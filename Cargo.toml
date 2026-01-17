@@ -1,0 +1,58 @@
+[package]
+name = "panoptes"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal-based dashboard for managing multiple Claude Code sessions"
+license = "MIT"
+readme = "docs/PRODUCT.md"
+
+[lib]
+name = "panoptes"
+path = "src/lib.rs"
+
+[[bin]]
+name = "panoptes"
+path = "src/main.rs"
+
+[dependencies]
+# TUI
+ratatui = "0.26"
+crossterm = "0.27"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server for hooks
+axum = "0.7"
+
+# PTY handling
+portable-pty = "0.8"
+
+# Git integration
+git2 = "0.18"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Utilities
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
