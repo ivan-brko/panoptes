@@ -3,8 +3,9 @@
 //! This module handles receiving state updates from Claude Code via HTTP callbacks.
 //! Claude Code's hook system sends POST requests when state changes occur.
 
-// Submodules will be added in later tickets:
-// pub mod server;
+pub mod server;
+
+pub use server::{HookEventReceiver, HookEventSender, ServerHandle};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

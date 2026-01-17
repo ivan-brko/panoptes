@@ -50,6 +50,7 @@ PTY Output → Session buffer → TUI render
 - Module-level doc comments (`//!`) describing purpose
 - Tests in `#[cfg(test)]` blocks within each module
 - State enums with display/color helpers for TUI rendering
+- Always run `cargo fmt` before committing
 
 ## Implementation Reference
 
