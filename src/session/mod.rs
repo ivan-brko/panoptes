@@ -3,9 +3,12 @@
 //! This module handles Claude Code session lifecycle, PTY management,
 //! and session state tracking.
 
+pub mod pty;
+
 // Submodules will be added in later tickets:
 // pub mod manager;
-// pub mod pty;
+
+pub use pty::PtyHandle;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

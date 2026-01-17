@@ -47,10 +47,10 @@ src/
 **Description**: Implement configuration loading and directory management.
 
 **Tasks**:
-- [ ] Define `Config` struct with settings (hook port, paths, limits)
-- [ ] Implement config directory creation (`~/.panoptes/`)
-- [ ] Implement subdirectory creation (hooks/, worktrees/)
-- [ ] Add config file loading/saving (TOML)
+- [x] Define `Config` struct with settings (hook port, paths, limits)
+- [x] Implement config directory creation (`~/.panoptes/`)
+- [x] Implement subdirectory creation (hooks/, worktrees/)
+- [x] Add config file loading/saving (TOML)
 
 **Dependencies**: Ticket 1
 
@@ -63,14 +63,14 @@ src/
 **Description**: Implement PTY spawning and I/O handling using portable-pty.
 
 **Tasks**:
-- [ ] Create `PtyHandle` struct wrapping portable-pty
-- [ ] Implement `spawn()` - create PTY with command, args, working dir, env
-- [ ] Implement `write()` - send raw bytes to PTY
-- [ ] Implement `send_key()` - convert KeyEvent to terminal escape sequences
-- [ ] Implement `try_read()` - non-blocking read from PTY
-- [ ] Implement `resize()` - handle terminal resize
-- [ ] Implement `is_alive()` - check if child process running
-- [ ] Implement `kill()` - terminate child process
+- [x] Create `PtyHandle` struct wrapping portable-pty
+- [x] Implement `spawn()` - create PTY with command, args, working dir, env
+- [x] Implement `write()` - send raw bytes to PTY
+- [x] Implement `send_key()` - convert KeyEvent to terminal escape sequences
+- [x] Implement `try_read()` - non-blocking read from PTY
+- [x] Implement `resize()` - handle terminal resize
+- [x] Implement `is_alive()` - check if child process running
+- [x] Implement `kill()` - terminate child process
 
 **Dependencies**: Ticket 1
 
@@ -308,8 +308,8 @@ Ticket 1 (Project Setup)
 | Ticket | Status | Notes |
 |--------|--------|-------|
 | 1. Project Setup | ✅ Complete | Cargo.toml, modules, 16 tests passing |
-| 2. Configuration | Not Started | |
-| 3. PTY Management | Not Started | |
+| 2. Configuration | ✅ Complete | Config struct, dirs, TOML load/save |
+| 3. PTY Management | ✅ Complete | PtyHandle with spawn, write, send_key, try_read, resize, is_alive, kill |
 | 4. Session Data | Not Started | |
 | 5. Agent Adapter | Not Started | |
 | 6. Hook Server | Not Started | |
