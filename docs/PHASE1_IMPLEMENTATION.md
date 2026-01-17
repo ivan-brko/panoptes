@@ -176,12 +176,12 @@ src/
 **Description**: Implement central application state and event handling.
 
 **Tasks**:
-- [ ] Define `InputMode` enum (Normal, Session)
-- [ ] Define `View` enum (SessionList, SessionView)
-- [ ] Define `AppState` struct with all state fields
-- [ ] Implement session selection helpers (next, prev, by number)
-- [ ] Define `App` struct tying everything together
-- [ ] Implement main event loop (keyboard + hooks + PTY output)
+- [x] Define `InputMode` enum (Normal, Session)
+- [x] Define `View` enum (SessionList, SessionView)
+- [x] Define `AppState` struct with all state fields
+- [x] Implement session selection helpers (next, prev, by number)
+- [x] Define `App` struct tying everything together
+- [x] Implement main event loop (keyboard + hooks + PTY output)
 
 **Dependencies**: Ticket 6, Ticket 8
 
@@ -315,7 +315,7 @@ Ticket 1 (Project Setup)
 | 6. Hook Server | ✅ Complete | Axum server, POST /hook endpoint, mpsc channel, graceful shutdown |
 | 7. Hook Scripts | ✅ Complete | Implemented in ClaudeCodeAdapter (generate_hook_script, install, settings) |
 | 8. Session Manager | ✅ Complete | SessionManager with create/destroy, poll_outputs, hook handling |
-| 9. Application State | Not Started | |
+| 9. Application State | ✅ Complete | InputMode, View, AppState, App with full event loop and TUI rendering |
 | 10. TUI Framework | Not Started | |
 | 11. TUI Session List | Not Started | |
 | 12. TUI Session View | Not Started | |
