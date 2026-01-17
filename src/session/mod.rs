@@ -10,6 +10,8 @@ pub mod pty;
 
 pub use pty::PtyHandle;
 
+use std::collections::VecDeque;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -102,6 +104,204 @@ impl SessionInfo {
     }
 }
 
+/// Bounded ring buffer for session output
+#[derive(Debug)]
+pub struct OutputBuffer {
+    /// Lines of output (ring buffer)
+    lines: VecDeque<String>,
+    /// Maximum lines to retain
+    max_lines: usize,
+    /// Scroll offset from the bottom (0 = at bottom, showing most recent)
+    scroll_offset: usize,
+}
+
+impl OutputBuffer {
+    /// Create a new output buffer with the specified capacity
+    pub fn new(max_lines: usize) -> Self {
+        Self {
+            lines: VecDeque::with_capacity(max_lines.min(1000)), // Pre-allocate reasonably
+            max_lines,
+            scroll_offset: 0,
+        }
+    }
+
+    /// Append a line to the buffer, removing oldest if at capacity
+    pub fn push(&mut self, line: String) {
+        if self.lines.len() >= self.max_lines {
+            self.lines.pop_front();
+            // Adjust scroll offset if we're scrolled up
+            if self.scroll_offset > 0 {
+                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+            }
+        }
+        self.lines.push_back(line);
+    }
+
+    /// Append raw bytes, splitting on newlines
+    /// Returns the number of complete lines added
+    pub fn push_bytes(&mut self, bytes: &[u8], partial_line: &mut String) -> usize {
+        let text = String::from_utf8_lossy(bytes);
+        let mut lines_added = 0;
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                self.push(std::mem::take(partial_line));
+                lines_added += 1;
+            } else if ch != '\r' {
+                // Skip carriage returns, keep other characters
+                partial_line.push(ch);
+            }
+        }
+        lines_added
+    }
+
+    /// Get total number of lines in buffer
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Check if buffer is empty
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Clear all lines
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.scroll_offset = 0;
+    }
+
+    /// Get visible lines for a given viewport height
+    /// Returns slice of lines to display based on scroll position
+    pub fn visible_lines(&self, viewport_height: usize) -> Vec<&str> {
+        if self.lines.is_empty() || viewport_height == 0 {
+            return Vec::new();
+        }
+
+        let total = self.lines.len();
+        // Calculate the end index (from bottom, accounting for scroll)
+        let end = total.saturating_sub(self.scroll_offset);
+        // Calculate start index
+        let start = end.saturating_sub(viewport_height);
+
+        self.lines
+            .iter()
+            .skip(start)
+            .take(end - start)
+            .map(|s| s.as_str())
+            .collect()
+    }
+
+    /// Get all lines as an iterator
+    pub fn iter(&self) -> impl Iterator<Item = &String> {
+        self.lines.iter()
+    }
+
+    /// Scroll up by n lines (toward older content)
+    pub fn scroll_up(&mut self, n: usize) {
+        let max_scroll = self.lines.len().saturating_sub(1);
+        self.scroll_offset = (self.scroll_offset + n).min(max_scroll);
+    }
+
+    /// Scroll down by n lines (toward newer content)
+    pub fn scroll_down(&mut self, n: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+    }
+
+    /// Scroll to bottom (most recent output)
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    /// Scroll to top (oldest output)
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset = self.lines.len().saturating_sub(1);
+    }
+
+    /// Check if scrolled to bottom
+    pub fn is_at_bottom(&self) -> bool {
+        self.scroll_offset == 0
+    }
+
+    /// Get current scroll offset
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+}
+
+/// A full session with PTY and output buffer
+pub struct Session {
+    /// Session metadata
+    pub info: SessionInfo,
+    /// PTY handle for I/O
+    pub pty: PtyHandle,
+    /// Output buffer
+    pub output: OutputBuffer,
+    /// Partial line buffer (for incomplete lines)
+    partial_line: String,
+}
+
+impl Session {
+    /// Create a new session with the given info, PTY, and buffer capacity
+    pub fn new(info: SessionInfo, pty: PtyHandle, max_output_lines: usize) -> Self {
+        Self {
+            info,
+            pty,
+            output: OutputBuffer::new(max_output_lines),
+            partial_line: String::new(),
+        }
+    }
+
+    /// Poll PTY for new output and add to buffer
+    /// Returns true if any output was read
+    pub fn poll_output(&mut self) -> bool {
+        match self.pty.try_read() {
+            Ok(Some(bytes)) => {
+                self.output.push_bytes(&bytes, &mut self.partial_line);
+                self.info.last_activity = Utc::now();
+                true
+            }
+            Ok(None) => false,
+            Err(_) => {
+                // PTY read error - likely process exited
+                self.info.state = SessionState::Exited;
+                false
+            }
+        }
+    }
+
+    /// Write bytes to the PTY
+    pub fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.pty.write(data)
+    }
+
+    /// Send a key event to the PTY
+    pub fn send_key(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
+        self.pty.send_key(key)
+    }
+
+    /// Check if the session's process is still running
+    pub fn is_alive(&mut self) -> bool {
+        self.pty.is_alive()
+    }
+
+    /// Kill the session's process
+    pub fn kill(&mut self) -> anyhow::Result<()> {
+        self.pty.kill()
+    }
+
+    /// Resize the PTY
+    pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.pty.resize(cols, rows)
+    }
+
+    /// Update session state
+    pub fn set_state(&mut self, state: SessionState) {
+        self.info.state = state;
+        self.info.last_activity = Utc::now();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +343,125 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let parsed: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(state, parsed);
+    }
+
+    #[test]
+    fn test_output_buffer_push() {
+        let mut buf = OutputBuffer::new(5);
+        assert!(buf.is_empty());
+
+        buf.push("line 1".to_string());
+        buf.push("line 2".to_string());
+        assert_eq!(buf.len(), 2);
+
+        // Fill to capacity
+        buf.push("line 3".to_string());
+        buf.push("line 4".to_string());
+        buf.push("line 5".to_string());
+        assert_eq!(buf.len(), 5);
+
+        // Push beyond capacity - oldest should be removed
+        buf.push("line 6".to_string());
+        assert_eq!(buf.len(), 5);
+
+        let lines: Vec<&String> = buf.iter().collect();
+        assert_eq!(lines[0], "line 2");
+        assert_eq!(lines[4], "line 6");
+    }
+
+    #[test]
+    fn test_output_buffer_push_bytes() {
+        let mut buf = OutputBuffer::new(100);
+        let mut partial = String::new();
+
+        // Push bytes with newlines
+        let lines_added = buf.push_bytes(b"hello\nworld\n", &mut partial);
+        assert_eq!(lines_added, 2);
+        assert_eq!(buf.len(), 2);
+        assert!(partial.is_empty());
+
+        // Push partial line
+        let lines_added = buf.push_bytes(b"partial", &mut partial);
+        assert_eq!(lines_added, 0);
+        assert_eq!(partial, "partial");
+
+        // Complete the partial line
+        let lines_added = buf.push_bytes(b" line\n", &mut partial);
+        assert_eq!(lines_added, 1);
+        assert_eq!(buf.len(), 3);
+        assert!(partial.is_empty());
+
+        let lines: Vec<&String> = buf.iter().collect();
+        assert_eq!(lines[2], "partial line");
+    }
+
+    #[test]
+    fn test_output_buffer_scroll() {
+        let mut buf = OutputBuffer::new(100);
+        for i in 0..20 {
+            buf.push(format!("line {}", i));
+        }
+
+        assert!(buf.is_at_bottom());
+        assert_eq!(buf.scroll_offset(), 0);
+
+        // Scroll up
+        buf.scroll_up(5);
+        assert!(!buf.is_at_bottom());
+        assert_eq!(buf.scroll_offset(), 5);
+
+        // Scroll down
+        buf.scroll_down(3);
+        assert_eq!(buf.scroll_offset(), 2);
+
+        // Scroll to bottom
+        buf.scroll_to_bottom();
+        assert!(buf.is_at_bottom());
+
+        // Scroll to top
+        buf.scroll_to_top();
+        assert_eq!(buf.scroll_offset(), 19);
+
+        // Can't scroll past max
+        buf.scroll_up(100);
+        assert_eq!(buf.scroll_offset(), 19);
+    }
+
+    #[test]
+    fn test_output_buffer_visible_lines() {
+        let mut buf = OutputBuffer::new(100);
+        for i in 0..10 {
+            buf.push(format!("line {}", i));
+        }
+
+        // Viewport of 5 lines, at bottom
+        let visible = buf.visible_lines(5);
+        assert_eq!(visible.len(), 5);
+        assert_eq!(visible[0], "line 5");
+        assert_eq!(visible[4], "line 9");
+
+        // Scroll up 3 lines
+        buf.scroll_up(3);
+        let visible = buf.visible_lines(5);
+        assert_eq!(visible.len(), 5);
+        assert_eq!(visible[0], "line 2");
+        assert_eq!(visible[4], "line 6");
+
+        // Viewport larger than content
+        buf.scroll_to_bottom();
+        let visible = buf.visible_lines(20);
+        assert_eq!(visible.len(), 10);
+    }
+
+    #[test]
+    fn test_output_buffer_clear() {
+        let mut buf = OutputBuffer::new(100);
+        buf.push("line 1".to_string());
+        buf.push("line 2".to_string());
+        buf.scroll_up(1);
+
+        buf.clear();
+        assert!(buf.is_empty());
+        assert!(buf.is_at_bottom());
     }
 }

@@ -84,12 +84,12 @@ src/
 **Description**: Define core session types and state management.
 
 **Tasks**:
-- [ ] Define `SessionId` type (UUID)
-- [ ] Define `SessionState` enum (Starting, Thinking, Executing, Waiting, Idle, Exited)
-- [ ] Implement state display helpers (name, color)
-- [ ] Define `Session` struct with all fields
-- [ ] Implement output buffer management (bounded ring buffer)
-- [ ] Implement scroll handling for output display
+- [x] Define `SessionId` type (UUID)
+- [x] Define `SessionState` enum (Starting, Thinking, Executing, Waiting, Idle, Exited)
+- [x] Implement state display helpers (name, color)
+- [x] Define `Session` struct with all fields
+- [x] Implement output buffer management (bounded ring buffer)
+- [x] Implement scroll handling for output display
 
 **Dependencies**: Ticket 3
 
@@ -310,7 +310,7 @@ Ticket 1 (Project Setup)
 | 1. Project Setup | ✅ Complete | Cargo.toml, modules, 16 tests passing |
 | 2. Configuration | ✅ Complete | Config struct, dirs, TOML load/save |
 | 3. PTY Management | ✅ Complete | PtyHandle with spawn, write, send_key, try_read, resize, is_alive, kill |
-| 4. Session Data | Not Started | |
+| 4. Session Data | ✅ Complete | Session, OutputBuffer with scroll, 5 new tests |
 | 5. Agent Adapter | Not Started | |
 | 6. Hook Server | Not Started | |
 | 7. Hook Scripts | Not Started | |
