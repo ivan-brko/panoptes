@@ -102,10 +102,10 @@ src/
 **Description**: Define the agent abstraction trait and implement Claude Code adapter.
 
 **Tasks**:
-- [ ] Define `AgentAdapter` trait with core methods
-- [ ] Implement `ClaudeCodeAdapter` struct
-- [ ] Implement spawn logic for Claude Code
-- [ ] Implement hooks configuration generation
+- [x] Define `AgentAdapter` trait with core methods
+- [x] Implement `ClaudeCodeAdapter` struct
+- [x] Implement spawn logic for Claude Code
+- [x] Implement hooks configuration generation
 
 **Dependencies**: Ticket 3
 
@@ -120,11 +120,11 @@ src/
 **Description**: Implement Axum HTTP server to receive Claude Code hook callbacks.
 
 **Tasks**:
-- [ ] Define `HookEvent` struct for incoming events
-- [ ] Create Axum router with `/hook` POST endpoint
-- [ ] Parse JSON payload (session_id, event, tool, timestamp)
-- [ ] Send events through channel to main app
-- [ ] Handle server startup on configurable port
+- [x] Define `HookEvent` struct for incoming events
+- [x] Create Axum router with `/hook` POST endpoint
+- [x] Parse JSON payload (session_id, event, tool, timestamp)
+- [x] Send events through channel to main app
+- [x] Handle server startup on configurable port
 
 **Dependencies**: Ticket 1, Ticket 2
 
@@ -138,12 +138,12 @@ src/
 **Description**: Create shell scripts that Claude Code will execute on hook events.
 
 **Tasks**:
-- [ ] Create `state-update.sh` script template
-- [ ] Parse JSON from stdin using jq
-- [ ] Extract session_id, event, tool fields
-- [ ] POST to localhost hook server
-- [ ] Implement script installation to `~/.panoptes/hooks/`
-- [ ] Make scripts executable
+- [x] Create `state-update.sh` script template
+- [x] Parse JSON from stdin using jq
+- [x] Extract session_id, event, tool fields
+- [x] POST to localhost hook server
+- [x] Implement script installation to `~/.panoptes/hooks/`
+- [x] Make scripts executable
 
 **Dependencies**: Ticket 6
 
@@ -157,12 +157,12 @@ src/
 **Description**: Implement session lifecycle management.
 
 **Tasks**:
-- [ ] Create `SessionManager` struct
-- [ ] Implement `create_session()` - spawn Claude Code with hooks
-- [ ] Implement `destroy_session()` - kill PTY, cleanup
-- [ ] Implement `poll_outputs()` - read from all session PTYs
-- [ ] Handle session state updates from hooks
-- [ ] Track session order for navigation
+- [x] Create `SessionManager` struct
+- [x] Implement `create_session()` - spawn Claude Code with hooks
+- [x] Implement `destroy_session()` - kill PTY, cleanup
+- [x] Implement `poll_outputs()` - read from all session PTYs
+- [x] Handle session state updates from hooks
+- [x] Track session order for navigation
 
 **Dependencies**: Ticket 4, Ticket 5, Ticket 7
 
@@ -311,10 +311,10 @@ Ticket 1 (Project Setup)
 | 2. Configuration | ✅ Complete | Config struct, dirs, TOML load/save |
 | 3. PTY Management | ✅ Complete | PtyHandle with spawn, write, send_key, try_read, resize, is_alive, kill |
 | 4. Session Data | ✅ Complete | Session, OutputBuffer with scroll, 5 new tests |
-| 5. Agent Adapter | Not Started | |
-| 6. Hook Server | Not Started | |
-| 7. Hook Scripts | Not Started | |
-| 8. Session Manager | Not Started | |
+| 5. Agent Adapter | ✅ Complete | AgentAdapter trait, ClaudeCodeAdapter with spawn and hooks |
+| 6. Hook Server | ✅ Complete | Axum server, POST /hook endpoint, mpsc channel, graceful shutdown |
+| 7. Hook Scripts | ✅ Complete | Implemented in ClaudeCodeAdapter (generate_hook_script, install, settings) |
+| 8. Session Manager | ✅ Complete | SessionManager with create/destroy, poll_outputs, hook handling |
 | 9. Application State | Not Started | |
 | 10. TUI Framework | Not Started | |
 | 11. TUI Session List | Not Started | |

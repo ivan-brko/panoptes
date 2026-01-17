@@ -3,11 +3,10 @@
 //! This module handles Claude Code session lifecycle, PTY management,
 //! and session state tracking.
 
+pub mod manager;
 pub mod pty;
 
-// Submodules will be added in later tickets:
-// pub mod manager;
-
+pub use manager::SessionManager;
 pub use pty::PtyHandle;
 
 use std::collections::VecDeque;
