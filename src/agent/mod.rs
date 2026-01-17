@@ -4,9 +4,11 @@
 //! Version 1.0 supports Claude Code only, but the architecture allows for
 //! adding other agents (Aider, OpenAI Codex, etc.) in the future.
 
-// Submodules will be added in later tickets:
-// pub mod adapter;
-// pub mod claude;
+pub mod adapter;
+pub mod claude;
+
+pub use adapter::{AgentAdapter, SpawnConfig, SpawnResult};
+pub use claude::ClaudeCodeAdapter;
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +45,13 @@ impl AgentType {
             AgentType::ClaudeCode => true,
         }
     }
+
+    /// Create an adapter instance for this agent type
+    pub fn create_adapter(&self) -> Box<dyn AgentAdapter> {
+        match self {
+            AgentType::ClaudeCode => Box::new(ClaudeCodeAdapter::new()),
+        }
+    }
 }
 
 impl std::fmt::Display for AgentType {
@@ -76,5 +85,13 @@ mod tests {
         let json = serde_json::to_string(&agent).unwrap();
         let parsed: AgentType = serde_json::from_str(&json).unwrap();
         assert_eq!(agent, parsed);
+    }
+
+    #[test]
+    fn test_agent_type_create_adapter() {
+        let adapter = AgentType::ClaudeCode.create_adapter();
+        assert_eq!(adapter.name(), "Claude Code");
+        assert_eq!(adapter.command(), "claude");
+        assert!(adapter.supports_hooks());
     }
 }
