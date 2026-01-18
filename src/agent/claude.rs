@@ -13,8 +13,11 @@ use std::path::{Path, PathBuf};
 
 use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
 
-/// Hook script filename (shared across all sessions)
+/// Base hook script filename (shared across all sessions)
 const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
+
+/// Hook event types that Claude Code supports
+const HOOK_EVENTS: &[&str] = &["PreToolUse", "PostToolUse", "Stop", "Notification"];
 
 /// Claude Code adapter for spawning and managing Claude Code sessions
 pub struct ClaudeCodeAdapter {
@@ -40,8 +43,8 @@ impl ClaudeCodeAdapter {
         config.hooks_dir.join(HOOK_SCRIPT_NAME)
     }
 
-    /// Install the shared hook script if it doesn't exist or needs updating
-    fn install_hook_script(config: &Config) -> Result<PathBuf> {
+    /// Install the shared hook script and create symlinks for each event type
+    fn install_hook_script(config: &Config) -> Result<HashMap<String, PathBuf>> {
         let script_path = Self::hook_script_path(config);
 
         // Ensure hooks directory exists
@@ -64,7 +67,27 @@ impl ClaudeCodeAdapter {
                 .context("Failed to set script permissions")?;
         }
 
-        Ok(script_path)
+        // Create symlinks for each event type so basename $0 returns the event name
+        let mut event_scripts = HashMap::new();
+        for event in HOOK_EVENTS {
+            let symlink_path = config.hooks_dir.join(format!("{}.sh", event));
+
+            // Remove existing symlink if present
+            if symlink_path.exists() || symlink_path.is_symlink() {
+                let _ = std::fs::remove_file(&symlink_path);
+            }
+
+            // Create symlink
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&script_path, &symlink_path)
+                    .with_context(|| format!("Failed to create symlink for {}", event))?;
+            }
+
+            event_scripts.insert(event.to_string(), symlink_path);
+        }
+
+        Ok(event_scripts)
     }
 
     /// Generate the hook script content
@@ -113,43 +136,34 @@ exit 0
     }
 
     /// Create the session-specific settings file
-    fn create_session_settings(working_dir: &Path, hook_script_path: &Path) -> Result<PathBuf> {
+    fn create_session_settings(
+        working_dir: &Path,
+        event_scripts: &HashMap<String, PathBuf>,
+    ) -> Result<PathBuf> {
         // Create .claude directory in the working directory
         let claude_dir = working_dir.join(".claude");
         std::fs::create_dir_all(&claude_dir).context("Failed to create .claude directory")?;
 
         let settings_path = claude_dir.join("settings.local.json");
-        let hook_path_str = hook_script_path.to_string_lossy();
 
-        // Generate settings JSON with all hook events configured
-        let settings = serde_json::json!({
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": ".*",
-                        "hooks": [{"type": "command", "command": &hook_path_str}]
-                    }
-                ],
-                "PostToolUse": [
-                    {
-                        "matcher": ".*",
-                        "hooks": [{"type": "command", "command": &hook_path_str}]
-                    }
-                ],
-                "Notification": [
-                    {
-                        "matcher": ".*",
-                        "hooks": [{"type": "command", "command": &hook_path_str}]
-                    }
-                ],
-                "Stop": [
-                    {
-                        "matcher": ".*",
-                        "hooks": [{"type": "command", "command": &hook_path_str}]
-                    }
-                ]
+        // Build hooks config using the event-specific script paths
+        let mut hooks = serde_json::Map::new();
+        for event in HOOK_EVENTS {
+            if let Some(script_path) = event_scripts.get(*event) {
+                let script_path_str = script_path.to_string_lossy().to_string();
+                hooks.insert(
+                    event.to_string(),
+                    serde_json::json!([
+                        {
+                            "matcher": ".*",
+                            "hooks": [{"type": "command", "command": script_path_str}]
+                        }
+                    ]),
+                );
             }
-        });
+        }
+
+        let settings = serde_json::json!({ "hooks": hooks });
 
         std::fs::write(
             &settings_path,
@@ -200,13 +214,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn setup_hooks(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<Vec<PathBuf>> {
         let mut cleanup_paths = Vec::new();
 
-        // Install shared hook script
-        let hook_script_path = Self::install_hook_script(config)?;
-        // Note: We don't add the shared script to cleanup_paths since it's reused
+        // Install shared hook script and create event-specific symlinks
+        let event_scripts = Self::install_hook_script(config)?;
+        // Note: We don't add the shared scripts to cleanup_paths since they're reused
 
         // Create session-specific settings file
         let settings_path =
-            Self::create_session_settings(&spawn_config.working_dir, &hook_script_path)?;
+            Self::create_session_settings(&spawn_config.working_dir, &event_scripts)?;
         cleanup_paths.push(settings_path);
 
         Ok(cleanup_paths)
@@ -341,16 +355,23 @@ mod tests {
             max_output_lines: 1000,
         };
 
-        let script_path = ClaudeCodeAdapter::install_hook_script(&config).unwrap();
+        let event_scripts = ClaudeCodeAdapter::install_hook_script(&config).unwrap();
 
-        // Verify script was created
-        assert!(script_path.exists());
-        assert!(script_path.ends_with(HOOK_SCRIPT_NAME));
+        // Verify base script was created
+        let base_script = config.hooks_dir.join(HOOK_SCRIPT_NAME);
+        assert!(base_script.exists());
 
-        // Verify it's executable on Unix
+        // Verify symlinks were created for each event type
+        for event in HOOK_EVENTS {
+            let symlink = event_scripts.get(*event).expect("Should have event script");
+            assert!(symlink.exists() || symlink.is_symlink());
+            assert!(symlink.ends_with(format!("{}.sh", event)));
+        }
+
+        // Verify base script is executable on Unix
         #[cfg(unix)]
         {
-            let metadata = std::fs::metadata(&script_path).unwrap();
+            let metadata = std::fs::metadata(&base_script).unwrap();
             let permissions = metadata.permissions();
             assert!(
                 permissions.mode() & 0o111 != 0,
@@ -363,10 +384,18 @@ mod tests {
     fn test_hooks_settings_json_structure() {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
-        let hook_script = PathBuf::from("/test/panoptes-hook.sh");
+
+        // Create mock event scripts HashMap
+        let mut event_scripts = HashMap::new();
+        for event in HOOK_EVENTS {
+            event_scripts.insert(
+                event.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event)),
+            );
+        }
 
         let settings_path =
-            ClaudeCodeAdapter::create_session_settings(&working_dir, &hook_script).unwrap();
+            ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
 
         // Verify settings file was created
         assert!(settings_path.exists());
@@ -387,10 +416,18 @@ mod tests {
     fn test_create_session_settings() {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
-        let hook_script = PathBuf::from("/test/panoptes-hook.sh");
+
+        // Create mock event scripts HashMap
+        let mut event_scripts = HashMap::new();
+        for event in HOOK_EVENTS {
+            event_scripts.insert(
+                event.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event)),
+            );
+        }
 
         let settings_path =
-            ClaudeCodeAdapter::create_session_settings(&working_dir, &hook_script).unwrap();
+            ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
 
         // Verify file location
         assert_eq!(

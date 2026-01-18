@@ -45,6 +45,8 @@ pub enum HookEventType {
     PreToolUse,
     /// Finished using a tool
     PostToolUse,
+    /// Notification from Claude (e.g., waiting for input)
+    Notification,
     /// Unknown event type
     Unknown,
 }
@@ -56,6 +58,7 @@ impl From<&str> for HookEventType {
             "Stop" => HookEventType::Stop,
             "PreToolUse" => HookEventType::PreToolUse,
             "PostToolUse" => HookEventType::PostToolUse,
+            "Notification" => HookEventType::Notification,
             _ => HookEventType::Unknown,
         }
     }

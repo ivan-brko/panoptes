@@ -201,6 +201,7 @@ impl SessionManager {
             }
             HookEventType::PostToolUse => SessionState::Thinking,
             HookEventType::Stop => SessionState::Waiting,
+            HookEventType::Notification => SessionState::Waiting,
             HookEventType::Unknown => {
                 // For unknown events, just update last_activity
                 session.info.last_activity = Utc::now();
