@@ -29,12 +29,18 @@ PTY Output → Session buffer → TUI render
 
 ### Module Responsibilities
 
-- **app.rs**: Main orchestrator. Holds Config, manages event loop, routes input and hook events
+- **app.rs**: Main orchestrator. Holds Config, manages event loop, routes input and hook events, handles graceful shutdown with session cleanup
 - **config.rs**: Configuration loading/saving. Defines paths (~/.panoptes/), hook port (9999), limits
-- **session/**: Session lifecycle. SessionState enum (Starting→Thinking→Executing→Waiting→Idle→Exited), SessionInfo struct, PTY handle (future: pty.rs, manager.rs)
-- **agent/**: Agent abstraction. AgentType enum, spawn configuration. Future: trait for different agent backends
-- **hooks/**: HTTP server receiving Claude Code callbacks. HookEvent parsing, state mapping
-- **tui/**: Ratatui terminal setup/teardown, rendering session list and session view
+- **session/**: Session lifecycle management
+  - `mod.rs`: SessionState enum (Starting→Thinking→Executing→Waiting→Idle→Exited), Session struct, OutputBuffer
+  - `pty.rs`: PtyHandle wrapping portable-pty for spawning and I/O
+  - `manager.rs`: SessionManager for create/destroy, polling, state updates
+  - `vterm.rs`: ANSI/VT100 terminal emulation with color support
+- **agent/**: Agent abstraction
+  - `adapter.rs`: AgentAdapter trait defining spawn interface
+  - `claude.rs`: ClaudeCodeAdapter implementation with hook script generation
+- **hooks/**: HTTP server (Axum on port 9999) receiving Claude Code callbacks, HookEvent parsing
+- **tui/**: Ratatui terminal setup/teardown, renders session list and fullscreen session view
 
 ### Key Types
 
@@ -52,6 +58,8 @@ PTY Output → Session buffer → TUI render
 - State enums with display/color helpers for TUI rendering
 - Always run `cargo fmt` before committing
 
-## Implementation Reference
+## Documentation
 
-See `docs/PHASE1_IMPLEMENTATION.md` for the ticket breakdown. Current status: Ticket 1 (Project Setup) complete, types defined for Tickets 4-6, implementation needed for PTY management, hook server, session manager, and TUI rendering.
+- `docs/PRODUCT.md`: Product overview and feature descriptions
+- `docs/TECHNICAL.md`: Technical stack and architecture details
+- `docs/PHASE1_IMPLEMENTATION.md`: Phase 1 implementation tickets (all complete)

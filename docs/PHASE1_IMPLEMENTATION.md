@@ -194,11 +194,11 @@ src/
 **Description**: Set up Ratatui terminal handling and basic rendering infrastructure.
 
 **Tasks**:
-- [ ] Create `Tui` struct wrapping terminal setup/teardown
-- [ ] Implement `enter()` - enable raw mode, alternate screen
-- [ ] Implement `exit()` - restore terminal state
-- [ ] Implement basic `draw()` method signature
-- [ ] Handle panic cleanup (restore terminal on crash)
+- [x] Create `Tui` struct wrapping terminal setup/teardown
+- [x] Implement `enter()` - enable raw mode, alternate screen
+- [x] Implement `exit()` - restore terminal state
+- [x] Implement basic `draw()` method signature
+- [x] Handle panic cleanup (restore terminal on crash)
 
 **Dependencies**: Ticket 1
 
@@ -211,11 +211,11 @@ src/
 **Description**: Render the session list/overview screen.
 
 **Tasks**:
-- [ ] Layout: header, session list, footer/help
-- [ ] Render session items with name, state, state color
-- [ ] Highlight selected session
-- [ ] Show session creation prompt when active
-- [ ] Display keyboard shortcuts in footer
+- [x] Layout: header, session list, footer/help
+- [x] Render session items with name, state, state color
+- [x] Highlight selected session
+- [x] Show session creation prompt when active
+- [x] Display keyboard shortcuts in footer
 
 **Dependencies**: Ticket 10, Ticket 9
 
@@ -229,11 +229,11 @@ src/
 **Description**: Render fullscreen session view with PTY output.
 
 **Tasks**:
-- [ ] Layout: header (breadcrumb, state), output area, input mode indicator
-- [ ] Render PTY output lines with basic ANSI color support
-- [ ] Show scroll position if not at bottom
-- [ ] Display input mode (Normal vs Session) clearly
-- [ ] Handle output area sizing based on terminal dimensions
+- [x] Layout: header (breadcrumb, state), output area, input mode indicator
+- [x] Render PTY output lines with basic ANSI color support
+- [x] Show scroll position if not at bottom
+- [x] Display input mode (Normal vs Session) clearly
+- [x] Handle output area sizing based on terminal dimensions
 
 **Dependencies**: Ticket 11
 
@@ -247,11 +247,11 @@ src/
 **Description**: Implement keyboard input routing and handling.
 
 **Tasks**:
-- [ ] Handle global keys (Ctrl+C to quit)
-- [ ] Session List view: n (new), j/k (nav), Enter (activate), d (delete), q (quit)
-- [ ] Session View (Normal mode): Esc (back), Tab (next), 1-9 (jump), i/Enter (session mode)
-- [ ] Session View (Session mode): Esc (exit to normal), all other keys → PTY
-- [ ] Session name input: character input, backspace, enter, escape
+- [x] Handle global keys (Ctrl+C to quit)
+- [x] Session List view: n (new), j/k (nav), Enter (activate), d (delete), q (quit)
+- [x] Session View (Normal mode): Esc (back), Tab (next), 1-9 (jump), i/Enter (session mode)
+- [x] Session View (Session mode): Esc (exit to normal), all other keys → PTY
+- [x] Session name input: character input, backspace, enter, escape
 
 **Dependencies**: Ticket 9, Ticket 11, Ticket 12
 
@@ -265,14 +265,14 @@ src/
 **Description**: Wire everything together and test the complete flow.
 
 **Tasks**:
-- [ ] Verify `cargo build --release` succeeds
-- [ ] Test: Launch panoptes
-- [ ] Test: Create a session (press n, enter name)
-- [ ] Test: Verify Claude Code spawns in PTY
-- [ ] Test: Send a prompt, verify state changes visible
-- [ ] Test: Create second session, verify switching works
-- [ ] Test: Verify hook callbacks update state correctly
-- [ ] Fix any bugs discovered during testing
+- [x] Verify `cargo build --release` succeeds
+- [x] Test: Launch panoptes
+- [x] Test: Create a session (press n, enter name)
+- [x] Test: Verify Claude Code spawns in PTY
+- [x] Test: Send a prompt, verify state changes visible
+- [x] Test: Create second session, verify switching works
+- [x] Test: Verify hook callbacks update state correctly
+- [x] Fix any bugs discovered during testing
 
 **Dependencies**: All previous tickets
 
@@ -307,17 +307,19 @@ Ticket 1 (Project Setup)
 
 | Ticket | Status | Notes |
 |--------|--------|-------|
-| 1. Project Setup | ✅ Complete | Cargo.toml, modules, 16 tests passing |
+| 1. Project Setup | ✅ Complete | Cargo.toml, modules |
 | 2. Configuration | ✅ Complete | Config struct, dirs, TOML load/save |
 | 3. PTY Management | ✅ Complete | PtyHandle with spawn, write, send_key, try_read, resize, is_alive, kill |
-| 4. Session Data | ✅ Complete | Session, OutputBuffer with scroll, 5 new tests |
+| 4. Session Data | ✅ Complete | Session, OutputBuffer with scroll |
 | 5. Agent Adapter | ✅ Complete | AgentAdapter trait, ClaudeCodeAdapter with spawn and hooks |
 | 6. Hook Server | ✅ Complete | Axum server, POST /hook endpoint, mpsc channel, graceful shutdown |
 | 7. Hook Scripts | ✅ Complete | Implemented in ClaudeCodeAdapter (generate_hook_script, install, settings) |
 | 8. Session Manager | ✅ Complete | SessionManager with create/destroy, poll_outputs, hook handling |
 | 9. Application State | ✅ Complete | InputMode, View, AppState, App with full event loop and TUI rendering |
-| 10. TUI Framework | Not Started | |
-| 11. TUI Session List | Not Started | |
-| 12. TUI Session View | Not Started | |
-| 13. Input Handling | Not Started | |
-| 14. Integration | Not Started | |
+| 10. TUI Framework | ✅ Complete | Tui struct with enter/exit, panic cleanup, alternate screen |
+| 11. TUI Session List | ✅ Complete | Session list with state colors, selection highlighting, help footer |
+| 12. TUI Session View | ✅ Complete | Full PTY output rendering with vterm color support, scroll indicator |
+| 13. Input Handling | ✅ Complete | All keyboard shortcuts, Normal/Session mode switching |
+| 14. Integration | ✅ Complete | 69 tests passing, session cleanup on exit |
+
+**Phase 1 Complete** - All tickets implemented and tested.

@@ -69,9 +69,14 @@
 │         │            └───────┬───────┘            │        │
 │         ▼                    │                    │        │
 │  ┌──────────────┐    ┌───────┴───────┐            │        │
-│  │ PTY Manager  │◄───│ Agent         │            │        │
-│  │ (portable-   │    │ Adapter       │            │        │
-│  │  pty)        │    └───────────────┘            │        │
+│  │ VTerm        │    │ Agent         │            │        │
+│  │ (ANSI/color) │    │ Adapter       │            │        │
+│  └──────┬───────┘    └───────────────┘            │        │
+│         │                    │                    │        │
+│  ┌──────┴───────┐            │                    │        │
+│  │ PTY Manager  │◄───────────┘                    │        │
+│  │ (portable-   │                                 │        │
+│  │  pty)        │                                 │        │
 │  └──────┬───────┘                                 │        │
 └─────────┼─────────────────────────────────────────┼────────┘
           │                                         │
@@ -118,3 +123,22 @@ Primary target: **macOS** (development platform)
 Secondary: **Linux** (should work with no changes)
 
 Windows: Possible with portable-pty, but untested.
+
+## Session Lifecycle
+
+Sessions are cleaned up automatically when Panoptes exits:
+- All child processes (Claude Code instances) are terminated
+- PTY handles are closed
+- No orphaned processes are left behind
+
+## Testing
+
+The project has 69 unit tests covering:
+- Configuration loading/saving
+- Session state transitions
+- Output buffer management
+- Hook event parsing
+- PTY operations
+- VTerm ANSI parsing
+
+Run tests with: `cargo test`
