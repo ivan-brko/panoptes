@@ -237,6 +237,26 @@ impl SessionManager {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&SessionId, &mut Session)> {
         self.sessions.iter_mut()
     }
+
+    /// Shutdown all sessions, killing any that are still alive
+    ///
+    /// This should be called when the application is exiting to ensure
+    /// no orphaned Claude Code processes are left running.
+    pub fn shutdown_all(&mut self) {
+        tracing::info!("Shutting down {} session(s)", self.sessions.len());
+
+        for (id, session) in self.sessions.iter_mut() {
+            if session.is_alive() {
+                tracing::debug!("Killing session {}", id);
+                if let Err(e) = session.kill() {
+                    tracing::warn!("Failed to kill session {}: {}", id, e);
+                }
+            }
+        }
+
+        self.sessions.clear();
+        self.session_order.clear();
+    }
 }
 
 #[cfg(test)]

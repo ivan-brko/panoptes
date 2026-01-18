@@ -330,6 +330,18 @@ impl Session {
     }
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Kill the PTY process if it's still alive to prevent orphaned processes
+        if self.is_alive() {
+            tracing::debug!("Killing session {} on drop", self.info.id);
+            if let Err(e) = self.kill() {
+                tracing::warn!("Failed to kill session {} on drop: {}", self.info.id, e);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

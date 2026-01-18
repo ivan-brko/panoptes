@@ -139,6 +139,9 @@ impl App {
         // Main event loop
         let result = self.event_loop().await;
 
+        // Shutdown all sessions to prevent orphaned Claude Code processes
+        self.sessions.shutdown_all();
+
         // Exit TUI mode (also done in Drop, but explicit is clearer)
         self.tui.exit()?;
 
