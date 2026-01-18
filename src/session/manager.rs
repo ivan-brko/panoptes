@@ -193,15 +193,22 @@ impl SessionManager {
         };
 
         // Update state based on event type
+        // Note: Any hook event means Claude Code is running (no longer Starting)
         let new_state = match event.event_type() {
-            HookEventType::SessionStart => SessionState::Starting,
+            HookEventType::SessionStart => {
+                // SessionStart just confirms Claude is running, transition to Waiting
+                SessionState::Waiting
+            }
             HookEventType::PreToolUse => {
                 let tool = event.tool.clone().unwrap_or_else(|| "unknown".to_string());
                 SessionState::Executing(tool)
             }
             HookEventType::PostToolUse => SessionState::Thinking,
             HookEventType::Stop => SessionState::Waiting,
-            HookEventType::Notification => SessionState::Waiting,
+            HookEventType::Notification => {
+                // Notification usually means waiting for user (e.g., permission prompt)
+                SessionState::Waiting
+            }
             HookEventType::Unknown => {
                 // For unknown events, just update last_activity
                 session.info.last_activity = Utc::now();

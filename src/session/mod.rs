@@ -257,6 +257,13 @@ impl Session {
             Ok(Some(bytes)) => {
                 self.vterm.process(&bytes);
                 self.info.last_activity = Utc::now();
+
+                // If we're in Starting state and receiving output, Claude is running
+                // Transition to Waiting (ready for user input)
+                if self.info.state == SessionState::Starting {
+                    self.info.state = SessionState::Waiting;
+                }
+
                 true
             }
             Ok(None) => false,
@@ -287,7 +294,15 @@ impl Session {
     }
 
     /// Send a key event to the PTY
+    /// If Enter is pressed while Waiting, transitions to Thinking state
     pub fn send_key(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
+        use crossterm::event::KeyCode;
+
+        // When user presses Enter while waiting, Claude will start processing
+        if key.code == KeyCode::Enter && self.info.state == SessionState::Waiting {
+            self.set_state(SessionState::Thinking);
+        }
+
         self.pty.send_key(key)
     }
 
