@@ -8,20 +8,31 @@
 
 use std::cell::RefCell;
 
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use vt100::Parser;
 
-/// Cached lines for rendering optimization
-struct LinesCache {
-    lines: Vec<String>,
+/// Cached styled lines for rendering optimization
+struct StyledLinesCache {
+    lines: Vec<Line<'static>>,
     viewport_height: usize,
+}
+
+/// Convert vt100 color to ratatui color
+fn convert_color(color: vt100::Color) -> Color {
+    match color {
+        vt100::Color::Default => Color::Reset,
+        vt100::Color::Idx(idx) => Color::Indexed(idx),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
 }
 
 /// Virtual terminal with screen buffer
 pub struct VirtualTerminal {
     /// VT100 parser that handles all escape sequences
     parser: Parser,
-    /// Cached visible lines (invalidated on process/resize)
-    cache: RefCell<Option<LinesCache>>,
+    /// Cached styled lines (invalidated on process/resize)
+    styled_cache: RefCell<Option<StyledLinesCache>>,
 }
 
 impl VirtualTerminal {
@@ -29,7 +40,7 @@ impl VirtualTerminal {
     pub fn new(rows: usize, cols: usize) -> Self {
         Self {
             parser: Parser::new(rows as u16, cols as u16, 0),
-            cache: RefCell::new(None),
+            styled_cache: RefCell::new(None),
         }
     }
 
@@ -37,14 +48,14 @@ impl VirtualTerminal {
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.parser.screen_mut().set_size(rows as u16, cols as u16);
         // Invalidate cache on resize
-        self.cache.borrow_mut().take();
+        self.styled_cache.borrow_mut().take();
     }
 
     /// Process input bytes through the terminal emulator
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
         // Invalidate cache when new data arrives
-        self.cache.borrow_mut().take();
+        self.styled_cache.borrow_mut().take();
     }
 
     /// Get the screen content as lines of text
@@ -71,13 +82,26 @@ impl VirtualTerminal {
             .collect()
     }
 
-    /// Get visible lines for a viewport
-    /// For full-screen terminal apps, we return the exact screen buffer content
-    /// Results are cached until process() or resize() is called
+    /// Get visible lines for a viewport (plain text, no styling)
     pub fn visible_lines(&self, viewport_height: usize) -> Vec<String> {
+        self.visible_styled_lines(viewport_height)
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.into_owned())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Get visible styled lines for a viewport
+    /// For full-screen terminal apps, we return the exact screen buffer content with colors
+    /// Results are cached until process() or resize() is called
+    pub fn visible_styled_lines(&self, viewport_height: usize) -> Vec<Line<'static>> {
         // Check cache first
         {
-            let cache = self.cache.borrow();
+            let cache = self.styled_cache.borrow();
             if let Some(ref cached) = *cache {
                 if cached.viewport_height == viewport_height {
                     return cached.lines.clone();
@@ -85,31 +109,71 @@ impl VirtualTerminal {
             }
         }
 
-        // Compute lines
+        // Compute styled lines
         let screen = self.parser.screen();
         let rows = (screen.size().0 as usize).min(viewport_height);
         let cols = screen.size().1 as usize;
 
-        let lines: Vec<String> = (0..rows)
+        let lines: Vec<Line<'static>> = (0..rows)
             .map(|row| {
-                (0..cols)
-                    .map(|col| {
-                        let contents = screen.cell(row as u16, col as u16).unwrap().contents();
-                        // Empty contents means unset cell - use space to preserve column positions
-                        if contents.is_empty() {
-                            " "
-                        } else {
-                            contents
-                        }
-                    })
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                let mut current_text = String::new();
+                let mut current_style = Style::default();
+
+                for col in 0..cols {
+                    let cell = screen.cell(row as u16, col as u16).unwrap();
+                    let contents = cell.contents();
+                    let text = if contents.is_empty() { " " } else { contents };
+
+                    // Build style from cell attributes
+                    let mut style = Style::default();
+                    style = style.fg(convert_color(cell.fgcolor()));
+                    style = style.bg(convert_color(cell.bgcolor()));
+
+                    let mut modifiers = Modifier::empty();
+                    if cell.bold() {
+                        modifiers |= Modifier::BOLD;
+                    }
+                    if cell.italic() {
+                        modifiers |= Modifier::ITALIC;
+                    }
+                    if cell.underline() {
+                        modifiers |= Modifier::UNDERLINED;
+                    }
+                    if cell.inverse() {
+                        modifiers |= Modifier::REVERSED;
+                    }
+                    if cell.dim() {
+                        modifiers |= Modifier::DIM;
+                    }
+                    style = style.add_modifier(modifiers);
+
+                    // If style changed, push current span and start new one
+                    if style != current_style && !current_text.is_empty() {
+                        spans.push(Span::styled(
+                            std::mem::take(&mut current_text),
+                            current_style,
+                        ));
+                    }
+                    current_style = style;
+                    current_text.push_str(text);
+                }
+
+                // Push final span (trim trailing spaces for the last span)
+                let trimmed = current_text.trim_end();
+                if !trimmed.is_empty() {
+                    spans.push(Span::styled(trimmed.to_string(), current_style));
+                } else if spans.is_empty() {
+                    // Empty line - ensure we have at least one span
+                    spans.push(Span::raw(""));
+                }
+
+                Line::from(spans)
             })
             .collect();
 
         // Store in cache
-        *self.cache.borrow_mut() = Some(LinesCache {
+        *self.styled_cache.borrow_mut() = Some(StyledLinesCache {
             lines: lines.clone(),
             viewport_height,
         });

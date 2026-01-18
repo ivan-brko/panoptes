@@ -268,9 +268,17 @@ impl Session {
         }
     }
 
-    /// Get visible lines for rendering
+    /// Get visible lines for rendering (plain text)
     pub fn visible_lines(&self, viewport_height: usize) -> Vec<String> {
         self.vterm.visible_lines(viewport_height)
+    }
+
+    /// Get visible styled lines for rendering (with colors)
+    pub fn visible_styled_lines(
+        &self,
+        viewport_height: usize,
+    ) -> Vec<ratatui::text::Line<'static>> {
+        self.vterm.visible_styled_lines(viewport_height)
     }
 
     /// Write bytes to the PTY

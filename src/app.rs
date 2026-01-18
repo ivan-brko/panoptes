@@ -555,9 +555,8 @@ fn render_session_view(frame: &mut Frame, area: Rect, state: &AppState, sessions
     // Output area
     if let Some(session) = session {
         let output_height = chunks[1].height.saturating_sub(2) as usize; // Account for borders
-        let lines = session.visible_lines(output_height);
-        let output_text = lines.join("\n");
-        let output = Paragraph::new(output_text)
+        let styled_lines = session.visible_styled_lines(output_height);
+        let output = Paragraph::new(styled_lines)
             .block(Block::default().borders(Borders::ALL).title("Output"));
         frame.render_widget(output, chunks[1]);
     } else {
