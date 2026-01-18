@@ -53,6 +53,8 @@ pub struct AppState {
     pub new_session_name: String,
     /// Whether the application should quit
     pub should_quit: bool,
+    /// Whether the UI needs to be re-rendered
+    pub needs_render: bool,
 }
 
 impl AppState {
@@ -147,25 +149,47 @@ impl App {
     async fn event_loop(&mut self) -> Result<()> {
         let tick_rate = Duration::from_millis(50);
 
+        // Always render on first frame
+        self.state.needs_render = true;
+
         loop {
-            // Render current state
-            self.render()?;
+            // Only render when something has changed
+            if self.state.needs_render {
+                self.render()?;
+                self.state.needs_render = false;
+            }
 
             // Poll for events with timeout
             if event::poll(tick_rate)? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key_event(key)?;
+                match event::read()? {
+                    Event::Key(key) => {
+                        self.handle_key_event(key)?;
+                        self.state.needs_render = true;
+                    }
+                    Event::Resize(_, _) => {
+                        // Resize active session PTY to match output area
+                        self.resize_active_session_pty()?;
+                        self.state.needs_render = true;
+                    }
+                    _ => {}
                 }
             }
 
             // Process any pending hook events
-            self.process_hook_events();
+            if self.process_hook_events() {
+                self.state.needs_render = true;
+            }
 
-            // Poll session outputs
-            self.sessions.poll_outputs();
+            // Poll session outputs - mark dirty if any session has new output
+            if !self.sessions.poll_outputs().is_empty() {
+                self.state.needs_render = true;
+            }
 
             // Check for dead sessions
-            self.sessions.check_alive();
+            let had_state_changes = self.sessions.check_alive();
+            if had_state_changes {
+                self.state.needs_render = true;
+            }
 
             // Check if we should quit
             if self.state.should_quit {
@@ -177,7 +201,9 @@ impl App {
     }
 
     /// Process pending hook events from the channel
-    fn process_hook_events(&mut self) {
+    /// Returns true if any events were processed
+    fn process_hook_events(&mut self) -> bool {
+        let mut had_events = false;
         while let Ok(event) = self.hook_rx.try_recv() {
             tracing::debug!(
                 "Hook event: session={}, event={}, tool={:?}",
@@ -186,7 +212,9 @@ impl App {
                 event.tool
             );
             self.sessions.handle_hook_event(&event);
+            had_events = true;
         }
+        had_events
     }
 
     /// Handle a key event
@@ -234,6 +262,8 @@ impl App {
                 if let Some(session) = self.sessions.get_by_index(self.state.selected_index) {
                     self.state.active_session = Some(session.info.id);
                     self.state.view = View::SessionView;
+                    // Resize PTY to match output viewport
+                    self.resize_active_session_pty()?;
                 }
             }
             KeyCode::Char('d') => {
@@ -280,6 +310,7 @@ impl App {
                 self.state.select_next(self.sessions.len());
                 if let Some(session) = self.sessions.get_by_index(self.state.selected_index) {
                     self.state.active_session = Some(session.info.id);
+                    self.resize_active_session_pty()?;
                 }
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -291,6 +322,7 @@ impl App {
                         if let Some(session) = self.sessions.get_by_index(self.state.selected_index)
                         {
                             self.state.active_session = Some(session.info.id);
+                            self.resize_active_session_pty()?;
                         }
                     }
                 }
@@ -336,9 +368,19 @@ impl App {
                 // Use current directory as working directory
                 let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+                // Get terminal dimensions for the session
+                let (rows, cols) = if let Ok(size) = self.tui.size() {
+                    (
+                        size.height.saturating_sub(8) as usize,
+                        size.width.saturating_sub(2) as usize,
+                    )
+                } else {
+                    (24, 80) // Fallback dimensions
+                };
+
                 match self
                     .sessions
-                    .create_session(name.clone(), working_dir, None)
+                    .create_session(name.clone(), working_dir, None, rows, cols)
                 {
                     Ok(session_id) => {
                         tracing::info!("Created session: {} ({})", name, session_id);
@@ -358,6 +400,22 @@ impl App {
                 self.state.new_session_name.push(c);
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Resize the active session's PTY to match the output viewport
+    fn resize_active_session_pty(&mut self) -> Result<()> {
+        if let Some(session_id) = self.state.active_session {
+            let size = self.tui.size()?;
+            // Output area is: total height - header (3) - footer (3) - borders (2)
+            let output_rows = size.height.saturating_sub(8);
+            // Output width is: total width - borders (2)
+            let output_cols = size.width.saturating_sub(2);
+
+            if let Some(session) = self.sessions.get_mut(session_id) {
+                session.resize(output_cols, output_rows)?;
+            }
         }
         Ok(())
     }
@@ -496,8 +554,8 @@ fn render_session_view(frame: &mut Frame, area: Rect, state: &AppState, sessions
 
     // Output area
     if let Some(session) = session {
-        let output_height = chunks[1].height as usize;
-        let lines = session.output.visible_lines(output_height);
+        let output_height = chunks[1].height.saturating_sub(2) as usize; // Account for borders
+        let lines = session.visible_lines(output_height);
         let output_text = lines.join("\n");
         let output = Paragraph::new(output_text)
             .block(Block::default().borders(Borders::ALL).title("Output"));

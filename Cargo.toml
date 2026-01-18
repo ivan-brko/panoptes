@@ -28,6 +28,9 @@ axum = "0.7"
 # PTY handling
 portable-pty = "0.8"
 
+# Terminal emulation
+vt100 = "0.16"
+
 # Git integration
 git2 = "0.18"
 

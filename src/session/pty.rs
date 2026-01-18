@@ -23,19 +23,23 @@ impl PtyHandle {
     /// * `args` - Command arguments
     /// * `working_dir` - Working directory for the process
     /// * `env` - Additional environment variables
+    /// * `rows` - Initial PTY rows
+    /// * `cols` - Initial PTY columns
     pub fn spawn(
         cmd: &str,
         args: &[&str],
         working_dir: &Path,
         env: HashMap<String, String>,
+        rows: u16,
+        cols: u16,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
 
-        // Create PTY with default size (will be resized when TUI starts)
+        // Create PTY with specified size
         let pair = pty_system
             .openpty(PtySize {
-                rows: 24,
-                cols: 80,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -260,6 +264,8 @@ mod tests {
             &["hello"],
             std::path::Path::new("/tmp"),
             HashMap::new(),
+            24,
+            80,
         )
         .expect("Failed to spawn PTY");
 
@@ -291,8 +297,15 @@ mod tests {
     #[test]
     fn test_pty_write_and_read() {
         // Spawn a simple cat process
-        let mut pty = PtyHandle::spawn("cat", &[], std::path::Path::new("/tmp"), HashMap::new())
-            .expect("Failed to spawn PTY");
+        let mut pty = PtyHandle::spawn(
+            "cat",
+            &[],
+            std::path::Path::new("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .expect("Failed to spawn PTY");
 
         // Write some data
         pty.write(b"hello pty\n").expect("Failed to write");
@@ -331,6 +344,8 @@ mod tests {
             &["10"],
             std::path::Path::new("/tmp"),
             HashMap::new(),
+            24,
+            80,
         )
         .expect("Failed to spawn PTY");
 

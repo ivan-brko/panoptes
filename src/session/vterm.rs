@@ -1,0 +1,181 @@
+//! Virtual terminal emulator
+//!
+//! This module provides a virtual terminal that parses ANSI escape sequences
+//! and maintains a screen buffer, enabling proper display of full-screen
+//! terminal applications like Claude Code.
+//!
+//! Uses the vt100 crate for complete terminal emulation.
+
+use std::cell::RefCell;
+
+use vt100::Parser;
+
+/// Cached lines for rendering optimization
+struct LinesCache {
+    lines: Vec<String>,
+    viewport_height: usize,
+}
+
+/// Virtual terminal with screen buffer
+pub struct VirtualTerminal {
+    /// VT100 parser that handles all escape sequences
+    parser: Parser,
+    /// Cached visible lines (invalidated on process/resize)
+    cache: RefCell<Option<LinesCache>>,
+}
+
+impl VirtualTerminal {
+    /// Create a new virtual terminal with the given dimensions
+    pub fn new(rows: usize, cols: usize) -> Self {
+        Self {
+            parser: Parser::new(rows as u16, cols as u16, 0),
+            cache: RefCell::new(None),
+        }
+    }
+
+    /// Resize the terminal
+    pub fn resize(&mut self, rows: usize, cols: usize) {
+        self.parser.screen_mut().set_size(rows as u16, cols as u16);
+        // Invalidate cache on resize
+        self.cache.borrow_mut().take();
+    }
+
+    /// Process input bytes through the terminal emulator
+    pub fn process(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+        // Invalidate cache when new data arrives
+        self.cache.borrow_mut().take();
+    }
+
+    /// Get the screen content as lines of text
+    pub fn get_lines(&self) -> Vec<String> {
+        let screen = self.parser.screen();
+        let (rows, cols) = (screen.size().0 as usize, screen.size().1 as usize);
+
+        (0..rows)
+            .map(|row| {
+                (0..cols)
+                    .map(|col| {
+                        let contents = screen.cell(row as u16, col as u16).unwrap().contents();
+                        // Empty contents means unset cell - use space to preserve column positions
+                        if contents.is_empty() {
+                            " "
+                        } else {
+                            contents
+                        }
+                    })
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Get visible lines for a viewport
+    /// For full-screen terminal apps, we return the exact screen buffer content
+    /// Results are cached until process() or resize() is called
+    pub fn visible_lines(&self, viewport_height: usize) -> Vec<String> {
+        // Check cache first
+        {
+            let cache = self.cache.borrow();
+            if let Some(ref cached) = *cache {
+                if cached.viewport_height == viewport_height {
+                    return cached.lines.clone();
+                }
+            }
+        }
+
+        // Compute lines
+        let screen = self.parser.screen();
+        let rows = (screen.size().0 as usize).min(viewport_height);
+        let cols = screen.size().1 as usize;
+
+        let lines: Vec<String> = (0..rows)
+            .map(|row| {
+                (0..cols)
+                    .map(|col| {
+                        let contents = screen.cell(row as u16, col as u16).unwrap().contents();
+                        // Empty contents means unset cell - use space to preserve column positions
+                        if contents.is_empty() {
+                            " "
+                        } else {
+                            contents
+                        }
+                    })
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+
+        // Store in cache
+        *self.cache.borrow_mut() = Some(LinesCache {
+            lines: lines.clone(),
+            viewport_height,
+        });
+
+        lines
+    }
+
+    /// Get dimensions
+    pub fn size(&self) -> (usize, usize) {
+        let size = self.parser.screen().size();
+        (size.0 as usize, size.1 as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vterm_creation() {
+        let vt = VirtualTerminal::new(24, 80);
+        assert_eq!(vt.size(), (24, 80));
+    }
+
+    #[test]
+    fn test_vterm_simple_text() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"Hello, World!");
+        let lines = vt.get_lines();
+        assert!(lines[0].starts_with("Hello, World!"));
+    }
+
+    #[test]
+    fn test_vterm_newline() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        // Use CR+LF for proper newline behavior (CR resets column, LF moves down)
+        vt.process(b"Line 1\r\nLine 2");
+        let lines = vt.get_lines();
+        assert!(lines[0].starts_with("Line 1"));
+        assert!(lines[1].starts_with("Line 2"));
+    }
+
+    #[test]
+    fn test_vterm_cursor_movement() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"\x1b[5;10HX"); // Move to row 5, col 10 and print X
+        let lines = vt.get_lines();
+        assert_eq!(lines[4].chars().nth(9), Some('X'));
+    }
+
+    #[test]
+    fn test_vterm_clear_screen() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"Text here");
+        vt.process(b"\x1b[2J"); // Clear screen
+        let lines = vt.get_lines();
+        assert!(lines[0].is_empty());
+    }
+
+    #[test]
+    fn test_vterm_resize() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"Hello");
+        vt.resize(10, 40);
+        assert_eq!(vt.size(), (10, 40));
+        let lines = vt.get_lines();
+        assert!(lines[0].starts_with("Hello"));
+    }
+}

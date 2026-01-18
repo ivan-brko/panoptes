@@ -5,9 +5,11 @@
 
 pub mod manager;
 pub mod pty;
+pub mod vterm;
 
 pub use manager::SessionManager;
 pub use pty::PtyHandle;
+pub use vterm::VirtualTerminal;
 
 use std::collections::VecDeque;
 
@@ -228,35 +230,32 @@ impl OutputBuffer {
     }
 }
 
-/// A full session with PTY and output buffer
+/// A full session with PTY and virtual terminal
 pub struct Session {
     /// Session metadata
     pub info: SessionInfo,
     /// PTY handle for I/O
     pub pty: PtyHandle,
-    /// Output buffer
-    pub output: OutputBuffer,
-    /// Partial line buffer (for incomplete lines)
-    partial_line: String,
+    /// Virtual terminal emulator
+    pub vterm: VirtualTerminal,
 }
 
 impl Session {
-    /// Create a new session with the given info, PTY, and buffer capacity
-    pub fn new(info: SessionInfo, pty: PtyHandle, max_output_lines: usize) -> Self {
+    /// Create a new session with the given info, PTY, and terminal dimensions
+    pub fn new(info: SessionInfo, pty: PtyHandle, rows: usize, cols: usize) -> Self {
         Self {
             info,
             pty,
-            output: OutputBuffer::new(max_output_lines),
-            partial_line: String::new(),
+            vterm: VirtualTerminal::new(rows, cols),
         }
     }
 
-    /// Poll PTY for new output and add to buffer
+    /// Poll PTY for new output and process through virtual terminal
     /// Returns true if any output was read
     pub fn poll_output(&mut self) -> bool {
         match self.pty.try_read() {
             Ok(Some(bytes)) => {
-                self.output.push_bytes(&bytes, &mut self.partial_line);
+                self.vterm.process(&bytes);
                 self.info.last_activity = Utc::now();
                 true
             }
@@ -267,6 +266,11 @@ impl Session {
                 false
             }
         }
+    }
+
+    /// Get visible lines for rendering
+    pub fn visible_lines(&self, viewport_height: usize) -> Vec<String> {
+        self.vterm.visible_lines(viewport_height)
     }
 
     /// Write bytes to the PTY
@@ -289,9 +293,11 @@ impl Session {
         self.pty.kill()
     }
 
-    /// Resize the PTY
-    pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
-        self.pty.resize(cols, rows)
+    /// Resize the PTY and virtual terminal
+    pub fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.pty.resize(rows, cols)?;
+        self.vterm.resize(rows as usize, cols as usize);
+        Ok(())
     }
 
     /// Update session state

@@ -21,6 +21,10 @@ pub struct SpawnConfig {
     pub working_dir: PathBuf,
     /// Optional initial prompt to send to the agent
     pub initial_prompt: Option<String>,
+    /// Terminal rows
+    pub rows: u16,
+    /// Terminal columns
+    pub cols: u16,
 }
 
 /// Result of spawning an agent
@@ -129,6 +133,8 @@ mod tests {
             session_name: "test-session".to_string(),
             working_dir: PathBuf::from("/tmp"),
             initial_prompt: Some("hello".to_string()),
+            rows: 24,
+            cols: 80,
         };
         assert_eq!(config.session_name, "test-session");
         assert_eq!(config.initial_prompt, Some("hello".to_string()));

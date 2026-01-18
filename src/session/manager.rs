@@ -36,12 +36,14 @@ impl SessionManager {
         }
     }
 
-    /// Create a new session with the given name and working directory
+    /// Create a new session with the given name, working directory, and terminal dimensions
     pub fn create_session(
         &mut self,
         name: String,
         working_dir: PathBuf,
         initial_prompt: Option<String>,
+        rows: usize,
+        cols: usize,
     ) -> Result<SessionId> {
         let info = SessionInfo::new(name.clone(), working_dir.clone());
         let session_id = info.id;
@@ -52,6 +54,8 @@ impl SessionManager {
             session_name: name,
             working_dir,
             initial_prompt,
+            rows: rows as u16,
+            cols: cols as u16,
         };
 
         // Get adapter and spawn the process
@@ -59,8 +63,8 @@ impl SessionManager {
         let adapter = agent_type.create_adapter();
         let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
 
-        // Create session with PTY
-        let session = Session::new(info, spawn_result.pty, self.config.max_output_lines);
+        // Create session with PTY and virtual terminal
+        let session = Session::new(info, spawn_result.pty, rows, cols);
 
         // Store session
         self.sessions.insert(session_id, session);
@@ -156,12 +160,16 @@ impl SessionManager {
 
     /// Check all sessions for exited processes
     /// Updates state to Exited for any dead sessions
-    pub fn check_alive(&mut self) {
+    /// Returns true if any session state changed
+    pub fn check_alive(&mut self) -> bool {
+        let mut changed = false;
         for session in self.sessions.values_mut() {
             if !session.is_alive() && session.info.state != SessionState::Exited {
                 session.set_state(SessionState::Exited);
+                changed = true;
             }
         }
+        changed
     }
 
     /// Handle a hook event and update session state accordingly
@@ -203,9 +211,9 @@ impl SessionManager {
         session.set_state(new_state);
     }
 
-    /// Resize all session PTYs
-    pub fn resize_all(&self, cols: u16, rows: u16) {
-        for session in self.sessions.values() {
+    /// Resize all session PTYs and virtual terminals
+    pub fn resize_all(&mut self, cols: u16, rows: u16) {
+        for session in self.sessions.values_mut() {
             if let Err(e) = session.resize(cols, rows) {
                 tracing::warn!("Failed to resize session {}: {}", session.info.id, e);
             }

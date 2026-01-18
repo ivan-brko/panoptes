@@ -177,9 +177,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn default_args(&self) -> Vec<String> {
-        let mut args = vec!["--no-open-browser".to_string()];
-        args.extend(self.extra_args.clone());
-        args
+        self.extra_args.clone()
     }
 
     fn supports_hooks(&self) -> bool {
@@ -231,8 +229,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // Convert args to &str for PtyHandle
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-        // Spawn the process
-        let pty = PtyHandle::spawn(self.command(), &args_refs, &spawn_config.working_dir, env)?;
+        // Spawn the process with correct terminal dimensions
+        let pty = PtyHandle::spawn(
+            self.command(),
+            &args_refs,
+            &spawn_config.working_dir,
+            env,
+            spawn_config.rows,
+            spawn_config.cols,
+        )?;
 
         Ok(SpawnResult {
             pty,
@@ -253,6 +258,8 @@ mod tests {
             session_name: "test-session".to_string(),
             working_dir,
             initial_prompt: None,
+            rows: 24,
+            cols: 80,
         }
     }
 
@@ -278,7 +285,14 @@ mod tests {
     fn test_claude_adapter_default_args() {
         let adapter = ClaudeCodeAdapter::new();
         let args = adapter.default_args();
-        assert!(args.contains(&"--no-open-browser".to_string()));
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_claude_adapter_with_extra_args() {
+        let adapter = ClaudeCodeAdapter::with_args(vec!["--verbose".to_string()]);
+        let args = adapter.default_args();
+        assert_eq!(args, vec!["--verbose".to_string()]);
     }
 
     #[test]
@@ -297,6 +311,8 @@ mod tests {
             session_name: "test".to_string(),
             working_dir: temp_dir.path().to_path_buf(),
             initial_prompt: None,
+            rows: 24,
+            cols: 80,
         };
 
         let env = adapter.generate_env(&config, &spawn_config);
