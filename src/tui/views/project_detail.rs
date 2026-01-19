@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{AppState, InputMode};
 use crate::config::Config;
-use crate::project::{ProjectId, ProjectStore};
+use crate::project::{Project, ProjectId, ProjectStore};
 use crate::session::SessionManager;
 use crate::tui::theme::theme;
 
@@ -60,8 +60,10 @@ pub fn render_project_detail(
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 
-    // Branch list or worktree creation dialog
-    if state.input_mode == InputMode::CreatingWorktree {
+    // Branch list, worktree creation dialog, or delete confirmation
+    if state.input_mode == InputMode::ConfirmingProjectDelete {
+        render_project_delete_confirmation(frame, chunks[1], state, project, sessions, config);
+    } else if state.input_mode == InputMode::CreatingWorktree {
         render_worktree_creation(frame, chunks[1], state);
     } else if let Some(_project) = project {
         let branches = project_store.branches_for_project_sorted(project_id);
@@ -158,8 +160,9 @@ pub fn render_project_detail(
 
     // Footer
     let help_text = match state.input_mode {
+        InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel",
         InputMode::CreatingWorktree => "Type: search | j/k: navigate | Enter: select | Esc: cancel",
-        _ => "w: new worktree | j/k: navigate | Enter: open branch | Esc: back | q: quit",
+        _ => "d: delete project | w: new worktree | j/k: navigate | Enter: open branch | Esc: back | q: quit",
     };
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
@@ -180,13 +183,11 @@ fn render_worktree_creation(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // Search input
     let input_text = format!("> {}_", state.new_branch_name);
-    let input = Paragraph::new(input_text)
-        .style(t.input_style())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Search / New Branch Name"),
-        );
+    let input = Paragraph::new(input_text).style(t.input_style()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Search / New Branch Name"),
+    );
     frame.render_widget(input, chunks[0]);
 
     // Branch list with "Create new" option
@@ -199,9 +200,7 @@ fn render_worktree_creation(frame: &mut Frame, area: Rect, state: &AppState) {
         format!("  + Create new branch: '{}'", state.new_branch_name)
     };
     let create_style = if state.branch_selector_index == 0 {
-        Style::default()
-            .fg(t.active)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(t.active).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(t.text_muted)
     };
@@ -221,4 +220,90 @@ fn render_worktree_creation(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Branches"));
     frame.render_widget(list, chunks[1]);
+}
+
+/// Render the project delete confirmation dialog
+fn render_project_delete_confirmation(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    project: Option<&Project>,
+    sessions: &SessionManager,
+    _config: &Config,
+) {
+    let t = theme();
+
+    let project_name = project.map(|p| p.name.as_str()).unwrap_or("Unknown");
+    let project_id = state.pending_delete_project;
+
+    // Count active sessions for this project
+    let (session_count, active_count) = if let Some(pid) = project_id {
+        (
+            sessions.session_count_for_project(pid),
+            sessions.active_session_count_for_project(pid),
+        )
+    } else {
+        (0, 0)
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Delete project: ", Style::default().fg(t.text)),
+            Span::styled(project_name, Style::default().fg(Color::Cyan).bold()),
+            Span::styled("?", Style::default().fg(t.text)),
+        ]),
+        Line::from(""),
+    ];
+
+    // Warning about active sessions
+    if active_count > 0 {
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "⚠  Warning: {} active session{} will be terminated",
+                active_count,
+                if active_count == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(Color::Yellow).bold(),
+        )]));
+        lines.push(Line::from(""));
+    } else if session_count > 0 {
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "Note: {} session{} will be removed",
+                session_count,
+                if session_count == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(t.text_muted),
+        )]));
+        lines.push(Line::from(""));
+    }
+
+    // Note about worktrees
+    lines.push(Line::from(vec![Span::styled(
+        "Note: Git worktrees on disk will NOT be deleted.",
+        Style::default().fg(t.text_muted),
+    )]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+
+    // Confirmation prompt
+    lines.push(Line::from(vec![
+        Span::styled("Press ", Style::default().fg(t.text)),
+        Span::styled("y", Style::default().fg(Color::Green).bold()),
+        Span::styled(" to confirm, ", Style::default().fg(t.text)),
+        Span::styled("n", Style::default().fg(Color::Red).bold()),
+        Span::styled(" or ", Style::default().fg(t.text)),
+        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
+        Span::styled(" to cancel", Style::default().fg(t.text)),
+    ]));
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title("Confirm Delete"),
+    );
+
+    frame.render_widget(paragraph, area);
 }

@@ -11,7 +11,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::hooks::{self, HookEventReceiver, HookEventSender, ServerHandle, DEFAULT_CHANNEL_BUFFER};
+use crate::hooks::{
+    self, HookEventReceiver, HookEventSender, ServerHandle, DEFAULT_CHANNEL_BUFFER,
+};
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionId, SessionManager};
 use crate::tui::views::{
@@ -36,6 +38,8 @@ pub enum InputMode {
     CreatingWorktree,
     /// Confirming session deletion
     ConfirmingSessionDelete,
+    /// Confirming project deletion
+    ConfirmingProjectDelete,
 }
 
 /// Current view being displayed
@@ -148,6 +152,8 @@ pub struct AppState {
     pub branch_selector_index: usize,
     /// Session pending deletion (for confirmation dialog)
     pub pending_delete_session: Option<SessionId>,
+    /// Project pending deletion (for confirmation dialog)
+    pub pending_delete_project: Option<ProjectId>,
     /// Whether the application should quit
     pub should_quit: bool,
     /// Whether the UI needs to be re-rendered
@@ -486,6 +492,7 @@ impl App {
                 }
             }
             InputMode::ConfirmingSessionDelete => self.handle_confirming_delete_key(key),
+            InputMode::ConfirmingProjectDelete => self.handle_confirming_project_delete_key(key),
         }
     }
 
@@ -685,6 +692,11 @@ impl App {
                     self.state.available_branches.clear();
                 }
                 self.state.filtered_branches = self.state.available_branches.clone();
+            }
+            KeyCode::Char('d') => {
+                // Prompt for confirmation before deleting project
+                self.state.pending_delete_project = Some(project_id);
+                self.state.input_mode = InputMode::ConfirmingProjectDelete;
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let Some(num) = c.to_digit(10) {
@@ -1139,6 +1151,54 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 // Cancel deletion
                 self.state.pending_delete_session = None;
+                self.state.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key when confirming project deletion
+    fn handle_confirming_project_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                // Confirm deletion
+                if let Some(project_id) = self.state.pending_delete_project.take() {
+                    // Destroy all sessions for this project
+                    let sessions_to_destroy: Vec<_> = self
+                        .sessions
+                        .sessions_for_project(project_id)
+                        .iter()
+                        .map(|s| s.info.id)
+                        .collect();
+
+                    for session_id in sessions_to_destroy {
+                        if let Err(e) = self.sessions.destroy_session(session_id) {
+                            tracing::error!("Failed to destroy session: {}", e);
+                        }
+                    }
+
+                    // Remove project and its branches from the store
+                    self.project_store.remove_project(project_id);
+
+                    // Save to disk
+                    if let Err(e) = self.project_store.save() {
+                        tracing::error!("Failed to save project store: {}", e);
+                        self.state.error_message =
+                            Some(format!("Failed to save project store: {}", e));
+                    }
+
+                    tracing::info!("Deleted project: {}", project_id);
+
+                    // Navigate back to projects overview
+                    self.state.view = View::ProjectsOverview;
+                    self.state.selected_project_index = 0;
+                }
+                self.state.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                // Cancel deletion
+                self.state.pending_delete_project = None;
                 self.state.input_mode = InputMode::Normal;
             }
             _ => {}

@@ -6,8 +6,7 @@
 pub mod server;
 
 pub use server::{
-    DroppedEventsCounter, HookEventReceiver, HookEventSender, ServerHandle,
-    DEFAULT_CHANNEL_BUFFER,
+    DroppedEventsCounter, HookEventReceiver, HookEventSender, ServerHandle, DEFAULT_CHANNEL_BUFFER,
 };
 
 use chrono::{DateTime, Utc};

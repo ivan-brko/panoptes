@@ -198,13 +198,11 @@ fn render_delete_confirmation(
         session_name
     );
 
-    let dialog = Paragraph::new(text)
-        .style(t.input_style())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Confirm Delete")
-                .border_style(Style::default().fg(t.error_bg)),
-        );
+    let dialog = Paragraph::new(text).style(t.input_style()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Confirm Delete")
+            .border_style(Style::default().fg(t.error_bg)),
+    );
     frame.render_widget(dialog, area);
 }

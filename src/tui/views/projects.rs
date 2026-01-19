@@ -188,10 +188,7 @@ fn render_attention_section(
                     let mins = duration.num_minutes();
                     (t.attention_idle, format!("[Idle - {}m]", mins))
                 }
-                _ => (
-                    t.text,
-                    format!("[{}]", session.info.state.display_name()),
-                ),
+                _ => (t.text, format!("[{}]", session.info.state.display_name())),
             };
 
             let content = Line::from(vec![

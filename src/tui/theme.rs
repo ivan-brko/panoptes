@@ -132,7 +132,9 @@ impl Theme {
 
     /// Style for headers/titles
     pub fn header_style(&self) -> Style {
-        Style::default().fg(self.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
     }
 
     /// Style for muted text
@@ -204,14 +206,26 @@ mod tests {
         use crate::session::SessionState;
         let theme = Theme::dark();
 
-        assert_eq!(theme.session_state_color(&SessionState::Starting), Color::Blue);
-        assert_eq!(theme.session_state_color(&SessionState::Thinking), Color::Yellow);
+        assert_eq!(
+            theme.session_state_color(&SessionState::Starting),
+            Color::Blue
+        );
+        assert_eq!(
+            theme.session_state_color(&SessionState::Thinking),
+            Color::Yellow
+        );
         assert_eq!(
             theme.session_state_color(&SessionState::Executing("Bash".to_string())),
             Color::Cyan
         );
-        assert_eq!(theme.session_state_color(&SessionState::Waiting), Color::Green);
-        assert_eq!(theme.session_state_color(&SessionState::Idle), Color::DarkGray);
+        assert_eq!(
+            theme.session_state_color(&SessionState::Waiting),
+            Color::Green
+        );
+        assert_eq!(
+            theme.session_state_color(&SessionState::Idle),
+            Color::DarkGray
+        );
         assert_eq!(theme.session_state_color(&SessionState::Exited), Color::Red);
     }
 
