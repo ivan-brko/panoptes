@@ -30,6 +30,8 @@ pub enum InputMode {
     Session,
     /// Creating a new session - typing session name
     CreatingSession,
+    /// Adding a new project - typing path
+    AddingProject,
 }
 
 /// Current view being displayed
@@ -387,6 +389,7 @@ impl App {
             InputMode::Normal => self.handle_normal_mode_key(key),
             InputMode::Session => self.handle_session_mode_key(key),
             InputMode::CreatingSession => self.handle_creating_session_key(key),
+            InputMode::AddingProject => self.handle_adding_project_key(key),
         }
     }
 
@@ -482,6 +485,11 @@ impl App {
                         }
                     }
                 }
+            }
+            KeyCode::Char('a') => {
+                // Start adding a new project
+                self.state.input_mode = InputMode::AddingProject;
+                self.state.new_project_path.clear();
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let Some(num) = c.to_digit(10) {
@@ -765,6 +773,89 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.state.new_session_name.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key when adding a new project
+    fn handle_adding_project_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                // Cancel project addition
+                self.state.input_mode = InputMode::Normal;
+                self.state.new_project_path.clear();
+            }
+            KeyCode::Enter => {
+                // Try to add the project
+                let path_str = std::mem::take(&mut self.state.new_project_path);
+                let path = PathBuf::from(shellexpand::tilde(&path_str).into_owned());
+
+                // Check if it's a git repository
+                match crate::git::GitOps::discover(&path) {
+                    Ok(git) => {
+                        let repo_path = git.repo_path().to_path_buf();
+
+                        // Check if already added
+                        if self.project_store.find_by_repo_path(&repo_path).is_some() {
+                            tracing::warn!("Project already exists: {}", repo_path.display());
+                            self.state.input_mode = InputMode::Normal;
+                            return Ok(());
+                        }
+
+                        // Get project name from directory
+                        let name = repo_path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+
+                        // Get default branch
+                        let default_branch = git
+                            .default_branch_name()
+                            .unwrap_or_else(|_| "main".to_string());
+
+                        // Create project
+                        let project = crate::project::Project::new(
+                            name.clone(),
+                            repo_path.clone(),
+                            default_branch.clone(),
+                        );
+                        let project_id = project.id;
+                        self.project_store.add_project(project);
+
+                        // Create default branch entry
+                        let branch = crate::project::Branch::default_for_project(
+                            project_id,
+                            default_branch,
+                            repo_path,
+                        );
+                        self.project_store.add_branch(branch);
+
+                        // Save to disk
+                        if let Err(e) = self.project_store.save() {
+                            tracing::error!("Failed to save project store: {}", e);
+                        }
+
+                        tracing::info!("Added project: {}", name);
+
+                        // Select the newly added project
+                        let project_count = self.project_store.project_count();
+                        self.state.selected_project_index = project_count.saturating_sub(1);
+                    }
+                    Err(e) => {
+                        tracing::error!("Not a git repository: {} ({})", path.display(), e);
+                    }
+                }
+
+                self.state.input_mode = InputMode::Normal;
+            }
+            KeyCode::Backspace => {
+                self.state.new_project_path.pop();
+            }
+            KeyCode::Char(c) => {
+                self.state.new_project_path.push(c);
             }
             _ => {}
         }

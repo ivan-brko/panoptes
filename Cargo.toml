@@ -47,6 +47,7 @@ thiserror = "1"
 dirs = "5"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+shellexpand = "3.1.1"
 
 # Unix PTY support
 [target.'cfg(unix)'.dependencies]

@@ -44,15 +44,22 @@ pub fn render_projects_overview(
     frame.render_widget(header, chunks[0]);
 
     // Main content area
-    if state.input_mode == InputMode::CreatingSession {
-        render_session_creation(frame, chunks[1], state);
-    } else {
-        render_main_content(frame, chunks[1], state, project_store, sessions);
+    match state.input_mode {
+        InputMode::CreatingSession => {
+            render_session_creation(frame, chunks[1], state);
+        }
+        InputMode::AddingProject => {
+            render_project_addition(frame, chunks[1], state);
+        }
+        _ => {
+            render_main_content(frame, chunks[1], state, project_store, sessions);
+        }
     }
 
     // Footer with help
     let help_text = match state.input_mode {
         InputMode::CreatingSession => "Enter: create | Esc: cancel",
+        InputMode::AddingProject => "Enter: add project | Esc: cancel",
         _ => {
             if project_store.project_count() > 0 || !sessions.is_empty() {
                 "a: add project | n: new session | t: timeline | j/k: navigate | Enter: open | q: quit"
@@ -76,6 +83,16 @@ fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState) {
                 .borders(Borders::ALL)
                 .title("Create Session"),
         );
+    frame.render_widget(input, area);
+}
+
+/// Render the project addition input
+fn render_project_addition(frame: &mut Frame, area: Rect, state: &AppState) {
+    let hint = "Enter the path to a git repository (~ expansion supported):";
+    let input_text = format!("{}\n\n> {}_", hint, state.new_project_path);
+    let input = Paragraph::new(input_text)
+        .style(Style::default().fg(Color::Yellow))
+        .block(Block::default().borders(Borders::ALL).title("Add Project"));
     frame.render_widget(input, area);
 }
 
