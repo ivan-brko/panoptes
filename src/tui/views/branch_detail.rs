@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionManager, SessionState};
 use crate::tui::theme::theme;
+use crate::tui::views::format_attention_hint;
 
 /// Render the branch detail view showing sessions
 #[allow(clippy::too_many_arguments)]
@@ -152,10 +153,16 @@ pub fn render_branch_detail(
 
     // Footer
     let help_text = match state.input_mode {
-        InputMode::CreatingSession => "Enter: create | Esc: cancel",
-        InputMode::ConfirmingSessionDelete => "y: confirm delete | n/Esc: cancel",
+        InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
+        InputMode::ConfirmingSessionDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         _ => {
-            "n: new session | d: delete | j/k: navigate | Enter: open session | Esc: back | q: quit"
+            let base =
+                "n: new session | d: delete | j/k: navigate | Enter: open session | Esc: back | q: quit";
+            if let Some(hint) = format_attention_hint(sessions, config) {
+                format!("{} | {}", hint, base)
+            } else {
+                base.to_string()
+            }
         }
     };
     let footer = Paragraph::new(help_text)

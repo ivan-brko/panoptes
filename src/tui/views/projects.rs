@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::theme::theme;
+use crate::tui::views::format_attention_hint;
 
 /// Render the projects overview
 pub fn render_projects_overview(
@@ -139,15 +140,20 @@ pub fn render_projects_overview(
     // Footer with help (always last chunk)
     let footer_index = chunks.len() - 1;
     let help_text = match state.input_mode {
-        InputMode::CreatingSession => "Enter: create | Esc: cancel",
-        InputMode::AddingProject => "Enter: add project | Esc: cancel",
+        InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
+        InputMode::AddingProject => "Enter: add project | Esc: cancel".to_string(),
         _ => {
-            if project_store.project_count() > 0 {
+            let base = if project_store.project_count() > 0 {
                 "a: add project | n: new session (enter branch) | t: timeline | j/k: navigate | Enter: open | q: quit"
             } else if !sessions.is_empty() {
                 "a: add project | n: quick session | t: timeline | j/k: navigate | Enter: open | q: quit"
             } else {
                 "a: add project | n: quick session | t: timeline | q: quit"
+            };
+            if let Some(hint) = format_attention_hint(sessions, config) {
+                format!("{} | {}", hint, base)
+            } else {
+                base.to_string()
             }
         }
     };

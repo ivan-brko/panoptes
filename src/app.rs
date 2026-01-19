@@ -482,6 +482,12 @@ impl App {
             }
         }
 
+        // Global: Jump to next session needing attention (Space key)
+        // Works in all modes except Session mode (where keys go to PTY)
+        if key.code == KeyCode::Char(' ') && self.state.input_mode != InputMode::Session {
+            return self.jump_to_next_attention();
+        }
+
         match self.state.input_mode {
             InputMode::Normal => self.handle_normal_mode_key(key),
             InputMode::Session => self.handle_session_mode_key(key),
@@ -1245,6 +1251,26 @@ impl App {
         Ok(())
     }
 
+    /// Jump to the next session needing attention (oldest first)
+    fn jump_to_next_attention(&mut self) -> Result<()> {
+        let attention_sessions = self
+            .sessions
+            .sessions_needing_attention(self.config.idle_threshold_secs);
+
+        if let Some(session) = attention_sessions.first() {
+            let session_id = session.info.id;
+            self.state.navigate_to_session(session_id);
+            self.sessions.acknowledge_attention(session_id);
+            if self.config.notification_method == "title" {
+                SessionManager::reset_terminal_title();
+            }
+            self.resize_active_session_pty()?;
+        } else {
+            self.state.error_message = Some("No sessions need attention".to_string());
+        }
+        Ok(())
+    }
+
     /// Resize the active session's PTY to match the output viewport
     fn resize_active_session_pty(&mut self) -> Result<()> {
         if let Some(session_id) = self.state.active_session {
@@ -1299,7 +1325,7 @@ impl App {
                     );
                 }
                 View::SessionView => {
-                    render_session_view(frame, area, state, sessions);
+                    render_session_view(frame, area, state, sessions, config);
                 }
                 View::ActivityTimeline => {
                     render_timeline(frame, area, state, sessions, project_store, config);

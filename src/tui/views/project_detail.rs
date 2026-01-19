@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::project::{Project, ProjectId, ProjectStore};
 use crate::session::SessionManager;
 use crate::tui::theme::theme;
+use crate::tui::views::format_attention_hint;
 
 /// Render the project detail view showing branches
 pub fn render_project_detail(
@@ -160,9 +161,19 @@ pub fn render_project_detail(
 
     // Footer
     let help_text = match state.input_mode {
-        InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel",
-        InputMode::CreatingWorktree => "Type: search | j/k: navigate | Enter: select | Esc: cancel",
-        _ => "d: delete project | w: new worktree | j/k: navigate | Enter: open branch | Esc: back | q: quit",
+        InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
+        InputMode::CreatingWorktree => {
+            "Type: search | j/k: navigate | Enter: select | Esc: cancel".to_string()
+        }
+        _ => {
+            let base =
+                "d: delete project | w: new worktree | j/k: navigate | Enter: open branch | Esc: back | q: quit";
+            if let Some(hint) = format_attention_hint(sessions, config) {
+                format!("{} | {}", hint, base)
+            } else {
+                base.to_string()
+            }
+        }
     };
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))

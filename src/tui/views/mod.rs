@@ -2,6 +2,9 @@
 //!
 //! Each view in the application has its own module for rendering logic.
 
+use crate::config::Config;
+use crate::session::SessionManager;
+
 mod branch_detail;
 mod placeholder;
 mod project_detail;
@@ -18,3 +21,12 @@ pub use timeline::render_timeline;
 
 // Re-export for convenience
 pub use placeholder::render_placeholder as placeholder;
+
+/// Format the attention hint for the footer showing the next session needing attention.
+/// Returns None if no sessions need attention.
+pub fn format_attention_hint(sessions: &SessionManager, config: &Config) -> Option<String> {
+    let attention = sessions.sessions_needing_attention(config.idle_threshold_secs);
+    attention
+        .first()
+        .map(|s| format!("Space: → {}", s.info.name))
+}

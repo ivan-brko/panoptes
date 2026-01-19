@@ -10,6 +10,7 @@ use crate::app::AppState;
 use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
+use crate::tui::views::format_attention_hint;
 
 /// Render the activity timeline view showing all sessions sorted by activity
 pub fn render_timeline(
@@ -181,7 +182,12 @@ pub fn render_timeline(
 
     // Footer
     let footer_index = if attention_count > 0 { 3 } else { 2 };
-    let help_text = "j/k: navigate | Enter: open session | Esc: back | q: quit";
+    let base_help = "j/k: navigate | Enter: open session | Esc: back | q: quit";
+    let help_text = if let Some(hint) = format_attention_hint(sessions, config) {
+        format!("{} | {}", hint, base_help)
+    } else {
+        base_help.to_string()
+    };
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));

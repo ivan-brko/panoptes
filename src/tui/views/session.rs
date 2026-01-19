@@ -6,8 +6,10 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{AppState, InputMode};
+use crate::config::Config;
 use crate::session::{SessionManager, SessionState};
 use crate::tui::theme::theme;
+use crate::tui::views::format_attention_hint;
 
 /// Render the session view
 pub fn render_session_view(
@@ -15,6 +17,7 @@ pub fn render_session_view(
     area: Rect,
     state: &AppState,
     sessions: &SessionManager,
+    config: &Config,
 ) {
     let t = theme();
     let session = state.active_session.and_then(|id| sessions.get(id));
@@ -95,8 +98,15 @@ pub fn render_session_view(
 
     // Footer with help
     let help_text = match state.input_mode {
-        InputMode::Session => "Esc: deactivate | Keys sent to session",
-        _ => "Enter: activate | Tab: next | 1-9: jump | Esc/q: back",
+        InputMode::Session => "Esc: deactivate | Keys sent to session".to_string(),
+        _ => {
+            let base = "Enter: activate | Tab: next | 1-9: jump | Esc/q: back";
+            if let Some(hint) = format_attention_hint(sessions, config) {
+                format!("{} | {}", hint, base)
+            } else {
+                base.to_string()
+            }
+        }
     };
     let footer = Paragraph::new(help_text)
         .style(t.muted_style())
