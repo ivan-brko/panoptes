@@ -2,9 +2,8 @@
 //!
 //! This module handles all terminal rendering and UI components using Ratatui.
 
-// Submodules will be added in later tickets:
-// pub mod render;
-// pub mod input;
+pub mod views;
+pub mod widgets;
 
 use anyhow::Result;
 use crossterm::{

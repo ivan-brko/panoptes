@@ -17,6 +17,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::project::{BranchId, ProjectId};
+
 /// Unique identifier for a session
 pub type SessionId = Uuid;
 
@@ -84,6 +86,10 @@ pub struct SessionInfo {
     pub state: SessionState,
     /// Working directory
     pub working_dir: std::path::PathBuf,
+    /// Parent project identifier
+    pub project_id: ProjectId,
+    /// Parent branch identifier
+    pub branch_id: BranchId,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp
@@ -92,13 +98,20 @@ pub struct SessionInfo {
 
 impl SessionInfo {
     /// Create new session info
-    pub fn new(name: String, working_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
             name,
             state: SessionState::default(),
             working_dir,
+            project_id,
+            branch_id,
             created_at: now,
             last_activity: now,
         }
@@ -371,9 +384,13 @@ mod tests {
 
     #[test]
     fn test_session_info_creation() {
-        let info = SessionInfo::new("test".to_string(), "/tmp".into());
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let info = SessionInfo::new("test".to_string(), "/tmp".into(), project_id, branch_id);
         assert_eq!(info.name, "test");
         assert_eq!(info.state, SessionState::Starting);
+        assert_eq!(info.project_id, project_id);
+        assert_eq!(info.branch_id, branch_id);
         assert!(info.created_at <= Utc::now());
     }
 

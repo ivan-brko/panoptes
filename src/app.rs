@@ -8,12 +8,15 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::hooks::{self, HookEventReceiver, HookEventSender, ServerHandle};
+use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionId, SessionManager};
+use crate::tui::views::{
+    render_placeholder, render_projects_overview, render_session_view, render_timeline,
+};
 use crate::tui::Tui;
 
 /// Input mode determines how keyboard input is handled
@@ -31,11 +34,72 @@ pub enum InputMode {
 /// Current view being displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
-    /// Session list overview
+    /// Grid of projects (main landing page)
     #[default]
-    SessionList,
+    ProjectsOverview,
+    /// Branches for a specific project
+    ProjectDetail(ProjectId),
+    /// Sessions for a specific branch
+    BranchDetail(ProjectId, BranchId),
     /// Single session fullscreen view
     SessionView,
+    /// All sessions sorted by recent activity
+    ActivityTimeline,
+}
+
+impl View {
+    /// Check if this view is the projects overview
+    pub fn is_projects_overview(&self) -> bool {
+        matches!(self, View::ProjectsOverview)
+    }
+
+    /// Check if this view is a project detail view
+    pub fn is_project_detail(&self) -> bool {
+        matches!(self, View::ProjectDetail(_))
+    }
+
+    /// Check if this view is a branch detail view
+    pub fn is_branch_detail(&self) -> bool {
+        matches!(self, View::BranchDetail(_, _))
+    }
+
+    /// Check if this view is the session view
+    pub fn is_session_view(&self) -> bool {
+        matches!(self, View::SessionView)
+    }
+
+    /// Check if this view is the activity timeline
+    pub fn is_activity_timeline(&self) -> bool {
+        matches!(self, View::ActivityTimeline)
+    }
+
+    /// Get the parent view for navigation (Esc key)
+    pub fn parent(&self) -> Option<View> {
+        match self {
+            View::ProjectsOverview => None,
+            View::ProjectDetail(_) => Some(View::ProjectsOverview),
+            View::BranchDetail(project_id, _) => Some(View::ProjectDetail(*project_id)),
+            View::SessionView => None, // Handled specially based on context
+            View::ActivityTimeline => Some(View::ProjectsOverview),
+        }
+    }
+
+    /// Get the project ID if this view is associated with a project
+    pub fn project_id(&self) -> Option<ProjectId> {
+        match self {
+            View::ProjectDetail(id) => Some(*id),
+            View::BranchDetail(id, _) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Get the branch ID if this view is associated with a branch
+    pub fn branch_id(&self) -> Option<BranchId> {
+        match self {
+            View::BranchDetail(_, id) => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 /// Application state
@@ -45,12 +109,22 @@ pub struct AppState {
     pub view: View,
     /// Current input mode
     pub input_mode: InputMode,
-    /// Currently selected session index (in session list)
-    pub selected_index: usize,
+    /// Selected index in ProjectsOverview
+    pub selected_project_index: usize,
+    /// Selected index in ProjectDetail (branch selection)
+    pub selected_branch_index: usize,
+    /// Selected index in BranchDetail (session selection)
+    pub selected_session_index: usize,
+    /// Selected index in ActivityTimeline
+    pub selected_timeline_index: usize,
     /// Session being viewed (in session view)
     pub active_session: Option<SessionId>,
+    /// Context for returning from session view (which view to go back to)
+    pub session_return_view: Option<View>,
     /// Buffer for new session name input
     pub new_session_name: String,
+    /// Buffer for new project path input
+    pub new_project_path: String,
     /// Whether the application should quit
     pub should_quit: bool,
     /// Whether the UI needs to be re-rendered
@@ -58,38 +132,106 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Select the next session in the list
-    pub fn select_next(&mut self, session_count: usize) {
-        if session_count > 0 {
-            self.selected_index = (self.selected_index + 1) % session_count;
+    /// Get the current selected index for the current view
+    pub fn current_selected_index(&self) -> usize {
+        match self.view {
+            View::ProjectsOverview => self.selected_project_index,
+            View::ProjectDetail(_) => self.selected_branch_index,
+            View::BranchDetail(_, _) => self.selected_session_index,
+            View::ActivityTimeline => self.selected_timeline_index,
+            View::SessionView => 0,
         }
     }
 
-    /// Select the previous session in the list
-    pub fn select_prev(&mut self, session_count: usize) {
-        if session_count > 0 {
-            self.selected_index = self
-                .selected_index
-                .checked_sub(1)
-                .unwrap_or(session_count - 1);
+    /// Set the selected index for the current view
+    pub fn set_current_selected_index(&mut self, index: usize) {
+        match self.view {
+            View::ProjectsOverview => self.selected_project_index = index,
+            View::ProjectDetail(_) => self.selected_branch_index = index,
+            View::BranchDetail(_, _) => self.selected_session_index = index,
+            View::ActivityTimeline => self.selected_timeline_index = index,
+            View::SessionView => {}
         }
     }
 
-    /// Select a session by number (1-indexed)
-    pub fn select_by_number(&mut self, num: usize, session_count: usize) {
-        if num > 0 && num <= session_count {
-            self.selected_index = num - 1;
+    /// Select the next item in the current view
+    pub fn select_next(&mut self, item_count: usize) {
+        if item_count > 0 {
+            let current = self.current_selected_index();
+            let next = (current + 1) % item_count;
+            self.set_current_selected_index(next);
         }
+    }
+
+    /// Select the previous item in the current view
+    pub fn select_prev(&mut self, item_count: usize) {
+        if item_count > 0 {
+            let current = self.current_selected_index();
+            let prev = current.checked_sub(1).unwrap_or(item_count - 1);
+            self.set_current_selected_index(prev);
+        }
+    }
+
+    /// Select by number (1-indexed) in the current view
+    pub fn select_by_number(&mut self, num: usize, item_count: usize) {
+        if num > 0 && num <= item_count {
+            self.set_current_selected_index(num - 1);
+        }
+    }
+
+    /// Navigate to the parent view
+    pub fn navigate_back(&mut self) {
+        if let Some(parent) = self.view.parent() {
+            self.view = parent;
+        }
+    }
+
+    /// Navigate to a project detail view
+    pub fn navigate_to_project(&mut self, project_id: ProjectId) {
+        self.view = View::ProjectDetail(project_id);
+        self.selected_branch_index = 0;
+    }
+
+    /// Navigate to a branch detail view
+    pub fn navigate_to_branch(&mut self, project_id: ProjectId, branch_id: BranchId) {
+        self.view = View::BranchDetail(project_id, branch_id);
+        self.selected_session_index = 0;
+    }
+
+    /// Navigate to session view
+    pub fn navigate_to_session(&mut self, session_id: SessionId) {
+        // Remember where we came from
+        self.session_return_view = Some(self.view);
+        self.view = View::SessionView;
+        self.active_session = Some(session_id);
+    }
+
+    /// Navigate to activity timeline
+    pub fn navigate_to_timeline(&mut self) {
+        self.view = View::ActivityTimeline;
+        self.selected_timeline_index = 0;
+    }
+
+    /// Return from session view to the previous view
+    pub fn return_from_session(&mut self) {
+        if let Some(return_view) = self.session_return_view.take() {
+            self.view = return_view;
+        } else {
+            self.view = View::ProjectsOverview;
+        }
+        self.active_session = None;
     }
 }
 
 /// Main application struct
 pub struct App {
-    /// Application configuration
+    /// Application configuration (used for project flows)
     #[allow(dead_code)]
     config: Config,
     /// Application state
     state: AppState,
+    /// Project store for project/branch persistence
+    project_store: ProjectStore,
     /// Session manager
     sessions: SessionManager,
     /// Hook event receiver
@@ -104,6 +246,17 @@ impl App {
     /// Create a new application instance
     pub async fn new() -> Result<Self> {
         let config = Config::load()?;
+
+        // Load project store (or create empty if doesn't exist)
+        let project_store = ProjectStore::load().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load project store: {}, starting fresh", e);
+            ProjectStore::new()
+        });
+        tracing::info!(
+            "Loaded {} projects, {} branches",
+            project_store.project_count(),
+            project_store.branch_count()
+        );
 
         // Create hook event channel
         let (hook_tx, hook_rx): (HookEventSender, HookEventReceiver) =
@@ -122,6 +275,7 @@ impl App {
         Ok(Self {
             config,
             state: AppState::default(),
+            project_store,
             sessions,
             hook_rx,
             _hook_server: hook_server,
@@ -238,21 +392,116 @@ impl App {
     /// Handle key in normal mode
     fn handle_normal_mode_key(&mut self, key: KeyEvent) -> Result<()> {
         match self.state.view {
-            View::SessionList => self.handle_session_list_key(key),
+            View::ProjectsOverview => self.handle_projects_overview_key(key),
+            View::ProjectDetail(_) => self.handle_project_detail_key(key),
+            View::BranchDetail(_, _) => self.handle_branch_detail_key(key),
             View::SessionView => self.handle_session_view_normal_key(key),
+            View::ActivityTimeline => self.handle_timeline_key(key),
         }
     }
 
-    /// Handle key in session list view (normal mode)
-    fn handle_session_list_key(&mut self, key: KeyEvent) -> Result<()> {
+    /// Handle key in projects overview (normal mode)
+    /// TODO: Will be fully implemented in Ticket 24
+    fn handle_projects_overview_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Char('q') => {
                 self.state.should_quit = true;
             }
+            KeyCode::Char('t') => {
+                // Go to activity timeline
+                self.state.navigate_to_timeline();
+            }
             KeyCode::Char('n') => {
-                // Start creating a new session
+                // Start creating a new session (temporary - will change to add project)
                 self.state.input_mode = InputMode::CreatingSession;
                 self.state.new_session_name.clear();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                // For now, navigate sessions (will be projects later)
+                self.state.select_next(self.sessions.len());
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.state.select_prev(self.sessions.len());
+            }
+            KeyCode::Enter => {
+                // Enter session view for selected session (temporary)
+                let index = self.state.current_selected_index();
+                if let Some(session) = self.sessions.get_by_index(index) {
+                    let session_id = session.info.id;
+                    self.state.navigate_to_session(session_id);
+                    self.resize_active_session_pty()?;
+                }
+            }
+            KeyCode::Char('d') => {
+                // Delete selected session
+                let index = self.state.current_selected_index();
+                if let Some(session) = self.sessions.get_by_index(index) {
+                    let id = session.info.id;
+                    if let Err(e) = self.sessions.destroy_session(id) {
+                        tracing::error!("Failed to destroy session: {}", e);
+                    }
+                    // Adjust selection if needed
+                    let count = self.sessions.len();
+                    if index >= count && index > 0 {
+                        self.state.set_current_selected_index(index - 1);
+                    }
+                }
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                if let Some(num) = c.to_digit(10) {
+                    self.state
+                        .select_by_number(num as usize, self.sessions.len());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key in project detail view (normal mode)
+    /// TODO: Will be fully implemented in Ticket 25
+    fn handle_project_detail_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state.navigate_back();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                // Will navigate branches when implemented
+                self.state.select_next(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.state.select_prev(1);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key in branch detail view (normal mode)
+    /// TODO: Will be fully implemented in Ticket 26
+    fn handle_branch_detail_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state.navigate_back();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                // Will navigate sessions when implemented
+                self.state.select_next(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.state.select_prev(1);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key in activity timeline (normal mode)
+    /// TODO: Will be fully implemented in Ticket 27
+    fn handle_timeline_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state.navigate_back();
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.state.select_next(self.sessions.len());
@@ -261,34 +510,11 @@ impl App {
                 self.state.select_prev(self.sessions.len());
             }
             KeyCode::Enter => {
-                // Enter session view for selected session
-                if let Some(session) = self.sessions.get_by_index(self.state.selected_index) {
-                    self.state.active_session = Some(session.info.id);
-                    self.state.view = View::SessionView;
-                    // Resize PTY to match output viewport
+                let index = self.state.current_selected_index();
+                if let Some(session) = self.sessions.get_by_index(index) {
+                    let session_id = session.info.id;
+                    self.state.navigate_to_session(session_id);
                     self.resize_active_session_pty()?;
-                }
-            }
-            KeyCode::Char('d') => {
-                // Delete selected session
-                if let Some(session) = self.sessions.get_by_index(self.state.selected_index) {
-                    let id = session.info.id;
-                    if let Err(e) = self.sessions.destroy_session(id) {
-                        tracing::error!("Failed to destroy session: {}", e);
-                    }
-                    // Adjust selection if needed
-                    if self.state.selected_index >= self.sessions.len()
-                        && self.state.selected_index > 0
-                    {
-                        self.state.selected_index -= 1;
-                    }
-                }
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                // Jump to session by number
-                if let Some(num) = c.to_digit(10) {
-                    self.state
-                        .select_by_number(num as usize, self.sessions.len());
                 }
             }
             _ => {}
@@ -300,9 +526,8 @@ impl App {
     fn handle_session_view_normal_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                // Go back to session list
-                self.state.view = View::SessionList;
-                self.state.active_session = None;
+                // Go back to the view we came from
+                self.state.return_from_session();
             }
             KeyCode::Char('i') | KeyCode::Enter => {
                 // Enter session mode (send keys to PTY)
@@ -310,10 +535,18 @@ impl App {
             }
             KeyCode::Tab => {
                 // Switch to next session
-                self.state.select_next(self.sessions.len());
-                if let Some(session) = self.sessions.get_by_index(self.state.selected_index) {
-                    self.state.active_session = Some(session.info.id);
-                    self.resize_active_session_pty()?;
+                let count = self.sessions.len();
+                if count > 0 {
+                    // Use the timeline index for cycling through all sessions
+                    self.state.selected_timeline_index =
+                        (self.state.selected_timeline_index + 1) % count;
+                    if let Some(session) = self
+                        .sessions
+                        .get_by_index(self.state.selected_timeline_index)
+                    {
+                        self.state.active_session = Some(session.info.id);
+                        self.resize_active_session_pty()?;
+                    }
                 }
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -321,8 +554,10 @@ impl App {
                 if let Some(num) = c.to_digit(10) {
                     let count = self.sessions.len();
                     if num > 0 && (num as usize) <= count {
-                        self.state.selected_index = (num as usize) - 1;
-                        if let Some(session) = self.sessions.get_by_index(self.state.selected_index)
+                        self.state.selected_timeline_index = (num as usize) - 1;
+                        if let Some(session) = self
+                            .sessions
+                            .get_by_index(self.state.selected_timeline_index)
                         {
                             self.state.active_session = Some(session.info.id);
                             self.resize_active_session_pty()?;
@@ -381,13 +616,26 @@ impl App {
                     (24, 80) // Fallback dimensions
                 };
 
-                match self
-                    .sessions
-                    .create_session(name.clone(), working_dir, None, rows, cols)
-                {
+                // TODO: Replace with actual project_id and branch_id from selected project/branch
+                // This will be implemented in Ticket 30 (Session in Branch)
+                let project_id = Uuid::nil();
+                let branch_id = Uuid::nil();
+
+                match self.sessions.create_session(
+                    name.clone(),
+                    working_dir,
+                    project_id,
+                    branch_id,
+                    None,
+                    rows,
+                    cols,
+                ) {
                     Ok(session_id) => {
                         tracing::info!("Created session: {} ({})", name, session_id);
-                        self.state.selected_index = self.sessions.len() - 1;
+                        // Update the selected index for the current view
+                        let new_index = self.sessions.len().saturating_sub(1);
+                        self.state.selected_project_index = new_index;
+                        self.state.selected_timeline_index = new_index;
                     }
                     Err(e) => {
                         tracing::error!("Failed to create session: {}", e);
@@ -426,158 +674,45 @@ impl App {
     /// Render the current state
     fn render(&mut self) -> Result<()> {
         let state = &self.state;
+        let project_store = &self.project_store;
         let sessions = &self.sessions;
 
         self.tui.draw(|frame| {
             let area = frame.size();
 
             match state.view {
-                View::SessionList => {
-                    render_session_list(frame, area, state, sessions);
+                View::ProjectsOverview => {
+                    render_projects_overview(frame, area, state, project_store, sessions);
+                }
+                View::ProjectDetail(_) => {
+                    // TODO: Ticket 25 - Render project detail
+                    render_placeholder(frame, area, "Project Detail (Coming Soon)");
+                }
+                View::BranchDetail(_, _) => {
+                    // TODO: Ticket 26 - Render branch detail
+                    render_placeholder(frame, area, "Branch Detail (Coming Soon)");
                 }
                 View::SessionView => {
                     render_session_view(frame, area, state, sessions);
+                }
+                View::ActivityTimeline => {
+                    render_timeline(frame, area, state, sessions);
                 }
             }
         })?;
 
         Ok(())
     }
-}
 
-/// Render the session list view
-fn render_session_list(frame: &mut Frame, area: Rect, state: &AppState, sessions: &SessionManager) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(0),    // Session list
-            Constraint::Length(3), // Footer/help
-        ])
-        .split(area);
-
-    // Header
-    let header = Paragraph::new("Panoptes - Claude Code Session Manager")
-        .style(Style::default().fg(Color::Cyan).bold())
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[0]);
-
-    // Session list or new session input
-    if state.input_mode == InputMode::CreatingSession {
-        let input = Paragraph::new(format!("New session name: {}_", state.new_session_name))
-            .style(Style::default().fg(Color::Yellow))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Create Session"),
-            );
-        frame.render_widget(input, chunks[1]);
-    } else if sessions.is_empty() {
-        let empty = Paragraph::new("No sessions. Press 'n' to create one.")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title("Sessions"));
-        frame.render_widget(empty, chunks[1]);
-    } else {
-        let items: Vec<ListItem> = sessions
-            .sessions_in_order()
-            .iter()
-            .enumerate()
-            .map(|(i, session)| {
-                let state_color = session.info.state.color();
-                let selected = i == state.selected_index;
-                let prefix = if selected { "▶ " } else { "  " };
-                let content = format!(
-                    "{}{}: {} [{}]",
-                    prefix,
-                    i + 1,
-                    session.info.name,
-                    session.info.state.display_name()
-                );
-                let style = if selected {
-                    Style::default().fg(state_color).bold()
-                } else {
-                    Style::default().fg(state_color)
-                };
-                ListItem::new(content).style(style)
-            })
-            .collect();
-
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Sessions"));
-        frame.render_widget(list, chunks[1]);
+    /// Get a reference to the project store
+    pub fn project_store(&self) -> &ProjectStore {
+        &self.project_store
     }
 
-    // Footer with help
-    let help_text = match state.input_mode {
-        InputMode::CreatingSession => "Enter: create | Esc: cancel",
-        _ => "n: new | j/k: navigate | Enter: open | d: delete | q: quit",
-    };
-    let footer = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[2]);
-}
-
-/// Render the session view
-fn render_session_view(frame: &mut Frame, area: Rect, state: &AppState, sessions: &SessionManager) {
-    let session = state.active_session.and_then(|id| sessions.get(id));
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(0),    // Output
-            Constraint::Length(3), // Footer
-        ])
-        .split(area);
-
-    // Header with session info
-    let header_text = if let Some(session) = session {
-        let mode_indicator = match state.input_mode {
-            InputMode::Session => " [SESSION MODE]",
-            _ => " [NORMAL]",
-        };
-        format!(
-            "{} - {}{}",
-            session.info.name,
-            session.info.state.display_name(),
-            mode_indicator
-        )
-    } else {
-        "No session selected".to_string()
-    };
-
-    let header_color = session
-        .map(|s| s.info.state.color())
-        .unwrap_or(Color::DarkGray);
-
-    let header = Paragraph::new(header_text)
-        .style(Style::default().fg(header_color).bold())
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[0]);
-
-    // Output area
-    if let Some(session) = session {
-        let output_height = chunks[1].height.saturating_sub(2) as usize; // Account for borders
-        let styled_lines = session.visible_styled_lines(output_height);
-        let output = Paragraph::new(styled_lines)
-            .block(Block::default().borders(Borders::ALL).title("Output"));
-        frame.render_widget(output, chunks[1]);
-    } else {
-        let empty = Paragraph::new("Session not found")
-            .style(Style::default().fg(Color::Red))
-            .block(Block::default().borders(Borders::ALL).title("Output"));
-        frame.render_widget(empty, chunks[1]);
+    /// Get a mutable reference to the project store
+    pub fn project_store_mut(&mut self) -> &mut ProjectStore {
+        &mut self.project_store
     }
-
-    // Footer with help
-    let help_text = match state.input_mode {
-        InputMode::Session => "Esc: exit session mode | Keys sent to session",
-        _ => "i/Enter: session mode | Tab: next | 1-9: jump | Esc/q: back",
-    };
-    let footer = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[2]);
 }
 
 #[cfg(test)]
@@ -591,15 +726,17 @@ mod tests {
 
     #[test]
     fn test_view_default() {
-        assert_eq!(View::default(), View::SessionList);
+        assert_eq!(View::default(), View::ProjectsOverview);
     }
 
     #[test]
     fn test_app_state_default() {
         let state = AppState::default();
-        assert_eq!(state.view, View::SessionList);
+        assert_eq!(state.view, View::ProjectsOverview);
         assert_eq!(state.input_mode, InputMode::Normal);
-        assert_eq!(state.selected_index, 0);
+        assert_eq!(state.selected_project_index, 0);
+        assert_eq!(state.selected_branch_index, 0);
+        assert_eq!(state.selected_session_index, 0);
         assert!(state.active_session.is_none());
         assert!(!state.should_quit);
     }
@@ -607,40 +744,118 @@ mod tests {
     #[test]
     fn test_app_state_select_next() {
         let mut state = AppState::default();
+        // In ProjectsOverview, selection uses selected_project_index
         state.select_next(3);
-        assert_eq!(state.selected_index, 1);
+        assert_eq!(state.selected_project_index, 1);
         state.select_next(3);
-        assert_eq!(state.selected_index, 2);
+        assert_eq!(state.selected_project_index, 2);
         state.select_next(3);
-        assert_eq!(state.selected_index, 0); // Wraps around
+        assert_eq!(state.selected_project_index, 0); // Wraps around
     }
 
     #[test]
     fn test_app_state_select_prev() {
         let mut state = AppState::default();
         state.select_prev(3);
-        assert_eq!(state.selected_index, 2); // Wraps to end
+        assert_eq!(state.selected_project_index, 2); // Wraps to end
         state.select_prev(3);
-        assert_eq!(state.selected_index, 1);
+        assert_eq!(state.selected_project_index, 1);
     }
 
     #[test]
     fn test_app_state_select_by_number() {
         let mut state = AppState::default();
         state.select_by_number(2, 5);
-        assert_eq!(state.selected_index, 1); // 1-indexed to 0-indexed
+        assert_eq!(state.selected_project_index, 1); // 1-indexed to 0-indexed
         state.select_by_number(0, 5); // Invalid, should not change
-        assert_eq!(state.selected_index, 1);
+        assert_eq!(state.selected_project_index, 1);
         state.select_by_number(6, 5); // Out of range, should not change
-        assert_eq!(state.selected_index, 1);
+        assert_eq!(state.selected_project_index, 1);
     }
 
     #[test]
     fn test_app_state_select_empty() {
         let mut state = AppState::default();
         state.select_next(0); // Should not panic
-        assert_eq!(state.selected_index, 0);
+        assert_eq!(state.selected_project_index, 0);
         state.select_prev(0); // Should not panic
-        assert_eq!(state.selected_index, 0);
+        assert_eq!(state.selected_project_index, 0);
+    }
+
+    #[test]
+    fn test_view_helpers() {
+        assert!(View::ProjectsOverview.is_projects_overview());
+        assert!(!View::ProjectsOverview.is_session_view());
+
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+
+        let project_view = View::ProjectDetail(project_id);
+        assert!(project_view.is_project_detail());
+        assert_eq!(project_view.project_id(), Some(project_id));
+        assert_eq!(project_view.parent(), Some(View::ProjectsOverview));
+
+        let branch_view = View::BranchDetail(project_id, branch_id);
+        assert!(branch_view.is_branch_detail());
+        assert_eq!(branch_view.project_id(), Some(project_id));
+        assert_eq!(branch_view.branch_id(), Some(branch_id));
+        assert_eq!(branch_view.parent(), Some(View::ProjectDetail(project_id)));
+
+        assert!(View::ActivityTimeline.is_activity_timeline());
+        assert_eq!(
+            View::ActivityTimeline.parent(),
+            Some(View::ProjectsOverview)
+        );
+    }
+
+    #[test]
+    fn test_navigation_helpers() {
+        let mut state = AppState::default();
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+
+        // Navigate to project
+        state.navigate_to_project(project_id);
+        assert_eq!(state.view, View::ProjectDetail(project_id));
+        assert_eq!(state.selected_branch_index, 0);
+
+        // Navigate to branch
+        state.navigate_to_branch(project_id, branch_id);
+        assert_eq!(state.view, View::BranchDetail(project_id, branch_id));
+        assert_eq!(state.selected_session_index, 0);
+
+        // Navigate to session
+        state.navigate_to_session(session_id);
+        assert_eq!(state.view, View::SessionView);
+        assert_eq!(state.active_session, Some(session_id));
+        assert_eq!(
+            state.session_return_view,
+            Some(View::BranchDetail(project_id, branch_id))
+        );
+
+        // Return from session
+        state.return_from_session();
+        assert_eq!(state.view, View::BranchDetail(project_id, branch_id));
+        assert!(state.active_session.is_none());
+
+        // Navigate back
+        state.navigate_back();
+        assert_eq!(state.view, View::ProjectDetail(project_id));
+
+        state.navigate_back();
+        assert_eq!(state.view, View::ProjectsOverview);
+    }
+
+    #[test]
+    fn test_timeline_navigation() {
+        let mut state = AppState::default();
+
+        state.navigate_to_timeline();
+        assert_eq!(state.view, View::ActivityTimeline);
+        assert_eq!(state.selected_timeline_index, 0);
+
+        state.navigate_back();
+        assert_eq!(state.view, View::ProjectsOverview);
     }
 }

@@ -156,6 +156,7 @@ fn key_event_to_bytes(key: KeyEvent) -> Vec<u8> {
         // Basic keys
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab => vec![0x1b, b'[', b'Z'], // Shift+Tab (CSI Z)
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Esc => vec![0x1b],
 
@@ -241,6 +242,12 @@ mod tests {
     fn test_key_event_to_bytes_arrow_up() {
         let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(key_event_to_bytes(key), vec![0x1b, b'[', b'A']);
+    }
+
+    #[test]
+    fn test_key_event_to_bytes_backtab() {
+        let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(key_event_to_bytes(key), vec![0x1b, b'[', b'Z']);
     }
 
     #[test]

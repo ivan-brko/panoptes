@@ -13,6 +13,7 @@ use crate::agent::adapter::SpawnConfig;
 use crate::agent::AgentType;
 use crate::config::Config;
 use crate::hooks::{HookEvent, HookEventType};
+use crate::project::{BranchId, ProjectId};
 
 use super::{Session, SessionId, SessionInfo, SessionState};
 
@@ -36,16 +37,19 @@ impl SessionManager {
         }
     }
 
-    /// Create a new session with the given name, working directory, and terminal dimensions
+    /// Create a new session with the given name, working directory, project/branch, and terminal dimensions
+    #[allow(clippy::too_many_arguments)]
     pub fn create_session(
         &mut self,
         name: String,
         working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
         initial_prompt: Option<String>,
         rows: usize,
         cols: usize,
     ) -> Result<SessionId> {
-        let info = SessionInfo::new(name.clone(), working_dir.clone());
+        let info = SessionInfo::new(name.clone(), working_dir.clone(), project_id, branch_id);
         let session_id = info.id;
 
         // Create spawn config
@@ -256,6 +260,62 @@ impl SessionManager {
 
         self.sessions.clear();
         self.session_order.clear();
+    }
+
+    /// Get all sessions for a specific project
+    pub fn sessions_for_project(&self, project_id: ProjectId) -> Vec<&Session> {
+        self.sessions
+            .values()
+            .filter(|s| s.info.project_id == project_id)
+            .collect()
+    }
+
+    /// Get all sessions for a specific branch
+    pub fn sessions_for_branch(&self, branch_id: BranchId) -> Vec<&Session> {
+        self.sessions
+            .values()
+            .filter(|s| s.info.branch_id == branch_id)
+            .collect()
+    }
+
+    /// Get count of sessions for a project
+    pub fn session_count_for_project(&self, project_id: ProjectId) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| s.info.project_id == project_id)
+            .count()
+    }
+
+    /// Get count of sessions for a branch
+    pub fn session_count_for_branch(&self, branch_id: BranchId) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| s.info.branch_id == branch_id)
+            .count()
+    }
+
+    /// Get count of active sessions for a project
+    pub fn active_session_count_for_project(&self, project_id: ProjectId) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| s.info.project_id == project_id && s.info.state.is_active())
+            .count()
+    }
+
+    /// Get count of active sessions for a branch
+    pub fn active_session_count_for_branch(&self, branch_id: BranchId) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| s.info.branch_id == branch_id && s.info.state.is_active())
+            .count()
+    }
+
+    /// Get total count of active sessions across all projects
+    pub fn total_active_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| s.info.state.is_active())
+            .count()
     }
 }
 
