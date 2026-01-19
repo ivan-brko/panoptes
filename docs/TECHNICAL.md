@@ -34,7 +34,7 @@
 
 **serde_json** (v1) - JSON support for Serde. Parses hook payloads from Claude Code.
 
-**TOML** (v0.8) - TOML format support. Used for the configuration file (`~/.panoptes/config.toml`).
+**TOML** (v0.8) - TOML format support. Used for configuration and project persistence files.
 
 ### Error Handling
 
@@ -48,57 +48,79 @@
 
 **chrono** (v0.4) - Date and time library. Timestamps for session activity tracking.
 
-**uuid** (v4) - UUID generation. Creates unique session identifiers.
+**uuid** (v4) - UUID generation. Creates unique identifiers for sessions, projects, and branches.
 
 **tracing** (v0.1) with **tracing-subscriber** - Structured logging framework. Debug and diagnostic output.
+
+**shellexpand** (v3) - Shell-like tilde expansion for paths.
 
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Panoptes Process                                            │
-│                                                             │
-│  ┌──────────────┐    ┌─────────────────┐   ┌─────────────┐ │
-│  │ TUI Layer    │◄───│ Application     │◄──│ HTTP Hook   │ │
-│  │ (Ratatui)    │    │ State           │   │ Server      │ │
-│  └──────────────┘    └─────────────────┘   │ (Axum)      │ │
-│         │                    │             └──────┬──────┘ │
-│         │            ┌───────┴───────┐            │        │
-│         │            │ Session       │            │        │
-│         │            │ Manager       │            │        │
-│         │            └───────┬───────┘            │        │
-│         ▼                    │                    │        │
-│  ┌──────────────┐    ┌───────┴───────┐            │        │
-│  │ VTerm        │    │ Agent         │            │        │
-│  │ (ANSI/color) │    │ Adapter       │            │        │
-│  └──────┬───────┘    └───────────────┘            │        │
-│         │                    │                    │        │
-│  ┌──────┴───────┐            │                    │        │
-│  │ PTY Manager  │◄───────────┘                    │        │
-│  │ (portable-   │                                 │        │
-│  │  pty)        │                                 │        │
-│  └──────┬───────┘                                 │        │
-└─────────┼─────────────────────────────────────────┼────────┘
-          │                                         │
-          ▼                                         │
-┌─────────────────────────────────────────────────────────────┐
-│ Claude Code Instances (Child Processes)                     │
-│                                                             │
-│  Each instance runs in its own PTY and sends hook events    │
-│  to the HTTP server when state changes occur                │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│ Panoptes Process                                                │
+│                                                                 │
+│  ┌──────────────┐    ┌─────────────────┐   ┌─────────────────┐ │
+│  │ TUI Layer    │◄───│ Application     │◄──│ HTTP Hook       │ │
+│  │ (Ratatui)    │    │ State           │   │ Server (Axum)   │ │
+│  │              │    │                 │   │                 │ │
+│  │ Views:       │    │ - AppState      │   │ Receives state  │ │
+│  │ - Projects   │    │ - View enum     │   │ updates from    │ │
+│  │ - Project    │    │ - InputMode     │   │ Claude Code     │ │
+│  │ - Branch     │    │                 │   │ hooks           │ │
+│  │ - Session    │    │                 │   │                 │ │
+│  │ - Timeline   │    │                 │   │                 │ │
+│  └──────────────┘    └────────┬────────┘   └────────┬────────┘ │
+│         │                     │                     │          │
+│         │            ┌────────┴────────┐            │          │
+│         │            │ Session         │            │          │
+│         │            │ Manager         │◄───────────┘          │
+│         │            │                 │                       │
+│         │            │ - Attention     │                       │
+│         │            │   tracking      │                       │
+│         │            │ - State updates │                       │
+│         │            └────────┬────────┘                       │
+│         │                     │                                │
+│         │            ┌────────┴────────┐                       │
+│         │            │ Project         │                       │
+│         │            │ Store           │                       │
+│         │            │                 │                       │
+│         │            │ - Projects      │                       │
+│         │            │ - Branches      │                       │
+│         │            │ - Persistence   │                       │
+│         │            └────────┬────────┘                       │
+│         ▼                     │                                │
+│  ┌──────────────┐    ┌────────┴────────┐                       │
+│  │ VTerm        │    │ Agent           │                       │
+│  │ (ANSI/color) │    │ Adapter         │                       │
+│  └──────┬───────┘    └────────┬────────┘                       │
+│         │                     │                                │
+│  ┌──────┴───────┐             │                                │
+│  │ PTY Manager  │◄────────────┘                                │
+│  │ (portable-   │                                              │
+│  │  pty)        │                                              │
+│  └──────┬───────┘                                              │
+└─────────┼──────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Claude Code Instances (Child Processes)                         │
+│                                                                 │
+│  Each instance runs in its own PTY and sends hook events        │
+│  to the HTTP server when state changes occur                    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Communication Flow
 
 ### User Input
 1. Crossterm captures keyboard events
-2. Application routes based on mode (Normal/Session)
+2. Application routes based on mode (Normal/Session) and view
 3. In Session mode, keystrokes are written to the PTY
 
 ### Session Output
 1. PTY reader captures output from Claude Code
-2. Output is buffered (ring buffer, max 10K lines)
+2. Output is buffered (ring buffer, max 10K lines by default)
 3. TUI renders visible portion with ANSI color support
 
 ### State Updates (Hooks)
@@ -106,15 +128,32 @@
 2. Hook script extracts session_id from JSON stdin
 3. Hook script POSTs event to localhost:9999
 4. Axum server updates session state
-5. TUI reflects new state on next render
+5. SessionManager tracks attention flags
+6. TUI reflects new state on next render
+
+### Attention Flow
+1. Session transitions to "Waiting" state
+2. SessionManager sets `needs_attention` flag
+3. If session is not currently active, terminal bell rings
+4. Session displays attention badge (green or yellow based on idle time)
+5. When user opens session, attention is acknowledged
 
 ## File Locations
 
 | Path | Purpose |
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration |
+| `~/.panoptes/projects.toml` | Project and branch persistence |
 | `~/.panoptes/hooks/` | Hook scripts for Claude Code |
 | `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
+
+## Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `hook_port` | 9999 | Port for the HTTP hook server |
+| `max_output_lines` | 10,000 | Lines kept in output buffer per session |
+| `idle_threshold_secs` | 300 | Seconds before waiting session shows yellow attention badge |
 
 ## Platform Support
 
@@ -133,12 +172,14 @@ Sessions are cleaned up automatically when Panoptes exits:
 
 ## Testing
 
-The project has 69 unit tests covering:
+The project has 108 unit tests covering:
 - Configuration loading/saving
 - Session state transitions
 - Output buffer management
 - Hook event parsing
 - PTY operations
 - VTerm ANSI parsing
+- Project/branch management
+- Navigation state machine
 
 Run tests with: `cargo test`

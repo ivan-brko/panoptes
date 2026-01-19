@@ -1,10 +1,10 @@
 # Panoptes Implementation Phases
 
-## Phase 1: Core Foundation
+## Phase 1: Core Foundation ✅ Complete
 
 **Goal**: Build a working prototype that can spawn and interact with multiple Claude Code sessions.
 
-### What We're Building
+### What We Built
 
 - **Project scaffolding** - Cargo workspace, module structure, dependencies
 - **PTY management** - Spawn Claude Code in pseudo-terminals, handle input/output
@@ -12,48 +12,41 @@
 - **Basic TUI** - Single-pane session view, status bar, session switching
 - **Session lifecycle** - Create, destroy, and switch between sessions
 
-### Why This Phase First
-
-This phase proves the core concept works. The two riskiest technical components are:
-1. PTY handling - Can we properly spawn and communicate with Claude Code?
-2. Hook integration - Can we receive real-time state updates?
-
-By tackling these first, we validate the architecture before building the full UI.
-
 ### Deliverable
 
 A working application where you can:
-- Create 2-3 Claude Code sessions
+- Create multiple Claude Code sessions
 - Switch between them with keyboard shortcuts
 - See real-time state updates (Starting → Thinking → Executing → Waiting)
 
 ---
 
-## Phase 2: Multi-Project & Git Integration
+## Phase 2: Multi-Project & Git Integration ✅ Complete
 
 **Goal**: Full project and branch hierarchy with git worktree support.
 
-### What We're Building
+### What We Built
 
-- **Project model** - Data structures for projects, branches, and their relationships
-- **Git worktree support** - Create isolated working directories for each branch
-- **Projects overview screen** - Grid view of all projects with session counts
-- **Project detail view** - Branches and sessions within a project
-- **Activity timeline** - All sessions sorted by recent activity
-
-### Why This Phase Second
-
-Once we have working sessions, users need a way to organize them. The three-screen navigation (Overview → Project → Session) provides the mental model for managing many sessions across multiple codebases.
-
-Git worktrees are essential for branch isolation - without them, sessions on different branches would conflict when modifying files.
+- ✅ **Project model** - Data structures for projects, branches, and their relationships
+- ✅ **Project persistence** - Projects and branches saved to `~/.panoptes/projects.toml`
+- ✅ **Git worktree support** - Create isolated working directories for each branch
+- ✅ **Projects overview screen** - Grid view of all projects with session counts
+- ✅ **Project detail view** - Branches and sessions within a project
+- ✅ **Branch detail view** - Sessions for a specific branch with create/delete actions
+- ✅ **Activity timeline** - All sessions sorted by recent activity
+- ✅ **Fuzzy branch selector** - Type to filter existing branches or create new ones
+- ✅ **Add project flow** - Add git repositories as projects with `a` key
+- ✅ **Session deletion** - Delete sessions with confirmation dialog (`d` then `y/n`)
+- ✅ **Attention system** - Terminal bell notifications, attention badges, idle threshold (bonus feature)
 
 ### Deliverable
 
 A fully navigable application where you can:
 - Add git repositories as projects
 - Create sessions on specific branches
-- Navigate between overview, project, and session views
+- Navigate between overview, project, branch, and session views
 - Have automatic worktree creation for branch isolation
+- Get notified when sessions need attention
 
 ---
 
@@ -63,11 +56,11 @@ A fully navigable application where you can:
 
 ### What We're Building
 
-- **Visual polish** - Color scheme, borders, visual hierarchy
-- **Notifications** - Alerts when sessions need attention
-- **Configuration** - TOML config file, customizable settings
+- **Visual polish** - Color scheme refinements, borders, visual hierarchy
+- **Notifications** - Additional alert mechanisms beyond terminal bell
 - **Error handling** - Graceful recovery, helpful error messages
 - **Performance tuning** - Handle 20+ sessions smoothly
+- **Edge cases** - Handle Claude Code crashes, disconnects, etc.
 
 ### Why This Phase Third
 
@@ -110,11 +103,11 @@ Version 1.0 release with:
 
 ## Summary
 
-| Phase | Focus | Key Risk |
-|-------|-------|----------|
-| 1 | Core prototype | PTY and hook integration |
-| 2 | Organization | Git worktree edge cases |
-| 3 | Quality | Performance at scale |
-| 4 | Release | User onboarding |
+| Phase | Focus | Status |
+|-------|-------|--------|
+| 1 | Core prototype | ✅ Complete |
+| 2 | Organization & Git | ✅ Complete |
+| 3 | Quality & Polish | In Progress |
+| 4 | Release | Planned |
 
 Each phase builds on the previous one. We validate risky technical assumptions early, then layer on organization, polish, and finally documentation.
