@@ -395,7 +395,9 @@ impl App {
         match self.state.view {
             View::ProjectsOverview => self.handle_projects_overview_key(key),
             View::ProjectDetail(_) => self.handle_project_detail_key(key),
-            View::BranchDetail(_, _) => self.handle_branch_detail_key(key),
+            View::BranchDetail(project_id, branch_id) => {
+                self.handle_branch_detail_key(key, project_id, branch_id)
+            }
             View::SessionView => self.handle_session_view_normal_key(key),
             View::ActivityTimeline => self.handle_timeline_key(key),
         }
@@ -546,18 +548,64 @@ impl App {
     }
 
     /// Handle key in branch detail view (normal mode)
-    /// TODO: Will be fully implemented in Ticket 26
-    fn handle_branch_detail_key(&mut self, key: KeyEvent) -> Result<()> {
+    fn handle_branch_detail_key(
+        &mut self,
+        key: KeyEvent,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Result<()> {
+        let branch_sessions = self.sessions.sessions_for_branch(branch_id);
+        let session_count = branch_sessions.len();
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.state.navigate_back();
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                // Will navigate sessions when implemented
-                self.state.select_next(1);
+                self.state.select_next(session_count);
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.state.select_prev(1);
+                self.state.select_prev(session_count);
+            }
+            KeyCode::Enter => {
+                let index = self.state.selected_session_index;
+                if index < session_count {
+                    let session_id = branch_sessions[index].info.id;
+                    self.state.navigate_to_session(session_id);
+                    self.resize_active_session_pty()?;
+                }
+            }
+            KeyCode::Char('n') => {
+                // Create new session on this branch
+                if let Some(branch) = self.project_store.get_branch(branch_id) {
+                    let name = format!("Session {}", self.sessions.len() + 1);
+                    let working_dir = branch.working_dir.clone();
+
+                    // Get terminal dimensions
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+
+                    let session_id = self.sessions.create_session(
+                        name,
+                        working_dir,
+                        project_id,
+                        branch_id,
+                        None, // initial_prompt
+                        rows as usize,
+                        cols as usize,
+                    )?;
+
+                    // Update branch and project activity timestamps
+                    if let Some(branch) = self.project_store.get_branch_mut(branch_id) {
+                        branch.touch();
+                    }
+                    if let Some(project) = self.project_store.get_project_mut(project_id) {
+                        project.touch();
+                    }
+
+                    // Navigate to the new session
+                    self.state.navigate_to_session(session_id);
+                    self.resize_active_session_pty()?;
+                }
             }
             _ => {}
         }
