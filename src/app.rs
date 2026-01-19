@@ -811,7 +811,7 @@ impl App {
                     render_session_view(frame, area, state, sessions);
                 }
                 View::ActivityTimeline => {
-                    render_timeline(frame, area, state, sessions);
+                    render_timeline(frame, area, state, sessions, project_store);
                 }
             }
         })?;
