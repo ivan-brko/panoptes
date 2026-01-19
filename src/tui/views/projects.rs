@@ -11,6 +11,7 @@ use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
+use crate::tui::theme::theme;
 
 /// Render the projects overview
 pub fn render_projects_overview(
@@ -24,30 +25,37 @@ pub fn render_projects_overview(
     let idle_threshold = config.idle_threshold_secs;
     let attention_count = sessions.total_attention_count(idle_threshold);
     let attention_sessions = sessions.sessions_needing_attention(idle_threshold);
+    let has_dropped_events = state.dropped_events_count > 0;
+    let has_error = state.error_message.is_some();
 
-    // Dynamic layout based on whether we have sessions needing attention
-    let chunks = if attention_count > 0 && state.input_mode == InputMode::Normal {
-        // Show attention section when not in input mode
-        let attention_height = (attention_sessions.len() + 2).min(8) as u16; // Cap at 8 lines
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),                // Header
-                Constraint::Length(attention_height), // Attention section
-                Constraint::Min(0),                   // Main content
-                Constraint::Length(3),                // Footer/help
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Min(0),    // Main content
-                Constraint::Length(3), // Footer/help
-            ])
-            .split(area)
-    };
+    // Build constraints dynamically based on what we need to show
+    let mut constraints = vec![Constraint::Length(3)]; // Header
+
+    // Error message banner
+    if has_error {
+        constraints.push(Constraint::Length(1));
+    }
+
+    // Warning banner for dropped events
+    if has_dropped_events {
+        constraints.push(Constraint::Length(1));
+    }
+
+    // Attention section
+    if attention_count > 0 && state.input_mode == InputMode::Normal {
+        let attention_height = (attention_sessions.len() + 2).min(8) as u16;
+        constraints.push(Constraint::Length(attention_height));
+    }
+
+    constraints.push(Constraint::Min(0)); // Main content
+    constraints.push(Constraint::Length(3)); // Footer
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    let mut chunk_idx = 0;
 
     // Header
     let active_count = sessions.total_active_count();
@@ -68,24 +76,45 @@ pub fn render_projects_overview(
             format!("{}, {}", parts[0], parts[1..].join(", "))
         }
     };
+    let t = theme();
     let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan).bold())
+        .style(t.header_style())
         .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[0]);
+    frame.render_widget(header, chunks[chunk_idx]);
+    chunk_idx += 1;
+
+    // Error message banner
+    if let Some(error_msg) = &state.error_message {
+        let error_text = format!("✖ {} (press any key to dismiss)", error_msg);
+        let error_banner = Paragraph::new(error_text).style(t.error_banner_style());
+        frame.render_widget(error_banner, chunks[chunk_idx]);
+        chunk_idx += 1;
+    }
+
+    // Dropped events warning banner
+    if has_dropped_events {
+        let warning_text = format!(
+            "⚠ {} hook events dropped due to channel overflow - session states may be inaccurate",
+            state.dropped_events_count
+        );
+        let warning = Paragraph::new(warning_text).style(t.warning_banner_style());
+        frame.render_widget(warning, chunks[chunk_idx]);
+        chunk_idx += 1;
+    }
 
     // Attention section (if needed and in normal mode)
-    let main_chunk_index = if attention_count > 0 && state.input_mode == InputMode::Normal {
+    if attention_count > 0 && state.input_mode == InputMode::Normal {
         render_attention_section(
             frame,
-            chunks[1],
+            chunks[chunk_idx],
             &attention_sessions,
             project_store,
             idle_threshold,
         );
-        2
-    } else {
-        1
-    };
+        chunk_idx += 1;
+    }
+
+    let main_chunk_index = chunk_idx;
 
     // Main content area
     match state.input_mode {
@@ -107,12 +136,8 @@ pub fn render_projects_overview(
         }
     }
 
-    // Footer with help
-    let footer_index = if attention_count > 0 && state.input_mode == InputMode::Normal {
-        3
-    } else {
-        2
-    };
+    // Footer with help (always last chunk)
+    let footer_index = chunks.len() - 1;
     let help_text = match state.input_mode {
         InputMode::CreatingSession => "Enter: create | Esc: cancel",
         InputMode::AddingProject => "Enter: add project | Esc: cancel",
@@ -127,7 +152,7 @@ pub fn render_projects_overview(
         }
     };
     let footer = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::DarkGray))
+        .style(t.muted_style())
         .block(Block::default().borders(Borders::TOP));
     frame.render_widget(footer, chunks[footer_index]);
 }
@@ -140,6 +165,7 @@ fn render_attention_section(
     project_store: &ProjectStore,
     _idle_threshold_secs: u64,
 ) {
+    let t = theme();
     let now = Utc::now();
 
     let items: Vec<ListItem> = attention_sessions
@@ -156,14 +182,14 @@ fn render_attention_section(
                 .unwrap_or("?");
 
             let (badge_color, state_text) = match &session.info.state {
-                SessionState::Waiting => (Color::Green, "[Waiting]".to_string()),
+                SessionState::Waiting => (t.attention_waiting, "[Waiting]".to_string()),
                 SessionState::Idle => {
                     let duration = now.signed_duration_since(session.info.last_activity);
                     let mins = duration.num_minutes();
-                    (Color::Yellow, format!("[Idle - {}m]", mins))
+                    (t.attention_idle, format!("[Idle - {}m]", mins))
                 }
                 _ => (
-                    Color::White,
+                    t.text,
                     format!("[{}]", session.info.state.display_name()),
                 ),
             };
@@ -185,15 +211,16 @@ fn render_attention_section(
         Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(Color::Yellow)),
+            .border_style(Style::default().fg(t.border_warning)),
     );
     frame.render_widget(list, area);
 }
 
 /// Render the session creation input
 fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
     let input = Paragraph::new(format!("New session name: {}_", state.new_session_name))
-        .style(Style::default().fg(Color::Yellow))
+        .style(t.input_style())
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -204,10 +231,11 @@ fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState) {
 
 /// Render the project addition input
 fn render_project_addition(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
     let hint = "Enter the path to a git repository (~ expansion supported):";
     let input_text = format!("{}\n\n> {}_", hint, state.new_project_path);
     let input = Paragraph::new(input_text)
-        .style(Style::default().fg(Color::Yellow))
+        .style(t.input_style())
         .block(Block::default().borders(Borders::ALL).title("Add Project"));
     frame.render_widget(input, area);
 }
@@ -226,11 +254,12 @@ fn render_main_content(
 
     if !has_projects && !has_sessions {
         // Empty state
+        let t = theme();
         let empty_text = "No projects yet.\n\n\
             Press 'a' to add a git repository as a project,\n\
             or 'n' to create a quick session in the current directory.";
         let empty = Paragraph::new(empty_text)
-            .style(Style::default().fg(Color::DarkGray))
+            .style(t.muted_style())
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::ALL).title("Welcome"));
         frame.render_widget(empty, area);
@@ -290,6 +319,7 @@ fn render_project_list(
     sessions: &SessionManager,
     idle_threshold_secs: u64,
 ) {
+    let t = theme();
     let selected_index = state.selected_project_index;
     let projects = project_store.projects_sorted();
 
@@ -317,21 +347,21 @@ fn render_project_list(
 
             let content = format!("{}{}: {} ({})", prefix, i + 1, project.name, status);
 
-            // Color precedence: Yellow (attention) > Green (active) > Cyan/White (default)
+            // Color precedence: attention > active > selected > default
             let style = if selected {
                 if attention_count > 0 {
-                    Style::default().fg(Color::Yellow).bold()
+                    Style::default().fg(t.attention_badge).bold()
                 } else if active_count > 0 {
-                    Style::default().fg(Color::Green).bold()
+                    Style::default().fg(t.active).bold()
                 } else {
-                    Style::default().fg(Color::Cyan).bold()
+                    t.selected_style()
                 }
             } else if attention_count > 0 {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(t.attention_badge)
             } else if active_count > 0 {
-                Style::default().fg(Color::Green)
+                Style::default().fg(t.active)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(t.text)
             };
 
             ListItem::new(content).style(style)
@@ -351,6 +381,7 @@ fn render_quick_sessions(
     sessions: &SessionManager,
     idle_threshold_secs: u64,
 ) {
+    let t = theme();
     let now = Utc::now();
     // For now, show all sessions. Later we can filter by project_id == nil
     let selected_index = state.selected_session_index;
@@ -390,12 +421,12 @@ fn render_quick_sessions(
             // Build content with attention badge
             let (badge, badge_color) = if needs_attention {
                 match &session.info.state {
-                    SessionState::Waiting => ("● ", Color::Green),
-                    SessionState::Idle => ("● ", Color::Yellow),
-                    _ => ("  ", Color::White),
+                    SessionState::Waiting => ("● ", t.attention_waiting),
+                    SessionState::Idle => ("● ", t.attention_idle),
+                    _ => ("  ", t.text),
                 }
             } else {
-                ("  ", Color::White)
+                ("  ", t.text)
             };
 
             let content = Line::from(vec![

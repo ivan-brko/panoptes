@@ -177,6 +177,63 @@ impl SessionManager {
         changed
     }
 
+    /// Check for sessions stuck in Executing state too long
+    /// Transitions them to Idle state if they've been Executing longer than timeout_secs
+    /// Returns true if any session state changed
+    pub fn check_state_timeouts(&mut self, timeout_secs: u64) -> bool {
+        let now = Utc::now();
+        let mut changed = false;
+
+        for session in self.sessions.values_mut() {
+            if let SessionState::Executing(_) = &session.info.state {
+                let elapsed = now
+                    .signed_duration_since(session.info.state_entered_at)
+                    .num_seconds();
+                if elapsed > timeout_secs as i64 {
+                    tracing::warn!(
+                        session_id = %session.info.id,
+                        session_name = %session.info.name,
+                        elapsed_secs = elapsed,
+                        "Session stuck in Executing state, transitioning to Idle"
+                    );
+                    session.set_state(SessionState::Idle);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Clean up exited sessions that have been exited longer than retention_secs
+    /// Returns the number of sessions cleaned up
+    pub fn cleanup_exited_sessions(&mut self, retention_secs: u64) -> usize {
+        let now = Utc::now();
+        let mut to_remove: Vec<SessionId> = Vec::new();
+
+        for (session_id, session) in &self.sessions {
+            if session.info.state == SessionState::Exited {
+                if let Some(exited_at) = session.info.exited_at {
+                    let elapsed = now.signed_duration_since(exited_at).num_seconds();
+                    if elapsed > retention_secs as i64 {
+                        tracing::info!(
+                            session_id = %session_id,
+                            session_name = %session.info.name,
+                            elapsed_secs = elapsed,
+                            "Cleaning up exited session"
+                        );
+                        to_remove.push(*session_id);
+                    }
+                }
+            }
+        }
+
+        let count = to_remove.len();
+        for session_id in to_remove {
+            self.sessions.remove(&session_id);
+        }
+        count
+    }
+
     /// Handle a hook event and update session state accordingly
     /// Returns the session ID if terminal bell should be rung (session entered Waiting state)
     pub fn handle_hook_event(&mut self, event: &HookEvent) -> Option<SessionId> {
@@ -236,9 +293,43 @@ impl SessionManager {
         }
     }
 
-    /// Ring the terminal bell
+    /// Send a notification based on the configured method
+    /// - "bell": Ring the terminal bell
+    /// - "title": Update terminal title with attention message
+    /// - "none": Do nothing
+    pub fn send_notification(method: &str, session_name: &str) {
+        match method {
+            "bell" => {
+                print!("\x07"); // ASCII bell character
+                std::io::stdout().flush().ok();
+            }
+            "title" => {
+                // Update terminal title using OSC escape sequence
+                // Format: ESC ] 0 ; title BEL
+                print!("\x1b]0;[!] {} needs attention\x07", session_name);
+                std::io::stdout().flush().ok();
+            }
+            "none" => {
+                // Do nothing
+            }
+            _ => {
+                // Unknown method, default to bell
+                print!("\x07");
+                std::io::stdout().flush().ok();
+            }
+        }
+    }
+
+    /// Ring the terminal bell (convenience method for backward compatibility)
     pub fn ring_terminal_bell() {
         print!("\x07"); // ASCII bell character
+        std::io::stdout().flush().ok();
+    }
+
+    /// Reset the terminal title to default (used after "title" notification mode)
+    pub fn reset_terminal_title() {
+        // Reset to "Panoptes" as the default title
+        print!("\x1b]0;Panoptes\x07");
         std::io::stdout().flush().ok();
     }
 
@@ -435,6 +526,10 @@ mod tests {
             hooks_dir: temp_dir.path().join("hooks"),
             max_output_lines: 1000,
             idle_threshold_secs: 300,
+            state_timeout_secs: 300,
+            exited_retention_secs: 300,
+            theme_preset: "dark".to_string(),
+            notification_method: "bell".to_string(),
         }
     }
 

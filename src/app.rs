@@ -11,7 +11,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::hooks::{self, HookEventReceiver, HookEventSender, ServerHandle};
+use crate::hooks::{self, HookEventReceiver, HookEventSender, ServerHandle, DEFAULT_CHANNEL_BUFFER};
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionId, SessionManager};
 use crate::tui::views::{
@@ -152,6 +152,10 @@ pub struct AppState {
     pub should_quit: bool,
     /// Whether the UI needs to be re-rendered
     pub needs_render: bool,
+    /// Count of dropped hook events (for warning display)
+    pub dropped_events_count: u64,
+    /// Error message to display to the user (cleared on next keypress)
+    pub error_message: Option<String>,
 }
 
 impl AppState {
@@ -275,8 +279,8 @@ pub struct App {
     sessions: SessionManager,
     /// Hook event receiver
     hook_rx: HookEventReceiver,
-    /// Hook server handle (kept alive)
-    _hook_server: ServerHandle,
+    /// Hook server handle (kept alive and used for dropped events tracking)
+    hook_server: ServerHandle,
     /// Terminal UI
     tui: Tui,
 }
@@ -297,9 +301,9 @@ impl App {
             project_store.branch_count()
         );
 
-        // Create hook event channel
+        // Create hook event channel with large buffer to avoid dropping events
         let (hook_tx, hook_rx): (HookEventSender, HookEventReceiver) =
-            hooks::server::create_channel(100);
+            hooks::server::create_channel(DEFAULT_CHANNEL_BUFFER);
 
         // Start hook server
         let hook_server = hooks::server::start(config.hook_port, hook_tx).await?;
@@ -317,7 +321,7 @@ impl App {
             project_store,
             sessions,
             hook_rx,
-            _hook_server: hook_server,
+            hook_server,
             tui,
         })
     }
@@ -359,6 +363,10 @@ impl App {
             if event::poll(tick_rate)? {
                 match event::read()? {
                     Event::Key(key) => {
+                        // Clear error message on any keypress
+                        if self.state.error_message.is_some() {
+                            self.state.error_message = None;
+                        }
                         self.handle_key_event(key)?;
                         self.state.needs_render = true;
                     }
@@ -387,6 +395,34 @@ impl App {
                 self.state.needs_render = true;
             }
 
+            // Check for sessions stuck in Executing state too long
+            let had_timeout_changes = self
+                .sessions
+                .check_state_timeouts(self.config.state_timeout_secs);
+            if had_timeout_changes {
+                self.state.needs_render = true;
+            }
+
+            // Clean up old exited sessions to prevent memory growth
+            let cleaned_up = self
+                .sessions
+                .cleanup_exited_sessions(self.config.exited_retention_secs);
+            if cleaned_up > 0 {
+                self.state.needs_render = true;
+            }
+
+            // Check for dropped hook events and update warning
+            let dropped = self.hook_server.take_dropped_events();
+            if dropped > 0 {
+                self.state.dropped_events_count += dropped;
+                tracing::warn!(
+                    "Dropped {} hook events due to channel overflow (total: {})",
+                    dropped,
+                    self.state.dropped_events_count
+                );
+                self.state.needs_render = true;
+            }
+
             // Check if we should quit
             if self.state.should_quit {
                 break;
@@ -407,12 +443,20 @@ impl App {
                 event.event,
                 event.tool
             );
-            // handle_hook_event returns Some(session_id) if bell should ring
+            // handle_hook_event returns Some(session_id) if notification should be sent
             if let Some(session_id) = self.sessions.handle_hook_event(&event) {
-                // Only ring bell if this session is NOT the one we're currently viewing
+                // Only notify if this session is NOT the one we're currently viewing
                 let is_active_session = self.state.active_session == Some(session_id);
                 if !is_active_session {
-                    SessionManager::ring_terminal_bell();
+                    let session_name = self
+                        .sessions
+                        .get(session_id)
+                        .map(|s| s.info.name.as_str())
+                        .unwrap_or("Session");
+                    SessionManager::send_notification(
+                        &self.config.notification_method,
+                        session_name,
+                    );
                 }
             }
             had_events = true;
@@ -539,6 +583,9 @@ impl App {
                         let session_id = session.info.id;
                         self.state.navigate_to_session(session_id);
                         self.sessions.acknowledge_attention(session_id);
+                        if self.config.notification_method == "title" {
+                            SessionManager::reset_terminal_title();
+                        }
                         self.resize_active_session_pty()?;
                     }
                 }
@@ -677,6 +724,9 @@ impl App {
                     let session_id = branch_sessions[index].info.id;
                     self.state.navigate_to_session(session_id);
                     self.sessions.acknowledge_attention(session_id);
+                    if self.config.notification_method == "title" {
+                        SessionManager::reset_terminal_title();
+                    }
                     self.resize_active_session_pty()?;
                 }
             }
@@ -725,6 +775,9 @@ impl App {
                     let session_id = session.info.id;
                     self.state.navigate_to_session(session_id);
                     self.sessions.acknowledge_attention(session_id);
+                    if self.config.notification_method == "title" {
+                        SessionManager::reset_terminal_title();
+                    }
                     self.resize_active_session_pty()?;
                 }
             }
@@ -758,6 +811,9 @@ impl App {
                         let session_id = session.info.id;
                         self.state.active_session = Some(session_id);
                         self.sessions.acknowledge_attention(session_id);
+                        if self.config.notification_method == "title" {
+                            SessionManager::reset_terminal_title();
+                        }
                         self.resize_active_session_pty()?;
                     }
                 }
@@ -775,6 +831,9 @@ impl App {
                             let session_id = session.info.id;
                             self.state.active_session = Some(session_id);
                             self.sessions.acknowledge_attention(session_id);
+                            if self.config.notification_method == "title" {
+                                SessionManager::reset_terminal_title();
+                            }
                             self.resize_active_session_pty()?;
                         }
                     }
@@ -879,6 +938,9 @@ impl App {
                         // Navigate to the new session (auto-activates Session mode)
                         self.state.navigate_to_session(session_id);
                         self.sessions.acknowledge_attention(session_id);
+                        if self.config.notification_method == "title" {
+                            SessionManager::reset_terminal_title();
+                        }
                         self.resize_active_session_pty()?;
                     }
                     Err(e) => {
@@ -956,6 +1018,8 @@ impl App {
                         // Save to disk
                         if let Err(e) = self.project_store.save() {
                             tracing::error!("Failed to save project store: {}", e);
+                            self.state.error_message =
+                                Some(format!("Failed to save project: {}", e));
                         }
 
                         tracing::info!("Added project: {}", name);
@@ -1007,18 +1071,26 @@ impl App {
                 self.state.branch_selector_index = (self.state.branch_selector_index + 1) % count;
             }
             KeyCode::Enter => {
-                if self.state.branch_selector_index == 0 {
+                let result = if self.state.branch_selector_index == 0 {
                     // "Create new branch" selected - use typed name
                     let branch_name = std::mem::take(&mut self.state.new_branch_name);
                     if !branch_name.is_empty() {
-                        self.create_worktree(project_id, &branch_name, true)?;
+                        self.create_worktree(project_id, &branch_name, true)
+                    } else {
+                        Ok(())
                     }
                 } else {
                     // Existing branch selected
                     let idx = self.state.branch_selector_index - 1;
                     if let Some(branch_name) = self.state.filtered_branches.get(idx).cloned() {
-                        self.create_worktree(project_id, &branch_name, false)?;
+                        self.create_worktree(project_id, &branch_name, false)
+                    } else {
+                        Ok(())
                     }
+                };
+                if let Err(e) = result {
+                    tracing::error!("Failed to create worktree: {}", e);
+                    self.state.error_message = Some(format!("Failed to create worktree: {}", e));
                 }
                 self.state.input_mode = InputMode::Normal;
                 self.state.available_branches.clear();

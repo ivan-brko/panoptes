@@ -10,6 +10,7 @@ use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::project::{ProjectId, ProjectStore};
 use crate::session::SessionManager;
+use crate::tui::theme::theme;
 
 /// Render the project detail view showing branches
 pub fn render_project_detail(
@@ -168,6 +169,7 @@ pub fn render_project_detail(
 
 /// Render the worktree creation dialog with branch selector
 fn render_worktree_creation(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -179,7 +181,7 @@ fn render_worktree_creation(frame: &mut Frame, area: Rect, state: &AppState) {
     // Search input
     let input_text = format!("> {}_", state.new_branch_name);
     let input = Paragraph::new(input_text)
-        .style(Style::default().fg(Color::Yellow))
+        .style(t.input_style())
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -198,10 +200,10 @@ fn render_worktree_creation(frame: &mut Frame, area: Rect, state: &AppState) {
     };
     let create_style = if state.branch_selector_index == 0 {
         Style::default()
-            .fg(Color::Green)
+            .fg(t.active)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(t.text_muted)
     };
     items.push(ListItem::new(create_new_text).style(create_style));
 
@@ -210,11 +212,9 @@ fn render_worktree_creation(frame: &mut Frame, area: Rect, state: &AppState) {
         let selected = state.branch_selector_index == i + 1;
         let prefix = if selected { "▶ " } else { "  " };
         let style = if selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            t.selected_style()
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(t.text)
         };
         items.push(ListItem::new(format!("{}{}", prefix, branch)).style(style));
     }

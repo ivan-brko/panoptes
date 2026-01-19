@@ -10,6 +10,7 @@ use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionManager, SessionState};
+use crate::tui::theme::theme;
 
 /// Render the branch detail view showing sessions
 #[allow(clippy::too_many_arguments)]
@@ -165,8 +166,9 @@ pub fn render_branch_detail(
 
 /// Render the session creation input
 fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
     let input = Paragraph::new(format!("New session name: {}_", state.new_session_name))
-        .style(Style::default().fg(Color::Yellow))
+        .style(t.input_style())
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -182,6 +184,7 @@ fn render_delete_confirmation(
     state: &AppState,
     sessions: &SessionManager,
 ) {
+    let t = theme();
     let session_name = state
         .pending_delete_session
         .and_then(|id| sessions.get(id))
@@ -196,12 +199,12 @@ fn render_delete_confirmation(
     );
 
     let dialog = Paragraph::new(text)
-        .style(Style::default().fg(Color::Yellow))
+        .style(t.input_style())
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title("Confirm Delete")
-                .border_style(Style::default().fg(Color::Red)),
+                .border_style(Style::default().fg(t.error_bg)),
         );
     frame.render_widget(dialog, area);
 }

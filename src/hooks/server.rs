@@ -6,10 +6,45 @@
 use anyhow::Result;
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use super::HookEvent;
+
+/// Default buffer size for the hook event channel
+pub const DEFAULT_CHANNEL_BUFFER: usize = 500;
+
+/// Counter for dropped events due to channel overflow
+#[derive(Debug, Default)]
+pub struct DroppedEventsCounter {
+    count: AtomicU64,
+}
+
+impl DroppedEventsCounter {
+    /// Create a new counter
+    pub fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+        }
+    }
+
+    /// Increment the counter and return the new value
+    pub fn increment(&self) -> u64 {
+        self.count.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Get the current count
+    pub fn get(&self) -> u64 {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Reset the counter and return the previous value
+    pub fn reset(&self) -> u64 {
+        self.count.swap(0, Ordering::SeqCst)
+    }
+}
 
 /// Sender half of the hook event channel
 pub type HookEventSender = mpsc::Sender<HookEvent>;
@@ -21,12 +56,23 @@ pub type HookEventReceiver = mpsc::Receiver<HookEvent>;
 pub struct ServerHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
     addr: SocketAddr,
+    dropped_events: Arc<DroppedEventsCounter>,
 }
 
 impl ServerHandle {
     /// Get the address the server is listening on
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Get the number of dropped events since last check
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped_events.get()
+    }
+
+    /// Reset and get the number of dropped events
+    pub fn take_dropped_events(&self) -> u64 {
+        self.dropped_events.reset()
     }
 
     /// Shutdown the server gracefully
@@ -50,6 +96,13 @@ pub fn create_channel(buffer: usize) -> (HookEventSender, HookEventReceiver) {
     mpsc::channel(buffer)
 }
 
+/// Shared state for the hook handler
+#[derive(Clone)]
+struct HookHandlerState {
+    sender: HookEventSender,
+    dropped_events: Arc<DroppedEventsCounter>,
+}
+
 /// Start the hook server
 ///
 /// # Arguments
@@ -59,9 +112,15 @@ pub fn create_channel(buffer: usize) -> (HookEventSender, HookEventReceiver) {
 /// # Returns
 /// A `ServerHandle` that can be used to shut down the server
 pub async fn start(port: u16, sender: HookEventSender) -> Result<ServerHandle> {
+    let dropped_events = Arc::new(DroppedEventsCounter::new());
+    let state = HookHandlerState {
+        sender,
+        dropped_events: Arc::clone(&dropped_events),
+    };
+
     let app = Router::new()
         .route("/hook", post(hook_handler))
-        .with_state(sender);
+        .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -84,6 +143,7 @@ pub async fn start(port: u16, sender: HookEventSender) -> Result<ServerHandle> {
     Ok(ServerHandle {
         shutdown_tx: Some(shutdown_tx),
         addr: bound_addr,
+        dropped_events,
     })
 }
 
@@ -91,7 +151,7 @@ pub async fn start(port: u16, sender: HookEventSender) -> Result<ServerHandle> {
 ///
 /// Receives hook events from Claude Code and forwards them to the event channel.
 async fn hook_handler(
-    State(sender): State<HookEventSender>,
+    State(state): State<HookHandlerState>,
     Json(event): Json<HookEvent>,
 ) -> StatusCode {
     debug!(
@@ -101,10 +161,14 @@ async fn hook_handler(
         "Received hook event"
     );
 
-    match sender.try_send(event) {
+    match state.sender.try_send(event) {
         Ok(()) => StatusCode::OK,
         Err(mpsc::error::TrySendError::Full(_)) => {
-            error!("Hook event channel full, dropping event");
+            let dropped_count = state.dropped_events.increment();
+            warn!(
+                dropped_count = dropped_count,
+                "Hook event channel full, dropping event"
+            );
             StatusCode::OK // Still return OK to not block Claude Code
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -132,6 +196,13 @@ mod tests {
         }
     }
 
+    fn create_test_state(sender: HookEventSender) -> HookHandlerState {
+        HookHandlerState {
+            sender,
+            dropped_events: Arc::new(DroppedEventsCounter::new()),
+        }
+    }
+
     #[test]
     fn test_create_channel() {
         let (tx, mut rx) = create_channel(10);
@@ -144,13 +215,27 @@ mod tests {
         assert_eq!(event.session_id, "test-session");
     }
 
+    #[test]
+    fn test_dropped_events_counter() {
+        let counter = DroppedEventsCounter::new();
+        assert_eq!(counter.get(), 0);
+
+        assert_eq!(counter.increment(), 1);
+        assert_eq!(counter.increment(), 2);
+        assert_eq!(counter.get(), 2);
+
+        assert_eq!(counter.reset(), 2);
+        assert_eq!(counter.get(), 0);
+    }
+
     #[tokio::test]
     async fn test_hook_handler_valid_event() {
         let (sender, _receiver) = create_channel(10);
+        let state = create_test_state(sender);
 
         let app = Router::new()
             .route("/hook", post(hook_handler))
-            .with_state(sender);
+            .with_state(state);
 
         let request = Request::builder()
             .method("POST")
@@ -168,10 +253,11 @@ mod tests {
     #[tokio::test]
     async fn test_hook_handler_invalid_json() {
         let (sender, _receiver) = create_channel(10);
+        let state = create_test_state(sender);
 
         let app = Router::new()
             .route("/hook", post(hook_handler))
-            .with_state(sender);
+            .with_state(state);
 
         let request = Request::builder()
             .method("POST")
@@ -188,10 +274,11 @@ mod tests {
     #[tokio::test]
     async fn test_hook_handler_missing_fields() {
         let (sender, _receiver) = create_channel(10);
+        let state = create_test_state(sender);
 
         let app = Router::new()
             .route("/hook", post(hook_handler))
-            .with_state(sender);
+            .with_state(state);
 
         // Missing required field 'timestamp'
         let request = Request::builder()
@@ -213,16 +300,18 @@ mod tests {
         let handle = start(0, sender).await.unwrap();
 
         assert!(handle.addr().port() > 0);
+        assert_eq!(handle.dropped_events(), 0);
         handle.shutdown().unwrap();
     }
 
     #[tokio::test]
     async fn test_event_sent_through_channel() {
         let (sender, mut receiver) = create_channel(10);
+        let state = create_test_state(sender);
 
         let app = Router::new()
             .route("/hook", post(hook_handler))
-            .with_state(sender);
+            .with_state(state);
 
         let request = Request::builder()
             .method("POST")

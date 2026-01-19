@@ -2,8 +2,11 @@
 //!
 //! This module handles all terminal rendering and UI components using Ratatui.
 
+pub mod theme;
 pub mod views;
 pub mod widgets;
+
+pub use theme::{theme, Theme};
 
 use anyhow::Result;
 use crossterm::{

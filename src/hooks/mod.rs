@@ -5,7 +5,10 @@
 
 pub mod server;
 
-pub use server::{HookEventReceiver, HookEventSender, ServerHandle};
+pub use server::{
+    DroppedEventsCounter, HookEventReceiver, HookEventSender, ServerHandle,
+    DEFAULT_CHANNEL_BUFFER,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

@@ -6,7 +6,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{AppState, InputMode};
-use crate::session::SessionManager;
+use crate::session::{SessionManager, SessionState};
+use crate::tui::theme::theme;
 
 /// Render the session view
 pub fn render_session_view(
@@ -15,6 +16,7 @@ pub fn render_session_view(
     state: &AppState,
     sessions: &SessionManager,
 ) {
+    let t = theme();
     let session = state.active_session.and_then(|id| sessions.get(id));
 
     let chunks = Layout::default()
@@ -32,10 +34,21 @@ pub fn render_session_view(
             InputMode::Session => " [SESSION MODE]",
             _ => " [NORMAL]",
         };
+        let exit_info = if session.info.state == SessionState::Exited {
+            session
+                .info
+                .exit_reason
+                .as_ref()
+                .map(|r| format!(" ({})", r))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         format!(
-            "{} - {}{}",
+            "{} - {}{}{}",
             session.info.name,
             session.info.state.display_name(),
+            exit_info,
             mode_indicator
         )
     } else {
@@ -44,18 +57,18 @@ pub fn render_session_view(
 
     let header_color = session
         .map(|s| s.info.state.color())
-        .unwrap_or(Color::DarkGray);
+        .unwrap_or(t.text_muted);
 
     let header = Paragraph::new(header_text)
         .style(Style::default().fg(header_color).bold())
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 
-    // Output area - green frame when active (Session mode), gray when inactive
+    // Output area - active (Session mode) uses focused border, otherwise muted
     let frame_color = if state.input_mode == InputMode::Session {
-        Color::Green
+        t.active
     } else {
-        Color::DarkGray
+        t.text_muted
     };
 
     if let Some(session) = session {
@@ -70,7 +83,7 @@ pub fn render_session_view(
         frame.render_widget(output, chunks[1]);
     } else {
         let empty = Paragraph::new("Session not found")
-            .style(Style::default().fg(Color::Red))
+            .style(Style::default().fg(t.error_bg))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -86,7 +99,7 @@ pub fn render_session_view(
         _ => "Enter: activate | Tab: next | 1-9: jump | Esc/q: back",
     };
     let footer = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::DarkGray))
+        .style(t.muted_style())
         .block(Block::default().borders(Borders::TOP));
     frame.render_widget(footer, chunks[2]);
 }

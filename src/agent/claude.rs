@@ -319,6 +319,10 @@ mod tests {
             hooks_dir: temp_dir.path().join("hooks"),
             max_output_lines: 1000,
             idle_threshold_secs: 300,
+            state_timeout_secs: 300,
+            exited_retention_secs: 300,
+            theme_preset: "dark".to_string(),
+            notification_method: "bell".to_string(),
         };
         let session_id = Uuid::new_v4();
         let spawn_config = SpawnConfig {
@@ -355,6 +359,10 @@ mod tests {
             hooks_dir: temp_dir.path().join("hooks"),
             max_output_lines: 1000,
             idle_threshold_secs: 300,
+            state_timeout_secs: 300,
+            exited_retention_secs: 300,
+            theme_preset: "dark".to_string(),
+            notification_method: "bell".to_string(),
         };
 
         let event_scripts = ClaudeCodeAdapter::install_hook_script(&config).unwrap();
@@ -451,6 +459,10 @@ mod tests {
             hooks_dir: temp_dir.path().join("hooks"),
             max_output_lines: 1000,
             idle_threshold_secs: 300,
+            state_timeout_secs: 300,
+            exited_retention_secs: 300,
+            theme_preset: "dark".to_string(),
+            notification_method: "bell".to_string(),
         };
         let spawn_config = test_spawn_config(temp_dir.path().to_path_buf());
 

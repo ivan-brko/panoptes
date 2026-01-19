@@ -55,15 +55,7 @@ impl SessionState {
 
     /// Get the color for this state (for TUI rendering)
     pub fn color(&self) -> ratatui::style::Color {
-        use ratatui::style::Color;
-        match self {
-            SessionState::Starting => Color::Blue,
-            SessionState::Thinking => Color::Yellow,
-            SessionState::Executing(_) => Color::Cyan,
-            SessionState::Waiting => Color::Green,
-            SessionState::Idle => Color::DarkGray,
-            SessionState::Exited => Color::Red,
-        }
+        crate::tui::theme::theme().session_state_color(self)
     }
 
     /// Check if session is in an active state
@@ -94,9 +86,18 @@ pub struct SessionInfo {
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp
     pub last_activity: DateTime<Utc>,
+    /// Timestamp when current state was entered (for timeout detection)
+    #[serde(default = "Utc::now")]
+    pub state_entered_at: DateTime<Utc>,
     /// Whether this session needs user attention (set on Waiting transition, cleared on view)
     #[serde(default)]
     pub needs_attention: bool,
+    /// Exit reason (if exited due to error)
+    #[serde(default)]
+    pub exit_reason: Option<String>,
+    /// Timestamp when session exited (for cleanup)
+    #[serde(default)]
+    pub exited_at: Option<DateTime<Utc>>,
 }
 
 impl SessionInfo {
@@ -117,7 +118,10 @@ impl SessionInfo {
             branch_id,
             created_at: now,
             last_activity: now,
+            state_entered_at: now,
             needs_attention: false,
+            exit_reason: None,
+            exited_at: None,
         }
     }
 }
@@ -278,15 +282,23 @@ impl Session {
                 // If we're in Starting state and receiving output, Claude is running
                 // Transition to Waiting (ready for user input)
                 if self.info.state == SessionState::Starting {
-                    self.info.state = SessionState::Waiting;
+                    self.set_state(SessionState::Waiting);
                 }
 
                 true
             }
             Ok(None) => false,
-            Err(_) => {
-                // PTY read error - likely process exited
-                self.info.state = SessionState::Exited;
+            Err(e) => {
+                // PTY read error - log and store the reason
+                let reason = format!("PTY read error: {}", e);
+                tracing::warn!(
+                    session_id = %self.info.id,
+                    session_name = %self.info.name,
+                    error = %e,
+                    "PTY read error, transitioning to Exited state"
+                );
+                self.info.exit_reason = Some(reason);
+                self.set_state(SessionState::Exited);
                 false
             }
         }
@@ -342,8 +354,14 @@ impl Session {
 
     /// Update session state
     pub fn set_state(&mut self, state: SessionState) {
+        let now = Utc::now();
+        // Track when session exited for cleanup
+        if state == SessionState::Exited && self.info.exited_at.is_none() {
+            self.info.exited_at = Some(now);
+        }
         self.info.state = state;
-        self.info.last_activity = Utc::now();
+        self.info.last_activity = now;
+        self.info.state_entered_at = now;
     }
 }
 
