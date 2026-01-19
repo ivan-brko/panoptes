@@ -18,6 +18,14 @@ pub struct Config {
 
     /// Maximum lines to keep in output buffer per session
     pub max_output_lines: usize,
+
+    /// Idle threshold in seconds before session is flagged as needing attention (default: 300 = 5 min)
+    #[serde(default = "default_idle_threshold")]
+    pub idle_threshold_secs: u64,
+}
+
+fn default_idle_threshold() -> u64 {
+    300
 }
 
 impl Default for Config {
@@ -28,6 +36,7 @@ impl Default for Config {
             worktrees_dir: base.join("worktrees"),
             hooks_dir: base.join("hooks"),
             max_output_lines: 10_000,
+            idle_threshold_secs: default_idle_threshold(),
         }
     }
 }

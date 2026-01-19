@@ -3,12 +3,14 @@
 //! Displays a list of projects with their branch/session counts,
 //! and a "quick sessions" section for sessions in the current directory.
 
+use chrono::Utc;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{AppState, InputMode};
+use crate::config::Config;
 use crate::project::ProjectStore;
-use crate::session::SessionManager;
+use crate::session::{Session, SessionManager, SessionState};
 
 /// Render the projects overview
 pub fn render_projects_overview(
@@ -17,46 +19,100 @@ pub fn render_projects_overview(
     state: &AppState,
     project_store: &ProjectStore,
     sessions: &SessionManager,
+    config: &Config,
 ) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(0),    // Main content
-            Constraint::Length(3), // Footer/help
-        ])
-        .split(area);
+    let idle_threshold = config.idle_threshold_secs;
+    let attention_count = sessions.total_attention_count(idle_threshold);
+    let attention_sessions = sessions.sessions_needing_attention(idle_threshold);
+
+    // Dynamic layout based on whether we have sessions needing attention
+    let chunks = if attention_count > 0 && state.input_mode == InputMode::Normal {
+        // Show attention section when not in input mode
+        let attention_height = (attention_sessions.len() + 2).min(8) as u16; // Cap at 8 lines
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),                // Header
+                Constraint::Length(attention_height), // Attention section
+                Constraint::Min(0),                   // Main content
+                Constraint::Length(3),                // Footer/help
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Header
+                Constraint::Min(0),    // Main content
+                Constraint::Length(3), // Footer/help
+            ])
+            .split(area)
+    };
 
     // Header
     let active_count = sessions.total_active_count();
-    let header_text = if active_count > 0 {
-        format!(
-            "Panoptes - {} projects, {} active sessions",
-            project_store.project_count(),
-            active_count
-        )
-    } else {
-        format!("Panoptes - {} projects", project_store.project_count())
+    let header_text = {
+        let mut parts = vec![format!(
+            "Panoptes - {} projects",
+            project_store.project_count()
+        )];
+        if active_count > 0 {
+            parts.push(format!("{} active", active_count));
+        }
+        if attention_count > 0 {
+            parts.push(format!("{} need attention", attention_count));
+        }
+        if parts.len() == 1 {
+            parts[0].clone()
+        } else {
+            format!("{}, {}", parts[0], parts[1..].join(", "))
+        }
     };
     let header = Paragraph::new(header_text)
         .style(Style::default().fg(Color::Cyan).bold())
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 
+    // Attention section (if needed and in normal mode)
+    let main_chunk_index = if attention_count > 0 && state.input_mode == InputMode::Normal {
+        render_attention_section(
+            frame,
+            chunks[1],
+            &attention_sessions,
+            project_store,
+            idle_threshold,
+        );
+        2
+    } else {
+        1
+    };
+
     // Main content area
     match state.input_mode {
         InputMode::CreatingSession => {
-            render_session_creation(frame, chunks[1], state);
+            render_session_creation(frame, chunks[main_chunk_index], state);
         }
         InputMode::AddingProject => {
-            render_project_addition(frame, chunks[1], state);
+            render_project_addition(frame, chunks[main_chunk_index], state);
         }
         _ => {
-            render_main_content(frame, chunks[1], state, project_store, sessions);
+            render_main_content(
+                frame,
+                chunks[main_chunk_index],
+                state,
+                project_store,
+                sessions,
+                idle_threshold,
+            );
         }
     }
 
     // Footer with help
+    let footer_index = if attention_count > 0 && state.input_mode == InputMode::Normal {
+        3
+    } else {
+        2
+    };
     let help_text = match state.input_mode {
         InputMode::CreatingSession => "Enter: create | Esc: cancel",
         InputMode::AddingProject => "Enter: add project | Esc: cancel",
@@ -73,7 +129,65 @@ pub fn render_projects_overview(
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[2]);
+    frame.render_widget(footer, chunks[footer_index]);
+}
+
+/// Render the "Needs Attention" section
+fn render_attention_section(
+    frame: &mut Frame,
+    area: Rect,
+    attention_sessions: &[&Session],
+    project_store: &ProjectStore,
+    _idle_threshold_secs: u64,
+) {
+    let now = Utc::now();
+
+    let items: Vec<ListItem> = attention_sessions
+        .iter()
+        .map(|session| {
+            // Get project/branch info
+            let project_name = project_store
+                .get_project(session.info.project_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("?");
+            let branch_name = project_store
+                .get_branch(session.info.branch_id)
+                .map(|b| b.name.as_str())
+                .unwrap_or("?");
+
+            let (badge_color, state_text) = match &session.info.state {
+                SessionState::Waiting => (Color::Green, "[Waiting]".to_string()),
+                SessionState::Idle => {
+                    let duration = now.signed_duration_since(session.info.last_activity);
+                    let mins = duration.num_minutes();
+                    (Color::Yellow, format!("[Idle - {}m]", mins))
+                }
+                _ => (
+                    Color::White,
+                    format!("[{}]", session.info.state.display_name()),
+                ),
+            };
+
+            let content = Line::from(vec![
+                Span::styled("● ", Style::default().fg(badge_color)),
+                Span::raw(format!(
+                    "{} ({}/{}) {}",
+                    session.info.name, project_name, branch_name, state_text
+                )),
+            ]);
+
+            ListItem::new(content)
+        })
+        .collect();
+
+    let title = format!("Needs Attention ({})", attention_sessions.len());
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    frame.render_widget(list, area);
 }
 
 /// Render the session creation input
@@ -105,6 +219,7 @@ fn render_main_content(
     state: &AppState,
     project_store: &ProjectStore,
     sessions: &SessionManager,
+    idle_threshold_secs: u64,
 ) {
     let has_projects = project_store.project_count() > 0;
     let has_sessions = !sessions.is_empty();
@@ -129,12 +244,40 @@ fn render_main_content(
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(area);
 
-        render_project_list(frame, split[0], state, project_store, sessions);
-        render_quick_sessions(frame, split[1], state, project_store, sessions);
+        render_project_list(
+            frame,
+            split[0],
+            state,
+            project_store,
+            sessions,
+            idle_threshold_secs,
+        );
+        render_quick_sessions(
+            frame,
+            split[1],
+            state,
+            project_store,
+            sessions,
+            idle_threshold_secs,
+        );
     } else if has_projects {
-        render_project_list(frame, area, state, project_store, sessions);
+        render_project_list(
+            frame,
+            area,
+            state,
+            project_store,
+            sessions,
+            idle_threshold_secs,
+        );
     } else {
-        render_quick_sessions(frame, area, state, project_store, sessions);
+        render_quick_sessions(
+            frame,
+            area,
+            state,
+            project_store,
+            sessions,
+            idle_threshold_secs,
+        );
     }
 }
 
@@ -145,6 +288,7 @@ fn render_project_list(
     state: &AppState,
     project_store: &ProjectStore,
     sessions: &SessionManager,
+    idle_threshold_secs: u64,
 ) {
     let selected_index = state.selected_project_index;
     let projects = project_store.projects_sorted();
@@ -160,6 +304,8 @@ fn render_project_list(
             let branch_count = project_store.branch_count_for_project(project.id);
             let session_count = sessions.session_count_for_project(project.id);
             let active_count = sessions.active_session_count_for_project(project.id);
+            let attention_count =
+                sessions.attention_count_for_project(project.id, idle_threshold_secs);
 
             let status = if active_count > 0 {
                 format!("{} branches, {} active", branch_count, active_count)
@@ -171,12 +317,17 @@ fn render_project_list(
 
             let content = format!("{}{}: {} ({})", prefix, i + 1, project.name, status);
 
+            // Color precedence: Yellow (attention) > Green (active) > Cyan/White (default)
             let style = if selected {
-                if active_count > 0 {
+                if attention_count > 0 {
+                    Style::default().fg(Color::Yellow).bold()
+                } else if active_count > 0 {
                     Style::default().fg(Color::Green).bold()
                 } else {
                     Style::default().fg(Color::Cyan).bold()
                 }
+            } else if attention_count > 0 {
+                Style::default().fg(Color::Yellow)
             } else if active_count > 0 {
                 Style::default().fg(Color::Green)
             } else {
@@ -198,7 +349,9 @@ fn render_quick_sessions(
     state: &AppState,
     project_store: &ProjectStore,
     sessions: &SessionManager,
+    idle_threshold_secs: u64,
 ) {
+    let now = Utc::now();
     // For now, show all sessions. Later we can filter by project_id == nil
     let selected_index = state.selected_session_index;
     let session_list = sessions.sessions_in_order();
@@ -207,9 +360,11 @@ fn render_quick_sessions(
         .iter()
         .enumerate()
         .map(|(i, session)| {
-            let state_color = session.info.state.color();
             let selected = i == selected_index;
             let prefix = if selected { "▶ " } else { "  " };
+
+            // Check if session needs attention
+            let needs_attention = sessions.session_needs_attention(session, idle_threshold_secs);
 
             // Get project/branch info
             let project_name = project_store
@@ -222,18 +377,43 @@ fn render_quick_sessions(
                 .unwrap_or("?");
             let context = format!("{}/{}", project_name, branch_name);
 
-            let content = format!(
-                "{}{}: {} ({}) [{}]",
-                prefix,
-                i + 1,
-                session.info.name,
-                context,
-                session.info.state.display_name()
-            );
-            let style = if selected {
-                Style::default().fg(state_color).bold()
+            // Build the state display with idle duration if applicable
+            let state_display = match &session.info.state {
+                SessionState::Idle => {
+                    let duration = now.signed_duration_since(session.info.last_activity);
+                    let mins = duration.num_minutes();
+                    format!("Idle - {}m", mins)
+                }
+                state => state.display_name().to_string(),
+            };
+
+            // Build content with attention badge
+            let (badge, badge_color) = if needs_attention {
+                match &session.info.state {
+                    SessionState::Waiting => ("● ", Color::Green),
+                    SessionState::Idle => ("● ", Color::Yellow),
+                    _ => ("  ", Color::White),
+                }
             } else {
-                Style::default().fg(state_color)
+                ("  ", Color::White)
+            };
+
+            let content = Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(badge, Style::default().fg(badge_color)),
+                Span::raw(format!(
+                    "{}: {} ({}) [{}]",
+                    i + 1,
+                    session.info.name,
+                    context,
+                    state_display
+                )),
+            ]);
+
+            let style = if selected {
+                Style::default().fg(session.info.state.color()).bold()
+            } else {
+                Style::default().fg(session.info.state.color())
             };
             ListItem::new(content).style(style)
         })

@@ -407,7 +407,14 @@ impl App {
                 event.event,
                 event.tool
             );
-            self.sessions.handle_hook_event(&event);
+            // handle_hook_event returns Some(session_id) if bell should ring
+            if let Some(session_id) = self.sessions.handle_hook_event(&event) {
+                // Only ring bell if this session is NOT the one we're currently viewing
+                let is_active_session = self.state.active_session == Some(session_id);
+                if !is_active_session {
+                    SessionManager::ring_terminal_bell();
+                }
+            }
             had_events = true;
         }
         had_events
@@ -531,6 +538,7 @@ impl App {
                     {
                         let session_id = session.info.id;
                         self.state.navigate_to_session(session_id);
+                        self.sessions.acknowledge_attention(session_id);
                         self.resize_active_session_pty()?;
                     }
                 }
@@ -668,6 +676,7 @@ impl App {
                 if index < session_count {
                     let session_id = branch_sessions[index].info.id;
                     self.state.navigate_to_session(session_id);
+                    self.sessions.acknowledge_attention(session_id);
                     self.resize_active_session_pty()?;
                 }
             }
@@ -715,6 +724,7 @@ impl App {
                 if let Some(session) = self.sessions.get_by_index(index) {
                     let session_id = session.info.id;
                     self.state.navigate_to_session(session_id);
+                    self.sessions.acknowledge_attention(session_id);
                     self.resize_active_session_pty()?;
                 }
             }
@@ -745,7 +755,9 @@ impl App {
                         .sessions
                         .get_by_index(self.state.selected_timeline_index)
                     {
-                        self.state.active_session = Some(session.info.id);
+                        let session_id = session.info.id;
+                        self.state.active_session = Some(session_id);
+                        self.sessions.acknowledge_attention(session_id);
                         self.resize_active_session_pty()?;
                     }
                 }
@@ -760,7 +772,9 @@ impl App {
                             .sessions
                             .get_by_index(self.state.selected_timeline_index)
                         {
-                            self.state.active_session = Some(session.info.id);
+                            let session_id = session.info.id;
+                            self.state.active_session = Some(session_id);
+                            self.sessions.acknowledge_attention(session_id);
                             self.resize_active_session_pty()?;
                         }
                     }
@@ -864,6 +878,7 @@ impl App {
 
                         // Navigate to the new session (auto-activates Session mode)
                         self.state.navigate_to_session(session_id);
+                        self.sessions.acknowledge_attention(session_id);
                         self.resize_active_session_pty()?;
                     }
                     Err(e) => {
@@ -1115,16 +1130,25 @@ impl App {
         let state = &self.state;
         let project_store = &self.project_store;
         let sessions = &self.sessions;
+        let config = &self.config;
 
         self.tui.draw(|frame| {
             let area = frame.size();
 
             match state.view {
                 View::ProjectsOverview => {
-                    render_projects_overview(frame, area, state, project_store, sessions);
+                    render_projects_overview(frame, area, state, project_store, sessions, config);
                 }
                 View::ProjectDetail(project_id) => {
-                    render_project_detail(frame, area, state, project_id, project_store, sessions);
+                    render_project_detail(
+                        frame,
+                        area,
+                        state,
+                        project_id,
+                        project_store,
+                        sessions,
+                        config,
+                    );
                 }
                 View::BranchDetail(project_id, branch_id) => {
                     render_branch_detail(
@@ -1135,13 +1159,14 @@ impl App {
                         branch_id,
                         project_store,
                         sessions,
+                        config,
                     );
                 }
                 View::SessionView => {
                     render_session_view(frame, area, state, sessions);
                 }
                 View::ActivityTimeline => {
-                    render_timeline(frame, area, state, sessions, project_store);
+                    render_timeline(frame, area, state, sessions, project_store, config);
                 }
             }
         })?;

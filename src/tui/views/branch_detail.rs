@@ -2,14 +2,17 @@
 //!
 //! Shows sessions for a specific branch.
 
+use chrono::Utc;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{AppState, InputMode};
+use crate::config::Config;
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::SessionManager;
+use crate::session::{SessionManager, SessionState};
 
 /// Render the branch detail view showing sessions
+#[allow(clippy::too_many_arguments)]
 pub fn render_branch_detail(
     frame: &mut Frame,
     area: Rect,
@@ -18,7 +21,9 @@ pub fn render_branch_detail(
     branch_id: BranchId,
     project_store: &ProjectStore,
     sessions: &SessionManager,
+    config: &Config,
 ) {
+    let idle_threshold = config.idle_threshold_secs;
     let project = project_store.get_project(project_id);
     let branch = project_store.get_branch(branch_id);
 
@@ -35,13 +40,19 @@ pub fn render_branch_detail(
     let header_text = match (project, branch) {
         (Some(project), Some(branch)) => {
             let active_count = sessions.active_session_count_for_branch(branch_id);
+            let attention_count = sessions.attention_count_for_branch(branch_id, idle_threshold);
+
+            let mut parts = vec![format!("{} / {}", project.name, branch.name)];
             if active_count > 0 {
-                format!(
-                    "{} / {} ({} active)",
-                    project.name, branch.name, active_count
-                )
+                parts.push(format!("{} active", active_count));
+            }
+            if attention_count > 0 {
+                parts.push(format!("{} need attention", attention_count));
+            }
+            if parts.len() == 1 {
+                parts[0].clone()
             } else {
-                format!("{} / {}", project.name, branch.name)
+                format!("{} ({})", parts[0], parts[1..].join(", "))
             }
         }
         _ => "Branch not found".to_string(),
@@ -73,6 +84,7 @@ pub fn render_branch_detail(
             frame.render_widget(empty, chunks[1]);
         } else {
             let selected_index = state.selected_session_index;
+            let now = Utc::now();
 
             let items: Vec<ListItem> = branch_sessions
                 .iter()
@@ -81,14 +93,40 @@ pub fn render_branch_detail(
                     let selected = i == selected_index;
                     let prefix = if selected { "▶ " } else { "  " };
 
-                    let state_display = session.info.state.display_name();
-                    let content = format!(
-                        "{}{}: {} [{}]",
-                        prefix,
-                        i + 1,
-                        session.info.name,
-                        state_display
-                    );
+                    // Check if session needs attention
+                    let needs_attention = sessions.session_needs_attention(session, idle_threshold);
+
+                    // Build state display with idle duration if applicable
+                    let state_display = match &session.info.state {
+                        SessionState::Idle => {
+                            let duration = now.signed_duration_since(session.info.last_activity);
+                            let mins = duration.num_minutes();
+                            format!("Idle - {}m", mins)
+                        }
+                        state => state.display_name().to_string(),
+                    };
+
+                    // Build attention badge
+                    let (badge, badge_color) = if needs_attention {
+                        match &session.info.state {
+                            SessionState::Waiting => ("● ", Color::Green),
+                            SessionState::Idle => ("● ", Color::Yellow),
+                            _ => ("  ", Color::White),
+                        }
+                    } else {
+                        ("  ", Color::White)
+                    };
+
+                    let content = Line::from(vec![
+                        Span::raw(prefix),
+                        Span::styled(badge, Style::default().fg(badge_color)),
+                        Span::raw(format!(
+                            "{}: {} [{}]",
+                            i + 1,
+                            session.info.name,
+                            state_display
+                        )),
+                    ]);
 
                     let style = if selected {
                         Style::default().fg(session.info.state.color()).bold()

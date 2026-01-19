@@ -4,6 +4,7 @@
 //! handling creation, destruction, state updates, and I/O polling.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -177,13 +178,14 @@ impl SessionManager {
     }
 
     /// Handle a hook event and update session state accordingly
-    pub fn handle_hook_event(&mut self, event: &HookEvent) {
+    /// Returns the session ID if terminal bell should be rung (session entered Waiting state)
+    pub fn handle_hook_event(&mut self, event: &HookEvent) -> Option<SessionId> {
         // Try to parse session_id as UUID
         let session_id = match event.session_id.parse::<SessionId>() {
             Ok(id) => id,
             Err(_) => {
                 tracing::warn!("Invalid session ID in hook event: {}", event.session_id);
-                return;
+                return None;
             }
         };
 
@@ -192,9 +194,12 @@ impl SessionManager {
             Some(s) => s,
             None => {
                 tracing::debug!("Hook event for unknown session: {}", session_id);
-                return;
+                return None;
             }
         };
+
+        // Capture old state to check for transition to Waiting
+        let old_state = session.info.state.clone();
 
         // Update state based on event type
         // Note: Any hook event means Claude Code is running (no longer Starting)
@@ -216,11 +221,32 @@ impl SessionManager {
             HookEventType::Unknown => {
                 // For unknown events, just update last_activity
                 session.info.last_activity = Utc::now();
-                return;
+                return None;
             }
         };
 
-        session.set_state(new_state);
+        session.set_state(new_state.clone());
+
+        // Return session ID if bell should ring (entered Waiting from non-Waiting)
+        if new_state == SessionState::Waiting && old_state != SessionState::Waiting {
+            session.info.needs_attention = true;
+            Some(session_id)
+        } else {
+            None
+        }
+    }
+
+    /// Ring the terminal bell
+    pub fn ring_terminal_bell() {
+        print!("\x07"); // ASCII bell character
+        std::io::stdout().flush().ok();
+    }
+
+    /// Clear the attention flag for a session (called when user views it)
+    pub fn acknowledge_attention(&mut self, session_id: SessionId) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.info.needs_attention = false;
+        }
     }
 
     /// Resize all session PTYs and virtual terminals
@@ -317,6 +343,84 @@ impl SessionManager {
             .filter(|s| s.info.state.is_active())
             .count()
     }
+
+    /// Check if a session needs attention (Waiting with flag set, or Idle beyond threshold)
+    pub fn session_needs_attention(&self, session: &Session, idle_threshold_secs: u64) -> bool {
+        match session.info.state {
+            SessionState::Waiting => session.info.needs_attention, // Use flag (cleared when viewed)
+            SessionState::Idle => {
+                // Idle beyond threshold always needs attention (time-based)
+                let idle_duration = Utc::now().signed_duration_since(session.info.last_activity);
+                idle_duration.num_seconds() > idle_threshold_secs as i64
+            }
+            _ => false,
+        }
+    }
+
+    /// Get all sessions needing attention, sorted by urgency (Waiting first, then by idle duration)
+    pub fn sessions_needing_attention(&self, idle_threshold_secs: u64) -> Vec<&Session> {
+        let mut sessions: Vec<_> = self
+            .sessions
+            .values()
+            .filter(|s| self.session_needs_attention(s, idle_threshold_secs))
+            .collect();
+
+        // Sort: Waiting sessions first, then by last_activity (oldest first for Idle)
+        sessions.sort_by(|a, b| {
+            match (&a.info.state, &b.info.state) {
+                (SessionState::Waiting, SessionState::Waiting) => {
+                    // Both waiting: sort by oldest activity first
+                    a.info.last_activity.cmp(&b.info.last_activity)
+                }
+                (SessionState::Waiting, _) => std::cmp::Ordering::Less,
+                (_, SessionState::Waiting) => std::cmp::Ordering::Greater,
+                _ => {
+                    // Both idle: sort by oldest activity first
+                    a.info.last_activity.cmp(&b.info.last_activity)
+                }
+            }
+        });
+
+        sessions
+    }
+
+    /// Count sessions needing attention for a project
+    pub fn attention_count_for_project(
+        &self,
+        project_id: ProjectId,
+        idle_threshold_secs: u64,
+    ) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| {
+                s.info.project_id == project_id
+                    && self.session_needs_attention(s, idle_threshold_secs)
+            })
+            .count()
+    }
+
+    /// Count sessions needing attention for a branch
+    pub fn attention_count_for_branch(
+        &self,
+        branch_id: BranchId,
+        idle_threshold_secs: u64,
+    ) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| {
+                s.info.branch_id == branch_id
+                    && self.session_needs_attention(s, idle_threshold_secs)
+            })
+            .count()
+    }
+
+    /// Total sessions needing attention globally
+    pub fn total_attention_count(&self, idle_threshold_secs: u64) -> usize {
+        self.sessions
+            .values()
+            .filter(|s| self.session_needs_attention(s, idle_threshold_secs))
+            .count()
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +434,7 @@ mod tests {
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
             max_output_lines: 1000,
+            idle_threshold_secs: 300,
         }
     }
 

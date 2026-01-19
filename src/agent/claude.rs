@@ -318,6 +318,7 @@ mod tests {
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
             max_output_lines: 1000,
+            idle_threshold_secs: 300,
         };
         let session_id = Uuid::new_v4();
         let spawn_config = SpawnConfig {
@@ -353,6 +354,7 @@ mod tests {
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
             max_output_lines: 1000,
+            idle_threshold_secs: 300,
         };
 
         let event_scripts = ClaudeCodeAdapter::install_hook_script(&config).unwrap();
@@ -448,6 +450,7 @@ mod tests {
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
             max_output_lines: 1000,
+            idle_threshold_secs: 300,
         };
         let spawn_config = test_spawn_config(temp_dir.path().to_path_buf());
 

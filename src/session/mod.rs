@@ -94,6 +94,9 @@ pub struct SessionInfo {
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp
     pub last_activity: DateTime<Utc>,
+    /// Whether this session needs user attention (set on Waiting transition, cleared on view)
+    #[serde(default)]
+    pub needs_attention: bool,
 }
 
 impl SessionInfo {
@@ -114,6 +117,7 @@ impl SessionInfo {
             branch_id,
             created_at: now,
             last_activity: now,
+            needs_attention: false,
         }
     }
 }

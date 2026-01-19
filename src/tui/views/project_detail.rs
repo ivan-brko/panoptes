@@ -7,6 +7,7 @@ use ratatui::style::Modifier;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{AppState, InputMode};
+use crate::config::Config;
 use crate::project::{ProjectId, ProjectStore};
 use crate::session::SessionManager;
 
@@ -18,7 +19,9 @@ pub fn render_project_detail(
     project_id: ProjectId,
     project_store: &ProjectStore,
     sessions: &SessionManager,
+    config: &Config,
 ) {
+    let idle_threshold = config.idle_threshold_secs;
     let project = project_store.get_project(project_id);
 
     let chunks = Layout::default()
@@ -33,10 +36,19 @@ pub fn render_project_detail(
     // Header
     let header_text = if let Some(project) = project {
         let active_count = sessions.active_session_count_for_project(project_id);
+        let attention_count = sessions.attention_count_for_project(project_id, idle_threshold);
+
+        let mut parts = vec![format!("Project: {}", project.name)];
         if active_count > 0 {
-            format!("Project: {} ({} active)", project.name, active_count)
+            parts.push(format!("{} active", active_count));
+        }
+        if attention_count > 0 {
+            parts.push(format!("{} need attention", attention_count));
+        }
+        if parts.len() == 1 {
+            parts[0].clone()
         } else {
-            format!("Project: {}", project.name)
+            format!("{} ({})", parts[0], parts[1..].join(", "))
         }
     } else {
         "Project not found".to_string()
@@ -74,6 +86,8 @@ pub fn render_project_detail(
                     // Count sessions for this branch
                     let session_count = sessions.session_count_for_branch(branch.id);
                     let active_count = sessions.active_session_count_for_branch(branch.id);
+                    let attention_count =
+                        sessions.attention_count_for_branch(branch.id, idle_threshold);
 
                     let status = if branch.is_default {
                         if active_count > 0 {
@@ -105,14 +119,19 @@ pub fn render_project_detail(
                         format!("{}{}: {} {}", prefix, i + 1, branch.name, status)
                     };
 
+                    // Color precedence: Yellow (attention) > Green (active) > Cyan (default) > White
                     let style = if selected {
-                        if active_count > 0 {
+                        if attention_count > 0 {
+                            Style::default().fg(Color::Yellow).bold()
+                        } else if active_count > 0 {
                             Style::default().fg(Color::Green).bold()
                         } else if branch.is_default {
                             Style::default().fg(Color::Cyan).bold()
                         } else {
                             Style::default().fg(Color::White).bold()
                         }
+                    } else if attention_count > 0 {
+                        Style::default().fg(Color::Yellow)
                     } else if active_count > 0 {
                         Style::default().fg(Color::Green)
                     } else if branch.is_default {
