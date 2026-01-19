@@ -3,9 +3,10 @@
 //! Shows branches for a specific project.
 
 use ratatui::prelude::*;
+use ratatui::style::Modifier;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::app::AppState;
+use crate::app::{AppState, InputMode};
 use crate::project::{ProjectId, ProjectStore};
 use crate::session::SessionManager;
 
@@ -46,8 +47,10 @@ pub fn render_project_detail(
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 
-    // Branch list
-    if let Some(_project) = project {
+    // Branch list or worktree creation dialog
+    if state.input_mode == InputMode::CreatingWorktree {
+        render_worktree_creation(frame, chunks[1], state);
+    } else if let Some(_project) = project {
         let branches = project_store.branches_for_project_sorted(project_id);
 
         if branches.is_empty() {
@@ -134,9 +137,69 @@ pub fn render_project_detail(
     }
 
     // Footer
-    let help_text = "w: new worktree | j/k: navigate | Enter: open branch | Esc: back | q: quit";
+    let help_text = match state.input_mode {
+        InputMode::CreatingWorktree => "Type: search | j/k: navigate | Enter: select | Esc: cancel",
+        _ => "w: new worktree | j/k: navigate | Enter: open branch | Esc: back | q: quit",
+    };
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));
     frame.render_widget(footer, chunks[2]);
+}
+
+/// Render the worktree creation dialog with branch selector
+fn render_worktree_creation(frame: &mut Frame, area: Rect, state: &AppState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Search input
+            Constraint::Min(0),    // Branch list
+        ])
+        .split(area);
+
+    // Search input
+    let input_text = format!("> {}_", state.new_branch_name);
+    let input = Paragraph::new(input_text)
+        .style(Style::default().fg(Color::Yellow))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Search / New Branch Name"),
+        );
+    frame.render_widget(input, chunks[0]);
+
+    // Branch list with "Create new" option
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // First item: "Create new branch"
+    let create_new_text = if state.new_branch_name.is_empty() {
+        "  + Create new branch (type name above)".to_string()
+    } else {
+        format!("  + Create new branch: '{}'", state.new_branch_name)
+    };
+    let create_style = if state.branch_selector_index == 0 {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    items.push(ListItem::new(create_new_text).style(create_style));
+
+    // Filtered branches
+    for (i, branch) in state.filtered_branches.iter().enumerate() {
+        let selected = state.branch_selector_index == i + 1;
+        let prefix = if selected { "▶ " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        items.push(ListItem::new(format!("{}{}", prefix, branch)).style(style));
+    }
+
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Branches"));
+    frame.render_widget(list, chunks[1]);
 }

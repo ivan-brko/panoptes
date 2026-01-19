@@ -32,6 +32,8 @@ pub enum InputMode {
     CreatingSession,
     /// Adding a new project - typing path
     AddingProject,
+    /// Creating a new worktree - typing branch name
+    CreatingWorktree,
 }
 
 /// Current view being displayed
@@ -128,6 +130,14 @@ pub struct AppState {
     pub new_session_name: String,
     /// Buffer for new project path input
     pub new_project_path: String,
+    /// Buffer for new branch name input (worktree creation)
+    pub new_branch_name: String,
+    /// Cached branches from git (for branch selector)
+    pub available_branches: Vec<String>,
+    /// Branches matching current search filter
+    pub filtered_branches: Vec<String>,
+    /// Selected index in branch selector (0 = "Create new")
+    pub branch_selector_index: usize,
     /// Whether the application should quit
     pub should_quit: bool,
     /// Whether the UI needs to be re-rendered
@@ -224,6 +234,19 @@ impl AppState {
         }
         self.active_session = None;
     }
+}
+
+/// Filter branches by fuzzy substring match
+fn filter_branches(branches: &[String], query: &str) -> Vec<String> {
+    if query.is_empty() {
+        return branches.to_vec();
+    }
+    let query_lower = query.to_lowercase();
+    branches
+        .iter()
+        .filter(|b| b.to_lowercase().contains(&query_lower))
+        .cloned()
+        .collect()
 }
 
 /// Main application struct
@@ -390,6 +413,14 @@ impl App {
             InputMode::Session => self.handle_session_mode_key(key),
             InputMode::CreatingSession => self.handle_creating_session_key(key),
             InputMode::AddingProject => self.handle_adding_project_key(key),
+            InputMode::CreatingWorktree => {
+                // Need to get project_id from current view
+                if let View::ProjectDetail(project_id) = self.state.view {
+                    self.handle_creating_worktree_key(key, project_id)
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -542,6 +573,25 @@ impl App {
                 if let Some(branch) = branches.get(self.state.selected_branch_index) {
                     self.state.navigate_to_branch(project_id, branch.id);
                 }
+            }
+            KeyCode::Char('w') => {
+                // Start creating a new worktree
+                self.state.input_mode = InputMode::CreatingWorktree;
+                self.state.new_branch_name.clear();
+                self.state.branch_selector_index = 0;
+
+                // Fetch available branches from git
+                if let Some(project) = self.project_store.get_project(project_id) {
+                    if let Ok(git) = crate::git::GitOps::open(&project.repo_path) {
+                        self.state.available_branches =
+                            git.list_local_branches().unwrap_or_default();
+                    } else {
+                        self.state.available_branches.clear();
+                    }
+                } else {
+                    self.state.available_branches.clear();
+                }
+                self.state.filtered_branches = self.state.available_branches.clone();
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let Some(num) = c.to_digit(10) {
@@ -858,6 +908,100 @@ impl App {
                 self.state.new_project_path.push(c);
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key when creating a new worktree
+    fn handle_creating_worktree_key(&mut self, key: KeyEvent, project_id: ProjectId) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                // Cancel worktree creation
+                self.state.input_mode = InputMode::Normal;
+                self.state.new_branch_name.clear();
+                self.state.available_branches.clear();
+                self.state.filtered_branches.clear();
+            }
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                // Navigate up (wrapping)
+                let count = self.state.filtered_branches.len() + 1; // +1 for "Create new"
+                self.state.branch_selector_index = self
+                    .state
+                    .branch_selector_index
+                    .checked_sub(1)
+                    .unwrap_or(count - 1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                // Navigate down (wrapping)
+                let count = self.state.filtered_branches.len() + 1;
+                self.state.branch_selector_index = (self.state.branch_selector_index + 1) % count;
+            }
+            KeyCode::Enter => {
+                if self.state.branch_selector_index == 0 {
+                    // "Create new branch" selected - use typed name
+                    let branch_name = std::mem::take(&mut self.state.new_branch_name);
+                    if !branch_name.is_empty() {
+                        self.create_worktree(project_id, &branch_name, true)?;
+                    }
+                } else {
+                    // Existing branch selected
+                    let idx = self.state.branch_selector_index - 1;
+                    if let Some(branch_name) = self.state.filtered_branches.get(idx).cloned() {
+                        self.create_worktree(project_id, &branch_name, false)?;
+                    }
+                }
+                self.state.input_mode = InputMode::Normal;
+                self.state.available_branches.clear();
+                self.state.filtered_branches.clear();
+            }
+            KeyCode::Backspace => {
+                self.state.new_branch_name.pop();
+                self.state.filtered_branches =
+                    filter_branches(&self.state.available_branches, &self.state.new_branch_name);
+                self.state.branch_selector_index = 0; // Reset to "Create new"
+            }
+            KeyCode::Char(c) => {
+                self.state.new_branch_name.push(c);
+                self.state.filtered_branches =
+                    filter_branches(&self.state.available_branches, &self.state.new_branch_name);
+                self.state.branch_selector_index = 0; // Reset to "Create new"
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Create a worktree for a branch
+    fn create_worktree(
+        &mut self,
+        project_id: ProjectId,
+        branch_name: &str,
+        create_branch: bool,
+    ) -> Result<()> {
+        if let Some(project) = self.project_store.get_project(project_id) {
+            let git = crate::git::GitOps::open(&project.repo_path)?;
+            let worktree_path = crate::git::worktree::worktree_path_for_branch(
+                &self.config.worktrees_dir,
+                branch_name,
+            );
+
+            crate::git::worktree::create_worktree(
+                git.repository(),
+                branch_name,
+                &worktree_path,
+                create_branch,
+            )?;
+
+            let branch = crate::project::Branch::new(
+                project_id,
+                branch_name.to_string(),
+                worktree_path,
+                false, // is_default
+                true,  // is_worktree
+            );
+            self.project_store.add_branch(branch);
+            self.project_store.save()?;
+            tracing::info!("Created worktree for branch: {}", branch_name);
         }
         Ok(())
     }
