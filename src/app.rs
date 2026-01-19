@@ -472,10 +472,14 @@ impl App {
 
     /// Handle a key event
     fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
-        // Global keys (work in any mode)
+        // Handle Ctrl+C specially
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.state.should_quit = true;
-            return Ok(());
+            // In Session mode, fall through to forward Ctrl+C to PTY
+            if self.state.input_mode != InputMode::Session {
+                // Show warning in all other modes
+                self.state.error_message = Some("Ctrl+C disabled. Press 'q' to quit.".to_string());
+                return Ok(());
+            }
         }
 
         match self.state.input_mode {
