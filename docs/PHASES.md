@@ -28,7 +28,7 @@ A working application where you can:
 ### What We Built
 
 - ✅ **Project model** - Data structures for projects, branches, and their relationships
-- ✅ **Project persistence** - Projects and branches saved to `~/.panoptes/projects.toml`
+- ✅ **Project persistence** - Projects and branches saved to `~/.panoptes/projects.json`
 - ✅ **Git worktree support** - Create isolated working directories for each branch
 - ✅ **Projects overview screen** - Grid view of all projects with session counts
 - ✅ **Project detail view** - Branches and sessions within a project

@@ -38,7 +38,7 @@ PTY Output → Session buffer → TUI render
   - `vterm.rs`: ANSI/VT100 terminal emulation with color support
 - **project/**: Project and branch management
   - `mod.rs`: Project and Branch structs, ProjectId/BranchId type aliases
-  - `store.rs`: ProjectStore for CRUD operations and persistence to `~/.panoptes/projects.toml`
+  - `store.rs`: ProjectStore for CRUD operations and persistence to `~/.panoptes/projects.json`
 - **agent/**: Agent abstraction
   - `adapter.rs`: AgentAdapter trait defining spawn interface
   - `claude.rs`: ClaudeCodeAdapter implementation with hook script generation

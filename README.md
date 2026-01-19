@@ -180,7 +180,7 @@ idle_threshold_secs = 300
 | Path | Purpose |
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration |
-| `~/.panoptes/projects.toml` | Project and branch persistence |
+| `~/.panoptes/projects.json` | Project and branch persistence |
 | `~/.panoptes/hooks/` | Hook scripts for Claude Code |
 | `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
 
