@@ -15,3 +15,6 @@ pub use project_detail::render_project_detail;
 pub use projects::render_projects_overview;
 pub use session::render_session_view;
 pub use timeline::render_timeline;
+
+// Re-export for convenience
+pub use placeholder::render_placeholder as placeholder;

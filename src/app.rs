@@ -15,7 +15,8 @@ use crate::hooks::{self, HookEventReceiver, HookEventSender, ServerHandle};
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionId, SessionManager};
 use crate::tui::views::{
-    render_placeholder, render_projects_overview, render_session_view, render_timeline,
+    render_placeholder, render_project_detail, render_projects_overview, render_session_view,
+    render_timeline,
 };
 use crate::tui::Tui;
 
@@ -401,56 +402,92 @@ impl App {
     }
 
     /// Handle key in projects overview (normal mode)
-    /// TODO: Will be fully implemented in Ticket 24
     fn handle_projects_overview_key(&mut self, key: KeyEvent) -> Result<()> {
+        let project_count = self.project_store.project_count();
+        let session_count = self.sessions.len();
+
         match key.code {
             KeyCode::Char('q') => {
                 self.state.should_quit = true;
             }
             KeyCode::Char('t') => {
-                // Go to activity timeline
                 self.state.navigate_to_timeline();
             }
             KeyCode::Char('n') => {
-                // Start creating a new session (temporary - will change to add project)
+                // Create a new quick session
                 self.state.input_mode = InputMode::CreatingSession;
                 self.state.new_session_name.clear();
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                // For now, navigate sessions (will be projects later)
-                self.state.select_next(self.sessions.len());
+                // Navigate projects if any, otherwise sessions
+                if project_count > 0 {
+                    self.state.selected_project_index =
+                        (self.state.selected_project_index + 1) % project_count;
+                } else if session_count > 0 {
+                    self.state.selected_session_index =
+                        (self.state.selected_session_index + 1) % session_count;
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.state.select_prev(self.sessions.len());
+                if project_count > 0 {
+                    self.state.selected_project_index = self
+                        .state
+                        .selected_project_index
+                        .checked_sub(1)
+                        .unwrap_or(project_count - 1);
+                } else if session_count > 0 {
+                    self.state.selected_session_index = self
+                        .state
+                        .selected_session_index
+                        .checked_sub(1)
+                        .unwrap_or(session_count - 1);
+                }
             }
             KeyCode::Enter => {
-                // Enter session view for selected session (temporary)
-                let index = self.state.current_selected_index();
-                if let Some(session) = self.sessions.get_by_index(index) {
-                    let session_id = session.info.id;
-                    self.state.navigate_to_session(session_id);
-                    self.resize_active_session_pty()?;
+                // Open selected project or session
+                if project_count > 0 {
+                    let projects = self.project_store.projects_sorted();
+                    if let Some(project) = projects.get(self.state.selected_project_index) {
+                        self.state.navigate_to_project(project.id);
+                    }
+                } else if session_count > 0 {
+                    if let Some(session) = self
+                        .sessions
+                        .get_by_index(self.state.selected_session_index)
+                    {
+                        let session_id = session.info.id;
+                        self.state.navigate_to_session(session_id);
+                        self.resize_active_session_pty()?;
+                    }
                 }
             }
             KeyCode::Char('d') => {
-                // Delete selected session
-                let index = self.state.current_selected_index();
-                if let Some(session) = self.sessions.get_by_index(index) {
-                    let id = session.info.id;
-                    if let Err(e) = self.sessions.destroy_session(id) {
-                        tracing::error!("Failed to destroy session: {}", e);
-                    }
-                    // Adjust selection if needed
-                    let count = self.sessions.len();
-                    if index >= count && index > 0 {
-                        self.state.set_current_selected_index(index - 1);
+                // Delete selected session (only if no projects, sessions are in focus)
+                if project_count == 0 && session_count > 0 {
+                    if let Some(session) = self
+                        .sessions
+                        .get_by_index(self.state.selected_session_index)
+                    {
+                        let id = session.info.id;
+                        if let Err(e) = self.sessions.destroy_session(id) {
+                            tracing::error!("Failed to destroy session: {}", e);
+                        }
+                        let new_count = self.sessions.len();
+                        if self.state.selected_session_index >= new_count
+                            && self.state.selected_session_index > 0
+                        {
+                            self.state.selected_session_index -= 1;
+                        }
                     }
                 }
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let Some(num) = c.to_digit(10) {
-                    self.state
-                        .select_by_number(num as usize, self.sessions.len());
+                    if project_count > 0 && num > 0 && (num as usize) <= project_count {
+                        self.state.selected_project_index = (num as usize) - 1;
+                    } else if project_count == 0 && num > 0 && (num as usize) <= session_count {
+                        self.state.selected_session_index = (num as usize) - 1;
+                    }
                 }
             }
             _ => {}
@@ -459,18 +496,49 @@ impl App {
     }
 
     /// Handle key in project detail view (normal mode)
-    /// TODO: Will be fully implemented in Ticket 25
     fn handle_project_detail_key(&mut self, key: KeyEvent) -> Result<()> {
+        let project_id = match self.state.view {
+            View::ProjectDetail(id) => id,
+            _ => return Ok(()),
+        };
+
+        let branch_count = self.project_store.branches_for_project(project_id).len();
+
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+            KeyCode::Esc => {
                 self.state.navigate_back();
             }
+            KeyCode::Char('q') => {
+                self.state.should_quit = true;
+            }
             KeyCode::Char('j') | KeyCode::Down => {
-                // Will navigate branches when implemented
-                self.state.select_next(1);
+                if branch_count > 0 {
+                    self.state.selected_branch_index =
+                        (self.state.selected_branch_index + 1) % branch_count;
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.state.select_prev(1);
+                if branch_count > 0 {
+                    self.state.selected_branch_index = self
+                        .state
+                        .selected_branch_index
+                        .checked_sub(1)
+                        .unwrap_or(branch_count - 1);
+                }
+            }
+            KeyCode::Enter => {
+                // Open selected branch
+                let branches = self.project_store.branches_for_project_sorted(project_id);
+                if let Some(branch) = branches.get(self.state.selected_branch_index) {
+                    self.state.navigate_to_branch(project_id, branch.id);
+                }
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                if let Some(num) = c.to_digit(10) {
+                    if num > 0 && (num as usize) <= branch_count {
+                        self.state.selected_branch_index = (num as usize) - 1;
+                    }
+                }
             }
             _ => {}
         }
@@ -684,9 +752,8 @@ impl App {
                 View::ProjectsOverview => {
                     render_projects_overview(frame, area, state, project_store, sessions);
                 }
-                View::ProjectDetail(_) => {
-                    // TODO: Ticket 25 - Render project detail
-                    render_placeholder(frame, area, "Project Detail (Coming Soon)");
+                View::ProjectDetail(project_id) => {
+                    render_project_detail(frame, area, state, project_id, project_store, sessions);
                 }
                 View::BranchDetail(_, _) => {
                     // TODO: Ticket 26 - Render branch detail
