@@ -51,24 +51,39 @@ pub fn render_session_view(
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 
-    // Output area
+    // Output area - green frame when active (Session mode), gray when inactive
+    let frame_color = if state.input_mode == InputMode::Session {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+
     if let Some(session) = session {
         let output_height = chunks[1].height.saturating_sub(2) as usize; // Account for borders
         let styled_lines = session.visible_styled_lines(output_height);
-        let output = Paragraph::new(styled_lines)
-            .block(Block::default().borders(Borders::ALL).title("Output"));
+        let output = Paragraph::new(styled_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(frame_color))
+                .title("Output"),
+        );
         frame.render_widget(output, chunks[1]);
     } else {
         let empty = Paragraph::new("Session not found")
             .style(Style::default().fg(Color::Red))
-            .block(Block::default().borders(Borders::ALL).title("Output"));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(frame_color))
+                    .title("Output"),
+            );
         frame.render_widget(empty, chunks[1]);
     }
 
     // Footer with help
     let help_text = match state.input_mode {
-        InputMode::Session => "Esc: exit session mode | Keys sent to session",
-        _ => "i/Enter: session mode | Tab: next | 1-9: jump | Esc/q: back",
+        InputMode::Session => "Esc: deactivate | Keys sent to session",
+        _ => "Enter: activate | Tab: next | 1-9: jump | Esc/q: back",
     };
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))

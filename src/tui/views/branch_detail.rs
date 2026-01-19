@@ -5,7 +5,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::app::AppState;
+use crate::app::{AppState, InputMode};
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::SessionManager;
 
@@ -52,8 +52,12 @@ pub fn render_branch_detail(
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 
-    // Session list
-    if let Some(branch) = branch {
+    // Main content area - either session creation input, delete confirmation, or session list
+    if state.input_mode == InputMode::CreatingSession {
+        render_session_creation(frame, chunks[1], state);
+    } else if state.input_mode == InputMode::ConfirmingSessionDelete {
+        render_delete_confirmation(frame, chunks[1], state, sessions);
+    } else if let Some(branch) = branch {
         let branch_sessions = sessions.sessions_for_branch(branch_id);
 
         if branch_sessions.is_empty() {
@@ -108,9 +112,58 @@ pub fn render_branch_detail(
     }
 
     // Footer
-    let help_text = "n: new session | j/k: navigate | Enter: open session | Esc: back | q: quit";
+    let help_text = match state.input_mode {
+        InputMode::CreatingSession => "Enter: create | Esc: cancel",
+        InputMode::ConfirmingSessionDelete => "y: confirm delete | n/Esc: cancel",
+        _ => {
+            "n: new session | d: delete | j/k: navigate | Enter: open session | Esc: back | q: quit"
+        }
+    };
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));
     frame.render_widget(footer, chunks[2]);
+}
+
+/// Render the session creation input
+fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState) {
+    let input = Paragraph::new(format!("New session name: {}_", state.new_session_name))
+        .style(Style::default().fg(Color::Yellow))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Create Session"),
+        );
+    frame.render_widget(input, area);
+}
+
+/// Render the delete confirmation dialog
+fn render_delete_confirmation(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    sessions: &SessionManager,
+) {
+    let session_name = state
+        .pending_delete_session
+        .and_then(|id| sessions.get(id))
+        .map(|s| s.info.name.as_str())
+        .unwrap_or("Unknown");
+
+    let text = format!(
+        "Are you sure you want to delete session '{}'?\n\n\
+        This will kill the Claude Code process.\n\n\
+        Press 'y' to confirm or 'n' to cancel.",
+        session_name
+    );
+
+    let dialog = Paragraph::new(text)
+        .style(Style::default().fg(Color::Yellow))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Confirm Delete")
+                .border_style(Style::default().fg(Color::Red)),
+        );
+    frame.render_widget(dialog, area);
 }

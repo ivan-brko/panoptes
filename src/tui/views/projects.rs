@@ -61,10 +61,12 @@ pub fn render_projects_overview(
         InputMode::CreatingSession => "Enter: create | Esc: cancel",
         InputMode::AddingProject => "Enter: add project | Esc: cancel",
         _ => {
-            if project_store.project_count() > 0 || !sessions.is_empty() {
-                "a: add project | n: new session | t: timeline | j/k: navigate | Enter: open | q: quit"
+            if project_store.project_count() > 0 {
+                "a: add project | n: new session (enter branch) | t: timeline | j/k: navigate | Enter: open | q: quit"
+            } else if !sessions.is_empty() {
+                "a: add project | n: quick session | t: timeline | j/k: navigate | Enter: open | q: quit"
             } else {
-                "a: add project | n: new session | t: timeline | q: quit"
+                "a: add project | n: quick session | t: timeline | q: quit"
             }
         }
     };
@@ -128,11 +130,11 @@ fn render_main_content(
             .split(area);
 
         render_project_list(frame, split[0], state, project_store, sessions);
-        render_quick_sessions(frame, split[1], state, sessions);
+        render_quick_sessions(frame, split[1], state, project_store, sessions);
     } else if has_projects {
         render_project_list(frame, area, state, project_store, sessions);
     } else {
-        render_quick_sessions(frame, area, state, sessions);
+        render_quick_sessions(frame, area, state, project_store, sessions);
     }
 }
 
@@ -194,6 +196,7 @@ fn render_quick_sessions(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
+    project_store: &ProjectStore,
     sessions: &SessionManager,
 ) {
     // For now, show all sessions. Later we can filter by project_id == nil
@@ -207,11 +210,24 @@ fn render_quick_sessions(
             let state_color = session.info.state.color();
             let selected = i == selected_index;
             let prefix = if selected { "▶ " } else { "  " };
+
+            // Get project/branch info
+            let project_name = project_store
+                .get_project(session.info.project_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("?");
+            let branch_name = project_store
+                .get_branch(session.info.branch_id)
+                .map(|b| b.name.as_str())
+                .unwrap_or("?");
+            let context = format!("{}/{}", project_name, branch_name);
+
             let content = format!(
-                "{}{}: {} [{}]",
+                "{}{}: {} ({}) [{}]",
                 prefix,
                 i + 1,
                 session.info.name,
+                context,
                 session.info.state.display_name()
             );
             let style = if selected {

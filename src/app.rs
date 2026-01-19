@@ -15,7 +15,7 @@ use crate::hooks::{self, HookEventReceiver, HookEventSender, ServerHandle};
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionId, SessionManager};
 use crate::tui::views::{
-    render_placeholder, render_project_detail, render_projects_overview, render_session_view,
+    render_branch_detail, render_project_detail, render_projects_overview, render_session_view,
     render_timeline,
 };
 use crate::tui::Tui;
@@ -34,6 +34,8 @@ pub enum InputMode {
     AddingProject,
     /// Creating a new worktree - typing branch name
     CreatingWorktree,
+    /// Confirming session deletion
+    ConfirmingSessionDelete,
 }
 
 /// Current view being displayed
@@ -128,6 +130,12 @@ pub struct AppState {
     pub session_return_view: Option<View>,
     /// Buffer for new session name input
     pub new_session_name: String,
+    /// Context: project ID for session being created (None = unassociated)
+    pub creating_session_project_id: Option<ProjectId>,
+    /// Context: branch ID for session being created (None = unassociated)
+    pub creating_session_branch_id: Option<BranchId>,
+    /// Context: working directory for session being created
+    pub creating_session_working_dir: Option<PathBuf>,
     /// Buffer for new project path input
     pub new_project_path: String,
     /// Buffer for new branch name input (worktree creation)
@@ -138,6 +146,8 @@ pub struct AppState {
     pub filtered_branches: Vec<String>,
     /// Selected index in branch selector (0 = "Create new")
     pub branch_selector_index: usize,
+    /// Session pending deletion (for confirmation dialog)
+    pub pending_delete_session: Option<SessionId>,
     /// Whether the application should quit
     pub should_quit: bool,
     /// Whether the UI needs to be re-rendered
@@ -211,12 +221,14 @@ impl AppState {
         self.selected_session_index = 0;
     }
 
-    /// Navigate to session view
+    /// Navigate to session view (auto-activates session mode)
     pub fn navigate_to_session(&mut self, session_id: SessionId) {
         // Remember where we came from
         self.session_return_view = Some(self.view);
         self.view = View::SessionView;
         self.active_session = Some(session_id);
+        // Auto-activate session mode so keys go directly to PTY
+        self.input_mode = InputMode::Session;
     }
 
     /// Navigate to activity timeline
@@ -233,6 +245,7 @@ impl AppState {
             self.view = View::ProjectsOverview;
         }
         self.active_session = None;
+        self.input_mode = InputMode::Normal;
     }
 }
 
@@ -421,6 +434,7 @@ impl App {
                     Ok(())
                 }
             }
+            InputMode::ConfirmingSessionDelete => self.handle_confirming_delete_key(key),
         }
     }
 
@@ -450,9 +464,33 @@ impl App {
                 self.state.navigate_to_timeline();
             }
             KeyCode::Char('n') => {
-                // Create a new quick session
-                self.state.input_mode = InputMode::CreatingSession;
-                self.state.new_session_name.clear();
+                if project_count > 0 {
+                    // Projects exist - navigate to selected project's default branch
+                    let projects = self.project_store.projects_sorted();
+                    if let Some(project) = projects.get(self.state.selected_project_index) {
+                        let project_id = project.id;
+                        // Find default branch for this project
+                        if let Some(branch) = self
+                            .project_store
+                            .branches_for_project(project_id)
+                            .into_iter()
+                            .find(|b| b.is_default)
+                        {
+                            // Navigate directly to branch detail
+                            self.state.navigate_to_branch(project_id, branch.id);
+                        } else {
+                            // No default branch - navigate to project detail
+                            self.state.navigate_to_project(project_id);
+                        }
+                    }
+                } else {
+                    // No projects - allow creating an unassociated quick session
+                    self.state.creating_session_project_id = None;
+                    self.state.creating_session_branch_id = None;
+                    self.state.creating_session_working_dir = None;
+                    self.state.new_session_name.clear();
+                    self.state.input_mode = InputMode::CreatingSession;
+                }
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 // Navigate projects if any, otherwise sessions
@@ -634,35 +672,24 @@ impl App {
                 }
             }
             KeyCode::Char('n') => {
-                // Create new session on this branch
+                // Prompt for session name before creating
                 if let Some(branch) = self.project_store.get_branch(branch_id) {
-                    let name = format!("Session {}", self.sessions.len() + 1);
-                    let working_dir = branch.working_dir.clone();
-
-                    // Get terminal dimensions
-                    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-
-                    let session_id = self.sessions.create_session(
-                        name,
-                        working_dir,
-                        project_id,
-                        branch_id,
-                        None, // initial_prompt
-                        rows as usize,
-                        cols as usize,
-                    )?;
-
-                    // Update branch and project activity timestamps
-                    if let Some(branch) = self.project_store.get_branch_mut(branch_id) {
-                        branch.touch();
+                    self.state.creating_session_project_id = Some(project_id);
+                    self.state.creating_session_branch_id = Some(branch_id);
+                    self.state.creating_session_working_dir = Some(branch.working_dir.clone());
+                    self.state.new_session_name.clear();
+                    self.state.input_mode = InputMode::CreatingSession;
+                }
+            }
+            KeyCode::Char('d') => {
+                // Prompt for confirmation before deleting session
+                if session_count > 0 {
+                    let index = self.state.selected_session_index;
+                    if index < session_count {
+                        let session_id = branch_sessions[index].info.id;
+                        self.state.pending_delete_session = Some(session_id);
+                        self.state.input_mode = InputMode::ConfirmingSessionDelete;
                     }
-                    if let Some(project) = self.project_store.get_project_mut(project_id) {
-                        project.touch();
-                    }
-
-                    // Navigate to the new session
-                    self.state.navigate_to_session(session_id);
-                    self.resize_active_session_pty()?;
                 }
             }
             _ => {}
@@ -703,8 +730,8 @@ impl App {
                 // Go back to the view we came from
                 self.state.return_from_session();
             }
-            KeyCode::Char('i') | KeyCode::Enter => {
-                // Enter session mode (send keys to PTY)
+            KeyCode::Enter => {
+                // Re-activate session mode (send keys to PTY)
                 self.state.input_mode = InputMode::Session;
             }
             KeyCode::Tab => {
@@ -768,6 +795,9 @@ impl App {
                 // Cancel session creation
                 self.state.input_mode = InputMode::Normal;
                 self.state.new_session_name.clear();
+                self.state.creating_session_project_id = None;
+                self.state.creating_session_branch_id = None;
+                self.state.creating_session_working_dir = None;
             }
             KeyCode::Enter => {
                 // Create the session
@@ -777,8 +807,26 @@ impl App {
                     std::mem::take(&mut self.state.new_session_name)
                 };
 
-                // Use current directory as working directory
-                let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                // Use context working directory, or current directory as fallback
+                let working_dir = self
+                    .state
+                    .creating_session_working_dir
+                    .take()
+                    .unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    });
+
+                // Get project/branch context (nil if unassociated)
+                let project_id = self
+                    .state
+                    .creating_session_project_id
+                    .take()
+                    .unwrap_or(Uuid::nil());
+                let branch_id = self
+                    .state
+                    .creating_session_branch_id
+                    .take()
+                    .unwrap_or(Uuid::nil());
 
                 // Get terminal dimensions for the session
                 let (rows, cols) = if let Ok(size) = self.tui.size() {
@@ -789,11 +837,6 @@ impl App {
                 } else {
                     (24, 80) // Fallback dimensions
                 };
-
-                // TODO: Replace with actual project_id and branch_id from selected project/branch
-                // This will be implemented in Ticket 30 (Session in Branch)
-                let project_id = Uuid::nil();
-                let branch_id = Uuid::nil();
 
                 match self.sessions.create_session(
                     name.clone(),
@@ -806,17 +849,29 @@ impl App {
                 ) {
                     Ok(session_id) => {
                         tracing::info!("Created session: {} ({})", name, session_id);
-                        // Update the selected index for the current view
-                        let new_index = self.sessions.len().saturating_sub(1);
-                        self.state.selected_project_index = new_index;
-                        self.state.selected_timeline_index = new_index;
+
+                        // Update project/branch activity timestamps if associated
+                        if !project_id.is_nil() {
+                            if let Some(project) = self.project_store.get_project_mut(project_id) {
+                                project.touch();
+                            }
+                        }
+                        if !branch_id.is_nil() {
+                            if let Some(branch) = self.project_store.get_branch_mut(branch_id) {
+                                branch.touch();
+                            }
+                        }
+
+                        // Navigate to the new session (auto-activates Session mode)
+                        self.state.navigate_to_session(session_id);
+                        self.resize_active_session_pty()?;
                     }
                     Err(e) => {
                         tracing::error!("Failed to create session: {}", e);
+                        // Only reset to Normal mode on failure
+                        self.state.input_mode = InputMode::Normal;
                     }
                 }
-
-                self.state.input_mode = InputMode::Normal;
             }
             KeyCode::Backspace => {
                 self.state.new_session_name.pop();
@@ -971,6 +1026,39 @@ impl App {
         Ok(())
     }
 
+    /// Handle key when confirming session deletion
+    fn handle_confirming_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                // Confirm deletion
+                if let Some(session_id) = self.state.pending_delete_session.take() {
+                    // Get branch_id before destroying (for selection adjustment)
+                    let branch_id = self.state.view.branch_id();
+
+                    if let Err(e) = self.sessions.destroy_session(session_id) {
+                        tracing::error!("Failed to destroy session: {}", e);
+                    }
+
+                    // Adjust selection if needed
+                    if let Some(branch_id) = branch_id {
+                        let new_count = self.sessions.sessions_for_branch(branch_id).len();
+                        if self.state.selected_session_index >= new_count && new_count > 0 {
+                            self.state.selected_session_index = new_count - 1;
+                        }
+                    }
+                }
+                self.state.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                // Cancel deletion
+                self.state.pending_delete_session = None;
+                self.state.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Create a worktree for a branch
     fn create_worktree(
         &mut self,
@@ -1038,9 +1126,16 @@ impl App {
                 View::ProjectDetail(project_id) => {
                     render_project_detail(frame, area, state, project_id, project_store, sessions);
                 }
-                View::BranchDetail(_, _) => {
-                    // TODO: Ticket 26 - Render branch detail
-                    render_placeholder(frame, area, "Branch Detail (Coming Soon)");
+                View::BranchDetail(project_id, branch_id) => {
+                    render_branch_detail(
+                        frame,
+                        area,
+                        state,
+                        project_id,
+                        branch_id,
+                        project_store,
+                        sessions,
+                    );
                 }
                 View::SessionView => {
                     render_session_view(frame, area, state, sessions);
