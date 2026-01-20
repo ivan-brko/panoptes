@@ -1191,13 +1191,9 @@ impl App {
                 }
             }
             KeyCode::Tab => {
-                if self.state.show_path_completions {
-                    // Cycle forward through completions
-                    let count = self.state.path_completions.len();
-                    if count > 0 {
-                        self.state.path_completion_index =
-                            (self.state.path_completion_index + 1) % count;
-                    }
+                if self.state.show_path_completions && !self.state.path_completions.is_empty() {
+                    // Apply selected completion (standard shell behavior)
+                    self.apply_path_completion();
                 } else {
                     // Show completions
                     self.update_path_completions();
