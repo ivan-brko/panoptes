@@ -11,7 +11,8 @@ pub use theme::{theme, Theme};
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{
         disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
@@ -30,6 +31,8 @@ pub struct Tui {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     /// Whether keyboard enhancement (key release detection) is enabled
     keyboard_enhancement_enabled: bool,
+    /// Whether bracketed paste mode is enabled
+    bracketed_paste_enabled: bool,
 }
 
 impl Tui {
@@ -40,6 +43,7 @@ impl Tui {
         Ok(Self {
             terminal,
             keyboard_enhancement_enabled: false,
+            bracketed_paste_enabled: false,
         })
     }
 
@@ -59,6 +63,11 @@ impl Tui {
             self.keyboard_enhancement_enabled = true;
         }
 
+        // Enable bracketed paste mode so paste events are detected
+        if stdout().execute(EnableBracketedPaste).is_ok() {
+            self.bracketed_paste_enabled = true;
+        }
+
         self.terminal.hide_cursor()?;
         self.terminal.clear()?;
         Ok(())
@@ -76,6 +85,12 @@ impl Tui {
                 let _ = event::read();
             }
             self.keyboard_enhancement_enabled = false;
+        }
+
+        // Disable bracketed paste mode
+        if self.bracketed_paste_enabled {
+            let _ = stdout().execute(DisableBracketedPaste);
+            self.bracketed_paste_enabled = false;
         }
 
         // Now restore the terminal
@@ -112,6 +127,11 @@ impl Drop for Tui {
             while event::poll(Duration::from_millis(10)).unwrap_or(false) {
                 let _ = event::read();
             }
+        }
+
+        // Disable bracketed paste mode
+        if self.bracketed_paste_enabled {
+            let _ = stdout().execute(DisableBracketedPaste);
         }
 
         // Now restore the terminal
