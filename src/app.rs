@@ -602,7 +602,7 @@ impl App {
                 self.select_default_base_branch();
             }
             InputMode::Session => {
-                // Send pasted text to PTY with bracketed paste sequences
+                // Send pasted text to PTY (wrapped in brackets if app enabled it)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
                         session.write_paste(text)?;

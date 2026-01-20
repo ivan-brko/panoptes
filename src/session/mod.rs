@@ -324,9 +324,14 @@ impl Session {
         self.pty.write(data)
     }
 
-    /// Write pasted text to the PTY with bracketed paste sequences
+    /// Write pasted text to the PTY
+    /// Wraps in bracketed paste sequences only if the app has enabled it
     pub fn write_paste(&mut self, text: &str) -> anyhow::Result<()> {
-        self.pty.write_paste(text)
+        if self.vterm.bracketed_paste_enabled() {
+            self.pty.write_paste(text)
+        } else {
+            self.pty.write(text.as_bytes())
+        }
     }
 
     /// Send a key event to the PTY

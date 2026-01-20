@@ -190,6 +190,11 @@ impl VirtualTerminal {
         let size = self.parser.screen().size();
         (size.0 as usize, size.1 as usize)
     }
+
+    /// Check if the terminal application has enabled bracketed paste mode
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.parser.screen().bracketed_paste()
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +250,26 @@ mod tests {
         assert_eq!(vt.size(), (10, 40));
         let lines = vt.get_lines();
         assert!(lines[0].starts_with("Hello"));
+    }
+
+    #[test]
+    fn test_bracketed_paste_mode_default() {
+        let vt = VirtualTerminal::new(24, 80);
+        assert!(!vt.bracketed_paste_enabled());
+    }
+
+    #[test]
+    fn test_bracketed_paste_mode_enabled() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"\x1b[?2004h");
+        assert!(vt.bracketed_paste_enabled());
+    }
+
+    #[test]
+    fn test_bracketed_paste_mode_disabled() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"\x1b[?2004h");
+        vt.process(b"\x1b[?2004l");
+        assert!(!vt.bracketed_paste_enabled());
     }
 }
