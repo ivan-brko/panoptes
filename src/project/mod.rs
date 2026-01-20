@@ -31,6 +31,9 @@ pub struct Project {
     pub remote_url: Option<String>,
     /// Default branch name (e.g., "main" or "master")
     pub default_branch: String,
+    /// Default base branch for creating new worktrees (e.g., "origin/develop")
+    #[serde(default)]
+    pub default_base_branch: Option<String>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp
@@ -47,6 +50,7 @@ impl Project {
             repo_path,
             remote_url: None,
             default_branch,
+            default_base_branch: None,
             created_at: now,
             last_activity: now,
         }
@@ -62,6 +66,11 @@ impl Project {
         let mut project = Self::new(name, repo_path, default_branch);
         project.remote_url = Some(remote_url);
         project
+    }
+
+    /// Set the default base branch for creating worktrees
+    pub fn set_default_base_branch(&mut self, base_branch: Option<String>) {
+        self.default_base_branch = base_branch;
     }
 
     /// Update last activity timestamp

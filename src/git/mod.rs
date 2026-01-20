@@ -153,6 +153,118 @@ impl GitOps {
     pub fn repository_mut(&mut self) -> &mut Repository {
         &mut self.repo
     }
+
+    /// Fetch from all remotes
+    ///
+    /// This is a potentially slow operation that should be run in a background task.
+    /// Returns Ok(()) on success, or an error if fetch fails.
+    pub fn fetch_all_remotes(&self) -> Result<()> {
+        let remote_names = self.repo.remotes().context("Failed to list remotes")?;
+
+        for remote_name in remote_names.iter().flatten() {
+            tracing::debug!("Fetching remote: {}", remote_name);
+            let mut remote = self
+                .repo
+                .find_remote(remote_name)
+                .with_context(|| format!("Failed to find remote '{}'", remote_name))?;
+
+            // Fetch with default options
+            remote
+                .fetch(&[] as &[&str], None, None)
+                .with_context(|| format!("Failed to fetch from remote '{}'", remote_name))?;
+        }
+
+        Ok(())
+    }
+
+    /// List all branch refs (local and remote) sorted for UI display
+    ///
+    /// Returns branches sorted with default base first, then local, then remote.
+    /// Within each group, branches are sorted alphabetically.
+    pub fn list_all_branch_refs(&self, default_base: Option<&str>) -> Result<Vec<BranchRefInfo>> {
+        let mut branch_refs = Vec::new();
+
+        // Collect local branches
+        let local_branches = self
+            .repo
+            .branches(Some(BranchType::Local))
+            .context("Failed to list local branches")?;
+
+        for branch_result in local_branches {
+            let (branch, _) = branch_result.context("Failed to get local branch")?;
+            if let Some(name) = branch.name().context("Failed to get branch name")? {
+                let is_default = default_base.is_some_and(|d| d == name);
+                branch_refs.push(BranchRefInfo {
+                    ref_type: BranchRefInfoType::Local,
+                    name: name.to_string(),
+                    is_default_base: is_default,
+                });
+            }
+        }
+
+        // Collect remote branches (excluding HEAD refs)
+        let remote_branches = self
+            .repo
+            .branches(Some(BranchType::Remote))
+            .context("Failed to list remote branches")?;
+
+        for branch_result in remote_branches {
+            let (branch, _) = branch_result.context("Failed to get remote branch")?;
+            if let Some(name) = branch.name().context("Failed to get branch name")? {
+                // Skip HEAD references like "origin/HEAD"
+                if name.ends_with("/HEAD") {
+                    continue;
+                }
+                let is_default = default_base.is_some_and(|d| d == name);
+                branch_refs.push(BranchRefInfo {
+                    ref_type: BranchRefInfoType::Remote,
+                    name: name.to_string(),
+                    is_default_base: is_default,
+                });
+            }
+        }
+
+        // Sort: default base first, then local, then remote (alphabetically within groups)
+        branch_refs.sort_by(|a, b| {
+            // Default base always comes first
+            match (a.is_default_base, b.is_default_base) {
+                (true, false) => return std::cmp::Ordering::Less,
+                (false, true) => return std::cmp::Ordering::Greater,
+                _ => {}
+            }
+
+            // Then sort by type (local before remote)
+            match (&a.ref_type, &b.ref_type) {
+                (BranchRefInfoType::Local, BranchRefInfoType::Remote) => std::cmp::Ordering::Less,
+                (BranchRefInfoType::Remote, BranchRefInfoType::Local) => {
+                    std::cmp::Ordering::Greater
+                }
+                _ => a.name.cmp(&b.name),
+            }
+        });
+
+        Ok(branch_refs)
+    }
+}
+
+/// Type of branch reference
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchRefInfoType {
+    /// Local branch
+    Local,
+    /// Remote tracking branch
+    Remote,
+}
+
+/// Information about a branch reference
+#[derive(Debug, Clone)]
+pub struct BranchRefInfo {
+    /// Type of branch (local or remote)
+    pub ref_type: BranchRefInfoType,
+    /// Full branch name (e.g., "main" or "origin/main")
+    pub name: String,
+    /// Whether this is the default base branch
+    pub is_default_base: bool,
 }
 
 /// Check if a path is inside a git repository

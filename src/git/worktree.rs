@@ -23,9 +23,10 @@ pub struct WorktreeInfo {
 ///
 /// # Arguments
 /// * `repo` - The git repository
-/// * `branch_name` - Name of the branch to check out
+/// * `branch_name` - Name of the branch to check out (or create)
 /// * `worktree_path` - Path where the worktree will be created
 /// * `create_branch` - If true, create the branch if it doesn't exist
+/// * `base_ref` - Optional base reference to branch from (e.g., "origin/develop")
 ///
 /// # Returns
 /// Path to the created worktree
@@ -34,6 +35,7 @@ pub fn create_worktree(
     branch_name: &str,
     worktree_path: &Path,
     create_branch: bool,
+    base_ref: Option<&str>,
 ) -> Result<PathBuf> {
     // Check if worktree path already exists
     if worktree_path.exists() {
@@ -57,9 +59,16 @@ pub fn create_worktree(
 
     if !branch_exists {
         if create_branch {
-            // Create the branch from HEAD
-            let head = repo.head().context("Failed to get HEAD")?;
-            let commit = head.peel_to_commit().context("Failed to get HEAD commit")?;
+            // Determine which commit to branch from
+            let commit = if let Some(base) = base_ref {
+                // Try to resolve the base reference
+                resolve_ref_to_commit(repo, base)?
+            } else {
+                // Default to HEAD
+                let head = repo.head().context("Failed to get HEAD")?;
+                head.peel_to_commit().context("Failed to get HEAD commit")?
+            };
+
             repo.branch(branch_name, &commit, false)
                 .with_context(|| format!("Failed to create branch '{}'", branch_name))?;
         } else {
@@ -82,6 +91,44 @@ pub fn create_worktree(
         .with_context(|| format!("Failed to create worktree at {:?}", worktree_path))?;
 
     Ok(worktree_path.to_path_buf())
+}
+
+/// Resolve a reference (branch name, remote branch, or commit) to a commit
+fn resolve_ref_to_commit<'repo>(
+    repo: &'repo Repository,
+    ref_name: &str,
+) -> Result<git2::Commit<'repo>> {
+    // First try as a local branch
+    if let Ok(branch) = repo.find_branch(ref_name, BranchType::Local) {
+        let reference = branch.into_reference();
+        return reference
+            .peel_to_commit()
+            .context("Failed to resolve local branch to commit");
+    }
+
+    // Try as a remote branch
+    if let Ok(branch) = repo.find_branch(ref_name, BranchType::Remote) {
+        let reference = branch.into_reference();
+        return reference
+            .peel_to_commit()
+            .context("Failed to resolve remote branch to commit");
+    }
+
+    // Try as a direct reference
+    if let Ok(reference) = repo.find_reference(ref_name) {
+        return reference
+            .peel_to_commit()
+            .context("Failed to resolve reference to commit");
+    }
+
+    // Try as a revspec (e.g., "refs/remotes/origin/main")
+    if let Ok(obj) = repo.revparse_single(ref_name) {
+        return obj
+            .peel_to_commit()
+            .with_context(|| format!("Failed to resolve '{}' to commit", ref_name));
+    }
+
+    anyhow::bail!("Could not resolve '{}' to a commit", ref_name)
 }
 
 /// Remove a worktree
@@ -245,8 +292,8 @@ mod tests {
         let (temp_dir, repo) = create_test_repo();
         let worktree_dir = temp_dir.path().join("worktrees").join("feature-test");
 
-        // Create a worktree with a new branch
-        let path = create_worktree(&repo, "feature-test", &worktree_dir, true).unwrap();
+        // Create a worktree with a new branch (no base_ref)
+        let path = create_worktree(&repo, "feature-test", &worktree_dir, true, None).unwrap();
 
         assert_eq!(path, worktree_dir);
         assert!(worktree_dir.exists());
@@ -268,7 +315,7 @@ mod tests {
         let worktree_dir = temp_dir.path().join("worktrees").join("existing-branch");
 
         // Create worktree for existing branch
-        let path = create_worktree(&repo, "existing-branch", &worktree_dir, false).unwrap();
+        let path = create_worktree(&repo, "existing-branch", &worktree_dir, false, None).unwrap();
 
         assert_eq!(path, worktree_dir);
         assert!(worktree_dir.exists());
@@ -280,7 +327,7 @@ mod tests {
         let worktree_dir = temp_dir.path().join("worktrees").join("nonexistent");
 
         // Should fail when branch doesn't exist and create_branch is false
-        let result = create_worktree(&repo, "nonexistent", &worktree_dir, false);
+        let result = create_worktree(&repo, "nonexistent", &worktree_dir, false, None);
         assert!(result.is_err());
     }
 
@@ -290,7 +337,7 @@ mod tests {
         let worktree_dir = temp_dir.path().join("worktrees").join("to-remove");
 
         // Create a worktree
-        create_worktree(&repo, "to-remove", &worktree_dir, true).unwrap();
+        create_worktree(&repo, "to-remove", &worktree_dir, true, None).unwrap();
         assert!(worktree_dir.exists());
 
         // Remove it (force=true because the worktree is valid/active)
@@ -337,7 +384,7 @@ mod tests {
 
         // Create a worktree for a new branch
         let worktree_dir = temp_dir.path().join("worktrees").join("test-branch");
-        create_worktree(&repo, "test-branch", &worktree_dir, true).unwrap();
+        create_worktree(&repo, "test-branch", &worktree_dir, true, None).unwrap();
 
         assert!(worktree_exists_for_branch(&repo, "test-branch"));
         assert!(!worktree_exists_for_branch(&repo, "nonexistent"));

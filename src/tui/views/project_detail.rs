@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::app::{AppState, InputMode};
+use crate::app::{AppState, BranchRefType, InputMode};
 use crate::config::Config;
 use crate::project::{Project, ProjectId, ProjectStore};
 use crate::session::SessionManager;
@@ -65,7 +65,11 @@ pub fn render_project_detail(
     if state.input_mode == InputMode::ConfirmingProjectDelete {
         render_project_delete_confirmation(frame, chunks[1], state, project, sessions, config);
     } else if state.input_mode == InputMode::CreatingWorktree {
-        render_worktree_creation(frame, chunks[1], state);
+        render_worktree_creation(frame, chunks[1], state, project);
+    } else if state.input_mode == InputMode::SelectingDefaultBase {
+        render_default_base_selection(frame, chunks[1], state);
+    } else if state.input_mode == InputMode::FetchingBranches {
+        render_fetching_branches(frame, chunks[1]);
     } else if let Some(_project) = project {
         let branches = project_store.branches_for_project_sorted(project_id);
 
@@ -163,11 +167,16 @@ pub fn render_project_detail(
     let help_text = match state.input_mode {
         InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         InputMode::CreatingWorktree => {
-            "Type: search | j/k: navigate | Enter: select | Esc: cancel".to_string()
+            "Type: name | j/k: select base | s: set default | Enter: create | Esc: cancel"
+                .to_string()
         }
+        InputMode::SelectingDefaultBase => {
+            "Type: filter | j/k: navigate | Enter: set default | Esc: cancel".to_string()
+        }
+        InputMode::FetchingBranches => "Fetching branches... | Esc: cancel".to_string(),
         _ => {
             let base =
-                "d: delete project | w: new worktree | j/k: navigate | Enter: open branch | Esc: back | q: quit";
+                "w: new worktree | b: set default base | d: delete | j/k: navigate | Enter: open | Esc: back | q: quit";
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
@@ -181,56 +190,173 @@ pub fn render_project_detail(
     frame.render_widget(footer, chunks[2]);
 }
 
-/// Render the worktree creation dialog with branch selector
-fn render_worktree_creation(frame: &mut Frame, area: Rect, state: &AppState) {
+/// Render the worktree creation dialog with base branch selector
+fn render_worktree_creation(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    project: Option<&Project>,
+) {
     let t = theme();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Search input
+            Constraint::Length(3), // Branch name input
+            Constraint::Length(1), // Instructions
+            Constraint::Min(0),    // Base branch list
+        ])
+        .split(area);
+
+    // Branch name input
+    let input_title = if state.new_branch_name.is_empty() {
+        "New Branch Name (leave empty to checkout existing)"
+    } else {
+        "New Branch Name"
+    };
+    let input_text = format!("> {}_", state.new_branch_name);
+    let input = Paragraph::new(input_text)
+        .style(t.input_style())
+        .block(Block::default().borders(Borders::ALL).title(input_title));
+    frame.render_widget(input, chunks[0]);
+
+    // Instructions line
+    let fetch_warning = if state.fetch_error.is_some() {
+        " (fetch failed, showing cached)"
+    } else {
+        ""
+    };
+    let default_info = project
+        .and_then(|p| p.default_base_branch.as_ref())
+        .map(|b| format!(" Default: {}", b))
+        .unwrap_or_default();
+    let instructions = format!(
+        "Select base branch{}{} | s: set as default",
+        fetch_warning, default_info
+    );
+    let instruction_widget = Paragraph::new(instructions).style(Style::default().fg(t.text_muted));
+    frame.render_widget(instruction_widget, chunks[1]);
+
+    // Base branch list
+    let items: Vec<ListItem> = state
+        .filtered_branch_refs
+        .iter()
+        .enumerate()
+        .map(|(i, branch_ref)| {
+            let selected = i == state.base_branch_selector_index;
+            let prefix = if selected { "▶ " } else { "  " };
+            let type_prefix = match branch_ref.ref_type {
+                BranchRefType::Local => "[L]",
+                BranchRefType::Remote => "[R]",
+            };
+            let default_marker = if branch_ref.is_default_base { " *" } else { "" };
+
+            let content = format!(
+                "{}{} {}{}",
+                prefix, type_prefix, branch_ref.name, default_marker
+            );
+
+            let style = if selected {
+                if branch_ref.is_default_base {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    t.selected_style()
+                }
+            } else if branch_ref.is_default_base {
+                Style::default().fg(Color::Cyan)
+            } else if branch_ref.ref_type == BranchRefType::Local {
+                Style::default().fg(t.text)
+            } else {
+                Style::default().fg(t.text_muted)
+            };
+
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let title = format!("Base Branch ({} options)", state.filtered_branch_refs.len());
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+    frame.render_widget(list, chunks[2]);
+}
+
+/// Render the default base branch selection dialog
+fn render_default_base_selection(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Filter input
             Constraint::Min(0),    // Branch list
         ])
         .split(area);
 
-    // Search input
+    // Filter input
     let input_text = format!("> {}_", state.new_branch_name);
     let input = Paragraph::new(input_text).style(t.input_style()).block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Search / New Branch Name"),
+            .title("Filter branches"),
     );
     frame.render_widget(input, chunks[0]);
 
-    // Branch list with "Create new" option
-    let mut items: Vec<ListItem> = Vec::new();
+    // Branch list
+    let items: Vec<ListItem> = state
+        .filtered_branch_refs
+        .iter()
+        .enumerate()
+        .map(|(i, branch_ref)| {
+            let selected = i == state.base_branch_selector_index;
+            let prefix = if selected { "▶ " } else { "  " };
+            let type_prefix = match branch_ref.ref_type {
+                BranchRefType::Local => "[L]",
+                BranchRefType::Remote => "[R]",
+            };
+            let default_marker = if branch_ref.is_default_base {
+                " (current default)"
+            } else {
+                ""
+            };
 
-    // First item: "Create new branch"
-    let create_new_text = if state.new_branch_name.is_empty() {
-        "  + Create new branch (type name above)".to_string()
-    } else {
-        format!("  + Create new branch: '{}'", state.new_branch_name)
-    };
-    let create_style = if state.branch_selector_index == 0 {
-        Style::default().fg(t.active).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(t.text_muted)
-    };
-    items.push(ListItem::new(create_new_text).style(create_style));
+            let content = format!(
+                "{}{} {}{}",
+                prefix, type_prefix, branch_ref.name, default_marker
+            );
 
-    // Filtered branches
-    for (i, branch) in state.filtered_branches.iter().enumerate() {
-        let selected = state.branch_selector_index == i + 1;
-        let prefix = if selected { "▶ " } else { "  " };
-        let style = if selected {
-            t.selected_style()
-        } else {
-            Style::default().fg(t.text)
-        };
-        items.push(ListItem::new(format!("{}{}", prefix, branch)).style(style));
-    }
+            let style = if selected {
+                if branch_ref.is_default_base {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    t.selected_style()
+                }
+            } else if branch_ref.is_default_base {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(t.text)
+            };
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Branches"));
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    let title = format!(
+        "Select Default Base Branch ({} options)",
+        state.filtered_branch_refs.len()
+    );
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, chunks[1]);
+}
+
+/// Render a spinner while fetching branches
+fn render_fetching_branches(frame: &mut Frame, area: Rect) {
+    let t = theme();
+    let content = Paragraph::new("Fetching branches from remotes...")
+        .style(Style::default().fg(t.text_muted))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL).title("Please wait"));
+    frame.render_widget(content, area);
 }
 
 /// Render the project delete confirmation dialog

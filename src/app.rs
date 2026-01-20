@@ -22,6 +22,57 @@ use crate::tui::views::{
 };
 use crate::tui::Tui;
 
+/// Type of branch reference (local or remote)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchRefType {
+    /// Local branch (e.g., "main")
+    Local,
+    /// Remote tracking branch (e.g., "origin/main")
+    Remote,
+}
+
+impl BranchRefType {
+    /// Get display prefix for UI
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            BranchRefType::Local => "[L]",
+            BranchRefType::Remote => "[R]",
+        }
+    }
+}
+
+/// A reference to a git branch (local or remote)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRef {
+    /// Type of branch (local or remote)
+    pub ref_type: BranchRefType,
+    /// Full reference name (e.g., "main" or "origin/main")
+    pub name: String,
+    /// Display name for UI
+    pub display_name: String,
+    /// Whether this is the default base branch
+    pub is_default_base: bool,
+}
+
+impl BranchRef {
+    /// Create a new branch reference
+    pub fn new(ref_type: BranchRefType, name: String) -> Self {
+        let display_name = name.clone();
+        Self {
+            ref_type,
+            name,
+            display_name,
+            is_default_base: false,
+        }
+    }
+
+    /// Mark this branch as the default base
+    pub fn with_default_base(mut self, is_default: bool) -> Self {
+        self.is_default_base = is_default;
+        self
+    }
+}
+
 /// Input mode determines how keyboard input is handled
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
@@ -34,8 +85,12 @@ pub enum InputMode {
     CreatingSession,
     /// Adding a new project - typing path
     AddingProject,
+    /// Fetching branches from git remotes (shows spinner)
+    FetchingBranches,
     /// Creating a new worktree - typing branch name
     CreatingWorktree,
+    /// Selecting default base branch
+    SelectingDefaultBase,
     /// Confirming session deletion
     ConfirmingSessionDelete,
     /// Confirming project deletion
@@ -144,12 +199,20 @@ pub struct AppState {
     pub new_project_path: String,
     /// Buffer for new branch name input (worktree creation)
     pub new_branch_name: String,
-    /// Cached branches from git (for branch selector)
+    /// Cached branches from git (for branch selector) - legacy, keep for compatibility
     pub available_branches: Vec<String>,
-    /// Branches matching current search filter
+    /// Branches matching current search filter - legacy, keep for compatibility
     pub filtered_branches: Vec<String>,
     /// Selected index in branch selector (0 = "Create new")
     pub branch_selector_index: usize,
+    /// Available branch refs (local and remote) for worktree creation
+    pub available_branch_refs: Vec<BranchRef>,
+    /// Filtered branch refs matching search query
+    pub filtered_branch_refs: Vec<BranchRef>,
+    /// Selected index in base branch selector
+    pub base_branch_selector_index: usize,
+    /// Whether git fetch encountered an error (show warning)
+    pub fetch_error: Option<String>,
     /// Session pending deletion (for confirmation dialog)
     pub pending_delete_session: Option<SessionId>,
     /// Project pending deletion (for confirmation dialog)
@@ -259,15 +322,15 @@ impl AppState {
     }
 }
 
-/// Filter branches by fuzzy substring match
-fn filter_branches(branches: &[String], query: &str) -> Vec<String> {
+/// Filter branch refs by fuzzy substring match
+fn filter_branch_refs(branch_refs: &[BranchRef], query: &str) -> Vec<BranchRef> {
     if query.is_empty() {
-        return branches.to_vec();
+        return branch_refs.to_vec();
     }
     let query_lower = query.to_lowercase();
-    branches
+    branch_refs
         .iter()
-        .filter(|b| b.to_lowercase().contains(&query_lower))
+        .filter(|b| b.name.to_lowercase().contains(&query_lower))
         .cloned()
         .collect()
 }
@@ -493,10 +556,25 @@ impl App {
             InputMode::Session => self.handle_session_mode_key(key),
             InputMode::CreatingSession => self.handle_creating_session_key(key),
             InputMode::AddingProject => self.handle_adding_project_key(key),
+            InputMode::FetchingBranches => {
+                // While fetching, only allow Esc to cancel
+                if key.code == KeyCode::Esc {
+                    self.state.input_mode = InputMode::Normal;
+                }
+                Ok(())
+            }
             InputMode::CreatingWorktree => {
                 // Need to get project_id from current view
                 if let View::ProjectDetail(project_id) = self.state.view {
                     self.handle_creating_worktree_key(key, project_id)
+                } else {
+                    Ok(())
+                }
+            }
+            InputMode::SelectingDefaultBase => {
+                // Need to get project_id from current view
+                if let View::ProjectDetail(project_id) = self.state.view {
+                    self.handle_selecting_default_base_key(key, project_id)
                 } else {
                     Ok(())
                 }
@@ -686,22 +764,11 @@ impl App {
             }
             KeyCode::Char('w') => {
                 // Start creating a new worktree
-                self.state.input_mode = InputMode::CreatingWorktree;
-                self.state.new_branch_name.clear();
-                self.state.branch_selector_index = 0;
-
-                // Fetch available branches from git
-                if let Some(project) = self.project_store.get_project(project_id) {
-                    if let Ok(git) = crate::git::GitOps::open(&project.repo_path) {
-                        self.state.available_branches =
-                            git.list_local_branches().unwrap_or_default();
-                    } else {
-                        self.state.available_branches.clear();
-                    }
-                } else {
-                    self.state.available_branches.clear();
-                }
-                self.state.filtered_branches = self.state.available_branches.clone();
+                self.start_worktree_creation(project_id);
+            }
+            KeyCode::Char('b') => {
+                // Set default base branch
+                self.start_default_base_selection(project_id);
             }
             KeyCode::Char('d') => {
                 // Prompt for confirmation before deleting project
@@ -1069,66 +1136,225 @@ impl App {
     }
 
     /// Handle key when creating a new worktree
+    ///
+    /// New flow:
+    /// - Type branch name to create NEW branch (leave empty to checkout existing)
+    /// - Navigate list to select base branch (for new) or target branch (for checkout)
+    /// - Press 's' to set current selection as default base
     fn handle_creating_worktree_key(&mut self, key: KeyEvent, project_id: ProjectId) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
                 // Cancel worktree creation
                 self.state.input_mode = InputMode::Normal;
                 self.state.new_branch_name.clear();
-                self.state.available_branches.clear();
-                self.state.filtered_branches.clear();
+                self.state.available_branch_refs.clear();
+                self.state.filtered_branch_refs.clear();
+                self.state.fetch_error = None;
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 // Navigate up (wrapping)
-                let count = self.state.filtered_branches.len() + 1; // +1 for "Create new"
-                self.state.branch_selector_index = self
-                    .state
-                    .branch_selector_index
-                    .checked_sub(1)
-                    .unwrap_or(count - 1);
+                let count = self.state.filtered_branch_refs.len();
+                if count > 0 {
+                    self.state.base_branch_selector_index = self
+                        .state
+                        .base_branch_selector_index
+                        .checked_sub(1)
+                        .unwrap_or(count - 1);
+                }
             }
             KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
                 // Navigate down (wrapping)
-                let count = self.state.filtered_branches.len() + 1;
-                self.state.branch_selector_index = (self.state.branch_selector_index + 1) % count;
+                let count = self.state.filtered_branch_refs.len();
+                if count > 0 {
+                    self.state.base_branch_selector_index =
+                        (self.state.base_branch_selector_index + 1) % count;
+                }
+            }
+            KeyCode::Char('s') if key.modifiers.is_empty() => {
+                // Set current selection as default base branch
+                if let Some(selected) = self
+                    .state
+                    .filtered_branch_refs
+                    .get(self.state.base_branch_selector_index)
+                {
+                    let branch_name = selected.name.clone();
+                    if let Some(project) = self.project_store.get_project_mut(project_id) {
+                        project.set_default_base_branch(Some(branch_name.clone()));
+                        if let Err(e) = self.project_store.save() {
+                            tracing::error!("Failed to save default base branch: {}", e);
+                            self.state.error_message =
+                                Some(format!("Failed to save default: {}", e));
+                        } else {
+                            // Update the is_default_base flags in our list
+                            for branch_ref in &mut self.state.available_branch_refs {
+                                branch_ref.is_default_base = branch_ref.name == branch_name;
+                            }
+                            self.state.filtered_branch_refs = filter_branch_refs(
+                                &self.state.available_branch_refs,
+                                &self.state.new_branch_name,
+                            );
+                            tracing::info!("Set default base branch to: {}", branch_name);
+                        }
+                    }
+                }
             }
             KeyCode::Enter => {
-                let result = if self.state.branch_selector_index == 0 {
-                    // "Create new branch" selected - use typed name
-                    let branch_name = std::mem::take(&mut self.state.new_branch_name);
-                    if !branch_name.is_empty() {
-                        self.create_worktree(project_id, &branch_name, true)
+                let branch_name_typed = std::mem::take(&mut self.state.new_branch_name);
+                let selected_idx = self.state.base_branch_selector_index;
+                let selected_branch = self.state.filtered_branch_refs.get(selected_idx).cloned();
+
+                let result = if !branch_name_typed.is_empty() {
+                    // Create NEW branch from selected base, then create worktree
+                    let base_ref = selected_branch.map(|b| b.name);
+                    self.create_worktree(project_id, &branch_name_typed, true, base_ref.as_deref())
+                } else if let Some(selected) = selected_branch {
+                    // Checkout existing branch as worktree (empty name = checkout selected)
+                    // For local branches, just create worktree
+                    // For remote branches, need to create tracking branch first
+                    let branch_name = if selected.ref_type == BranchRefType::Remote {
+                        // Extract branch name from remote ref (e.g., "origin/feature" -> "feature")
+                        selected
+                            .name
+                            .split_once('/')
+                            .map(|(_, b)| b.to_string())
+                            .unwrap_or(selected.name.clone())
                     } else {
-                        Ok(())
-                    }
+                        selected.name.clone()
+                    };
+
+                    // For remote branches, we create a new local branch tracking it
+                    let create_branch = selected.ref_type == BranchRefType::Remote;
+                    let base_ref = if create_branch {
+                        Some(selected.name.as_str())
+                    } else {
+                        None
+                    };
+
+                    self.create_worktree(project_id, &branch_name, create_branch, base_ref)
                 } else {
-                    // Existing branch selected
-                    let idx = self.state.branch_selector_index - 1;
-                    if let Some(branch_name) = self.state.filtered_branches.get(idx).cloned() {
-                        self.create_worktree(project_id, &branch_name, false)
-                    } else {
-                        Ok(())
-                    }
+                    Ok(())
                 };
+
                 if let Err(e) = result {
                     tracing::error!("Failed to create worktree: {}", e);
                     self.state.error_message = Some(format!("Failed to create worktree: {}", e));
                 }
                 self.state.input_mode = InputMode::Normal;
-                self.state.available_branches.clear();
-                self.state.filtered_branches.clear();
+                self.state.available_branch_refs.clear();
+                self.state.filtered_branch_refs.clear();
+                self.state.fetch_error = None;
             }
             KeyCode::Backspace => {
                 self.state.new_branch_name.pop();
-                self.state.filtered_branches =
-                    filter_branches(&self.state.available_branches, &self.state.new_branch_name);
-                self.state.branch_selector_index = 0; // Reset to "Create new"
+                self.state.filtered_branch_refs = filter_branch_refs(
+                    &self.state.available_branch_refs,
+                    &self.state.new_branch_name,
+                );
+                // Find and select the default base branch if exists
+                self.select_default_base_branch();
             }
             KeyCode::Char(c) => {
                 self.state.new_branch_name.push(c);
-                self.state.filtered_branches =
-                    filter_branches(&self.state.available_branches, &self.state.new_branch_name);
-                self.state.branch_selector_index = 0; // Reset to "Create new"
+                self.state.filtered_branch_refs = filter_branch_refs(
+                    &self.state.available_branch_refs,
+                    &self.state.new_branch_name,
+                );
+                // Find and select the default base branch if exists
+                self.select_default_base_branch();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Select the default base branch in the filtered list
+    fn select_default_base_branch(&mut self) {
+        // Find index of default base branch in filtered list
+        if let Some(idx) = self
+            .state
+            .filtered_branch_refs
+            .iter()
+            .position(|b| b.is_default_base)
+        {
+            self.state.base_branch_selector_index = idx;
+        } else if !self.state.filtered_branch_refs.is_empty() {
+            // If no default, select first item
+            self.state.base_branch_selector_index = 0;
+        }
+    }
+
+    /// Handle key when selecting default base branch (via 'b' in project view)
+    fn handle_selecting_default_base_key(
+        &mut self,
+        key: KeyEvent,
+        project_id: ProjectId,
+    ) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                // Cancel selection
+                self.state.input_mode = InputMode::Normal;
+                self.state.available_branch_refs.clear();
+                self.state.filtered_branch_refs.clear();
+                self.state.new_branch_name.clear();
+                self.state.fetch_error = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+                let count = self.state.filtered_branch_refs.len();
+                if count > 0 {
+                    self.state.base_branch_selector_index = self
+                        .state
+                        .base_branch_selector_index
+                        .checked_sub(1)
+                        .unwrap_or(count - 1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+                let count = self.state.filtered_branch_refs.len();
+                if count > 0 {
+                    self.state.base_branch_selector_index =
+                        (self.state.base_branch_selector_index + 1) % count;
+                }
+            }
+            KeyCode::Enter => {
+                // Set selected branch as default base
+                if let Some(selected) = self
+                    .state
+                    .filtered_branch_refs
+                    .get(self.state.base_branch_selector_index)
+                {
+                    let branch_name = selected.name.clone();
+                    if let Some(project) = self.project_store.get_project_mut(project_id) {
+                        project.set_default_base_branch(Some(branch_name.clone()));
+                        if let Err(e) = self.project_store.save() {
+                            tracing::error!("Failed to save default base branch: {}", e);
+                            self.state.error_message =
+                                Some(format!("Failed to save default: {}", e));
+                        } else {
+                            tracing::info!("Set default base branch to: {}", branch_name);
+                        }
+                    }
+                }
+                self.state.input_mode = InputMode::Normal;
+                self.state.available_branch_refs.clear();
+                self.state.filtered_branch_refs.clear();
+                self.state.new_branch_name.clear();
+                self.state.fetch_error = None;
+            }
+            KeyCode::Backspace => {
+                self.state.new_branch_name.pop();
+                self.state.filtered_branch_refs = filter_branch_refs(
+                    &self.state.available_branch_refs,
+                    &self.state.new_branch_name,
+                );
+                self.select_default_base_branch();
+            }
+            KeyCode::Char(c) => {
+                self.state.new_branch_name.push(c);
+                self.state.filtered_branch_refs = filter_branch_refs(
+                    &self.state.available_branch_refs,
+                    &self.state.new_branch_name,
+                );
+                self.select_default_base_branch();
             }
             _ => {}
         }
@@ -1216,12 +1442,91 @@ impl App {
         Ok(())
     }
 
+    /// Start worktree creation flow: fetch branches, then show dialog
+    fn start_worktree_creation(&mut self, project_id: ProjectId) {
+        self.state.new_branch_name.clear();
+        self.state.base_branch_selector_index = 0;
+        self.state.fetch_error = None;
+
+        // Fetch branches (synchronous for now - could be made async)
+        self.fetch_and_populate_branch_refs(project_id);
+
+        // Transition to worktree creation mode
+        self.state.input_mode = InputMode::CreatingWorktree;
+    }
+
+    /// Start default base branch selection flow
+    fn start_default_base_selection(&mut self, project_id: ProjectId) {
+        self.state.new_branch_name.clear();
+        self.state.base_branch_selector_index = 0;
+        self.state.fetch_error = None;
+
+        // Fetch branches (synchronous for now)
+        self.fetch_and_populate_branch_refs(project_id);
+
+        // Transition to selection mode
+        self.state.input_mode = InputMode::SelectingDefaultBase;
+    }
+
+    /// Fetch remotes and populate branch refs for a project
+    fn fetch_and_populate_branch_refs(&mut self, project_id: ProjectId) {
+        let Some(project) = self.project_store.get_project(project_id) else {
+            self.state.available_branch_refs.clear();
+            self.state.filtered_branch_refs.clear();
+            return;
+        };
+
+        let Ok(git) = crate::git::GitOps::open(&project.repo_path) else {
+            self.state.available_branch_refs.clear();
+            self.state.filtered_branch_refs.clear();
+            return;
+        };
+
+        // Try to fetch from remotes (may fail if offline, continue anyway)
+        if let Err(e) = git.fetch_all_remotes() {
+            tracing::warn!("Failed to fetch remotes: {}", e);
+            self.state.fetch_error = Some(format!("Fetch failed: {}", e));
+        }
+
+        // Get all branch refs
+        let default_base = project.default_base_branch.as_deref();
+        match git.list_all_branch_refs(default_base) {
+            Ok(refs) => {
+                // Convert git::BranchRefInfo to app::BranchRef
+                self.state.available_branch_refs = refs
+                    .into_iter()
+                    .map(|r| {
+                        let ref_type = match r.ref_type {
+                            crate::git::BranchRefInfoType::Local => BranchRefType::Local,
+                            crate::git::BranchRefInfoType::Remote => BranchRefType::Remote,
+                        };
+                        BranchRef {
+                            ref_type,
+                            name: r.name.clone(),
+                            display_name: r.name,
+                            is_default_base: r.is_default_base,
+                        }
+                    })
+                    .collect();
+                self.state.filtered_branch_refs = self.state.available_branch_refs.clone();
+                // Select the default base branch
+                self.select_default_base_branch();
+            }
+            Err(e) => {
+                tracing::error!("Failed to list branches: {}", e);
+                self.state.available_branch_refs.clear();
+                self.state.filtered_branch_refs.clear();
+            }
+        }
+    }
+
     /// Create a worktree for a branch
     fn create_worktree(
         &mut self,
         project_id: ProjectId,
         branch_name: &str,
         create_branch: bool,
+        base_ref: Option<&str>,
     ) -> Result<()> {
         if let Some(project) = self.project_store.get_project(project_id) {
             let git = crate::git::GitOps::open(&project.repo_path)?;
@@ -1235,6 +1540,7 @@ impl App {
                 branch_name,
                 &worktree_path,
                 create_branch,
+                base_ref,
             )?;
 
             let branch = crate::project::Branch::new(
