@@ -18,7 +18,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use ratatui::prelude::*;
-use std::io::{self, stdout};
+use std::io::{self, stdout, Write};
 
 /// Terminal UI wrapper
 ///
@@ -63,15 +63,18 @@ impl Tui {
 
     /// Exit TUI mode (restore terminal)
     pub fn exit(&mut self) -> Result<()> {
-        // Disable keyboard enhancement if it was enabled
+        self.terminal.show_cursor()?;
+        stdout().execute(LeaveAlternateScreen)?;
+        disable_raw_mode()?;
+
+        // Disable keyboard enhancement AFTER restoring terminal
+        // to prevent escape sequence responses from leaking
         if self.keyboard_enhancement_enabled {
+            let _ = stdout().flush();
             let _ = stdout().execute(PopKeyboardEnhancementFlags);
             self.keyboard_enhancement_enabled = false;
         }
 
-        self.terminal.show_cursor()?;
-        stdout().execute(LeaveAlternateScreen)?;
-        disable_raw_mode()?;
         Ok(())
     }
 
@@ -92,15 +95,17 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
-        // Disable keyboard enhancement if it was enabled
-        if self.keyboard_enhancement_enabled {
-            let _ = stdout().execute(PopKeyboardEnhancementFlags);
-        }
-
-        // Attempt to restore terminal state on drop
+        // Restore terminal state first
         let _ = self.terminal.show_cursor();
         let _ = stdout().execute(LeaveAlternateScreen);
         let _ = disable_raw_mode();
+
+        // Disable keyboard enhancement AFTER restoring terminal
+        // to prevent escape sequence responses from leaking
+        if self.keyboard_enhancement_enabled {
+            let _ = stdout().flush();
+            let _ = stdout().execute(PopKeyboardEnhancementFlags);
+        }
     }
 }
 
