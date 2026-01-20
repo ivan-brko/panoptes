@@ -483,8 +483,8 @@ impl App {
         }
 
         // Global: Jump to next session needing attention (Space key)
-        // Works in all modes except Session mode (where keys go to PTY)
-        if key.code == KeyCode::Char(' ') && self.state.input_mode != InputMode::Session {
+        // Only works in Normal mode (not in text input modes or Session mode)
+        if key.code == KeyCode::Char(' ') && self.state.input_mode == InputMode::Normal {
             return self.jump_to_next_attention();
         }
 
@@ -1260,6 +1260,9 @@ impl App {
         if let Some(session) = attention_sessions.first() {
             let session_id = session.info.id;
             self.state.navigate_to_session(session_id);
+            // Don't auto-activate - stay in Normal mode so user can press Space again
+            // to browse other sessions needing attention
+            self.state.input_mode = InputMode::Normal;
             self.sessions.acknowledge_attention(session_id);
             if self.config.notification_method == "title" {
                 SessionManager::reset_terminal_title();
