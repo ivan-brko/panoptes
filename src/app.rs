@@ -1064,6 +1064,10 @@ impl App {
 
     /// Handle key while creating a new session
     fn handle_creating_session_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Esc => {
                 // Cancel session creation
@@ -1164,6 +1168,10 @@ impl App {
 
     /// Handle key when adding a new project (path input step)
     fn handle_adding_project_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Esc => {
                 // Cancel project addition
@@ -1252,6 +1260,10 @@ impl App {
 
     /// Handle key when entering project name (second step of project addition)
     fn handle_adding_project_name_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Esc => {
                 // Cancel project addition entirely
@@ -1338,6 +1350,10 @@ impl App {
     /// - Navigate list to select base branch (for new) or target branch (for checkout)
     /// - Press 's' to set current selection as default base
     fn handle_creating_worktree_key(&mut self, key: KeyEvent, project_id: ProjectId) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Esc => {
                 // Cancel worktree creation
@@ -1485,6 +1501,10 @@ impl App {
         key: KeyEvent,
         project_id: ProjectId,
     ) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Esc => {
                 // Cancel selection
