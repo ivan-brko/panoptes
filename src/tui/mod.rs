@@ -10,7 +10,9 @@ pub use theme::{theme, Theme};
 
 use anyhow::Result;
 use crossterm::{
-    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    event::{
+        self, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     terminal::{
         disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
         LeaveAlternateScreen,
@@ -19,6 +21,7 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 use std::io::{self, stdout, Write};
+use std::time::Duration;
 
 /// Terminal UI wrapper
 ///
@@ -63,17 +66,22 @@ impl Tui {
 
     /// Exit TUI mode (restore terminal)
     pub fn exit(&mut self) -> Result<()> {
+        // Pop keyboard enhancement FIRST (while still in raw mode)
+        // The terminal may send a response sequence, which we need to consume
+        if self.keyboard_enhancement_enabled {
+            let _ = stdout().execute(PopKeyboardEnhancementFlags);
+            let _ = stdout().flush();
+            // Drain any pending terminal responses (CSI u sequences)
+            while event::poll(Duration::from_millis(10)).unwrap_or(false) {
+                let _ = event::read();
+            }
+            self.keyboard_enhancement_enabled = false;
+        }
+
+        // Now restore the terminal
         self.terminal.show_cursor()?;
         stdout().execute(LeaveAlternateScreen)?;
         disable_raw_mode()?;
-
-        // Disable keyboard enhancement AFTER restoring terminal
-        // to prevent escape sequence responses from leaking
-        if self.keyboard_enhancement_enabled {
-            let _ = stdout().flush();
-            let _ = stdout().execute(PopKeyboardEnhancementFlags);
-            self.keyboard_enhancement_enabled = false;
-        }
 
         Ok(())
     }
@@ -95,17 +103,21 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
-        // Restore terminal state first
+        // Pop keyboard enhancement FIRST (while still in raw mode)
+        // The terminal may send a response sequence, which we need to consume
+        if self.keyboard_enhancement_enabled {
+            let _ = stdout().execute(PopKeyboardEnhancementFlags);
+            let _ = stdout().flush();
+            // Drain any pending terminal responses (CSI u sequences)
+            while event::poll(Duration::from_millis(10)).unwrap_or(false) {
+                let _ = event::read();
+            }
+        }
+
+        // Now restore the terminal
         let _ = self.terminal.show_cursor();
         let _ = stdout().execute(LeaveAlternateScreen);
         let _ = disable_raw_mode();
-
-        // Disable keyboard enhancement AFTER restoring terminal
-        // to prevent escape sequence responses from leaking
-        if self.keyboard_enhancement_enabled {
-            let _ = stdout().flush();
-            let _ = stdout().execute(PopKeyboardEnhancementFlags);
-        }
     }
 }
 
