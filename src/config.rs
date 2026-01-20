@@ -38,6 +38,10 @@ pub struct Config {
     /// Notification method: "bell" (terminal bell), "title" (update terminal title), "none"
     #[serde(default = "default_notification_method")]
     pub notification_method: String,
+
+    /// Esc hold threshold in milliseconds for exiting session mode (default: 400ms)
+    #[serde(default = "default_esc_hold_threshold_ms")]
+    pub esc_hold_threshold_ms: u64,
 }
 
 fn default_idle_threshold() -> u64 {
@@ -60,6 +64,10 @@ fn default_notification_method() -> String {
     "bell".to_string()
 }
 
+fn default_esc_hold_threshold_ms() -> u64 {
+    400
+}
+
 impl Default for Config {
     fn default() -> Self {
         let base = config_dir();
@@ -73,6 +81,7 @@ impl Default for Config {
             exited_retention_secs: default_exited_retention(),
             theme_preset: default_theme_preset(),
             notification_method: default_notification_method(),
+            esc_hold_threshold_ms: default_esc_hold_threshold_ms(),
         }
     }
 }

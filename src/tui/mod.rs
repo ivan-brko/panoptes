@@ -10,7 +10,11 @@ pub use theme::{theme, Theme};
 
 use anyhow::Result;
 use crossterm::{
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
     ExecutableCommand,
 };
 use ratatui::prelude::*;
@@ -21,6 +25,8 @@ use std::io::{self, stdout};
 /// Handles terminal setup, teardown, and provides the rendering surface.
 pub struct Tui {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    /// Whether keyboard enhancement (key release detection) is enabled
+    keyboard_enhancement_enabled: bool,
 }
 
 impl Tui {
@@ -28,13 +34,28 @@ impl Tui {
     pub fn new() -> Result<Self> {
         let backend = CrosstermBackend::new(stdout());
         let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            keyboard_enhancement_enabled: false,
+        })
     }
 
     /// Enter TUI mode (raw mode + alternate screen)
     pub fn enter(&mut self) -> Result<()> {
         enable_raw_mode()?;
         stdout().execute(EnterAlternateScreen)?;
+
+        // Enable keyboard enhancement for key release detection (if supported)
+        if supports_keyboard_enhancement().unwrap_or(false)
+            && stdout()
+                .execute(PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+                ))
+                .is_ok()
+        {
+            self.keyboard_enhancement_enabled = true;
+        }
+
         self.terminal.hide_cursor()?;
         self.terminal.clear()?;
         Ok(())
@@ -42,6 +63,12 @@ impl Tui {
 
     /// Exit TUI mode (restore terminal)
     pub fn exit(&mut self) -> Result<()> {
+        // Disable keyboard enhancement if it was enabled
+        if self.keyboard_enhancement_enabled {
+            let _ = stdout().execute(PopKeyboardEnhancementFlags);
+            self.keyboard_enhancement_enabled = false;
+        }
+
         self.terminal.show_cursor()?;
         stdout().execute(LeaveAlternateScreen)?;
         disable_raw_mode()?;
@@ -65,6 +92,11 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
+        // Disable keyboard enhancement if it was enabled
+        if self.keyboard_enhancement_enabled {
+            let _ = stdout().execute(PopKeyboardEnhancementFlags);
+        }
+
         // Attempt to restore terminal state on drop
         let _ = self.terminal.show_cursor();
         let _ = stdout().execute(LeaveAlternateScreen);

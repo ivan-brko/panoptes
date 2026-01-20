@@ -323,6 +323,7 @@ mod tests {
             exited_retention_secs: 300,
             theme_preset: "dark".to_string(),
             notification_method: "bell".to_string(),
+            esc_hold_threshold_ms: 400,
         };
         let session_id = Uuid::new_v4();
         let spawn_config = SpawnConfig {
@@ -363,6 +364,7 @@ mod tests {
             exited_retention_secs: 300,
             theme_preset: "dark".to_string(),
             notification_method: "bell".to_string(),
+            esc_hold_threshold_ms: 400,
         };
 
         let event_scripts = ClaudeCodeAdapter::install_hook_script(&config).unwrap();
@@ -463,6 +465,7 @@ mod tests {
             exited_retention_secs: 300,
             theme_preset: "dark".to_string(),
             notification_method: "bell".to_string(),
+            esc_hold_threshold_ms: 400,
         };
         let spawn_config = test_spawn_config(temp_dir.path().to_path_buf());
 
