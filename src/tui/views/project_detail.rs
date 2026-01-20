@@ -71,6 +71,8 @@ pub fn render_project_detail(
         render_default_base_selection(frame, chunks[1], state);
     } else if state.input_mode == InputMode::FetchingBranches {
         render_fetching_branches(frame, chunks[1]);
+    } else if state.input_mode == InputMode::RenamingProject {
+        render_rename_dialog(frame, chunks[1], state);
     } else if let Some(_project) = project {
         let branches = project_store.branches_for_project_sorted(project_id);
 
@@ -175,9 +177,10 @@ pub fn render_project_detail(
             "Type: filter | j/k: navigate | Enter: set default | Esc: cancel".to_string()
         }
         InputMode::FetchingBranches => "Fetching branches... | Esc: cancel".to_string(),
+        InputMode::RenamingProject => "Type: project name | Enter: save | Esc: cancel".to_string(),
         _ => {
             let base =
-                "w: new worktree | b: set default base | d: delete | j/k: navigate | Enter: open | Esc: back | q: quit";
+                "w: new worktree | b: set default base | r: rename | d: delete | j/k: navigate | Enter: open | Esc: back | q: quit";
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
@@ -358,6 +361,16 @@ fn render_fetching_branches(frame: &mut Frame, area: Rect) {
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL).title("Please wait"));
     frame.render_widget(content, area);
+}
+
+/// Render the project rename dialog
+fn render_rename_dialog(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
+    let input_text = format!("> {}_", state.new_project_name);
+    let input = Paragraph::new(input_text)
+        .style(t.input_style())
+        .block(Block::default().borders(Borders::ALL).title("Rename Project"));
+    frame.render_widget(input, area);
 }
 
 /// Render the project delete confirmation dialog

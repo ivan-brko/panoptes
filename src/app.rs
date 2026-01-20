@@ -97,6 +97,10 @@ pub enum InputMode {
     ConfirmingSessionDelete,
     /// Confirming project deletion
     ConfirmingProjectDelete,
+    /// Confirming application quit
+    ConfirmingQuit,
+    /// Renaming a project
+    RenamingProject,
 }
 
 /// Current view being displayed
@@ -233,6 +237,8 @@ pub struct AppState {
     pub pending_delete_session: Option<SessionId>,
     /// Project pending deletion (for confirmation dialog)
     pub pending_delete_project: Option<ProjectId>,
+    /// Project being renamed
+    pub renaming_project: Option<ProjectId>,
     /// Whether the application should quit
     pub should_quit: bool,
     /// Whether the UI needs to be re-rendered
@@ -243,6 +249,10 @@ pub struct AppState {
     pub error_message: Option<String>,
     /// Timestamp when Esc was pressed in session mode (for hold-to-exit detection)
     pub esc_press_time: Option<Instant>,
+    /// Timestamp of last resize event (for debouncing)
+    pub last_resize: Option<Instant>,
+    /// Whether a resize is pending (debounced)
+    pub pending_resize: bool,
 }
 
 impl AppState {
@@ -462,11 +472,24 @@ impl App {
                         self.state.needs_render = true;
                     }
                     Event::Resize(_, _) => {
-                        // Resize active session PTY to match output area
-                        self.resize_active_session_pty()?;
+                        // Debounce resize events - record time and mark pending
+                        // We still need to render (for UI layout), but PTY resize is deferred
+                        self.state.last_resize = Some(Instant::now());
+                        self.state.pending_resize = true;
                         self.state.needs_render = true;
                     }
                     _ => {}
+                }
+            }
+
+            // Process debounced resize: wait 50ms after last resize event before actually resizing
+            if self.state.pending_resize {
+                if let Some(last_resize) = self.state.last_resize {
+                    if last_resize.elapsed() >= Duration::from_millis(50) {
+                        self.state.pending_resize = false;
+                        self.resize_active_session_pty()?;
+                        self.state.needs_render = true;
+                    }
                 }
             }
 
@@ -578,7 +601,7 @@ impl App {
                 self.state.new_project_path.push_str(cleaned);
                 self.update_path_completions();
             }
-            InputMode::AddingProjectName => {
+            InputMode::AddingProjectName | InputMode::RenamingProject => {
                 self.state.new_project_name.push_str(cleaned);
             }
             InputMode::CreatingSession => {
@@ -655,6 +678,8 @@ impl App {
             }
             InputMode::ConfirmingSessionDelete => self.handle_confirming_delete_key(key),
             InputMode::ConfirmingProjectDelete => self.handle_confirming_project_delete_key(key),
+            InputMode::ConfirmingQuit => self.handle_confirming_quit_key(key),
+            InputMode::RenamingProject => self.handle_renaming_project_key(key),
         }
     }
 
@@ -683,7 +708,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => {
-                self.state.should_quit = true;
+                self.state.input_mode = InputMode::ConfirmingQuit;
             }
             KeyCode::Char('t') => {
                 self.state.navigate_to_timeline();
@@ -801,7 +826,7 @@ impl App {
                 self.state.navigate_back();
             }
             KeyCode::Char('q') => {
-                self.state.should_quit = true;
+                self.state.input_mode = InputMode::ConfirmingQuit;
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if branch_count > 0 {
@@ -837,6 +862,14 @@ impl App {
                 // Prompt for confirmation before deleting project
                 self.state.pending_delete_project = Some(project_id);
                 self.state.input_mode = InputMode::ConfirmingProjectDelete;
+            }
+            KeyCode::Char('r') => {
+                // Start renaming project
+                if let Some(project) = self.project_store.get_project(project_id) {
+                    self.state.new_project_name = project.name.clone();
+                    self.state.renaming_project = Some(project_id);
+                    self.state.input_mode = InputMode::RenamingProject;
+                }
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let Some(num) = c.to_digit(10) {
@@ -1236,81 +1269,72 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if self.state.show_path_completions && !self.state.path_completions.is_empty() {
-                    // Apply selected completion
-                    self.apply_path_completion();
-                } else {
-                    // Validate path and transition to name input
-                    self.clear_path_completions();
-                    let path_str = std::mem::take(&mut self.state.new_project_path);
-                    let user_path = PathBuf::from(shellexpand::tilde(&path_str).into_owned());
-                    let user_path = user_path.canonicalize().unwrap_or(user_path);
+                // Always validate path and transition to name input
+                self.clear_path_completions();
+                let path_str = std::mem::take(&mut self.state.new_project_path);
+                let user_path = PathBuf::from(shellexpand::tilde(&path_str).into_owned());
+                let user_path = user_path.canonicalize().unwrap_or(user_path);
 
-                    // Check if it's a git repository
-                    match crate::git::GitOps::discover(&user_path) {
-                        Ok(git) => {
-                            let repo_path = git.repo_path().to_path_buf();
-                            let repo_path = repo_path.canonicalize().unwrap_or(repo_path);
+                // Check if it's a git repository
+                match crate::git::GitOps::discover(&user_path) {
+                    Ok(git) => {
+                        let repo_path = git.repo_path().to_path_buf();
+                        let repo_path = repo_path.canonicalize().unwrap_or(repo_path);
 
-                            // Calculate session_subdir if user_path is inside repo_path
-                            let session_subdir = if user_path != repo_path {
-                                user_path
-                                    .strip_prefix(&repo_path)
-                                    .ok()
-                                    .map(|p| p.to_path_buf())
+                        // Calculate session_subdir if user_path is inside repo_path
+                        let session_subdir = if user_path != repo_path {
+                            user_path
+                                .strip_prefix(&repo_path)
+                                .ok()
+                                .map(|p| p.to_path_buf())
+                        } else {
+                            None
+                        };
+
+                        // Check if already added (with same subdir)
+                        if self
+                            .project_store
+                            .find_by_repo_and_subdir(&repo_path, session_subdir.as_deref())
+                            .is_some()
+                        {
+                            let path_display = if let Some(ref subdir) = session_subdir {
+                                format!("{}/{}", repo_path.display(), subdir.display())
                             } else {
-                                None
+                                repo_path.display().to_string()
                             };
-
-                            // Check if already added (with same subdir)
-                            if self
-                                .project_store
-                                .find_by_repo_and_subdir(&repo_path, session_subdir.as_deref())
-                                .is_some()
-                            {
-                                let path_display = if let Some(ref subdir) = session_subdir {
-                                    format!("{}/{}", repo_path.display(), subdir.display())
-                                } else {
-                                    repo_path.display().to_string()
-                                };
-                                self.state.error_message =
-                                    Some(format!("Project already exists: {}", path_display));
-                                tracing::warn!("Project already exists: {}", path_display);
-                                self.state.input_mode = InputMode::Normal;
-                                return Ok(());
-                            }
-
-                            // Get default branch
-                            let default_branch = git
-                                .default_branch_name()
-                                .unwrap_or_else(|_| "main".to_string());
-
-                            // Compute default project name from subdir folder or repo folder
-                            let default_name = session_subdir
-                                .as_ref()
-                                .and_then(|s| s.file_name())
-                                .or_else(|| repo_path.file_name())
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-
-                            // Store pending values and transition to name input
-                            self.state.pending_project_path = repo_path;
-                            self.state.pending_session_subdir = session_subdir;
-                            self.state.pending_default_branch = default_branch;
-                            self.state.new_project_name = default_name;
-                            self.state.input_mode = InputMode::AddingProjectName;
-                        }
-                        Err(e) => {
                             self.state.error_message =
-                                Some(format!("Not a git repository: {}", user_path.display()));
-                            tracing::error!(
-                                "Not a git repository: {} ({})",
-                                user_path.display(),
-                                e
-                            );
+                                Some(format!("Project already exists: {}", path_display));
+                            tracing::warn!("Project already exists: {}", path_display);
                             self.state.input_mode = InputMode::Normal;
+                            return Ok(());
                         }
+
+                        // Get default branch
+                        let default_branch = git
+                            .default_branch_name()
+                            .unwrap_or_else(|_| "main".to_string());
+
+                        // Compute default project name from subdir folder or repo folder
+                        let default_name = session_subdir
+                            .as_ref()
+                            .and_then(|s| s.file_name())
+                            .or_else(|| repo_path.file_name())
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+
+                        // Store pending values and transition to name input
+                        self.state.pending_project_path = repo_path;
+                        self.state.pending_session_subdir = session_subdir;
+                        self.state.pending_default_branch = default_branch;
+                        self.state.new_project_name = default_name;
+                        self.state.input_mode = InputMode::AddingProjectName;
+                    }
+                    Err(e) => {
+                        self.state.error_message =
+                            Some(format!("Not a git repository: {}", user_path.display()));
+                        tracing::error!("Not a git repository: {} ({})", user_path.display(), e);
+                        self.state.input_mode = InputMode::Normal;
                     }
                 }
             }
@@ -1758,6 +1782,60 @@ impl App {
                 // Cancel deletion
                 self.state.pending_delete_project = None;
                 self.state.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key while confirming quit
+    fn handle_confirming_quit_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                // Confirm quit
+                self.state.should_quit = true;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                // Cancel quit
+                self.state.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key while renaming a project
+    fn handle_renaming_project_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.state.input_mode = InputMode::Normal;
+                self.state.new_project_name.clear();
+                self.state.renaming_project = None;
+            }
+            KeyCode::Enter => {
+                if let Some(project_id) = self.state.renaming_project {
+                    let new_name = self.state.new_project_name.trim().to_string();
+                    if !new_name.is_empty() {
+                        if let Some(project) = self.project_store.get_project_mut(project_id) {
+                            project.name = new_name;
+                        }
+                        if let Err(e) = self.project_store.save() {
+                            self.state.error_message = Some(format!("Failed to save: {}", e));
+                        }
+                    }
+                }
+                self.state.input_mode = InputMode::Normal;
+                self.state.new_project_name.clear();
+                self.state.renaming_project = None;
+            }
+            KeyCode::Backspace => {
+                self.state.new_project_name.pop();
+            }
+            KeyCode::Char(c) => {
+                self.state.new_project_name.push(c);
             }
             _ => {}
         }
