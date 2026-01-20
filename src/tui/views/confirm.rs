@@ -107,3 +107,61 @@ pub fn render_confirm_dialog(frame: &mut Frame, area: Rect, config: ConfirmDialo
 
     frame.render_widget(paragraph, area);
 }
+
+/// Render a quit confirmation dialog
+///
+/// Centered dialog asking user to confirm quitting the application.
+/// Uses the same styling as other confirmation dialogs.
+pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
+    let t = theme();
+
+    // Calculate centered dialog area (smaller than delete dialogs)
+    let dialog_width = 40_u16.min(area.width.saturating_sub(4));
+    let dialog_height = 7_u16.min(area.height.saturating_sub(2));
+
+    let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+    let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+
+    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+
+    // Clear the background
+    frame.render_widget(ratatui::widgets::Clear, dialog_area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Quit Panoptes?",
+            Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Press ", Style::default().fg(t.text)),
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to confirm, ", Style::default().fg(t.text)),
+            Span::styled(
+                "n",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" or ", Style::default().fg(t.text)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to cancel", Style::default().fg(t.text)),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.border_warning))
+            .title("Confirm Quit"),
+    );
+
+    frame.render_widget(paragraph, dialog_area);
+}

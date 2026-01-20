@@ -14,6 +14,7 @@ use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::theme::theme;
 use crate::tui::views::format_attention_hint;
 use crate::tui::views::render_project_delete_confirmation;
+use crate::tui::views::render_quit_confirm_dialog;
 
 /// Render the projects overview
 pub fn render_projects_overview(
@@ -164,6 +165,7 @@ pub fn render_projects_overview(
         }
         InputMode::AddingProjectName => "Enter: create project | Esc: cancel".to_string(),
         InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
+        InputMode::ConfirmingQuit => "y/Enter: quit | n/Esc: cancel".to_string(),
         _ => {
             let base = if project_store.project_count() > 0 {
                 "n: new project | d: delete | t: timeline | j/k: navigate | Enter: open | q: quit"
@@ -183,6 +185,11 @@ pub fn render_projects_overview(
         .style(t.muted_style())
         .block(Block::default().borders(Borders::TOP));
     frame.render_widget(footer, chunks[footer_index]);
+
+    // Render quit confirmation dialog as overlay
+    if state.input_mode == InputMode::ConfirmingQuit {
+        render_quit_confirm_dialog(frame, area);
+    }
 }
 
 /// Render the "Needs Attention" section
