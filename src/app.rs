@@ -247,8 +247,6 @@ pub struct AppState {
     pub dropped_events_count: u64,
     /// Error message to display to the user (cleared on next keypress)
     pub error_message: Option<String>,
-    /// Timestamp when Esc was pressed in session mode (for hold-to-exit detection)
-    pub esc_press_time: Option<Instant>,
     /// Timestamp of last resize event (for debouncing)
     pub last_resize: Option<Instant>,
     /// Whether a resize is pending (debounced)
@@ -488,19 +486,6 @@ impl App {
                     if last_resize.elapsed() >= Duration::from_millis(50) {
                         self.state.pending_resize = false;
                         self.resize_active_session_pty()?;
-                        self.state.needs_render = true;
-                    }
-                }
-            }
-
-            // Fallback for terminals without keyboard enhancement:
-            // If Esc was pressed in session mode and threshold has elapsed, exit session mode
-            if self.state.input_mode == InputMode::Session {
-                if let Some(press_time) = self.state.esc_press_time {
-                    let threshold = Duration::from_millis(self.config.esc_hold_threshold_ms);
-                    if press_time.elapsed() >= threshold {
-                        self.state.esc_press_time = None;
-                        self.state.input_mode = InputMode::Normal;
                         self.state.needs_render = true;
                     }
                 }
@@ -1041,13 +1026,10 @@ impl App {
 
     /// Handle key in session mode (keys go to PTY)
     fn handle_session_mode_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Handle Esc with hold-to-exit behavior
+        // Handle Esc key
         if key.code == KeyCode::Esc {
             return self.handle_session_mode_esc(key);
         }
-
-        // Clear any pending Esc if another key is pressed
-        self.state.esc_press_time = None;
 
         // Only forward key press events (not release/repeat)
         if key.kind != KeyEventKind::Press {
@@ -1063,29 +1045,19 @@ impl App {
         Ok(())
     }
 
-    /// Handle Esc key in session mode with hold-to-exit behavior
+    /// Handle Esc key in session mode
     fn handle_session_mode_esc(&mut self, key: KeyEvent) -> Result<()> {
-        let threshold = Duration::from_millis(self.config.esc_hold_threshold_ms);
+        // Only handle key press events
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
 
-        match key.kind {
-            KeyEventKind::Press => {
-                // Record press time, don't forward yet
-                self.state.esc_press_time = Some(Instant::now());
-            }
-            KeyEventKind::Release => {
-                if let Some(press_time) = self.state.esc_press_time.take() {
-                    if press_time.elapsed() >= threshold {
-                        // Held long enough - exit session mode
-                        self.state.input_mode = InputMode::Normal;
-                    } else {
-                        // Quick tap - forward Esc to PTY
-                        self.forward_esc_to_pty()?;
-                    }
-                }
-            }
-            KeyEventKind::Repeat => {
-                // Ignore repeats
-            }
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            // Option/Alt+Escape: forward Escape to Claude Code
+            self.forward_esc_to_pty()?;
+        } else {
+            // Plain Escape: exit session mode
+            self.state.input_mode = InputMode::Normal;
         }
         Ok(())
     }

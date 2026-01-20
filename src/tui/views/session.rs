@@ -106,7 +106,7 @@ pub fn render_session_view(
 
     // Footer with help
     let help_text = match state.input_mode {
-        InputMode::Session => "Hold Esc: deactivate | Keys sent to session".to_string(),
+        InputMode::Session => "Esc: deactivate | ⌥Esc: send Esc | Keys sent to session".to_string(),
         _ => {
             let base = "Enter: activate | Tab: next | 1-9: jump | Esc/q: back";
             if let Some(hint) = format_attention_hint(sessions, config) {
