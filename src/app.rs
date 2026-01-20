@@ -1969,9 +1969,7 @@ impl App {
         if let Some(session) = attention_sessions.first() {
             let session_id = session.info.id;
             self.state.navigate_to_session(session_id);
-            // Don't auto-activate - stay in Normal mode so user can press Space again
-            // to browse other sessions needing attention
-            self.state.input_mode = InputMode::Normal;
+            // Auto-enter session mode so user is immediately active in the session
             self.sessions.acknowledge_attention(session_id);
             if self.config.notification_method == "title" {
                 SessionManager::reset_terminal_title();
