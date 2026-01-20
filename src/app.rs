@@ -199,6 +199,12 @@ pub struct AppState {
     pub creating_session_working_dir: Option<PathBuf>,
     /// Buffer for new project path input
     pub new_project_path: String,
+    /// Path completions for autocomplete
+    pub path_completions: Vec<PathBuf>,
+    /// Selected index in path completions list
+    pub path_completion_index: usize,
+    /// Whether to show path completions popup
+    pub show_path_completions: bool,
     /// Buffer for new project name input (optional custom name)
     pub new_project_name: String,
     /// Pending project path (validated repo path) for two-step project addition
@@ -570,6 +576,7 @@ impl App {
         match self.state.input_mode {
             InputMode::AddingProject => {
                 self.state.new_project_path.push_str(cleaned);
+                self.update_path_completions();
             }
             InputMode::AddingProjectName => {
                 self.state.new_project_name.push_str(cleaned);
@@ -1173,84 +1180,151 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => {
-                // Cancel project addition
-                self.state.input_mode = InputMode::Normal;
-                self.state.new_project_path.clear();
+                if self.state.show_path_completions {
+                    // First Esc hides completions
+                    self.clear_path_completions();
+                } else {
+                    // Second Esc cancels input
+                    self.state.input_mode = InputMode::Normal;
+                    self.state.new_project_path.clear();
+                    self.clear_path_completions();
+                }
+            }
+            KeyCode::Tab => {
+                if self.state.show_path_completions {
+                    // Cycle forward through completions
+                    let count = self.state.path_completions.len();
+                    if count > 0 {
+                        self.state.path_completion_index =
+                            (self.state.path_completion_index + 1) % count;
+                    }
+                } else {
+                    // Show completions
+                    self.update_path_completions();
+                }
+            }
+            KeyCode::BackTab => {
+                // Cycle backward through completions
+                if self.state.show_path_completions {
+                    let count = self.state.path_completions.len();
+                    if count > 0 {
+                        self.state.path_completion_index = self
+                            .state
+                            .path_completion_index
+                            .checked_sub(1)
+                            .unwrap_or(count - 1);
+                    }
+                }
+            }
+            KeyCode::Up => {
+                // Navigate up in completions
+                if self.state.show_path_completions {
+                    let count = self.state.path_completions.len();
+                    if count > 0 {
+                        self.state.path_completion_index = self
+                            .state
+                            .path_completion_index
+                            .checked_sub(1)
+                            .unwrap_or(count - 1);
+                    }
+                }
+            }
+            KeyCode::Down => {
+                // Navigate down in completions
+                if self.state.show_path_completions {
+                    let count = self.state.path_completions.len();
+                    if count > 0 {
+                        self.state.path_completion_index =
+                            (self.state.path_completion_index + 1) % count;
+                    }
+                }
             }
             KeyCode::Enter => {
-                // Validate path and transition to name input
-                let path_str = std::mem::take(&mut self.state.new_project_path);
-                let user_path = PathBuf::from(shellexpand::tilde(&path_str).into_owned());
-                let user_path = user_path.canonicalize().unwrap_or(user_path);
+                if self.state.show_path_completions && !self.state.path_completions.is_empty() {
+                    // Apply selected completion
+                    self.apply_path_completion();
+                } else {
+                    // Validate path and transition to name input
+                    self.clear_path_completions();
+                    let path_str = std::mem::take(&mut self.state.new_project_path);
+                    let user_path = PathBuf::from(shellexpand::tilde(&path_str).into_owned());
+                    let user_path = user_path.canonicalize().unwrap_or(user_path);
 
-                // Check if it's a git repository
-                match crate::git::GitOps::discover(&user_path) {
-                    Ok(git) => {
-                        let repo_path = git.repo_path().to_path_buf();
-                        let repo_path = repo_path.canonicalize().unwrap_or(repo_path);
+                    // Check if it's a git repository
+                    match crate::git::GitOps::discover(&user_path) {
+                        Ok(git) => {
+                            let repo_path = git.repo_path().to_path_buf();
+                            let repo_path = repo_path.canonicalize().unwrap_or(repo_path);
 
-                        // Calculate session_subdir if user_path is inside repo_path
-                        let session_subdir = if user_path != repo_path {
-                            user_path
-                                .strip_prefix(&repo_path)
-                                .ok()
-                                .map(|p| p.to_path_buf())
-                        } else {
-                            None
-                        };
-
-                        // Check if already added (with same subdir)
-                        if self
-                            .project_store
-                            .find_by_repo_and_subdir(&repo_path, session_subdir.as_deref())
-                            .is_some()
-                        {
-                            let path_display = if let Some(ref subdir) = session_subdir {
-                                format!("{}/{}", repo_path.display(), subdir.display())
+                            // Calculate session_subdir if user_path is inside repo_path
+                            let session_subdir = if user_path != repo_path {
+                                user_path
+                                    .strip_prefix(&repo_path)
+                                    .ok()
+                                    .map(|p| p.to_path_buf())
                             } else {
-                                repo_path.display().to_string()
+                                None
                             };
-                            self.state.error_message =
-                                Some(format!("Project already exists: {}", path_display));
-                            tracing::warn!("Project already exists: {}", path_display);
-                            self.state.input_mode = InputMode::Normal;
-                            return Ok(());
+
+                            // Check if already added (with same subdir)
+                            if self
+                                .project_store
+                                .find_by_repo_and_subdir(&repo_path, session_subdir.as_deref())
+                                .is_some()
+                            {
+                                let path_display = if let Some(ref subdir) = session_subdir {
+                                    format!("{}/{}", repo_path.display(), subdir.display())
+                                } else {
+                                    repo_path.display().to_string()
+                                };
+                                self.state.error_message =
+                                    Some(format!("Project already exists: {}", path_display));
+                                tracing::warn!("Project already exists: {}", path_display);
+                                self.state.input_mode = InputMode::Normal;
+                                return Ok(());
+                            }
+
+                            // Get default branch
+                            let default_branch = git
+                                .default_branch_name()
+                                .unwrap_or_else(|_| "main".to_string());
+
+                            // Compute default project name from subdir folder or repo folder
+                            let default_name = session_subdir
+                                .as_ref()
+                                .and_then(|s| s.file_name())
+                                .or_else(|| repo_path.file_name())
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+
+                            // Store pending values and transition to name input
+                            self.state.pending_project_path = repo_path;
+                            self.state.pending_session_subdir = session_subdir;
+                            self.state.pending_default_branch = default_branch;
+                            self.state.new_project_name = default_name;
+                            self.state.input_mode = InputMode::AddingProjectName;
                         }
-
-                        // Get default branch
-                        let default_branch = git
-                            .default_branch_name()
-                            .unwrap_or_else(|_| "main".to_string());
-
-                        // Compute default project name from subdir folder or repo folder
-                        let default_name = session_subdir
-                            .as_ref()
-                            .and_then(|s| s.file_name())
-                            .or_else(|| repo_path.file_name())
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-
-                        // Store pending values and transition to name input
-                        self.state.pending_project_path = repo_path;
-                        self.state.pending_session_subdir = session_subdir;
-                        self.state.pending_default_branch = default_branch;
-                        self.state.new_project_name = default_name;
-                        self.state.input_mode = InputMode::AddingProjectName;
-                    }
-                    Err(e) => {
-                        self.state.error_message =
-                            Some(format!("Not a git repository: {}", user_path.display()));
-                        tracing::error!("Not a git repository: {} ({})", user_path.display(), e);
-                        self.state.input_mode = InputMode::Normal;
+                        Err(e) => {
+                            self.state.error_message =
+                                Some(format!("Not a git repository: {}", user_path.display()));
+                            tracing::error!(
+                                "Not a git repository: {} ({})",
+                                user_path.display(),
+                                e
+                            );
+                            self.state.input_mode = InputMode::Normal;
+                        }
                     }
                 }
             }
             KeyCode::Backspace => {
                 self.state.new_project_path.pop();
+                self.update_path_completions();
             }
             KeyCode::Char(c) => {
                 self.state.new_project_path.push(c);
+                self.update_path_completions();
             }
             _ => {}
         }
@@ -1491,6 +1565,34 @@ impl App {
         } else if !self.state.filtered_branch_refs.is_empty() {
             // If no default, select first item
             self.state.base_branch_selector_index = 0;
+        }
+    }
+
+    /// Update path completions based on current input
+    fn update_path_completions(&mut self) {
+        let completions = crate::path_complete::get_completions(&self.state.new_project_path);
+        self.state.path_completions = completions;
+        self.state.path_completion_index = 0;
+        self.state.show_path_completions = !self.state.path_completions.is_empty();
+    }
+
+    /// Clear path completion state
+    fn clear_path_completions(&mut self) {
+        self.state.path_completions.clear();
+        self.state.path_completion_index = 0;
+        self.state.show_path_completions = false;
+    }
+
+    /// Apply the selected completion to the input field
+    fn apply_path_completion(&mut self) {
+        if let Some(path) = self
+            .state
+            .path_completions
+            .get(self.state.path_completion_index)
+        {
+            self.state.new_project_path = crate::path_complete::path_to_input(path);
+            // After applying, refresh completions for the new path
+            self.update_path_completions();
         }
     }
 
@@ -1861,7 +1963,7 @@ impl App {
                     );
                 }
                 View::SessionView => {
-                    render_session_view(frame, area, state, sessions, config);
+                    render_session_view(frame, area, state, sessions, project_store, config);
                 }
                 View::ActivityTimeline => {
                     render_timeline(frame, area, state, sessions, project_store, config);

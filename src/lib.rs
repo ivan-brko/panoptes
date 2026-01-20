@@ -7,6 +7,7 @@ pub mod app;
 pub mod config;
 pub mod git;
 pub mod hooks;
+pub mod path_complete;
 pub mod project;
 pub mod session;
 pub mod tui;

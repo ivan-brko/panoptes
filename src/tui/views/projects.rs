@@ -159,7 +159,9 @@ pub fn render_projects_overview(
     let footer_index = chunks.len() - 1;
     let help_text = match state.input_mode {
         InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
-        InputMode::AddingProject => "Enter: validate path | Esc: cancel".to_string(),
+        InputMode::AddingProject => {
+            "Tab: autocomplete | Enter: select/validate | Esc: cancel".to_string()
+        }
         InputMode::AddingProjectName => "Enter: create project | Esc: cancel".to_string(),
         InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         _ => {
@@ -252,15 +254,93 @@ fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(input, area);
 }
 
-/// Render the project addition input
+/// Render the project addition input with path completion
 fn render_project_addition(frame: &mut Frame, area: Rect, state: &AppState) {
     let t = theme();
-    let hint = "Enter the path to a git repository (~ expansion supported):";
+
+    // Calculate layout: input area + completions list
+    let show_completions = state.show_path_completions && !state.path_completions.is_empty();
+    let completions_height = if show_completions {
+        // Show up to 8 completions
+        (state.path_completions.len().min(8) + 2) as u16
+    } else {
+        0
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6), // Input area (hint + input line)
+            Constraint::Length(completions_height),
+            Constraint::Min(0), // Spacer
+        ])
+        .split(area);
+
+    // Input area
+    let hint = "Enter path to git repository (Tab: autocomplete, ~/):";
     let input_text = format!("{}\n\n> {}_", hint, state.new_project_path);
     let input = Paragraph::new(input_text)
         .style(t.input_style())
         .block(Block::default().borders(Borders::ALL).title("Add Project"));
-    frame.render_widget(input, area);
+    frame.render_widget(input, chunks[0]);
+
+    // Completions list
+    if show_completions {
+        let completions = &state.path_completions;
+        let selected_idx = state.path_completion_index;
+
+        // Calculate visible range with scroll
+        let max_visible = 8;
+        let total = completions.len();
+        let (start, end) = if total <= max_visible {
+            (0, total)
+        } else {
+            // Keep selected item visible with some context
+            let half = max_visible / 2;
+            let start = if selected_idx < half {
+                0
+            } else if selected_idx >= total - half {
+                total - max_visible
+            } else {
+                selected_idx - half
+            };
+            (start, start + max_visible)
+        };
+
+        let items: Vec<ListItem> = completions[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                let actual_idx = start + i;
+                let is_selected = actual_idx == selected_idx;
+                let prefix = if is_selected { "▶ " } else { "  " };
+                let display = crate::path_complete::path_to_display(path);
+                let content = format!("{}{}/", prefix, display);
+
+                let style = if is_selected {
+                    t.selected_style()
+                } else {
+                    Style::default().fg(t.text)
+                };
+                ListItem::new(content).style(style)
+            })
+            .collect();
+
+        // Build title with scroll indicator
+        let title = if total > max_visible {
+            format!("Completions ({}/{}) ↑↓", selected_idx + 1, total)
+        } else {
+            format!("Completions ({})", total)
+        };
+
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(t.border_focused)),
+        );
+        frame.render_widget(list, chunks[1]);
+    }
 }
 
 /// Render the project name input (second step of project addition)

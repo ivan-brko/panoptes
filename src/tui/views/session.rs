@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{AppState, InputMode};
 use crate::config::Config;
+use crate::project::ProjectStore;
 use crate::session::{SessionManager, SessionState};
 use crate::tui::theme::theme;
 use crate::tui::views::format_attention_hint;
@@ -17,6 +18,7 @@ pub fn render_session_view(
     area: Rect,
     state: &AppState,
     sessions: &SessionManager,
+    project_store: &ProjectStore,
     config: &Config,
 ) {
     let t = theme();
@@ -47,8 +49,13 @@ pub fn render_session_view(
         } else {
             String::new()
         };
+        let project_name = project_store
+            .get_project(session.info.project_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or("?");
         format!(
-            "{} - {}{}{}",
+            "{} / {} - {}{}{}",
+            project_name,
             session.info.name,
             session.info.state.display_name(),
             exit_info,
