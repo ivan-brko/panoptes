@@ -692,7 +692,7 @@ impl App {
         let session_count = self.sessions.len();
 
         match key.code {
-            KeyCode::Char('q') => {
+            KeyCode::Esc | KeyCode::Char('q') => {
                 self.state.input_mode = InputMode::ConfirmingQuit;
             }
             KeyCode::Char('t') => {
@@ -703,7 +703,7 @@ impl App {
                 self.state.input_mode = InputMode::AddingProject;
                 self.state.new_project_path.clear();
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 // Navigate projects if any, otherwise sessions
                 if project_count > 0 {
                     self.state.selected_project_index =
@@ -713,7 +713,7 @@ impl App {
                         (self.state.selected_session_index + 1) % session_count;
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 if project_count > 0 {
                     self.state.selected_project_index = self
                         .state
@@ -813,13 +813,13 @@ impl App {
             KeyCode::Char('q') => {
                 self.state.input_mode = InputMode::ConfirmingQuit;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 if branch_count > 0 {
                     self.state.selected_branch_index =
                         (self.state.selected_branch_index + 1) % branch_count;
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 if branch_count > 0 {
                     self.state.selected_branch_index = self
                         .state
@@ -887,10 +887,10 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.state.navigate_back();
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 self.state.select_next(session_count);
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 self.state.select_prev(session_count);
             }
             KeyCode::Enter => {
@@ -943,10 +943,10 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.state.navigate_back();
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 self.state.select_next(self.sessions.len());
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 self.state.select_prev(self.sessions.len());
             }
             KeyCode::Enter => {
@@ -1428,7 +1428,7 @@ impl App {
                 self.state.filtered_branch_refs.clear();
                 self.state.fetch_error = None;
             }
-            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            KeyCode::Up => {
                 // Navigate up (wrapping)
                 let count = self.state.filtered_branch_refs.len();
                 if count > 0 {
@@ -1439,7 +1439,7 @@ impl App {
                         .unwrap_or(count - 1);
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            KeyCode::Down => {
                 // Navigate down (wrapping)
                 let count = self.state.filtered_branch_refs.len();
                 if count > 0 {
@@ -1607,7 +1607,7 @@ impl App {
                 self.state.new_branch_name.clear();
                 self.state.fetch_error = None;
             }
-            KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
+            KeyCode::Up => {
                 let count = self.state.filtered_branch_refs.len();
                 if count > 0 {
                     self.state.base_branch_selector_index = self
@@ -1617,7 +1617,7 @@ impl App {
                         .unwrap_or(count - 1);
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
+            KeyCode::Down => {
                 let count = self.state.filtered_branch_refs.len();
                 if count > 0 {
                     self.state.base_branch_selector_index =
@@ -1672,6 +1672,9 @@ impl App {
 
     /// Handle key when confirming session deletion
     fn handle_confirming_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 // Confirm deletion
@@ -1705,6 +1708,9 @@ impl App {
 
     /// Handle key when confirming project deletion
     fn handle_confirming_project_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 // Confirm deletion
@@ -1762,6 +1768,9 @@ impl App {
 
     /// Handle key while confirming quit
     fn handle_confirming_quit_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 // Confirm quit
