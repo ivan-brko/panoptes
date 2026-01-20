@@ -602,10 +602,10 @@ impl App {
                 self.select_default_base_branch();
             }
             InputMode::Session => {
-                // Send raw text to PTY (preserve original text with newlines for PTY)
+                // Send pasted text to PTY with bracketed paste sequences
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        session.write(text.as_bytes())?;
+                        session.write_paste(text)?;
                     }
                 }
             }

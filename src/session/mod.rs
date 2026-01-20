@@ -324,6 +324,11 @@ impl Session {
         self.pty.write(data)
     }
 
+    /// Write pasted text to the PTY with bracketed paste sequences
+    pub fn write_paste(&mut self, text: &str) -> anyhow::Result<()> {
+        self.pty.write_paste(text)
+    }
+
     /// Send a key event to the PTY
     /// If Enter is pressed while Waiting, transitions to Thinking state
     pub fn send_key(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {

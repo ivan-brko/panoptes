@@ -7,6 +7,11 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 
+/// Bracketed paste start sequence
+const PASTE_START: &[u8] = b"\x1b[200~";
+/// Bracketed paste end sequence
+const PASTE_END: &[u8] = b"\x1b[201~";
+
 /// Handle to a PTY with spawned process
 pub struct PtyHandle {
     master: Box<dyn MasterPty + Send>,
@@ -95,6 +100,21 @@ impl PtyHandle {
         self.writer
             .write_all(data)
             .context("Failed to write to PTY")?;
+        self.writer.flush().context("Failed to flush PTY writer")?;
+        Ok(())
+    }
+
+    /// Write pasted text to the PTY, wrapped in bracketed paste sequences
+    pub fn write_paste(&mut self, text: &str) -> Result<()> {
+        self.writer
+            .write_all(PASTE_START)
+            .context("Failed to write paste start sequence")?;
+        self.writer
+            .write_all(text.as_bytes())
+            .context("Failed to write paste content")?;
+        self.writer
+            .write_all(PASTE_END)
+            .context("Failed to write paste end sequence")?;
         self.writer.flush().context("Failed to flush PTY writer")?;
         Ok(())
     }
