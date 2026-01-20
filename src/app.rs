@@ -932,7 +932,6 @@ impl App {
     }
 
     /// Handle key in activity timeline (normal mode)
-    /// TODO: Will be fully implemented in Ticket 27
     fn handle_timeline_key(&mut self, key: KeyEvent) -> Result<()> {
         // Only process key press events (not release/repeat)
         if key.kind != KeyEventKind::Press {
