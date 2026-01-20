@@ -170,17 +170,17 @@ pub fn render_project_detail(
     let help_text = match state.input_mode {
         InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         InputMode::CreatingWorktree => {
-            "Type: name | j/k: select base | s: set default | Enter: create | Esc: cancel"
+            "Type: name | ↑/↓: select base | s: set default | Enter: create | Esc: cancel"
                 .to_string()
         }
         InputMode::SelectingDefaultBase => {
-            "Type: filter | j/k: navigate | Enter: set default | Esc: cancel".to_string()
+            "Type: filter | ↑/↓: navigate | Enter: set default | Esc: cancel".to_string()
         }
         InputMode::FetchingBranches => "Fetching branches... | Esc: cancel".to_string(),
         InputMode::RenamingProject => "Type: project name | Enter: save | Esc: cancel".to_string(),
         _ => {
             let base =
-                "w: new worktree | b: set default base | r: rename | d: delete | j/k: navigate | Enter: open | Esc: back | q: quit";
+                "w: new worktree | b: set default base | r: rename | d: delete | ↑/↓: navigate | Enter: open | Esc: back | q: quit";
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
@@ -367,9 +367,11 @@ fn render_fetching_branches(frame: &mut Frame, area: Rect) {
 fn render_rename_dialog(frame: &mut Frame, area: Rect, state: &AppState) {
     let t = theme();
     let input_text = format!("> {}_", state.new_project_name);
-    let input = Paragraph::new(input_text)
-        .style(t.input_style())
-        .block(Block::default().borders(Borders::ALL).title("Rename Project"));
+    let input = Paragraph::new(input_text).style(t.input_style()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Rename Project"),
+    );
     frame.render_widget(input, area);
 }
 

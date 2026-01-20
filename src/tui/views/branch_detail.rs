@@ -157,8 +157,7 @@ pub fn render_branch_detail(
         InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
         InputMode::ConfirmingSessionDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         _ => {
-            let base =
-                "n: new session | d: delete | j/k: navigate | Enter: open session | Esc: back | q: quit";
+            let base = "n: new session | d: delete | ↑/↓: navigate | Enter: open | Esc/q: back";
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {

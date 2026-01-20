@@ -168,11 +168,11 @@ pub fn render_projects_overview(
         InputMode::ConfirmingQuit => "y/Enter: quit | n/Esc: cancel".to_string(),
         _ => {
             let base = if project_store.project_count() > 0 {
-                "n: new project | d: delete | t: timeline | j/k: navigate | Enter: open | q: quit"
+                "n: new project | d: delete | t: timeline | ↑/↓: navigate | Enter: open | Esc/q: quit"
             } else if !sessions.is_empty() {
-                "n: new project | t: timeline | j/k: navigate | Enter: open | q: quit"
+                "n: new project | t: timeline | ↑/↓: navigate | Enter: open | Esc/q: quit"
             } else {
-                "n: new project | t: timeline | q: quit"
+                "n: new project | t: timeline | Esc/q: quit"
             };
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)

@@ -182,7 +182,7 @@ pub fn render_timeline(
 
     // Footer
     let footer_index = if attention_count > 0 { 3 } else { 2 };
-    let base_help = "j/k: navigate | Enter: open session | Esc: back | q: quit";
+    let base_help = "↑/↓: navigate | Enter: open | Esc/q: back";
     let help_text = if let Some(hint) = format_attention_hint(sessions, config) {
         format!("{} | {}", hint, base_help)
     } else {
