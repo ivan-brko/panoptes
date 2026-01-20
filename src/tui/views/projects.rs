@@ -164,11 +164,11 @@ pub fn render_projects_overview(
         InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         _ => {
             let base = if project_store.project_count() > 0 {
-                "a: add project | d: delete | n: new session (enter branch) | t: timeline | j/k: navigate | Enter: open | q: quit"
+                "n: new project | d: delete | t: timeline | j/k: navigate | Enter: open | q: quit"
             } else if !sessions.is_empty() {
-                "a: add project | n: quick session | t: timeline | j/k: navigate | Enter: open | q: quit"
+                "n: new project | t: timeline | j/k: navigate | Enter: open | q: quit"
             } else {
-                "a: add project | n: quick session | t: timeline | q: quit"
+                "n: new project | t: timeline | q: quit"
             };
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)

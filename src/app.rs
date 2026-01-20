@@ -682,33 +682,9 @@ impl App {
                 self.state.navigate_to_timeline();
             }
             KeyCode::Char('n') => {
-                if project_count > 0 {
-                    // Projects exist - navigate to selected project's default branch
-                    let projects = self.project_store.projects_sorted();
-                    if let Some(project) = projects.get(self.state.selected_project_index) {
-                        let project_id = project.id;
-                        // Find default branch for this project
-                        if let Some(branch) = self
-                            .project_store
-                            .branches_for_project(project_id)
-                            .into_iter()
-                            .find(|b| b.is_default)
-                        {
-                            // Navigate directly to branch detail
-                            self.state.navigate_to_branch(project_id, branch.id);
-                        } else {
-                            // No default branch - navigate to project detail
-                            self.state.navigate_to_project(project_id);
-                        }
-                    }
-                } else {
-                    // No projects - allow creating an unassociated quick session
-                    self.state.creating_session_project_id = None;
-                    self.state.creating_session_branch_id = None;
-                    self.state.creating_session_working_dir = None;
-                    self.state.new_session_name.clear();
-                    self.state.input_mode = InputMode::CreatingSession;
-                }
+                // Start adding a new project
+                self.state.input_mode = InputMode::AddingProject;
+                self.state.new_project_path.clear();
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 // Navigate projects if any, otherwise sessions
@@ -784,11 +760,6 @@ impl App {
                         }
                     }
                 }
-            }
-            KeyCode::Char('a') => {
-                // Start adding a new project
-                self.state.input_mode = InputMode::AddingProject;
-                self.state.new_project_path.clear();
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let Some(num) = c.to_digit(10) {
