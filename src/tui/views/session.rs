@@ -84,7 +84,8 @@ pub fn render_session_view(
     if let Some(session) = session {
         let output_height = chunks[1].height.saturating_sub(2) as usize; // Account for borders
         let styled_lines = session.visible_styled_lines(output_height);
-        let output = Paragraph::new(styled_lines).block(
+        // Dereference Rc to get the Vec, then clone for Paragraph (cheap since Lines contain Rc'd spans)
+        let output = Paragraph::new((*styled_lines).clone()).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(frame_color))

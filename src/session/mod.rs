@@ -12,6 +12,7 @@ pub use pty::PtyHandle;
 pub use vterm::VirtualTerminal;
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -310,10 +311,11 @@ impl Session {
     }
 
     /// Get visible styled lines for rendering (with colors)
+    /// Returns Rc to avoid cloning the entire vector on each render
     pub fn visible_styled_lines(
         &self,
         viewport_height: usize,
-    ) -> Vec<ratatui::text::Line<'static>> {
+    ) -> Rc<Vec<ratatui::text::Line<'static>>> {
         self.vterm.visible_styled_lines(viewport_height)
     }
 

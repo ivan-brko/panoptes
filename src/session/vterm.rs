@@ -7,6 +7,7 @@
 //! Uses the vt100 crate for complete terminal emulation.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -14,7 +15,7 @@ use vt100::Parser;
 
 /// Cached styled lines for rendering optimization
 struct StyledLinesCache {
-    lines: Vec<Line<'static>>,
+    lines: Rc<Vec<Line<'static>>>,
     viewport_height: usize,
 }
 
@@ -85,11 +86,11 @@ impl VirtualTerminal {
     /// Get visible lines for a viewport (plain text, no styling)
     pub fn visible_lines(&self, viewport_height: usize) -> Vec<String> {
         self.visible_styled_lines(viewport_height)
-            .into_iter()
+            .iter()
             .map(|line| {
                 line.spans
-                    .into_iter()
-                    .map(|span| span.content.into_owned())
+                    .iter()
+                    .map(|span| span.content.as_ref())
                     .collect()
             })
             .collect()
@@ -98,13 +99,14 @@ impl VirtualTerminal {
     /// Get visible styled lines for a viewport
     /// For full-screen terminal apps, we return the exact screen buffer content with colors
     /// Results are cached until process() or resize() is called
-    pub fn visible_styled_lines(&self, viewport_height: usize) -> Vec<Line<'static>> {
+    /// Returns Rc to avoid cloning the entire vector on each render
+    pub fn visible_styled_lines(&self, viewport_height: usize) -> Rc<Vec<Line<'static>>> {
         // Check cache first
         {
             let cache = self.styled_cache.borrow();
             if let Some(ref cached) = *cache {
                 if cached.viewport_height == viewport_height {
-                    return cached.lines.clone();
+                    return Rc::clone(&cached.lines);
                 }
             }
         }
@@ -172,9 +174,11 @@ impl VirtualTerminal {
             })
             .collect();
 
+        let lines = Rc::new(lines);
+
         // Store in cache
         *self.styled_cache.borrow_mut() = Some(StyledLinesCache {
-            lines: lines.clone(),
+            lines: Rc::clone(&lines),
             viewport_height,
         });
 
