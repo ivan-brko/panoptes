@@ -94,6 +94,7 @@ mod tests {
             remote_url: None,
             default_branch: "main".to_string(),
             default_base_branch: None,
+            session_subdir: None,
             created_at: Utc::now(),
             last_activity: Utc::now(),
         }

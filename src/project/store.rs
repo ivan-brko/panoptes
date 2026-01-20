@@ -79,6 +79,18 @@ impl ProjectStore {
         self.projects.values().find(|p| p.repo_path == path)
     }
 
+    /// Find a project by repository path AND session subdir
+    /// Used for duplicate detection when adding projects from subfolders
+    pub fn find_by_repo_and_subdir(
+        &self,
+        repo_path: &Path,
+        session_subdir: Option<&Path>,
+    ) -> Option<&Project> {
+        self.projects
+            .values()
+            .find(|p| p.repo_path == repo_path && p.session_subdir.as_deref() == session_subdir)
+    }
+
     /// Add a project to the store
     pub fn add_project(&mut self, project: Project) {
         self.projects.insert(project.id, project);

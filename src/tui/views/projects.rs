@@ -125,6 +125,9 @@ pub fn render_projects_overview(
         InputMode::AddingProject => {
             render_project_addition(frame, chunks[main_chunk_index], state);
         }
+        InputMode::AddingProjectName => {
+            render_project_name_input(frame, chunks[main_chunk_index], state);
+        }
         _ => {
             render_main_content(
                 frame,
@@ -141,7 +144,8 @@ pub fn render_projects_overview(
     let footer_index = chunks.len() - 1;
     let help_text = match state.input_mode {
         InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
-        InputMode::AddingProject => "Enter: add project | Esc: cancel".to_string(),
+        InputMode::AddingProject => "Enter: validate path | Esc: cancel".to_string(),
+        InputMode::AddingProjectName => "Enter: create project | Esc: cancel".to_string(),
         _ => {
             let base = if project_store.project_count() > 0 {
                 "a: add project | n: new session (enter branch) | t: timeline | j/k: navigate | Enter: open | q: quit"
@@ -240,6 +244,28 @@ fn render_project_addition(frame: &mut Frame, area: Rect, state: &AppState) {
     let input = Paragraph::new(input_text)
         .style(t.input_style())
         .block(Block::default().borders(Borders::ALL).title("Add Project"));
+    frame.render_widget(input, area);
+}
+
+/// Render the project name input (second step of project addition)
+fn render_project_name_input(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
+
+    let path_display = state.pending_project_path.display();
+    let subdir_info = state
+        .pending_session_subdir
+        .as_ref()
+        .map(|s| format!("\nSubfolder: {}", s.display()))
+        .unwrap_or_default();
+
+    let hint = format!(
+        "Repository: {}{}\n\nEnter project name (or press Enter for default):\n\n> {}_",
+        path_display, subdir_info, state.new_project_name
+    );
+
+    let input = Paragraph::new(hint)
+        .style(t.input_style())
+        .block(Block::default().borders(Borders::ALL).title("Project Name"));
     frame.render_widget(input, area);
 }
 

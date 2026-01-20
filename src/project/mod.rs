@@ -9,7 +9,7 @@ pub use store::ProjectStore;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Unique identifier for a project
@@ -34,6 +34,10 @@ pub struct Project {
     /// Default base branch for creating new worktrees (e.g., "origin/develop")
     #[serde(default)]
     pub default_base_branch: Option<String>,
+    /// Subfolder relative to repo_path for Claude Code sessions.
+    /// If None, sessions start at repo root.
+    #[serde(default)]
+    pub session_subdir: Option<PathBuf>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp
@@ -51,8 +55,18 @@ impl Project {
             remote_url: None,
             default_branch,
             default_base_branch: None,
+            session_subdir: None,
             created_at: now,
             last_activity: now,
+        }
+    }
+
+    /// Get effective working dir for a base path (repo or worktree)
+    /// If session_subdir is set, returns base_path/session_subdir, otherwise returns base_path
+    pub fn effective_working_dir(&self, base_path: &Path) -> PathBuf {
+        match &self.session_subdir {
+            Some(subdir) => base_path.join(subdir),
+            None => base_path.to_path_buf(),
         }
     }
 

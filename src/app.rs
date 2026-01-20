@@ -85,6 +85,8 @@ pub enum InputMode {
     CreatingSession,
     /// Adding a new project - typing path
     AddingProject,
+    /// Adding a new project - typing optional name (after path validation)
+    AddingProjectName,
     /// Fetching branches from git remotes (shows spinner)
     FetchingBranches,
     /// Creating a new worktree - typing branch name
@@ -197,6 +199,14 @@ pub struct AppState {
     pub creating_session_working_dir: Option<PathBuf>,
     /// Buffer for new project path input
     pub new_project_path: String,
+    /// Buffer for new project name input (optional custom name)
+    pub new_project_name: String,
+    /// Pending project path (validated repo path) for two-step project addition
+    pub pending_project_path: PathBuf,
+    /// Pending session subdir (computed from user path vs repo root)
+    pub pending_session_subdir: Option<PathBuf>,
+    /// Pending default branch (computed during path validation)
+    pub pending_default_branch: String,
     /// Buffer for new branch name input (worktree creation)
     pub new_branch_name: String,
     /// Cached branches from git (for branch selector) - legacy, keep for compatibility
@@ -439,6 +449,10 @@ impl App {
                         self.handle_key_event(key)?;
                         self.state.needs_render = true;
                     }
+                    Event::Paste(text) => {
+                        self.handle_paste_event(&text)?;
+                        self.state.needs_render = true;
+                    }
                     Event::Resize(_, _) => {
                         // Resize active session PTY to match output area
                         self.resize_active_session_pty()?;
@@ -533,6 +547,43 @@ impl App {
         had_events
     }
 
+    /// Handle paste event (for clipboard paste support)
+    fn handle_paste_event(&mut self, text: &str) -> Result<()> {
+        // Clean the pasted text (take first line, trim whitespace)
+        let cleaned = text.lines().next().unwrap_or("").trim();
+
+        match self.state.input_mode {
+            InputMode::AddingProject => {
+                self.state.new_project_path.push_str(cleaned);
+            }
+            InputMode::AddingProjectName => {
+                self.state.new_project_name.push_str(cleaned);
+            }
+            InputMode::CreatingSession => {
+                self.state.new_session_name.push_str(cleaned);
+            }
+            InputMode::CreatingWorktree | InputMode::SelectingDefaultBase => {
+                self.state.new_branch_name.push_str(cleaned);
+                // Update filtered branches
+                self.state.filtered_branch_refs = filter_branch_refs(
+                    &self.state.available_branch_refs,
+                    &self.state.new_branch_name,
+                );
+                self.select_default_base_branch();
+            }
+            InputMode::Session => {
+                // Send raw text to PTY (preserve original text with newlines for PTY)
+                if let Some(session_id) = self.state.active_session {
+                    if let Some(session) = self.sessions.get_mut(session_id) {
+                        session.write(text.as_bytes())?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Handle a key event
     fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
         // Handle Ctrl+C specially
@@ -556,6 +607,7 @@ impl App {
             InputMode::Session => self.handle_session_mode_key(key),
             InputMode::CreatingSession => self.handle_creating_session_key(key),
             InputMode::AddingProject => self.handle_adding_project_key(key),
+            InputMode::AddingProjectName => self.handle_adding_project_name_key(key),
             InputMode::FetchingBranches => {
                 // While fetching, only allow Esc to cancel
                 if key.code == KeyCode::Esc {
@@ -1050,7 +1102,7 @@ impl App {
         Ok(())
     }
 
-    /// Handle key when adding a new project
+    /// Handle key when adding a new project (path input step)
     fn handle_adding_project_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
@@ -1059,76 +1111,160 @@ impl App {
                 self.state.new_project_path.clear();
             }
             KeyCode::Enter => {
-                // Try to add the project
+                // Validate path and transition to name input
                 let path_str = std::mem::take(&mut self.state.new_project_path);
-                let path = PathBuf::from(shellexpand::tilde(&path_str).into_owned());
+                let user_path = PathBuf::from(shellexpand::tilde(&path_str).into_owned());
+                let user_path = user_path.canonicalize().unwrap_or(user_path);
 
                 // Check if it's a git repository
-                match crate::git::GitOps::discover(&path) {
+                match crate::git::GitOps::discover(&user_path) {
                     Ok(git) => {
                         let repo_path = git.repo_path().to_path_buf();
+                        let repo_path = repo_path.canonicalize().unwrap_or(repo_path);
 
-                        // Check if already added
-                        if self.project_store.find_by_repo_path(&repo_path).is_some() {
-                            tracing::warn!("Project already exists: {}", repo_path.display());
+                        // Calculate session_subdir if user_path is inside repo_path
+                        let session_subdir = if user_path != repo_path {
+                            user_path
+                                .strip_prefix(&repo_path)
+                                .ok()
+                                .map(|p| p.to_path_buf())
+                        } else {
+                            None
+                        };
+
+                        // Check if already added (with same subdir)
+                        if self
+                            .project_store
+                            .find_by_repo_and_subdir(&repo_path, session_subdir.as_deref())
+                            .is_some()
+                        {
+                            let path_display = if let Some(ref subdir) = session_subdir {
+                                format!("{}/{}", repo_path.display(), subdir.display())
+                            } else {
+                                repo_path.display().to_string()
+                            };
+                            self.state.error_message =
+                                Some(format!("Project already exists: {}", path_display));
+                            tracing::warn!("Project already exists: {}", path_display);
                             self.state.input_mode = InputMode::Normal;
                             return Ok(());
                         }
-
-                        // Get project name from directory
-                        let name = repo_path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("unknown")
-                            .to_string();
 
                         // Get default branch
                         let default_branch = git
                             .default_branch_name()
                             .unwrap_or_else(|_| "main".to_string());
 
-                        // Create project
-                        let project = crate::project::Project::new(
-                            name.clone(),
-                            repo_path.clone(),
-                            default_branch.clone(),
-                        );
-                        let project_id = project.id;
-                        self.project_store.add_project(project);
+                        // Compute default project name from subdir folder or repo folder
+                        let default_name = session_subdir
+                            .as_ref()
+                            .and_then(|s| s.file_name())
+                            .or_else(|| repo_path.file_name())
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
 
-                        // Create default branch entry
-                        let branch = crate::project::Branch::default_for_project(
-                            project_id,
-                            default_branch,
-                            repo_path,
-                        );
-                        self.project_store.add_branch(branch);
-
-                        // Save to disk
-                        if let Err(e) = self.project_store.save() {
-                            tracing::error!("Failed to save project store: {}", e);
-                            self.state.error_message =
-                                Some(format!("Failed to save project: {}", e));
-                        }
-
-                        tracing::info!("Added project: {}", name);
-
-                        // Select the newly added project
-                        let project_count = self.project_store.project_count();
-                        self.state.selected_project_index = project_count.saturating_sub(1);
+                        // Store pending values and transition to name input
+                        self.state.pending_project_path = repo_path;
+                        self.state.pending_session_subdir = session_subdir;
+                        self.state.pending_default_branch = default_branch;
+                        self.state.new_project_name = default_name;
+                        self.state.input_mode = InputMode::AddingProjectName;
                     }
                     Err(e) => {
-                        tracing::error!("Not a git repository: {} ({})", path.display(), e);
+                        self.state.error_message =
+                            Some(format!("Not a git repository: {}", user_path.display()));
+                        tracing::error!("Not a git repository: {} ({})", user_path.display(), e);
+                        self.state.input_mode = InputMode::Normal;
                     }
                 }
-
-                self.state.input_mode = InputMode::Normal;
             }
             KeyCode::Backspace => {
                 self.state.new_project_path.pop();
             }
             KeyCode::Char(c) => {
                 self.state.new_project_path.push(c);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key when entering project name (second step of project addition)
+    fn handle_adding_project_name_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                // Cancel project addition entirely
+                self.state.input_mode = InputMode::Normal;
+                self.state.new_project_name.clear();
+                self.state.new_project_path.clear();
+                self.state.pending_project_path = PathBuf::new();
+                self.state.pending_session_subdir = None;
+                self.state.pending_default_branch.clear();
+            }
+            KeyCode::Enter => {
+                // Create project with custom (or default) name
+                let name = if self.state.new_project_name.trim().is_empty() {
+                    // Use folder name as fallback
+                    self.state
+                        .pending_project_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                } else {
+                    std::mem::take(&mut self.state.new_project_name)
+                        .trim()
+                        .to_string()
+                };
+
+                let repo_path = std::mem::take(&mut self.state.pending_project_path);
+                let session_subdir = self.state.pending_session_subdir.take();
+                let default_branch = std::mem::take(&mut self.state.pending_default_branch);
+
+                // Create project
+                let mut project = crate::project::Project::new(
+                    name.clone(),
+                    repo_path.clone(),
+                    default_branch.clone(),
+                );
+                project.session_subdir = session_subdir;
+                let project_id = project.id;
+                self.project_store.add_project(project);
+
+                // Create default branch entry with effective working dir
+                let effective_working_dir = self
+                    .project_store
+                    .get_project(project_id)
+                    .map(|p| p.effective_working_dir(&repo_path))
+                    .unwrap_or(repo_path);
+
+                let branch = crate::project::Branch::default_for_project(
+                    project_id,
+                    default_branch,
+                    effective_working_dir,
+                );
+                self.project_store.add_branch(branch);
+
+                // Save to disk
+                if let Err(e) = self.project_store.save() {
+                    tracing::error!("Failed to save project store: {}", e);
+                    self.state.error_message = Some(format!("Failed to save project: {}", e));
+                }
+
+                tracing::info!("Added project: {}", name);
+
+                // Select the newly added project
+                let project_count = self.project_store.project_count();
+                self.state.selected_project_index = project_count.saturating_sub(1);
+
+                self.state.input_mode = InputMode::Normal;
+            }
+            KeyCode::Backspace => {
+                self.state.new_project_name.pop();
+            }
+            KeyCode::Char(c) => {
+                self.state.new_project_name.push(c);
             }
             _ => {}
         }
@@ -1543,10 +1679,13 @@ impl App {
                 base_ref,
             )?;
 
+            // Apply project's subfolder to get effective working dir for sessions
+            let effective_working_dir = project.effective_working_dir(&worktree_path);
+
             let branch = crate::project::Branch::new(
                 project_id,
                 branch_name.to_string(),
-                worktree_path,
+                effective_working_dir,
                 false, // is_default
                 true,  // is_worktree
             );
