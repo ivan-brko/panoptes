@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::project::{Project, ProjectId, ProjectStore};
 use crate::session::SessionManager;
 use crate::tui::theme::theme;
+use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::format_attention_hint;
 
 /// Render the project detail view showing branches
@@ -360,7 +361,7 @@ fn render_fetching_branches(frame: &mut Frame, area: Rect) {
 }
 
 /// Render the project delete confirmation dialog
-fn render_project_delete_confirmation(
+pub fn render_project_delete_confirmation(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
@@ -368,9 +369,9 @@ fn render_project_delete_confirmation(
     sessions: &SessionManager,
     _config: &Config,
 ) {
-    let t = theme();
-
-    let project_name = project.map(|p| p.name.as_str()).unwrap_or("Unknown");
+    let project_name = project
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
     let project_id = state.pending_delete_project;
 
     // Count active sessions for this project
@@ -383,64 +384,33 @@ fn render_project_delete_confirmation(
         (0, 0)
     };
 
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Delete project: ", Style::default().fg(t.text)),
-            Span::styled(project_name, Style::default().fg(Color::Cyan).bold()),
-            Span::styled("?", Style::default().fg(t.text)),
-        ]),
-        Line::from(""),
-    ];
+    let mut warnings = vec![];
+    let mut notes = vec![];
 
     // Warning about active sessions
     if active_count > 0 {
-        lines.push(Line::from(vec![Span::styled(
-            format!(
-                "⚠  Warning: {} active session{} will be terminated",
-                active_count,
-                if active_count == 1 { "" } else { "s" }
-            ),
-            Style::default().fg(Color::Yellow).bold(),
-        )]));
-        lines.push(Line::from(""));
+        warnings.push(format!(
+            "{} active session{} will be terminated",
+            active_count,
+            if active_count == 1 { "" } else { "s" }
+        ));
     } else if session_count > 0 {
-        lines.push(Line::from(vec![Span::styled(
-            format!(
-                "Note: {} session{} will be removed",
-                session_count,
-                if session_count == 1 { "" } else { "s" }
-            ),
-            Style::default().fg(t.text_muted),
-        )]));
-        lines.push(Line::from(""));
+        notes.push(format!(
+            "{} session{} will be removed",
+            session_count,
+            if session_count == 1 { "" } else { "s" }
+        ));
     }
 
     // Note about worktrees
-    lines.push(Line::from(vec![Span::styled(
-        "Note: Git worktrees on disk will NOT be deleted.",
-        Style::default().fg(t.text_muted),
-    )]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(""));
+    notes.push("Git worktrees on disk will NOT be deleted.".to_string());
 
-    // Confirmation prompt
-    lines.push(Line::from(vec![
-        Span::styled("Press ", Style::default().fg(t.text)),
-        Span::styled("y", Style::default().fg(Color::Green).bold()),
-        Span::styled(" to confirm, ", Style::default().fg(t.text)),
-        Span::styled("n", Style::default().fg(Color::Red).bold()),
-        Span::styled(" or ", Style::default().fg(t.text)),
-        Span::styled("Esc", Style::default().fg(Color::Red).bold()),
-        Span::styled(" to cancel", Style::default().fg(t.text)),
-    ]));
-
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title("Confirm Delete"),
-    );
-
-    frame.render_widget(paragraph, area);
+    let config = ConfirmDialogConfig {
+        title: "Confirm Delete",
+        item_label: "project",
+        item_name: &project_name,
+        warnings,
+        notes,
+    };
+    render_confirm_dialog(frame, area, config);
 }

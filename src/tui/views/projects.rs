@@ -13,6 +13,7 @@ use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::theme::theme;
 use crate::tui::views::format_attention_hint;
+use crate::tui::views::render_project_delete_confirmation;
 
 /// Render the projects overview
 pub fn render_projects_overview(
@@ -128,6 +129,20 @@ pub fn render_projects_overview(
         InputMode::AddingProjectName => {
             render_project_name_input(frame, chunks[main_chunk_index], state);
         }
+        InputMode::ConfirmingProjectDelete => {
+            // Get the project being deleted
+            let project = state
+                .pending_delete_project
+                .and_then(|id| project_store.get_project(id));
+            render_project_delete_confirmation(
+                frame,
+                chunks[main_chunk_index],
+                state,
+                project,
+                sessions,
+                config,
+            );
+        }
         _ => {
             render_main_content(
                 frame,
@@ -146,9 +161,10 @@ pub fn render_projects_overview(
         InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
         InputMode::AddingProject => "Enter: validate path | Esc: cancel".to_string(),
         InputMode::AddingProjectName => "Enter: create project | Esc: cancel".to_string(),
+        InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         _ => {
             let base = if project_store.project_count() > 0 {
-                "a: add project | n: new session (enter branch) | t: timeline | j/k: navigate | Enter: open | q: quit"
+                "a: add project | d: delete | n: new session (enter branch) | t: timeline | j/k: navigate | Enter: open | q: quit"
             } else if !sessions.is_empty() {
                 "a: add project | n: quick session | t: timeline | j/k: navigate | Enter: open | q: quit"
             } else {

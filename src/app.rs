@@ -666,6 +666,11 @@ impl App {
 
     /// Handle key in projects overview (normal mode)
     fn handle_projects_overview_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
         let project_count = self.project_store.project_count();
         let session_count = self.sessions.len();
 
@@ -753,8 +758,16 @@ impl App {
                 }
             }
             KeyCode::Char('d') => {
-                // Delete selected session (only if no projects, sessions are in focus)
-                if project_count == 0 && session_count > 0 {
+                // Delete selected project (if projects exist) or session (if only sessions)
+                if project_count > 0 {
+                    // Projects exist - delete selected project
+                    let projects = self.project_store.projects_sorted();
+                    if let Some(project) = projects.get(self.state.selected_project_index) {
+                        self.state.pending_delete_project = Some(project.id);
+                        self.state.input_mode = InputMode::ConfirmingProjectDelete;
+                    }
+                } else if session_count > 0 {
+                    // No projects, sessions in focus - delete selected session
                     if let Some(session) = self
                         .sessions
                         .get_by_index(self.state.selected_session_index)
@@ -793,6 +806,11 @@ impl App {
 
     /// Handle key in project detail view (normal mode)
     fn handle_project_detail_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
         let project_id = match self.state.view {
             View::ProjectDetail(id) => id,
             _ => return Ok(()),
@@ -861,6 +879,11 @@ impl App {
         project_id: ProjectId,
         branch_id: BranchId,
     ) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
         let branch_sessions = self.sessions.sessions_for_branch(branch_id);
         let session_count = branch_sessions.len();
 
@@ -915,6 +938,11 @@ impl App {
     /// Handle key in activity timeline (normal mode)
     /// TODO: Will be fully implemented in Ticket 27
     fn handle_timeline_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.state.navigate_back();
@@ -1644,7 +1672,16 @@ impl App {
 
                     // Navigate back to projects overview
                     self.state.view = View::ProjectsOverview;
-                    self.state.selected_project_index = 0;
+
+                    // Adjust selected index if needed
+                    let new_project_count = self.project_store.project_count();
+                    if self.state.selected_project_index >= new_project_count
+                        && new_project_count > 0
+                    {
+                        self.state.selected_project_index = new_project_count - 1;
+                    } else if new_project_count == 0 {
+                        self.state.selected_project_index = 0;
+                    }
                 }
                 self.state.input_mode = InputMode::Normal;
             }

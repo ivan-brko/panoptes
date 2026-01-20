@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionManager, SessionState};
 use crate::tui::theme::theme;
+use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::format_attention_hint;
 
 /// Render the branch detail view showing sessions
@@ -191,25 +192,18 @@ fn render_delete_confirmation(
     state: &AppState,
     sessions: &SessionManager,
 ) {
-    let t = theme();
     let session_name = state
         .pending_delete_session
         .and_then(|id| sessions.get(id))
-        .map(|s| s.info.name.as_str())
-        .unwrap_or("Unknown");
+        .map(|s| s.info.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
 
-    let text = format!(
-        "Are you sure you want to delete session '{}'?\n\n\
-        This will kill the Claude Code process.\n\n\
-        Press 'y' to confirm or 'n' to cancel.",
-        session_name
-    );
-
-    let dialog = Paragraph::new(text).style(t.input_style()).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Confirm Delete")
-            .border_style(Style::default().fg(t.error_bg)),
-    );
-    frame.render_widget(dialog, area);
+    let config = ConfirmDialogConfig {
+        title: "Confirm Delete",
+        item_label: "session",
+        item_name: &session_name,
+        warnings: vec!["This will kill the Claude Code process.".to_string()],
+        notes: vec![],
+    };
+    render_confirm_dialog(frame, area, config);
 }
