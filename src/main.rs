@@ -21,11 +21,11 @@ async fn main() -> Result<()> {
     // Clean up old logs (7-day retention)
     if let Ok(count) = logging::cleanup_old_logs(&config::logs_dir()) {
         if count > 0 {
-            tracing::info!("Cleaned up {} old log files", count);
+            tracing::debug!("Cleaned up {} old log files", count);
         }
     }
 
-    tracing::info!("Logging to: {}", log_file_info.path.display());
+    tracing::debug!("Logging to: {}", log_file_info.path.display());
 
     // Run the application
     let mut app = App::new(log_buffer, log_file_info).await?;

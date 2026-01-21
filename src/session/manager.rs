@@ -215,7 +215,7 @@ impl SessionManager {
                 if let Some(exited_at) = session.info.exited_at {
                     let elapsed = now.signed_duration_since(exited_at).num_seconds();
                     if elapsed > retention_secs as i64 {
-                        tracing::info!(
+                        tracing::debug!(
                             session_id = %session_id,
                             session_name = %session.info.name,
                             elapsed_secs = elapsed,

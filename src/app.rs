@@ -405,7 +405,7 @@ impl App {
             tracing::warn!("Failed to load project store: {}, starting fresh", e);
             ProjectStore::new()
         });
-        tracing::info!(
+        tracing::debug!(
             "Loaded {} projects, {} branches",
             project_store.project_count(),
             project_store.branch_count()
@@ -417,7 +417,7 @@ impl App {
 
         // Start hook server
         let hook_server = hooks::server::start(config.hook_port, hook_tx).await?;
-        tracing::info!("Hook server started on port {}", hook_server.addr().port());
+        tracing::debug!("Hook server started on port {}", hook_server.addr().port());
 
         // Create session manager
         let sessions = SessionManager::new(config.clone());
@@ -1545,7 +1545,7 @@ impl App {
                                 &self.state.available_branch_refs,
                                 &self.state.new_branch_name,
                             );
-                            tracing::info!("Set default base branch to: {}", branch_name);
+                            tracing::debug!("Set default base branch to: {}", branch_name);
                         }
                     }
                 }
@@ -1714,7 +1714,7 @@ impl App {
                             self.state.error_message =
                                 Some(format!("Failed to save default: {}", e));
                         } else {
-                            tracing::info!("Set default base branch to: {}", branch_name);
+                            tracing::debug!("Set default base branch to: {}", branch_name);
                         }
                     }
                 }
