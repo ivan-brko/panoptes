@@ -44,7 +44,7 @@ use crossterm::{
     cursor,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEventKind, MouseEventKind,
+        Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
@@ -153,6 +153,8 @@ pub struct ClaudeWrapper {
     should_exit: bool,
     /// Scrollback offset (0 = live view, >0 = scrolled back by N rows)
     scroll_offset: usize,
+    /// Whether to show blank screen (for testing session switching)
+    blank_screen_mode: bool,
 }
 
 impl ClaudeWrapper {
@@ -166,6 +168,7 @@ impl ClaudeWrapper {
             needs_render: true,
             should_exit: false,
             scroll_offset: 0,
+            blank_screen_mode: false,
         }
     }
 
@@ -326,6 +329,15 @@ impl ClaudeWrapper {
                                     vterm.set_scrollback(self.scroll_offset);
                                     log_debug("PageDown: vterm.set_scrollback() done");
                                 }
+                                self.needs_render = true;
+                                continue;
+                            }
+                            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.blank_screen_mode = !self.blank_screen_mode;
+                                log_debug(&format!(
+                                    "Ctrl+B: blank_screen_mode = {}",
+                                    self.blank_screen_mode
+                                ));
                                 self.needs_render = true;
                                 continue;
                             }
@@ -527,7 +539,11 @@ impl ClaudeWrapper {
         callbacks: &C,
     ) -> Result<()> {
         let scroll_offset = self.scroll_offset;
-        log_debug(&format!("render: starting, scroll_offset={}", scroll_offset));
+        let blank_screen_mode = self.blank_screen_mode;
+        log_debug(&format!(
+            "render: starting, scroll_offset={}, blank_screen_mode={}",
+            scroll_offset, blank_screen_mode
+        ));
 
         terminal.draw(|frame| {
             let size = frame.size();
@@ -565,8 +581,25 @@ impl ClaudeWrapper {
                 title.as_deref(),
             );
 
-            // Render PTY content
-            if let Some(ref vterm) = self.vterm {
+            // Render PTY content or blank placeholder
+            if blank_screen_mode {
+                // Render blank placeholder with centered message
+                use ratatui::widgets::{Block, Borders, Paragraph};
+                let msg = "Session hidden (Ctrl+B to show)";
+                let para = Paragraph::new(msg)
+                    .alignment(Alignment::Center)
+                    .block(Block::default().borders(Borders::NONE));
+                // Center vertically
+                let y_offset = layout.content.height.saturating_sub(1) / 2;
+                let centered_area = Rect {
+                    x: layout.content.x,
+                    y: layout.content.y + y_offset,
+                    width: layout.content.width,
+                    height: 1,
+                };
+                frame.render_widget(para, centered_area);
+                log_debug("render: blank screen placeholder rendered");
+            } else if let Some(ref vterm) = self.vterm {
                 log_debug(&format!(
                     "render: vterm size={:?}, vterm scrollback={}, requesting {} lines",
                     vterm.size(),
