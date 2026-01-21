@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "claude-wrapper"]
+resolver = "2"
+
 [package]
 name = "panoptes"
 version = "0.1.0"
