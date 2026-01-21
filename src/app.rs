@@ -498,11 +498,17 @@ impl App {
             }
 
             // Process debounced resize: wait 50ms after last resize event before actually resizing
+            // Resize ALL sessions to keep their PTYs in sync with terminal dimensions
             if self.state.pending_resize {
                 if let Some(last_resize) = self.state.last_resize {
                     if last_resize.elapsed() >= Duration::from_millis(50) {
                         self.state.pending_resize = false;
-                        self.resize_active_session_pty()?;
+                        let size = self.tui.size()?;
+                        // Output area is: total height - header (3) - footer (3) - borders (2)
+                        let output_rows = size.height.saturating_sub(8);
+                        // Output width is: total width - borders (2)
+                        let output_cols = size.width.saturating_sub(2);
+                        self.sessions.resize_all(output_cols, output_rows);
                         self.state.needs_render = true;
                     }
                 }
@@ -1052,6 +1058,41 @@ impl App {
                 // Re-activate session mode (send keys to PTY)
                 self.state.input_mode = InputMode::Session;
             }
+            KeyCode::PageUp => {
+                // Scroll up in session output
+                if let Some(session_id) = self.state.active_session {
+                    if let Some(session) = self.sessions.get_mut(session_id) {
+                        let scroll_amount = 10; // Scroll by 10 lines
+                        session.vterm.scroll_up(scroll_amount);
+                    }
+                }
+            }
+            KeyCode::PageDown => {
+                // Scroll down in session output
+                if let Some(session_id) = self.state.active_session {
+                    if let Some(session) = self.sessions.get_mut(session_id) {
+                        let scroll_amount = 10;
+                        session.vterm.scroll_down(scroll_amount);
+                    }
+                }
+            }
+            KeyCode::Home => {
+                // Scroll to top (oldest content)
+                if let Some(session_id) = self.state.active_session {
+                    if let Some(session) = self.sessions.get_mut(session_id) {
+                        let max = session.vterm.max_scrollback();
+                        session.vterm.set_scrollback(max);
+                    }
+                }
+            }
+            KeyCode::End => {
+                // Scroll to bottom (live view)
+                if let Some(session_id) = self.state.active_session {
+                    if let Some(session) = self.sessions.get_mut(session_id) {
+                        session.vterm.scroll_to_bottom();
+                    }
+                }
+            }
             KeyCode::Tab => {
                 // Switch to next session
                 let count = self.sessions.len();
@@ -1109,6 +1150,46 @@ impl App {
         // Only forward key press events (not release/repeat)
         if key.kind != KeyEventKind::Press {
             return Ok(());
+        }
+
+        // Intercept scroll keys - don't forward to PTY
+        match key.code {
+            KeyCode::PageUp => {
+                if let Some(session_id) = self.state.active_session {
+                    if let Some(session) = self.sessions.get_mut(session_id) {
+                        session.vterm.scroll_up(10);
+                    }
+                }
+                return Ok(());
+            }
+            KeyCode::PageDown => {
+                if let Some(session_id) = self.state.active_session {
+                    if let Some(session) = self.sessions.get_mut(session_id) {
+                        session.vterm.scroll_down(10);
+                    }
+                }
+                return Ok(());
+            }
+            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl+Home: scroll to top
+                if let Some(session_id) = self.state.active_session {
+                    if let Some(session) = self.sessions.get_mut(session_id) {
+                        let max = session.vterm.max_scrollback();
+                        session.vterm.set_scrollback(max);
+                    }
+                }
+                return Ok(());
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl+End: scroll to bottom (live view)
+                if let Some(session_id) = self.state.active_session {
+                    if let Some(session) = self.sessions.get_mut(session_id) {
+                        session.vterm.scroll_to_bottom();
+                    }
+                }
+                return Ok(());
+            }
+            _ => {}
         }
 
         // Send key to active session

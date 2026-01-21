@@ -13,10 +13,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use vt100::Parser;
 
+/// Number of scrollback rows to retain
+const SCROLLBACK_ROWS: usize = 10000;
+
 /// Cached styled lines for rendering optimization
 struct StyledLinesCache {
     lines: Rc<Vec<Line<'static>>>,
     viewport_height: usize,
+    scroll_offset: usize,
 }
 
 /// Convert vt100 color to ratatui color
@@ -28,20 +32,23 @@ fn convert_color(color: vt100::Color) -> Color {
     }
 }
 
-/// Virtual terminal with screen buffer
+/// Virtual terminal with screen buffer and scrollback support
 pub struct VirtualTerminal {
     /// VT100 parser that handles all escape sequences
     parser: Parser,
-    /// Cached styled lines (invalidated on process/resize)
+    /// Cached styled lines (invalidated on process/resize/scroll)
     styled_cache: RefCell<Option<StyledLinesCache>>,
+    /// Scroll offset from bottom (0 = live view, >0 = scrolled back into history)
+    scroll_offset: usize,
 }
 
 impl VirtualTerminal {
-    /// Create a new virtual terminal with the given dimensions
+    /// Create a new virtual terminal with the given dimensions and scrollback buffer
     pub fn new(rows: usize, cols: usize) -> Self {
         Self {
-            parser: Parser::new(rows as u16, cols as u16, 0),
+            parser: Parser::new(rows as u16, cols as u16, SCROLLBACK_ROWS),
             styled_cache: RefCell::new(None),
+            scroll_offset: 0,
         }
     }
 
@@ -98,57 +105,69 @@ impl VirtualTerminal {
 
     /// Get visible styled lines for a viewport
     /// For full-screen terminal apps, we return the exact screen buffer content with colors
-    /// Results are cached until process() or resize() is called
+    /// Results are cached until process(), resize(), or scroll is called
     /// Returns Rc to avoid cloning the entire vector on each render
+    ///
+    /// When scrollback is active (via set_scrollback), vt100's cell() method
+    /// automatically returns content from the scrolled position.
     pub fn visible_styled_lines(&self, viewport_height: usize) -> Rc<Vec<Line<'static>>> {
-        // Check cache first
+        // Check cache first (including scroll_offset in key)
         {
             let cache = self.styled_cache.borrow();
             if let Some(ref cached) = *cache {
-                if cached.viewport_height == viewport_height {
+                if cached.viewport_height == viewport_height
+                    && cached.scroll_offset == self.scroll_offset
+                {
                     return Rc::clone(&cached.lines);
                 }
             }
         }
 
-        // Compute styled lines
         let screen = self.parser.screen();
-        let rows = (screen.size().0 as usize).min(viewport_height);
+        let screen_rows = screen.size().0 as usize;
         let cols = screen.size().1 as usize;
+        let rows_to_show = screen_rows.min(viewport_height);
 
-        let lines: Vec<Line<'static>> = (0..rows)
+        let lines: Vec<Line<'static>> = (0..rows_to_show)
             .map(|row| {
                 let mut spans: Vec<Span<'static>> = Vec::new();
                 let mut current_text = String::new();
                 let mut current_style = Style::default();
 
                 for col in 0..cols {
-                    let cell = screen.cell(row as u16, col as u16).unwrap();
-                    let contents = cell.contents();
-                    let text = if contents.is_empty() { " " } else { contents };
+                    // cell() can return None when scrollback offset exceeds available content
+                    let (text, style) = if let Some(cell) = screen.cell(row as u16, col as u16) {
+                        let contents = cell.contents();
+                        let text = if contents.is_empty() { " " } else { contents };
 
-                    // Build style from cell attributes
-                    let mut style = Style::default();
-                    style = style.fg(convert_color(cell.fgcolor()));
-                    style = style.bg(convert_color(cell.bgcolor()));
+                        // Build style from cell attributes
+                        let mut style = Style::default();
+                        style = style.fg(convert_color(cell.fgcolor()));
+                        style = style.bg(convert_color(cell.bgcolor()));
 
-                    let mut modifiers = Modifier::empty();
-                    if cell.bold() {
-                        modifiers |= Modifier::BOLD;
-                    }
-                    if cell.italic() {
-                        modifiers |= Modifier::ITALIC;
-                    }
-                    if cell.underline() {
-                        modifiers |= Modifier::UNDERLINED;
-                    }
-                    if cell.inverse() {
-                        modifiers |= Modifier::REVERSED;
-                    }
-                    if cell.dim() {
-                        modifiers |= Modifier::DIM;
-                    }
-                    style = style.add_modifier(modifiers);
+                        let mut modifiers = Modifier::empty();
+                        if cell.bold() {
+                            modifiers |= Modifier::BOLD;
+                        }
+                        if cell.italic() {
+                            modifiers |= Modifier::ITALIC;
+                        }
+                        if cell.underline() {
+                            modifiers |= Modifier::UNDERLINED;
+                        }
+                        if cell.inverse() {
+                            modifiers |= Modifier::REVERSED;
+                        }
+                        if cell.dim() {
+                            modifiers |= Modifier::DIM;
+                        }
+                        style = style.add_modifier(modifiers);
+
+                        (text, style)
+                    } else {
+                        // No cell available (scrolled past available content)
+                        (" ", Style::default())
+                    };
 
                     // If style changed, push current span and start new one
                     if style != current_style && !current_text.is_empty() {
@@ -180,6 +199,7 @@ impl VirtualTerminal {
         *self.styled_cache.borrow_mut() = Some(StyledLinesCache {
             lines: Rc::clone(&lines),
             viewport_height,
+            scroll_offset: self.scroll_offset,
         });
 
         lines
@@ -194,6 +214,54 @@ impl VirtualTerminal {
     /// Check if the terminal application has enabled bracketed paste mode
     pub fn bracketed_paste_enabled(&self) -> bool {
         self.parser.screen().bracketed_paste()
+    }
+
+    /// Set the scrollback view offset (0 = live view, >0 = scrolled back)
+    ///
+    /// The offset represents how many rows back from the live view to display.
+    /// This uses vt100's set_scrollback() which shifts what cell() returns.
+    pub fn set_scrollback(&mut self, offset: usize) {
+        self.parser.screen_mut().set_scrollback(offset);
+        self.scroll_offset = self.parser.screen().scrollback();
+        // Invalidate cache when scrollback changes
+        self.styled_cache.borrow_mut().take();
+    }
+
+    /// Scroll up (toward older content) by the given number of lines
+    pub fn scroll_up(&mut self, lines: usize) {
+        let current = self.parser.screen().scrollback();
+        let max = self.max_scrollback();
+        let new_offset = (current + lines).min(max);
+        self.set_scrollback(new_offset);
+    }
+
+    /// Scroll down (toward newer content) by the given number of lines
+    pub fn scroll_down(&mut self, lines: usize) {
+        let current = self.parser.screen().scrollback();
+        let new_offset = current.saturating_sub(lines);
+        self.set_scrollback(new_offset);
+    }
+
+    /// Scroll to the bottom (live view)
+    pub fn scroll_to_bottom(&mut self) {
+        if self.scroll_offset != 0 {
+            self.set_scrollback(0);
+        }
+    }
+
+    /// Get current scroll offset (0 = at bottom/live view)
+    pub fn scrollback_offset(&self) -> usize {
+        self.parser.screen().scrollback()
+    }
+
+    /// Get maximum scrollback available (number of lines in history)
+    pub fn max_scrollback(&self) -> usize {
+        SCROLLBACK_ROWS
+    }
+
+    /// Check if at the bottom (live view)
+    pub fn is_at_bottom(&self) -> bool {
+        self.parser.screen().scrollback() == 0
     }
 }
 

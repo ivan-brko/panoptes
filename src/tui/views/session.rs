@@ -33,7 +33,7 @@ pub fn render_session_view(
         ])
         .split(area);
 
-    // Header with session info
+    // Header with session info and scroll indicator
     let header_text = if let Some(session) = session {
         let mode_indicator = match state.input_mode {
             InputMode::Session => " [SESSION MODE]",
@@ -49,16 +49,26 @@ pub fn render_session_view(
         } else {
             String::new()
         };
+        // Show scroll indicator when not at live view
+        let scroll_indicator = {
+            let offset = session.vterm.scrollback_offset();
+            if offset > 0 {
+                format!(" [↑{} lines]", offset)
+            } else {
+                String::new()
+            }
+        };
         let project_name = project_store
             .get_project(session.info.project_id)
             .map(|p| p.name.as_str())
             .unwrap_or("?");
         format!(
-            "{} / {} - {}{}{}",
+            "{} / {} - {}{}{}{}",
             project_name,
             session.info.name,
             session.info.state.display_name(),
             exit_info,
+            scroll_indicator,
             mode_indicator
         )
     } else {
@@ -104,15 +114,27 @@ pub fn render_session_view(
         frame.render_widget(empty, chunks[1]);
     }
 
-    // Footer with help
+    // Footer with help (include scroll info when scrolled)
+    let is_scrolled = session.map(|s| s.vterm.scrollback_offset() > 0).unwrap_or(false);
     let help_text = match state.input_mode {
-        InputMode::Session => "Esc: deactivate | ⌥Esc: send Esc | Keys sent to session".to_string(),
+        InputMode::Session => {
+            if is_scrolled {
+                "Esc: deactivate | PgUp/PgDn: scroll | Ctrl+End: live view".to_string()
+            } else {
+                "Esc: deactivate | ⌥Esc: send Esc | PgUp: scroll history".to_string()
+            }
+        }
         _ => {
-            let base = "Enter: activate | Tab: next | 1-9: jump | Esc/q: back";
+            let scroll_hint = if is_scrolled {
+                "End: live view | "
+            } else {
+                ""
+            };
+            let base = format!("{}Enter: activate | Tab: next | PgUp/Dn: scroll", scroll_hint);
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
-                base.to_string()
+                base
             }
         }
     };
