@@ -4,11 +4,42 @@
 //! terminal emulation, input handling, and rendering.
 
 use std::collections::HashMap;
-use std::io::stdout;
+use std::fs::OpenOptions;
+use std::io::{stdout, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+
+// Debug logging to file
+static DEBUG_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+fn init_debug_log() {
+    let mut log = DEBUG_LOG.lock().unwrap();
+    if log.is_none() {
+        if let Ok(file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/ivan/Projects/panoptes/wrapper-debug.log")
+        {
+            *log = Some(file);
+        }
+    }
+}
+
+fn log_debug(msg: &str) {
+    if let Ok(mut log) = DEBUG_LOG.lock() {
+        if let Some(ref mut file) = *log {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = writeln!(file, "[{}] {}", timestamp, msg);
+            let _ = file.flush();
+        }
+    }
+}
 use crossterm::{
     cursor,
     event::{
@@ -143,6 +174,9 @@ impl ClaudeWrapper {
     /// This enters raw mode, spawns the PTY, and runs the main event loop.
     /// Returns when the process exits or the user triggers exit via ESC.
     pub fn run<C: WrapperCallbacks>(&mut self, callbacks: &mut C) -> Result<()> {
+        init_debug_log();
+        log_debug("=== WRAPPER STARTING ===");
+
         // Setup terminal
         enable_raw_mode()?;
         stdout().execute(EnterAlternateScreen)?;
@@ -174,6 +208,10 @@ impl ClaudeWrapper {
         )?);
 
         self.vterm = Some(VirtualTerminal::new(rows, cols));
+        log_debug(&format!(
+            "Initial PTY size: {}x{}, vterm created",
+            cols, rows
+        ));
 
         // Run event loop
         let result = self.event_loop(&mut terminal, callbacks);
@@ -206,6 +244,10 @@ impl ClaudeWrapper {
             // Handle pending resize
             if let Some(last_resize) = self.last_resize {
                 if last_resize.elapsed() >= RESIZE_DEBOUNCE {
+                    log_debug(&format!(
+                        "Resize debounce elapsed, scroll_offset={}, applying resize",
+                        self.scroll_offset
+                    ));
                     self.apply_resize(terminal)?;
                     self.last_resize = None;
                     self.needs_render = true;
@@ -246,22 +288,36 @@ impl ClaudeWrapper {
                                 // Scroll up (increase offset) by viewport height
                                 let max_scroll =
                                     self.vterm.as_ref().map(|v| v.max_scrollback()).unwrap_or(0);
+                                let old_offset = self.scroll_offset;
                                 self.scroll_offset = self
                                     .scroll_offset
                                     .saturating_add(viewport_height)
                                     .min(max_scroll);
+                                log_debug(&format!(
+                                    "PageUp: scroll_offset {} -> {}, viewport_height={}, max_scroll={}",
+                                    old_offset, self.scroll_offset, viewport_height, max_scroll
+                                ));
                                 if let Some(ref mut vterm) = self.vterm {
+                                    log_debug("PageUp: calling vterm.set_scrollback()");
                                     vterm.set_scrollback(self.scroll_offset);
+                                    log_debug("PageUp: vterm.set_scrollback() done");
                                 }
                                 self.needs_render = true;
                                 continue;
                             }
                             KeyCode::PageDown => {
                                 // Scroll down (decrease offset) by viewport height
+                                let old_offset = self.scroll_offset;
                                 self.scroll_offset =
                                     self.scroll_offset.saturating_sub(viewport_height);
+                                log_debug(&format!(
+                                    "PageDown: scroll_offset {} -> {}, viewport_height={}",
+                                    old_offset, self.scroll_offset, viewport_height
+                                ));
                                 if let Some(ref mut vterm) = self.vterm {
+                                    log_debug("PageDown: calling vterm.set_scrollback()");
                                     vterm.set_scrollback(self.scroll_offset);
+                                    log_debug("PageDown: vterm.set_scrollback() done");
                                 }
                                 self.needs_render = true;
                                 continue;
@@ -309,8 +365,12 @@ impl ClaudeWrapper {
                             self.needs_render = true;
                         }
                     }
-                    Event::Resize(_, _) => {
+                    Event::Resize(w, h) => {
                         // Debounce resize events
+                        log_debug(&format!(
+                            "Resize event received: {}x{}, scroll_offset={}",
+                            w, h, self.scroll_offset
+                        ));
                         self.last_resize = Some(Instant::now());
                     }
                     Event::FocusGained | Event::FocusLost => {
@@ -341,15 +401,25 @@ impl ClaudeWrapper {
                                         .as_ref()
                                         .map(|v| v.max_scrollback())
                                         .unwrap_or(0);
+                                    let old_offset = self.scroll_offset;
                                     self.scroll_offset =
                                         self.scroll_offset.saturating_add(3).min(max_scroll);
+                                    log_debug(&format!(
+                                        "ScrollUp: scroll_offset {} -> {}",
+                                        old_offset, self.scroll_offset
+                                    ));
                                     if let Some(ref mut vterm) = self.vterm {
                                         vterm.set_scrollback(self.scroll_offset);
                                     }
                                     self.needs_render = true;
                                 }
                                 MouseEventKind::ScrollDown => {
+                                    let old_offset = self.scroll_offset;
                                     self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                                    log_debug(&format!(
+                                        "ScrollDown: scroll_offset {} -> {}",
+                                        old_offset, self.scroll_offset
+                                    ));
                                     if let Some(ref mut vterm) = self.vterm {
                                         vterm.set_scrollback(self.scroll_offset);
                                     }
@@ -382,21 +452,42 @@ impl ClaudeWrapper {
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
         let size = terminal.size()?;
+        log_debug(&format!(
+            "apply_resize: terminal size = {}x{}, scroll_offset={}",
+            size.width, size.height, self.scroll_offset
+        ));
+
         let layout = FrameLayout::calculate(size, &self.config.frame);
         let (rows, cols) = layout.pty_size();
+
+        log_debug(&format!(
+            "apply_resize: PTY size will be {}x{}, content area = {:?}",
+            cols, rows, layout.content
+        ));
 
         debug!("Resizing to {}x{}", cols, rows);
 
         // Resize PTY
         if let Some(ref pty) = self.pty {
+            log_debug("apply_resize: resizing PTY");
             pty.resize(rows, cols)?;
+            log_debug("apply_resize: PTY resize done");
         }
 
         // Resize vterm
         if let Some(ref mut vterm) = self.vterm {
+            log_debug(&format!(
+                "apply_resize: resizing vterm, current scrollback={}",
+                vterm.scrollback()
+            ));
             vterm.resize(rows, cols);
+            log_debug(&format!(
+                "apply_resize: vterm resize done, scrollback now={}",
+                vterm.scrollback()
+            ));
         }
 
+        log_debug("apply_resize: complete");
         Ok(())
     }
 
@@ -407,10 +498,20 @@ impl ClaudeWrapper {
         callbacks: &C,
     ) -> Result<()> {
         let scroll_offset = self.scroll_offset;
+        log_debug(&format!("render: starting, scroll_offset={}", scroll_offset));
 
         terminal.draw(|frame| {
             let size = frame.size();
+            log_debug(&format!(
+                "render: frame size = {}x{}",
+                size.width, size.height
+            ));
+
             let layout = FrameLayout::calculate(size, &self.config.frame);
+            log_debug(&format!(
+                "render: layout content = {:?}, content height={}",
+                layout.content, layout.content.height
+            ));
 
             // Render header
             if layout.header.height > 0 {
@@ -437,7 +538,16 @@ impl ClaudeWrapper {
 
             // Render PTY content
             if let Some(ref vterm) = self.vterm {
+                log_debug(&format!(
+                    "render: vterm size={:?}, vterm scrollback={}, requesting {} lines",
+                    vterm.size(),
+                    vterm.scrollback(),
+                    layout.content.height
+                ));
+
                 let lines = vterm.visible_styled_lines(layout.content.height);
+                log_debug(&format!("render: got {} lines from vterm", lines.len()));
+
                 let cursor_pos = vterm.cursor_position();
                 // Hide cursor when scrolled back (showing historical content)
                 let cursor_visible = vterm.cursor_visible() && scroll_offset == 0;
@@ -449,6 +559,7 @@ impl ClaudeWrapper {
                     Some(cursor_pos),
                     cursor_visible,
                 );
+                log_debug("render: PTY content rendered");
             }
 
             // Render footer
@@ -457,6 +568,7 @@ impl ClaudeWrapper {
             }
         })?;
 
+        log_debug("render: complete");
         Ok(())
     }
 

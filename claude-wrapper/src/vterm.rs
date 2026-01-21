@@ -7,11 +7,38 @@
 //! Uses the vt100 crate for complete terminal emulation.
 
 use std::cell::RefCell;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use vt100::Parser;
+
+// Debug logging to file
+static VTERM_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+fn vterm_log(msg: &str) {
+    let mut log = VTERM_LOG.lock().unwrap();
+    if log.is_none() {
+        if let Ok(file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/ivan/Projects/panoptes/wrapper-debug.log")
+        {
+            *log = Some(file);
+        }
+    }
+    if let Some(ref mut file) = *log {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{}] [vterm] {}", timestamp, msg);
+        let _ = file.flush();
+    }
+}
 
 /// Cached styled lines for rendering optimization
 struct StyledLinesCache {
@@ -50,9 +77,24 @@ impl VirtualTerminal {
 
     /// Resize the terminal
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        let old_size = self.parser.screen().size();
+        let old_scrollback = self.parser.screen().scrollback();
+        vterm_log(&format!(
+            "resize: old={}x{} scrollback={}, new={}x{}",
+            old_size.1, old_size.0, old_scrollback, cols, rows
+        ));
+
         self.parser.screen_mut().set_size(rows, cols);
+
+        let new_scrollback = self.parser.screen().scrollback();
+        vterm_log(&format!(
+            "resize: after set_size, scrollback={}",
+            new_scrollback
+        ));
+
         // Invalidate cache on resize
         self.styled_cache.borrow_mut().take();
+        vterm_log("resize: cache invalidated");
     }
 
     /// Set the scrollback view offset (0 = live view, >0 = scrolled back)
@@ -61,7 +103,14 @@ impl VirtualTerminal {
     /// The visible_styled_lines() method will automatically read from the
     /// correct scrollback position.
     pub fn set_scrollback(&mut self, offset: usize) {
+        let old = self.parser.screen().scrollback();
+        vterm_log(&format!("set_scrollback: {} -> {}", old, offset));
+
         self.parser.screen_mut().set_scrollback(offset);
+
+        let actual = self.parser.screen().scrollback();
+        vterm_log(&format!("set_scrollback: actual scrollback now={}", actual));
+
         // Invalidate cache when scrollback changes
         self.styled_cache.borrow_mut().take();
     }
@@ -90,21 +139,37 @@ impl VirtualTerminal {
     /// Returns Rc to avoid cloning the entire vector on each render.
     pub fn visible_styled_lines(&self, viewport_height: u16) -> Rc<Vec<Line<'static>>> {
         let viewport_height = viewport_height as usize;
+        let screen = self.parser.screen();
+        let current_scrollback = screen.scrollback();
+
+        vterm_log(&format!(
+            "visible_styled_lines: viewport_height={}, screen_size={:?}, scrollback={}",
+            viewport_height,
+            screen.size(),
+            current_scrollback
+        ));
 
         // Check cache first
         {
             let cache = self.styled_cache.borrow();
             if let Some(ref cached) = *cache {
                 if cached.viewport_height == viewport_height {
+                    vterm_log("visible_styled_lines: returning cached");
                     return Rc::clone(&cached.lines);
                 }
             }
         }
 
+        vterm_log("visible_styled_lines: computing lines (cache miss)");
+
         // Compute styled lines
-        let screen = self.parser.screen();
         let rows = (screen.size().0 as usize).min(viewport_height);
         let cols = screen.size().1 as usize;
+
+        vterm_log(&format!(
+            "visible_styled_lines: will read {} rows x {} cols",
+            rows, cols
+        ));
 
         let lines: Vec<Line<'static>> = (0..rows)
             .map(|row| {
@@ -113,32 +178,38 @@ impl VirtualTerminal {
                 let mut current_style = Style::default();
 
                 for col in 0..cols {
-                    let cell = screen.cell(row as u16, col as u16).unwrap();
-                    let contents = cell.contents();
-                    let text = if contents.is_empty() { " " } else { contents };
+                    // cell() can return None when scrollback offset exceeds available content
+                    let (text, style) = if let Some(cell) = screen.cell(row as u16, col as u16) {
+                        let contents = cell.contents();
+                        let text = if contents.is_empty() { " " } else { contents };
 
-                    // Build style from cell attributes
-                    let mut style = Style::default();
-                    style = style.fg(convert_color(cell.fgcolor()));
-                    style = style.bg(convert_color(cell.bgcolor()));
+                        // Build style from cell attributes
+                        let mut style = Style::default();
+                        style = style.fg(convert_color(cell.fgcolor()));
+                        style = style.bg(convert_color(cell.bgcolor()));
 
-                    let mut modifiers = Modifier::empty();
-                    if cell.bold() {
-                        modifiers |= Modifier::BOLD;
-                    }
-                    if cell.italic() {
-                        modifiers |= Modifier::ITALIC;
-                    }
-                    if cell.underline() {
-                        modifiers |= Modifier::UNDERLINED;
-                    }
-                    if cell.inverse() {
-                        modifiers |= Modifier::REVERSED;
-                    }
-                    if cell.dim() {
-                        modifiers |= Modifier::DIM;
-                    }
-                    style = style.add_modifier(modifiers);
+                        let mut modifiers = Modifier::empty();
+                        if cell.bold() {
+                            modifiers |= Modifier::BOLD;
+                        }
+                        if cell.italic() {
+                            modifiers |= Modifier::ITALIC;
+                        }
+                        if cell.underline() {
+                            modifiers |= Modifier::UNDERLINED;
+                        }
+                        if cell.inverse() {
+                            modifiers |= Modifier::REVERSED;
+                        }
+                        if cell.dim() {
+                            modifiers |= Modifier::DIM;
+                        }
+                        style = style.add_modifier(modifiers);
+                        (text, style)
+                    } else {
+                        // No cell available (scrolled past available content)
+                        (" ", Style::default())
+                    };
 
                     // If style changed, push current span and start new one
                     if style != current_style && !current_text.is_empty() {
@@ -163,6 +234,11 @@ impl VirtualTerminal {
                 Line::from(spans)
             })
             .collect();
+
+        vterm_log(&format!(
+            "visible_styled_lines: computed {} lines",
+            lines.len()
+        ));
 
         let lines = Rc::new(lines);
 
