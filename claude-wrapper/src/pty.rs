@@ -6,8 +6,40 @@
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
+
+// Debug logging to file (shared with wrapper.rs)
+static DEBUG_LOG_PTY: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+fn init_debug_log_pty() {
+    let mut log = DEBUG_LOG_PTY.lock().unwrap();
+    if log.is_none() {
+        if let Ok(file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/Users/ivan/Projects/panoptes/wrapper-debug.log")
+        {
+            *log = Some(file);
+        }
+    }
+}
+
+fn log_debug_pty(msg: &str) {
+    init_debug_log_pty();
+    if let Ok(mut log) = DEBUG_LOG_PTY.lock() {
+        if let Some(ref mut file) = *log {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let _ = writeln!(file, "[{}] [PTY] {}", timestamp, msg);
+            let _ = file.flush();
+        }
+    }
+}
 
 /// Bracketed paste start sequence
 const PASTE_START: &[u8] = b"\x1b[200~";
@@ -106,22 +138,92 @@ impl PtyHandle {
         Ok(())
     }
 
+    /// Write all bytes, retrying on WouldBlock
+    ///
+    /// Since the PTY is in non-blocking mode, large writes can fail with WouldBlock
+    /// when the kernel buffer is full. This method retries with small delays.
+    fn write_all_with_retry(&mut self, mut data: &[u8]) -> Result<()> {
+        use std::io::ErrorKind;
+
+        const MAX_RETRIES: usize = 100;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+        let mut retries = 0;
+        while !data.is_empty() {
+            match self.writer.write(data) {
+                Ok(0) => {
+                    return Err(anyhow::anyhow!("Failed to write: write returned 0"));
+                }
+                Ok(n) => {
+                    data = &data[n..];
+                    retries = 0; // Reset retries on successful write
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    retries += 1;
+                    if retries > MAX_RETRIES {
+                        log_debug_pty(&format!(
+                            "write_all_with_retry: giving up after {} retries, {} bytes remaining",
+                            MAX_RETRIES,
+                            data.len()
+                        ));
+                        return Err(anyhow::anyhow!(
+                            "Write timed out after {} retries",
+                            MAX_RETRIES
+                        ));
+                    }
+                    log_debug_pty(&format!(
+                        "write_all_with_retry: WouldBlock, retry {}/{}, {} bytes remaining",
+                        retries,
+                        MAX_RETRIES,
+                        data.len()
+                    ));
+                    std::thread::sleep(RETRY_DELAY);
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {
+                    // Retry immediately on interrupt
+                    continue;
+                }
+                Err(e) => {
+                    return Err(e).context("Failed to write to PTY");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Write pasted text to the PTY, optionally wrapped in bracketed paste sequences
     pub fn write_paste(&mut self, text: &str, use_bracketed_paste: bool) -> Result<()> {
+        log_debug_pty(&format!(
+            "write_paste: text_len={}, lines={}, use_bracketed={}",
+            text.len(),
+            text.lines().count(),
+            use_bracketed_paste
+        ));
+
         if use_bracketed_paste {
+            log_debug_pty("write_paste: writing PASTE_START");
             self.writer
                 .write_all(PASTE_START)
                 .context("Failed to write paste start sequence")?;
+            log_debug_pty("write_paste: PASTE_START written");
         }
-        self.writer
-            .write_all(text.as_bytes())
+
+        log_debug_pty("write_paste: writing text content");
+        self.write_all_with_retry(text.as_bytes())
             .context("Failed to write paste content")?;
+        log_debug_pty("write_paste: text content written");
+
         if use_bracketed_paste {
+            log_debug_pty("write_paste: writing PASTE_END");
             self.writer
                 .write_all(PASTE_END)
                 .context("Failed to write paste end sequence")?;
+            log_debug_pty("write_paste: PASTE_END written");
         }
+
+        log_debug_pty("write_paste: flushing");
         self.writer.flush().context("Failed to flush PTY writer")?;
+        log_debug_pty("write_paste: flush complete");
         Ok(())
     }
 

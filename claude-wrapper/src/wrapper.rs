@@ -261,8 +261,11 @@ impl ClaudeWrapper {
             // Read PTY output
             if let Some(ref mut pty) = self.pty {
                 while let Some(data) = pty.try_read()? {
+                    log_debug(&format!("PTY READ: got {} bytes", data.len()));
                     if let Some(ref mut vterm) = self.vterm {
+                        log_debug("PTY READ: calling vterm.process()");
                         vterm.process(&data);
+                        log_debug("PTY READ: vterm.process() complete");
                         self.needs_render = true;
                     }
                 }
@@ -353,21 +356,43 @@ impl ClaudeWrapper {
                         }
                     }
                     Event::Paste(text) => {
+                        log_debug(&format!(
+                            "PASTE EVENT: received text_len={}, lines={}",
+                            text.len(),
+                            text.lines().count()
+                        ));
+
                         // Reset scroll to live view when pasting
                         if self.scroll_offset > 0 {
+                            log_debug("PASTE: resetting scroll offset to 0");
                             self.scroll_offset = 0;
                             if let Some(ref mut vterm) = self.vterm {
                                 vterm.set_scrollback(0);
                             }
                         }
+
                         if let Some(ref mut pty) = self.pty {
                             let use_bracketed = self
                                 .vterm
                                 .as_ref()
                                 .is_some_and(|v| v.bracketed_paste_enabled());
-                            pty.write_paste(&text, use_bracketed)?;
+                            log_debug(&format!(
+                                "PASTE: calling pty.write_paste, use_bracketed={}",
+                                use_bracketed
+                            ));
+
+                            match pty.write_paste(&text, use_bracketed) {
+                                Ok(()) => log_debug("PASTE: write_paste succeeded"),
+                                Err(ref e) => {
+                                    log_debug(&format!("PASTE: write_paste FAILED: {}", e));
+                                    return Err(anyhow::anyhow!("Paste failed: {}", e));
+                                }
+                            }
+
+                            log_debug("PASTE: marking needs_render=true");
                             self.needs_render = true;
                         }
+                        log_debug("PASTE EVENT: handling complete");
                     }
                     Event::Resize(w, h) => {
                         // Debounce resize events
