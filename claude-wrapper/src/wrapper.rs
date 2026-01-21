@@ -198,11 +198,15 @@ impl ClaudeWrapper {
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
 
+        // Force Claude Code to use consistent header mode (prevents flickering on resize)
+        let mut env = self.config.env.clone();
+        env.insert("CLAUDE_CODE_FORCE_FULL_LOGO".to_string(), "1".to_string());
+
         self.pty = Some(PtyHandle::spawn(
             &self.config.command,
             &self.config.args,
             &working_dir,
-            self.config.env.clone(),
+            env,
             rows,
             cols,
         )?);
