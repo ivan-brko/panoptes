@@ -1,24 +1,33 @@
+use std::sync::Arc;
+
 use anyhow::Result;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use panoptes::app::App;
 use panoptes::config;
+use panoptes::logging::{self, LogBuffer};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "panoptes=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer().with_target(false))
-        .init();
-
-    // Ensure config directory exists
+    // Ensure config directory exists (creates logs dir too)
     config::ensure_directories()?;
 
+    // Create log buffer for real-time log viewing
+    let log_buffer = Arc::new(LogBuffer::new(10_000, 100));
+
+    // Initialize file logging BEFORE any tracing calls
+    let (log_file_info, _guard) =
+        logging::init_file_logging(config::logs_dir(), Arc::clone(&log_buffer))?;
+
+    // Clean up old logs (7-day retention)
+    if let Ok(count) = logging::cleanup_old_logs(&config::logs_dir()) {
+        if count > 0 {
+            tracing::info!("Cleaned up {} old log files", count);
+        }
+    }
+
+    tracing::info!("Logging to: {}", log_file_info.path.display());
+
     // Run the application
-    let mut app = App::new().await?;
+    let mut app = App::new(log_buffer, log_file_info).await?;
     app.run().await
 }

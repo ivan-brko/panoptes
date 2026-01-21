@@ -126,6 +126,11 @@ pub fn config_file_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Get the path to the logs directory
+pub fn logs_dir() -> PathBuf {
+    config_dir().join("logs")
+}
+
 /// Ensure all required directories exist
 pub fn ensure_directories() -> Result<()> {
     let config = Config::default();
@@ -136,6 +141,8 @@ pub fn ensure_directories() -> Result<()> {
         .context("Failed to create worktrees directory")?;
 
     std::fs::create_dir_all(&config.hooks_dir).context("Failed to create hooks directory")?;
+
+    std::fs::create_dir_all(logs_dir()).context("Failed to create logs directory")?;
 
     Ok(())
 }

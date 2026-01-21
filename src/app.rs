@@ -4,6 +4,7 @@
 //! that ties together session management, hook handling, and terminal UI.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -14,11 +15,12 @@ use crate::config::Config;
 use crate::hooks::{
     self, HookEventReceiver, HookEventSender, ServerHandle, DEFAULT_CHANNEL_BUFFER,
 };
+use crate::logging::{LogBuffer, LogFileInfo};
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionId, SessionManager};
 use crate::tui::views::{
-    render_branch_detail, render_project_detail, render_projects_overview, render_session_view,
-    render_timeline,
+    render_branch_detail, render_log_viewer, render_project_detail, render_projects_overview,
+    render_session_view, render_timeline,
 };
 use crate::tui::Tui;
 
@@ -117,6 +119,8 @@ pub enum View {
     SessionView,
     /// All sessions sorted by recent activity
     ActivityTimeline,
+    /// Log viewer showing application logs
+    LogViewer,
 }
 
 impl View {
@@ -153,6 +157,7 @@ impl View {
             View::BranchDetail(project_id, _) => Some(View::ProjectDetail(*project_id)),
             View::SessionView => None, // Handled specially based on context
             View::ActivityTimeline => Some(View::ProjectsOverview),
+            View::LogViewer => Some(View::ProjectsOverview),
         }
     }
 
@@ -251,6 +256,10 @@ pub struct AppState {
     pub last_resize: Option<Instant>,
     /// Whether a resize is pending (debounced)
     pub pending_resize: bool,
+    /// Scroll offset in log viewer
+    pub log_viewer_scroll: usize,
+    /// Whether log viewer auto-scrolls to new entries
+    pub log_viewer_auto_scroll: bool,
 }
 
 impl AppState {
@@ -262,6 +271,7 @@ impl AppState {
             View::BranchDetail(_, _) => self.selected_session_index,
             View::ActivityTimeline => self.selected_timeline_index,
             View::SessionView => 0,
+            View::LogViewer => self.log_viewer_scroll,
         }
     }
 
@@ -273,6 +283,7 @@ impl AppState {
             View::BranchDetail(_, _) => self.selected_session_index = index,
             View::ActivityTimeline => self.selected_timeline_index = index,
             View::SessionView => {}
+            View::LogViewer => self.log_viewer_scroll = index,
         }
     }
 
@@ -378,11 +389,15 @@ pub struct App {
     hook_server: ServerHandle,
     /// Terminal UI
     tui: Tui,
+    /// Log buffer for real-time log viewing
+    log_buffer: Arc<LogBuffer>,
+    /// Information about the current log file
+    log_file_info: LogFileInfo,
 }
 
 impl App {
     /// Create a new application instance
-    pub async fn new() -> Result<Self> {
+    pub async fn new(log_buffer: Arc<LogBuffer>, log_file_info: LogFileInfo) -> Result<Self> {
         let config = Config::load()?;
 
         // Load project store (or create empty if doesn't exist)
@@ -418,6 +433,8 @@ impl App {
             hook_rx,
             hook_server,
             tui,
+            log_buffer,
+            log_file_info,
         })
     }
 
@@ -678,6 +695,7 @@ impl App {
             }
             View::SessionView => self.handle_session_view_normal_key(key),
             View::ActivityTimeline => self.handle_timeline_key(key),
+            View::LogViewer => self.handle_log_viewer_key(key),
         }
     }
 
@@ -786,6 +804,12 @@ impl App {
                         self.state.selected_session_index = (num as usize) - 1;
                     }
                 }
+            }
+            KeyCode::Char('l') => {
+                // Open log viewer
+                self.state.view = View::LogViewer;
+                self.state.log_viewer_scroll = 0;
+                self.state.log_viewer_auto_scroll = true;
             }
             _ => {}
         }
@@ -959,6 +983,58 @@ impl App {
                     }
                     self.resize_active_session_pty()?;
                 }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key in log viewer (normal mode)
+    fn handle_log_viewer_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        let entry_count = self.log_buffer.len();
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                // Go back to projects overview
+                self.state.view = View::ProjectsOverview;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                // Scroll down (disable auto-scroll)
+                self.state.log_viewer_auto_scroll = false;
+                if self.state.log_viewer_scroll < entry_count.saturating_sub(1) {
+                    self.state.log_viewer_scroll += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                // Scroll up (disable auto-scroll)
+                self.state.log_viewer_auto_scroll = false;
+                self.state.log_viewer_scroll = self.state.log_viewer_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('g') => {
+                // Jump to top (disable auto-scroll)
+                self.state.log_viewer_auto_scroll = false;
+                self.state.log_viewer_scroll = 0;
+            }
+            KeyCode::Char('G') => {
+                // Jump to bottom and enable auto-scroll
+                self.state.log_viewer_auto_scroll = true;
+                self.state.log_viewer_scroll = entry_count.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                // Page down (disable auto-scroll)
+                self.state.log_viewer_auto_scroll = false;
+                self.state.log_viewer_scroll =
+                    (self.state.log_viewer_scroll + 20).min(entry_count.saturating_sub(1));
+            }
+            KeyCode::PageUp => {
+                // Page up (disable auto-scroll)
+                self.state.log_viewer_auto_scroll = false;
+                self.state.log_viewer_scroll = self.state.log_viewer_scroll.saturating_sub(20);
             }
             _ => {}
         }
@@ -1983,6 +2059,8 @@ impl App {
         let project_store = &self.project_store;
         let sessions = &self.sessions;
         let config = &self.config;
+        let log_buffer = &self.log_buffer;
+        let log_file_info = &self.log_file_info;
 
         self.tui.draw(|frame| {
             let area = frame.size();
@@ -2019,6 +2097,16 @@ impl App {
                 }
                 View::ActivityTimeline => {
                     render_timeline(frame, area, state, sessions, project_store, config);
+                }
+                View::LogViewer => {
+                    render_log_viewer(
+                        frame,
+                        area,
+                        log_buffer,
+                        log_file_info,
+                        state.log_viewer_scroll,
+                        state.log_viewer_auto_scroll,
+                    );
                 }
             }
         })?;
