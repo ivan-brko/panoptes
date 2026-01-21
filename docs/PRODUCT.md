@@ -82,6 +82,14 @@ Panoptes actively helps you manage your attention across sessions:
 
 Press `t` from the projects overview to see all sessions sorted by recent activity. This view cuts across project/branch boundaries, showing you what's been happening across your entire workspace.
 
+### Log Viewer
+
+Press `l` from the projects overview to access the application log viewer. Useful for debugging and understanding what's happening under the hood. Logs are stored in `~/.panoptes/logs/` with 7-day automatic retention.
+
+### Session Scrollback
+
+Session views support scrollback through output history with PgUp/PgDn keys. The terminal maintains a 10,000-line scrollback buffer per session, allowing you to review past output even after it scrolls off screen.
+
 ### Keyboard-Driven Interface
 
 Everything is accessible via keyboard shortcuts. Number keys (1-9) for quick selection, Tab to cycle through sessions, and intuitive vim-style navigation.
@@ -100,6 +108,13 @@ Create new git worktrees directly from Panoptes with a fuzzy branch selector. Ty
 - Delete sessions with confirmation (`d` then `y/n`)
 - Sessions are automatically cleaned up when Panoptes exits
 
+### Project Management
+
+- Add projects by path with automatic git repository detection
+- Rename projects for better organization (`r` key)
+- Delete projects with confirmation, including cascade deletion of branches and sessions (`d` key)
+- Quick attention navigation with `Space` key to jump to next session needing input
+
 ## Who Is This For?
 
 Panoptes is for developers who:
@@ -114,9 +129,13 @@ The current version includes:
 - Managing multiple Claude Code sessions
 - Git repository and branch organization with worktree support
 - Real-time session state tracking
-- Attention system with notifications
+- Attention system with notifications and quick navigation
 - Activity timeline view
+- Log viewer for debugging
+- Session scrollback (10,000 lines)
+- Project management (add, rename, delete)
 - Keyboard-driven navigation
 - Project and branch persistence
+- Path autocomplete when adding projects
 
 Sessions are ephemeral - they exist only while Panoptes is running. Projects and branches are persisted between sessions.

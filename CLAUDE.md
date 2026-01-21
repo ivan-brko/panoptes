@@ -29,7 +29,7 @@ PTY Output → Session buffer → TUI render
 
 ### Module Responsibilities
 
-- **app.rs**: Main orchestrator. Holds Config, manages event loop, routes input and hook events, handles graceful shutdown with session cleanup. Defines `View` enum (ProjectsOverview, ProjectDetail, BranchDetail, SessionView, ActivityTimeline) and `InputMode` enum.
+- **app.rs**: Main orchestrator. Holds Config, manages event loop, routes input and hook events, handles graceful shutdown with session cleanup. Defines `View` enum (ProjectsOverview, ProjectDetail, BranchDetail, SessionView, ActivityTimeline, LogViewer) and `InputMode` enum.
 - **config.rs**: Configuration loading/saving. Defines paths (~/.panoptes/), hook port (9999), limits, `idle_threshold_secs`
 - **session/**: Session lifecycle management
   - `mod.rs`: SessionState enum (Starting→Thinking→Executing→Waiting→Idle→Exited), Session struct, OutputBuffer, `needs_attention` tracking
@@ -46,14 +46,25 @@ PTY Output → Session buffer → TUI render
   - `mod.rs`: GitOps struct for repository operations
   - `worktree.rs`: Git worktree creation and management
 - **hooks/**: HTTP server (Axum on port 9999) receiving Claude Code callbacks, HookEvent parsing
+- **logging/**: Application logging system
+  - `mod.rs`: Logging initialization and exports
+  - `buffer.rs`: LogBuffer for real-time log display in TUI
+  - `file_writer.rs`: File-based logging with timestamps
+  - `retention.rs`: Automatic cleanup of old log files (7-day retention)
+- **path_complete.rs**: Path completion/autocomplete for directory input with tilde expansion
 - **tui/**: Ratatui terminal setup/teardown
   - `mod.rs`: Tui struct for terminal management
+  - `theme.rs`: Centralized color and style definitions for UI
+  - `widgets/mod.rs`: Custom widget exports
+  - `widgets/project_card.rs`: Project card widget for grid display
   - `views/mod.rs`: View rendering exports
   - `views/projects.rs`: Projects overview (grid of projects, needs attention section)
   - `views/project_detail.rs`: Project detail (branches list, worktree creation UI)
   - `views/branch_detail.rs`: Branch detail (sessions list, delete confirmation)
-  - `views/session.rs`: Fullscreen session view
+  - `views/session.rs`: Fullscreen session view with scrollback support
   - `views/timeline.rs`: Activity timeline (all sessions sorted by activity)
+  - `views/logs.rs`: Log viewer for application logs
+  - `views/confirm.rs`: Reusable confirmation dialog component
 
 ### Key Types
 
@@ -66,8 +77,8 @@ PTY Output → Session buffer → TUI render
 - `Project`: Git repository metadata (name, repo_path, default_branch, timestamps)
 - `Branch`: Branch within a project (name, working_dir, is_default, is_worktree)
 - `ProjectStore`: In-memory store for projects and branches with TOML persistence
-- `View`: Enum for current UI view (ProjectsOverview, ProjectDetail, BranchDetail, SessionView, ActivityTimeline)
-- `InputMode`: Enum for input handling (Normal, Session, CreatingSession, AddingProject, CreatingWorktree, ConfirmingSessionDelete)
+- `View`: Enum for current UI view (ProjectsOverview, ProjectDetail, BranchDetail, SessionView, ActivityTimeline, LogViewer)
+- `InputMode`: Enum for input handling (Normal, Session, CreatingSession, AddingProject, AddingProjectName, FetchingBranches, CreatingWorktree, SelectingDefaultBase, ConfirmingSessionDelete, ConfirmingProjectDelete, ConfirmingQuit, RenamingProject)
 
 ## Conventions
 

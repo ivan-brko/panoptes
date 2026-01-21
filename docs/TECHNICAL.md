@@ -111,6 +111,24 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Logging System
+
+Panoptes includes a comprehensive logging system for debugging and diagnostics:
+
+- **File-based logging** - Logs written to `~/.panoptes/logs/` with daily rotation
+- **In-memory buffer** - Real-time log buffer accessible via Log Viewer (`l` key)
+- **Automatic retention** - Old log files automatically cleaned up after 7 days
+- **Structured logging** - Uses tracing framework with timestamps and log levels
+
+## Theme System
+
+The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
+
+- Semantic colors for UI elements (primary, secondary, success, warning, error)
+- State-specific colors for session states (thinking, executing, waiting, idle)
+- Reusable style definitions for borders, text, and highlights
+- Easy customization point for future theming support
+
 ## Communication Flow
 
 ### User Input
@@ -146,6 +164,7 @@
 | `~/.panoptes/projects.json` | Project and branch persistence |
 | `~/.panoptes/hooks/` | Hook scripts for Claude Code |
 | `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
+| `~/.panoptes/logs/` | Application logs (7-day retention) |
 
 ## Configuration
 
@@ -172,7 +191,7 @@ Sessions are cleaned up automatically when Panoptes exits:
 
 ## Testing
 
-The project has 108 unit tests covering:
+The project has 134 unit tests covering:
 - Configuration loading/saving
 - Session state transitions
 - Output buffer management
@@ -181,5 +200,7 @@ The project has 108 unit tests covering:
 - VTerm ANSI parsing
 - Project/branch management
 - Navigation state machine
+- Logging system
+- Path completion
 
 Run tests with: `cargo test`

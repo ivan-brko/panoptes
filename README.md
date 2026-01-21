@@ -49,6 +49,7 @@ Panoptes has a hierarchical navigation model:
 3. **Branch Detail** - Sessions for a specific branch
 4. **Session View** - Fullscreen view of a single Claude Code session
 5. **Activity Timeline** - All sessions sorted by recent activity (press `t`)
+6. **Log Viewer** - Application logs for debugging (press `l`)
 
 Navigate forward with `Enter`, backward with `Esc`.
 
@@ -60,7 +61,11 @@ Navigate forward with `Enter`, backward with `Esc`.
 |-----|--------|
 | `a` | Add a new project |
 | `n` | Create session (in selected project's default branch) |
+| `d` | Delete selected project (prompts for confirmation) |
+| `r` | Rename selected project |
 | `t` | Open activity timeline |
+| `l` | Open log viewer |
+| `Space` | Jump to next session needing attention |
 | `j` / `Down` | Move selection down |
 | `k` / `Up` | Move selection up |
 | `Enter` | Open selected project |
@@ -98,7 +103,8 @@ Navigate forward with `Enter`, backward with `Esc`.
 | `Enter` | Enter Session mode (interact with PTY) |
 | `Esc` | Return to previous view |
 | `Tab` | Switch to next session |
-| `1-9` | Jump to session by number |
+| `PgUp` / `PgDn` | Scroll through session history |
+| `Ctrl+End` | Jump to bottom of output |
 | `q` | Return to previous view |
 
 ### Session View (Session Mode)
@@ -134,6 +140,16 @@ Navigate forward with `Enter`, backward with `Esc`.
 |-----|--------|
 | `y` | Confirm deletion |
 | `n` / `Esc` | Cancel deletion |
+
+### Log Viewer
+
+| Key | Action |
+|-----|--------|
+| `j` / `Down` | Scroll down |
+| `k` / `Up` | Scroll up |
+| `g` | Jump to top |
+| `G` | Jump to bottom (auto-scroll) |
+| `Esc` / `q` | Return to projects overview |
 
 ## Session States
 
@@ -183,6 +199,7 @@ idle_threshold_secs = 300
 | `~/.panoptes/projects.json` | Project and branch persistence |
 | `~/.panoptes/hooks/` | Hook scripts for Claude Code |
 | `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
+| `~/.panoptes/logs/` | Application logs (7-day retention) |
 
 ## Documentation
 
@@ -195,7 +212,7 @@ idle_threshold_secs = 300
 ```bash
 cargo build              # Build debug
 cargo build --release    # Build release
-cargo test               # Run all tests (108 tests)
+cargo test               # Run all tests (134 tests)
 cargo clippy             # Lint
 cargo fmt                # Format code
 ```
