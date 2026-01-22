@@ -263,6 +263,25 @@ impl VirtualTerminal {
     pub fn is_at_bottom(&self) -> bool {
         self.parser.screen().scrollback() == 0
     }
+
+    /// Get cursor position (row, col)
+    pub fn cursor_position(&self) -> (u16, u16) {
+        let screen = self.parser.screen();
+        screen.cursor_position()
+    }
+
+    /// Check if cursor should be visible
+    pub fn cursor_visible(&self) -> bool {
+        !self.parser.screen().hide_cursor()
+    }
+
+    /// Check if the terminal application has enabled mouse reporting
+    ///
+    /// Returns the mouse protocol mode that the application has requested.
+    /// Mouse events should be forwarded to the PTY when this is not `None`.
+    pub fn mouse_protocol_mode(&self) -> vt100::MouseProtocolMode {
+        self.parser.screen().mouse_protocol_mode()
+    }
 }
 
 #[cfg(test)]

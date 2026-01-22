@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -17,7 +19,8 @@ use crate::hooks::{
 };
 use crate::logging::{LogBuffer, LogFileInfo};
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::{SessionId, SessionManager};
+use crate::session::{mouse_event_to_bytes, SessionId, SessionManager};
+use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
     render_branch_detail, render_log_viewer, render_project_detail, render_projects_overview,
     render_session_view, render_timeline,
@@ -260,6 +263,8 @@ pub struct AppState {
     pub log_viewer_scroll: usize,
     /// Whether log viewer auto-scrolls to new entries
     pub log_viewer_auto_scroll: bool,
+    /// Scroll offset for session view (0 = live view, >0 = scrolled back)
+    pub session_scroll_offset: usize,
 }
 
 impl AppState {
@@ -337,6 +342,8 @@ impl AppState {
         self.session_return_view = Some(self.view);
         self.view = View::SessionView;
         self.active_session = Some(session_id);
+        // Reset scroll offset when entering session view
+        self.session_scroll_offset = 0;
         // Auto-activate session mode so keys go directly to PTY
         self.input_mode = InputMode::Session;
     }
@@ -459,7 +466,7 @@ impl App {
 
     /// Main event loop
     async fn event_loop(&mut self) -> Result<()> {
-        let tick_rate = Duration::from_millis(50);
+        let tick_rate = Duration::from_millis(16); // ~60fps for smooth rendering
 
         // Always render on first frame
         self.state.needs_render = true;
@@ -493,6 +500,11 @@ impl App {
                         self.state.pending_resize = true;
                         self.state.needs_render = true;
                     }
+                    Event::Mouse(mouse) => {
+                        if self.handle_mouse_event(mouse)? {
+                            self.state.needs_render = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -504,11 +516,15 @@ impl App {
                     if last_resize.elapsed() >= Duration::from_millis(50) {
                         self.state.pending_resize = false;
                         let size = self.tui.size()?;
-                        // Output area is: total height - header (3) - footer (3) - borders (2)
-                        let output_rows = size.height.saturating_sub(8);
-                        // Output width is: total width - borders (2)
-                        let output_cols = size.width.saturating_sub(2);
-                        self.sessions.resize_all(output_cols, output_rows);
+
+                        // Use FrameLayout for consistent size calculation
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(
+                            ratatui::prelude::Rect::new(0, 0, size.width, size.height),
+                            &frame_config,
+                        );
+                        let (rows, cols) = layout.pty_size();
+                        self.sessions.resize_all(cols, rows);
                         self.state.needs_render = true;
                     }
                 }
@@ -635,6 +651,71 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Handle a mouse event
+    ///
+    /// Returns true if the event caused a state change requiring re-render.
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) -> Result<bool> {
+        // Only handle mouse events in session view with active session
+        if self.state.view != View::SessionView {
+            return Ok(false);
+        }
+
+        let Some(session_id) = self.state.active_session else {
+            return Ok(false);
+        };
+
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return Ok(false);
+        };
+
+        // Check if Claude Code has mouse mode enabled
+        let mouse_enabled = session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+
+        if mouse_enabled {
+            // Forward mouse events to PTY when Claude Code wants them
+            // (for vim, etc. with mouse support)
+            let terminal_size = self.tui.size()?;
+            let frame_config = FrameConfig::default();
+            let layout = FrameLayout::calculate(
+                ratatui::prelude::Rect::new(0, 0, terminal_size.width, terminal_size.height),
+                &frame_config,
+            );
+            if let Some(bytes) = mouse_event_to_bytes(mouse, layout.content) {
+                session.write(&bytes)?;
+                return Ok(true);
+            }
+        } else {
+            // Handle scroll wheel for our own scrollback when mouse mode is disabled
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    let max_scroll = session.vterm.max_scrollback();
+                    // Scroll up by 3 lines (same as claude-wrapper)
+                    self.state.session_scroll_offset = self
+                        .state
+                        .session_scroll_offset
+                        .saturating_add(3)
+                        .min(max_scroll);
+                    session
+                        .vterm
+                        .set_scrollback(self.state.session_scroll_offset);
+                    return Ok(true);
+                }
+                MouseEventKind::ScrollDown => {
+                    // Scroll down by 3 lines (same as claude-wrapper)
+                    self.state.session_scroll_offset =
+                        self.state.session_scroll_offset.saturating_sub(3);
+                    session
+                        .vterm
+                        .set_scrollback(self.state.session_scroll_offset);
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(false)
     }
 
     /// Handle a key event
@@ -1059,20 +1140,46 @@ impl App {
                 self.state.input_mode = InputMode::Session;
             }
             KeyCode::PageUp => {
-                // Scroll up in session output
+                // Scroll up in session output (toward older content)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        let scroll_amount = 10; // Scroll by 10 lines
-                        session.vterm.scroll_up(scroll_amount);
+                        // Calculate viewport height for scroll amount
+                        let terminal_size = self.tui.size().unwrap_or_default();
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                        let viewport_height = layout.content.height as usize;
+                        let max_scroll = session.vterm.max_scrollback();
+
+                        // Update app-level scroll offset with constraints
+                        self.state.session_scroll_offset = self
+                            .state
+                            .session_scroll_offset
+                            .saturating_add(viewport_height)
+                            .min(max_scroll);
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
             }
             KeyCode::PageDown => {
-                // Scroll down in session output
+                // Scroll down in session output (toward newer content)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        let scroll_amount = 10;
-                        session.vterm.scroll_down(scroll_amount);
+                        // Calculate viewport height for scroll amount
+                        let terminal_size = self.tui.size().unwrap_or_default();
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                        let viewport_height = layout.content.height as usize;
+
+                        // Update app-level scroll offset
+                        self.state.session_scroll_offset = self
+                            .state
+                            .session_scroll_offset
+                            .saturating_sub(viewport_height);
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
             }
@@ -1080,8 +1187,11 @@ impl App {
                 // Scroll to top (oldest content)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        let max = session.vterm.max_scrollback();
-                        session.vterm.set_scrollback(max);
+                        let max_scroll = session.vterm.max_scrollback();
+                        self.state.session_scroll_offset = max_scroll;
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
             }
@@ -1089,6 +1199,7 @@ impl App {
                 // Scroll to bottom (live view)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
+                        self.state.session_scroll_offset = 0;
                         session.vterm.scroll_to_bottom();
                     }
                 }
@@ -1106,6 +1217,8 @@ impl App {
                     {
                         let session_id = session.info.id;
                         self.state.active_session = Some(session_id);
+                        // Reset scroll offset when switching sessions
+                        self.state.session_scroll_offset = 0;
                         self.sessions.acknowledge_attention(session_id);
                         if self.config.notification_method == "title" {
                             SessionManager::reset_terminal_title();
@@ -1126,6 +1239,8 @@ impl App {
                         {
                             let session_id = session.info.id;
                             self.state.active_session = Some(session_id);
+                            // Reset scroll offset when switching sessions
+                            self.state.session_scroll_offset = 0;
                             self.sessions.acknowledge_attention(session_id);
                             if self.config.notification_method == "title" {
                                 SessionManager::reset_terminal_title();
@@ -1157,7 +1272,22 @@ impl App {
             KeyCode::PageUp => {
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        session.vterm.scroll_up(10);
+                        // Calculate viewport height for scroll amount
+                        let terminal_size = self.tui.size().unwrap_or_default();
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                        let viewport_height = layout.content.height as usize;
+                        let max_scroll = session.vterm.max_scrollback();
+
+                        // Update app-level scroll offset with constraints
+                        self.state.session_scroll_offset = self
+                            .state
+                            .session_scroll_offset
+                            .saturating_add(viewport_height)
+                            .min(max_scroll);
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
                 return Ok(());
@@ -1165,7 +1295,20 @@ impl App {
             KeyCode::PageDown => {
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        session.vterm.scroll_down(10);
+                        // Calculate viewport height for scroll amount
+                        let terminal_size = self.tui.size().unwrap_or_default();
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                        let viewport_height = layout.content.height as usize;
+
+                        // Update app-level scroll offset
+                        self.state.session_scroll_offset = self
+                            .state
+                            .session_scroll_offset
+                            .saturating_sub(viewport_height);
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
                 return Ok(());
@@ -1174,8 +1317,11 @@ impl App {
                 // Ctrl+Home: scroll to top
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        let max = session.vterm.max_scrollback();
-                        session.vterm.set_scrollback(max);
+                        let max_scroll = session.vterm.max_scrollback();
+                        self.state.session_scroll_offset = max_scroll;
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
                 return Ok(());
@@ -1184,12 +1330,23 @@ impl App {
                 // Ctrl+End: scroll to bottom (live view)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
+                        self.state.session_scroll_offset = 0;
                         session.vterm.scroll_to_bottom();
                     }
                 }
                 return Ok(());
             }
             _ => {}
+        }
+
+        // Reset scroll to live view when typing
+        if self.state.session_scroll_offset > 0 {
+            self.state.session_scroll_offset = 0;
+            if let Some(session_id) = self.state.active_session {
+                if let Some(session) = self.sessions.get_mut(session_id) {
+                    session.vterm.scroll_to_bottom();
+                }
+            }
         }
 
         // Send key to active session
