@@ -151,11 +151,17 @@ impl SessionManager {
 
     /// Poll all sessions for new output
     /// Returns list of session IDs that had new output
+    /// Drains ALL available PTY data before returning to prevent rendering lag
     pub fn poll_outputs(&mut self) -> Vec<SessionId> {
         let mut sessions_with_output = Vec::new();
 
         for (&session_id, session) in &mut self.sessions {
-            if session.poll_output() {
+            let mut had_output = false;
+            // Drain ALL available PTY data before returning
+            while session.poll_output() {
+                had_output = true;
+            }
+            if had_output {
                 sessions_with_output.push(session_id);
             }
         }
