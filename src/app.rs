@@ -92,11 +92,11 @@ pub enum InputMode {
     AddingProject,
     /// Adding a new project - typing optional name (after path validation)
     AddingProjectName,
-    /// Fetching branches from git remotes (shows spinner)
+    /// Fetching branches from git remotes (shows spinner) - DEPRECATED
     FetchingBranches,
-    /// Creating a new worktree - typing branch name
+    /// Creating a new worktree - typing branch name - DEPRECATED (use WorktreeSelectBranch)
     CreatingWorktree,
-    /// Selecting default base branch
+    /// Selecting default base branch - DEPRECATED (use WorktreeSelectBase)
     SelectingDefaultBase,
     /// Confirming session deletion
     ConfirmingSessionDelete,
@@ -108,6 +108,24 @@ pub enum InputMode {
     ConfirmingQuit,
     /// Renaming a project
     RenamingProject,
+    /// Worktree creation Step 1: Search/select existing branch or create new
+    WorktreeSelectBranch,
+    /// Worktree creation Step 2: Select base branch for new branch
+    WorktreeSelectBase,
+    /// Worktree creation Step 3: Confirmation before creation
+    WorktreeConfirm,
+}
+
+/// Type of worktree creation being performed
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorktreeCreationType {
+    /// Checkout existing local branch into a worktree
+    #[default]
+    ExistingLocal,
+    /// Create local tracking branch from remote and checkout into worktree
+    RemoteTracking,
+    /// Create a new branch from a base and checkout into worktree
+    NewBranch,
 }
 
 /// Current view being displayed
@@ -273,6 +291,30 @@ pub struct AppState {
     pub log_viewer_auto_scroll: bool,
     /// Scroll offset for session view (0 = live view, >0 = scrolled back)
     pub session_scroll_offset: usize,
+
+    // --- New worktree creation wizard state ---
+    /// Search text in WorktreeSelectBranch step
+    pub worktree_search_text: String,
+    /// All available branches (local + remote) for worktree creation
+    pub worktree_all_branches: Vec<BranchRef>,
+    /// Filtered branches matching search text
+    pub worktree_filtered_branches: Vec<BranchRef>,
+    /// Selected index in branch list (0..N = branches, N = "create new" option)
+    pub worktree_list_index: usize,
+    /// Final local branch name (for new branch or from remote)
+    pub worktree_branch_name: String,
+    /// Selected existing/remote branch (for ExistingLocal/RemoteTracking)
+    pub worktree_source_branch: Option<BranchRef>,
+    /// Base branch for creating new branches (step 2)
+    pub worktree_base_branch: Option<BranchRef>,
+    /// Search text in WorktreeSelectBase step
+    pub worktree_base_search_text: String,
+    /// Selected index in base branch list (step 2)
+    pub worktree_base_list_index: usize,
+    /// Type of worktree creation being performed
+    pub worktree_creation_type: WorktreeCreationType,
+    /// Project name for worktree path (cached during wizard)
+    pub worktree_project_name: String,
 }
 
 impl AppState {
@@ -778,6 +820,27 @@ impl App {
             InputMode::ConfirmingProjectDelete => self.handle_confirming_project_delete_key(key),
             InputMode::ConfirmingQuit => self.handle_confirming_quit_key(key),
             InputMode::RenamingProject => self.handle_renaming_project_key(key),
+            InputMode::WorktreeSelectBranch => {
+                if let View::ProjectDetail(project_id) = self.state.view {
+                    self.handle_worktree_select_branch_key(key, project_id)
+                } else {
+                    Ok(())
+                }
+            }
+            InputMode::WorktreeSelectBase => {
+                if let View::ProjectDetail(project_id) = self.state.view {
+                    self.handle_worktree_select_base_key(key, project_id)
+                } else {
+                    Ok(())
+                }
+            }
+            InputMode::WorktreeConfirm => {
+                if let View::ProjectDetail(project_id) = self.state.view {
+                    self.handle_worktree_confirm_key(key, project_id)
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -957,8 +1020,8 @@ impl App {
                 }
             }
             KeyCode::Char('w') => {
-                // Start creating a new worktree
-                self.start_worktree_creation(project_id);
+                // Start creating a new worktree (new wizard flow)
+                self.start_worktree_wizard(project_id);
             }
             KeyCode::Char('b') => {
                 // Set default base branch
@@ -972,11 +1035,6 @@ impl App {
                     self.state.delete_worktree_on_disk = branch.is_worktree; // Default to deleting if it's a worktree
                     self.state.input_mode = InputMode::ConfirmingBranchDelete;
                 }
-            }
-            KeyCode::Char('D') => {
-                // Delete entire project (Shift+D)
-                self.state.pending_delete_project = Some(project_id);
-                self.state.input_mode = InputMode::ConfirmingProjectDelete;
             }
             KeyCode::Char('r') => {
                 // Start renaming project
@@ -1841,7 +1899,11 @@ impl App {
                 let result = if !branch_name_typed.is_empty() {
                     // Create NEW branch from selected base, then create worktree
                     // Use selected_base_branch which is preserved even when filtered out
-                    let base_ref = self.state.selected_base_branch.as_ref().map(|b| b.name.clone());
+                    let base_ref = self
+                        .state
+                        .selected_base_branch
+                        .as_ref()
+                        .map(|b| b.name.clone());
                     self.create_worktree(project_id, &branch_name_typed, true, base_ref.as_deref())
                 } else if let Some(selected) = selected_branch {
                     // Checkout existing branch as worktree (empty name = checkout selected)
@@ -2171,10 +2233,7 @@ impl App {
 
                     // Adjust selected index if needed
                     if let Some(project_id) = self.state.view.project_id() {
-                        let new_count = self
-                            .project_store
-                            .branches_for_project(project_id)
-                            .len();
+                        let new_count = self.project_store.branches_for_project(project_id).len();
                         if self.state.selected_branch_index >= new_count && new_count > 0 {
                             self.state.selected_branch_index = new_count - 1;
                         } else if new_count == 0 {
@@ -2313,7 +2372,391 @@ impl App {
         Ok(())
     }
 
+    // ========================================================================
+    // New Worktree Creation Wizard Handlers
+    // ========================================================================
+
+    /// Handle key in WorktreeSelectBranch mode (Step 1)
+    ///
+    /// User can:
+    /// - Type to filter existing branches
+    /// - Arrow keys to navigate the list
+    /// - Enter on existing local branch → WorktreeConfirm (ExistingLocal)
+    /// - Enter on remote branch → WorktreeConfirm (RemoteTracking)
+    /// - Enter on "Create new branch" → WorktreeSelectBase
+    /// - Esc to cancel
+    fn handle_worktree_select_branch_key(
+        &mut self,
+        key: KeyEvent,
+        project_id: ProjectId,
+    ) -> Result<()> {
+        // project_id reserved for potential future use
+        let _ = project_id;
+
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        let filtered_count = self.state.worktree_filtered_branches.len();
+        // The "Create new branch" option is at index = filtered_count when search text is non-empty
+        let has_create_option = !self.state.worktree_search_text.is_empty();
+        let total_options = if has_create_option {
+            filtered_count + 1
+        } else {
+            filtered_count
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                self.cancel_worktree_wizard();
+            }
+            KeyCode::Up => {
+                if total_options > 0 {
+                    self.state.worktree_list_index = self
+                        .state
+                        .worktree_list_index
+                        .checked_sub(1)
+                        .unwrap_or(total_options - 1);
+                }
+            }
+            KeyCode::Down => {
+                if total_options > 0 {
+                    self.state.worktree_list_index =
+                        (self.state.worktree_list_index + 1) % total_options;
+                }
+            }
+            KeyCode::Enter => {
+                if self.state.worktree_list_index < filtered_count {
+                    // Selected an existing branch
+                    let selected = self.state.worktree_filtered_branches
+                        [self.state.worktree_list_index]
+                        .clone();
+
+                    if selected.ref_type == BranchRefType::Local {
+                        // Existing local branch → go directly to confirm
+                        self.state.worktree_source_branch = Some(selected.clone());
+                        self.state.worktree_branch_name = selected.name.clone();
+                        self.state.worktree_creation_type = WorktreeCreationType::ExistingLocal;
+                        self.state.input_mode = InputMode::WorktreeConfirm;
+                    } else {
+                        // Remote branch → will create tracking branch
+                        // Extract local name from remote ref (e.g., "origin/feature" -> "feature")
+                        let local_name = selected
+                            .name
+                            .split_once('/')
+                            .map(|(_, b)| b.to_string())
+                            .unwrap_or_else(|| selected.name.clone());
+
+                        self.state.worktree_source_branch = Some(selected);
+                        self.state.worktree_branch_name = local_name;
+                        self.state.worktree_creation_type = WorktreeCreationType::RemoteTracking;
+                        self.state.input_mode = InputMode::WorktreeConfirm;
+                    }
+                } else if has_create_option {
+                    // Selected "Create new branch" option
+                    self.state.worktree_branch_name = self.state.worktree_search_text.clone();
+                    self.state.worktree_creation_type = WorktreeCreationType::NewBranch;
+
+                    // Initialize base branch selection
+                    self.state.worktree_base_search_text.clear();
+                    self.state.worktree_base_list_index = 0;
+
+                    // Find and select the default base branch
+                    if let Some(idx) = self
+                        .state
+                        .worktree_all_branches
+                        .iter()
+                        .position(|b| b.is_default_base)
+                    {
+                        self.state.worktree_base_list_index = idx;
+                        self.state.worktree_base_branch =
+                            Some(self.state.worktree_all_branches[idx].clone());
+                    } else if let Some(first) = self.state.worktree_all_branches.first() {
+                        self.state.worktree_base_branch = Some(first.clone());
+                    }
+
+                    self.state.input_mode = InputMode::WorktreeSelectBase;
+                }
+            }
+            KeyCode::Backspace => {
+                self.state.worktree_search_text.pop();
+                self.update_worktree_filtered_branches();
+                // Reset selection to top
+                self.state.worktree_list_index = 0;
+            }
+            KeyCode::Char(c) => {
+                self.state.worktree_search_text.push(c);
+                self.update_worktree_filtered_branches();
+                // Reset selection to top
+                self.state.worktree_list_index = 0;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key in WorktreeSelectBase mode (Step 2)
+    ///
+    /// User can:
+    /// - Type to filter base branches
+    /// - Arrow keys to navigate the list
+    /// - Enter to confirm and go to WorktreeConfirm
+    /// - Esc to go back to WorktreeSelectBranch
+    fn handle_worktree_select_base_key(
+        &mut self,
+        key: KeyEvent,
+        project_id: ProjectId,
+    ) -> Result<()> {
+        // project_id reserved for potential future use (e.g., setting default base branch)
+        let _ = project_id;
+
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        // Filter branches based on base search text
+        let filtered: Vec<BranchRef> = if self.state.worktree_base_search_text.is_empty() {
+            self.state.worktree_all_branches.clone()
+        } else {
+            let query = self.state.worktree_base_search_text.to_lowercase();
+            self.state
+                .worktree_all_branches
+                .iter()
+                .filter(|b| b.name.to_lowercase().contains(&query))
+                .cloned()
+                .collect()
+        };
+        let filtered_count = filtered.len();
+
+        match key.code {
+            KeyCode::Esc => {
+                // Go back to step 1
+                self.state.input_mode = InputMode::WorktreeSelectBranch;
+                self.state.worktree_base_search_text.clear();
+            }
+            KeyCode::Up => {
+                if filtered_count > 0 {
+                    self.state.worktree_base_list_index = self
+                        .state
+                        .worktree_base_list_index
+                        .checked_sub(1)
+                        .unwrap_or(filtered_count - 1);
+                    // Update selected base branch
+                    if let Some(branch) = filtered.get(self.state.worktree_base_list_index) {
+                        self.state.worktree_base_branch = Some(branch.clone());
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if filtered_count > 0 {
+                    self.state.worktree_base_list_index =
+                        (self.state.worktree_base_list_index + 1) % filtered_count;
+                    // Update selected base branch
+                    if let Some(branch) = filtered.get(self.state.worktree_base_list_index) {
+                        self.state.worktree_base_branch = Some(branch.clone());
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                // Confirm base branch selection, go to confirmation
+                if let Some(branch) = filtered.get(self.state.worktree_base_list_index) {
+                    self.state.worktree_base_branch = Some(branch.clone());
+                }
+                self.state.input_mode = InputMode::WorktreeConfirm;
+            }
+            KeyCode::Backspace => {
+                self.state.worktree_base_search_text.pop();
+                self.state.worktree_base_list_index = 0;
+            }
+            KeyCode::Char(c) => {
+                self.state.worktree_base_search_text.push(c);
+                self.state.worktree_base_list_index = 0;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key in WorktreeConfirm mode (Step 3)
+    ///
+    /// User can:
+    /// - Enter to create the worktree
+    /// - Esc to go back to the previous step
+    fn handle_worktree_confirm_key(&mut self, key: KeyEvent, project_id: ProjectId) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                // Go back to appropriate step
+                match self.state.worktree_creation_type {
+                    WorktreeCreationType::NewBranch => {
+                        self.state.input_mode = InputMode::WorktreeSelectBase;
+                    }
+                    _ => {
+                        self.state.input_mode = InputMode::WorktreeSelectBranch;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                // Create the worktree
+                let result = match self.state.worktree_creation_type {
+                    WorktreeCreationType::ExistingLocal => {
+                        // Create worktree from existing local branch (don't create branch)
+                        self.create_worktree(
+                            project_id,
+                            &self.state.worktree_branch_name.clone(),
+                            false,
+                            None,
+                        )
+                    }
+                    WorktreeCreationType::RemoteTracking => {
+                        // Create local tracking branch from remote, then worktree
+                        let base_ref = self
+                            .state
+                            .worktree_source_branch
+                            .as_ref()
+                            .map(|b| b.name.clone());
+                        self.create_worktree(
+                            project_id,
+                            &self.state.worktree_branch_name.clone(),
+                            true,
+                            base_ref.as_deref(),
+                        )
+                    }
+                    WorktreeCreationType::NewBranch => {
+                        // Create new branch from base, then worktree
+                        let base_ref = self
+                            .state
+                            .worktree_base_branch
+                            .as_ref()
+                            .map(|b| b.name.clone());
+                        self.create_worktree(
+                            project_id,
+                            &self.state.worktree_branch_name.clone(),
+                            true,
+                            base_ref.as_deref(),
+                        )
+                    }
+                };
+
+                if let Err(e) = result {
+                    tracing::error!("Failed to create worktree: {}", e);
+                    self.state.error_message = Some(format!("Failed to create worktree: {}", e));
+                }
+
+                self.cancel_worktree_wizard();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Cancel and clean up the worktree wizard state
+    fn cancel_worktree_wizard(&mut self) {
+        self.state.input_mode = InputMode::Normal;
+        self.state.worktree_search_text.clear();
+        self.state.worktree_all_branches.clear();
+        self.state.worktree_filtered_branches.clear();
+        self.state.worktree_list_index = 0;
+        self.state.worktree_branch_name.clear();
+        self.state.worktree_source_branch = None;
+        self.state.worktree_base_branch = None;
+        self.state.worktree_base_search_text.clear();
+        self.state.worktree_base_list_index = 0;
+        self.state.worktree_creation_type = WorktreeCreationType::ExistingLocal;
+        self.state.worktree_project_name.clear();
+        self.state.fetch_error = None;
+    }
+
+    /// Update filtered branches based on search text
+    fn update_worktree_filtered_branches(&mut self) {
+        if self.state.worktree_search_text.is_empty() {
+            self.state.worktree_filtered_branches = self.state.worktree_all_branches.clone();
+        } else {
+            let query = self.state.worktree_search_text.to_lowercase();
+            self.state.worktree_filtered_branches = self
+                .state
+                .worktree_all_branches
+                .iter()
+                .filter(|b| b.name.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+        }
+    }
+
+    /// Start the new worktree creation wizard (Step 1)
+    fn start_worktree_wizard(&mut self, project_id: ProjectId) {
+        // Clear all wizard state
+        self.state.worktree_search_text.clear();
+        self.state.worktree_list_index = 0;
+        self.state.worktree_branch_name.clear();
+        self.state.worktree_source_branch = None;
+        self.state.worktree_base_branch = None;
+        self.state.worktree_base_search_text.clear();
+        self.state.worktree_base_list_index = 0;
+        self.state.worktree_creation_type = WorktreeCreationType::ExistingLocal;
+        self.state.fetch_error = None;
+
+        // Get project info
+        let Some(project) = self.project_store.get_project(project_id) else {
+            self.state.error_message = Some("Project not found".to_string());
+            return;
+        };
+        self.state.worktree_project_name = project.name.clone();
+
+        // Try to open git repo and fetch branches
+        let Ok(git) = crate::git::GitOps::open(&project.repo_path) else {
+            self.state.error_message = Some("Failed to open git repository".to_string());
+            return;
+        };
+
+        // Try to fetch from remotes (may fail if offline)
+        if let Err(e) = git.fetch_all_remotes() {
+            tracing::warn!("Failed to fetch remotes: {}", e);
+            self.state.fetch_error = Some(format!("Fetch failed: {}", e));
+        }
+
+        // Get all branch refs
+        let default_base = project.default_base_branch.as_deref();
+        match git.list_all_branch_refs(default_base) {
+            Ok(refs) => {
+                self.state.worktree_all_branches = refs
+                    .into_iter()
+                    .map(|r| {
+                        let ref_type = match r.ref_type {
+                            crate::git::BranchRefInfoType::Local => BranchRefType::Local,
+                            crate::git::BranchRefInfoType::Remote => BranchRefType::Remote,
+                        };
+                        BranchRef {
+                            ref_type,
+                            name: r.name.clone(),
+                            display_name: r.name,
+                            is_default_base: r.is_default_base,
+                        }
+                    })
+                    .collect();
+                self.state.worktree_filtered_branches = self.state.worktree_all_branches.clone();
+            }
+            Err(e) => {
+                tracing::error!("Failed to list branches: {}", e);
+                self.state.error_message = Some(format!("Failed to list branches: {}", e));
+                return;
+            }
+        }
+
+        // Transition to step 1
+        self.state.input_mode = InputMode::WorktreeSelectBranch;
+    }
+
+    // ========================================================================
+    // End New Worktree Creation Wizard Handlers
+    // ========================================================================
+
     /// Start worktree creation flow: fetch branches, then show dialog
+    /// DEPRECATED: Use start_worktree_wizard instead for new worktree creation
+    #[allow(dead_code)]
     fn start_worktree_creation(&mut self, project_id: ProjectId) {
         self.state.new_branch_name.clear();
         self.state.base_branch_selector_index = 0;
@@ -2403,6 +2846,7 @@ impl App {
             let git = crate::git::GitOps::open(&project.repo_path)?;
             let worktree_path = crate::git::worktree::worktree_path_for_branch(
                 &self.config.worktrees_dir,
+                &project.name,
                 branch_name,
             );
 

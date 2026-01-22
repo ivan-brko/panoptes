@@ -5,7 +5,7 @@
 pub mod worktree;
 
 use anyhow::{Context, Result};
-use git2::{BranchType, Repository};
+use git2::{BranchType, Cred, CredentialType, FetchOptions, RemoteCallbacks, Repository};
 use std::path::{Path, PathBuf};
 
 /// Wrapper for git repository operations
@@ -158,6 +158,11 @@ impl GitOps {
     ///
     /// This is a potentially slow operation that should be run in a background task.
     /// Returns Ok(()) on success, or an error if fetch fails.
+    ///
+    /// Supports authentication via:
+    /// - SSH agent (most common)
+    /// - SSH key files (~/.ssh/id_ed25519, id_rsa, etc.)
+    /// - HTTPS via git credential helper
     pub fn fetch_all_remotes(&self) -> Result<()> {
         let remote_names = self.repo.remotes().context("Failed to list remotes")?;
 
@@ -168,9 +173,47 @@ impl GitOps {
                 .find_remote(remote_name)
                 .with_context(|| format!("Failed to find remote '{}'", remote_name))?;
 
-            // Fetch with default options
+            // Set up credential callbacks for authentication
+            let mut callbacks = RemoteCallbacks::new();
+            let config = self.repo.config().ok();
+            callbacks.credentials(move |url, username_from_url, allowed_types| {
+                // Try SSH agent first
+                if allowed_types.contains(CredentialType::SSH_KEY) {
+                    let username = username_from_url.unwrap_or("git");
+                    if let Ok(cred) = Cred::ssh_key_from_agent(username) {
+                        return Ok(cred);
+                    }
+                    // Fallback to SSH key files
+                    if let Some(home) = dirs::home_dir() {
+                        for key_name in &["id_ed25519", "id_rsa", "id_ecdsa"] {
+                            let key_path = home.join(".ssh").join(key_name);
+                            if key_path.exists() {
+                                if let Ok(cred) = Cred::ssh_key(username, None, &key_path, None) {
+                                    return Ok(cred);
+                                }
+                            }
+                        }
+                    }
+                }
+                // HTTPS credentials via git credential helper
+                if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) {
+                    if let Some(ref cfg) = config {
+                        if let Ok(cred) = Cred::credential_helper(cfg, url, username_from_url) {
+                            return Ok(cred);
+                        }
+                    }
+                }
+                // Default credentials (for anonymous access)
+                if allowed_types.contains(CredentialType::DEFAULT) {
+                    return Cred::default();
+                }
+                Err(git2::Error::from_str("no authentication available"))
+            });
+
+            let mut fetch_opts = FetchOptions::new();
+            fetch_opts.remote_callbacks(callbacks);
             remote
-                .fetch(&[] as &[&str], None, None)
+                .fetch(&[] as &[&str], Some(&mut fetch_opts), None)
                 .with_context(|| format!("Failed to fetch from remote '{}'", remote_name))?;
         }
 

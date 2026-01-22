@@ -221,15 +221,33 @@ pub fn list_worktrees(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
     Ok(worktrees)
 }
 
-/// Generate a worktree path for a branch
+/// Generate a worktree path for a branch within a project directory
 ///
-/// Creates a sanitized directory name from the branch name in the worktrees directory.
-pub fn worktree_path_for_branch(worktrees_dir: &Path, branch_name: &str) -> PathBuf {
+/// Creates a sanitized directory structure: `{worktrees_dir}/{project_name}/{branch_name}`.
+/// This allows worktrees from different projects to coexist without name collisions.
+///
+/// # Arguments
+/// * `worktrees_dir` - Base directory for all worktrees (e.g., `~/.panoptes/worktrees`)
+/// * `project_name` - Human-readable project name
+/// * `branch_name` - Git branch name
+///
+/// # Example
+/// ```ignore
+/// worktree_path_for_branch(Path::new("~/.panoptes/worktrees"), "my-app", "feature/auth")
+/// // Returns: ~/.panoptes/worktrees/my-app/feature-auth
+/// ```
+pub fn worktree_path_for_branch(
+    worktrees_dir: &Path,
+    project_name: &str,
+    branch_name: &str,
+) -> PathBuf {
+    // Sanitize project name for use as directory name
+    let safe_project =
+        project_name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|', ' '], "-");
     // Sanitize branch name for use as directory name
-    // Replace characters that are invalid in directory names
-    let safe_name = branch_name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-");
+    let safe_branch = branch_name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "-");
 
-    worktrees_dir.join(safe_name)
+    worktrees_dir.join(safe_project).join(safe_branch)
 }
 
 /// Check if a worktree exists for a given branch
@@ -353,18 +371,18 @@ mod tests {
         let base = PathBuf::from("/home/user/worktrees");
 
         assert_eq!(
-            worktree_path_for_branch(&base, "main"),
-            PathBuf::from("/home/user/worktrees/main")
+            worktree_path_for_branch(&base, "my-project", "main"),
+            PathBuf::from("/home/user/worktrees/my-project/main")
         );
 
         assert_eq!(
-            worktree_path_for_branch(&base, "feature/add-auth"),
-            PathBuf::from("/home/user/worktrees/feature-add-auth")
+            worktree_path_for_branch(&base, "my-project", "feature/add-auth"),
+            PathBuf::from("/home/user/worktrees/my-project/feature-add-auth")
         );
 
         assert_eq!(
-            worktree_path_for_branch(&base, "fix/bug:123"),
-            PathBuf::from("/home/user/worktrees/fix-bug-123")
+            worktree_path_for_branch(&base, "My Project", "fix/bug:123"),
+            PathBuf::from("/home/user/worktrees/My-Project/fix-bug-123")
         );
     }
 
