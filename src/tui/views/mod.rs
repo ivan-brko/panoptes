@@ -7,7 +7,9 @@ use crate::session::SessionManager;
 
 mod branch_detail;
 mod confirm;
+mod focus_stats;
 mod logs;
+mod notifications;
 mod project_detail;
 mod projects;
 mod session;
@@ -18,7 +20,9 @@ pub use confirm::{
     render_confirm_dialog, render_loading_indicator, render_quit_confirm_dialog,
     ConfirmDialogConfig,
 };
+pub use focus_stats::{render_focus_stats, render_timer_input_dialog};
 pub use logs::render_log_viewer;
+pub use notifications::{render_notification_badge, render_notifications};
 pub use project_detail::{render_project_delete_confirmation, render_project_detail};
 pub use projects::render_projects_overview;
 pub use session::render_session_view;
