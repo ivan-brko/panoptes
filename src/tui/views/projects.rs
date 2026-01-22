@@ -15,6 +15,7 @@ use crate::tui::theme::theme;
 use crate::tui::views::format_attention_hint;
 use crate::tui::views::render_project_delete_confirmation;
 use crate::tui::views::render_quit_confirm_dialog;
+use crate::tui::views::Breadcrumb;
 
 /// Render the projects overview
 pub fn render_projects_overview(
@@ -60,24 +61,19 @@ pub fn render_projects_overview(
 
     let mut chunk_idx = 0;
 
-    // Header
+    // Header with breadcrumb
     let active_count = sessions.total_active_count();
     let header_text = {
-        let mut parts = vec![format!(
-            "Panoptes - {} projects",
-            project_store.project_count()
-        )];
+        let breadcrumb = Breadcrumb::new();
+        let mut status_parts = vec![format!("{} projects", project_store.project_count())];
         if active_count > 0 {
-            parts.push(format!("{} active", active_count));
+            status_parts.push(format!("{} active", active_count));
         }
         if attention_count > 0 {
-            parts.push(format!("{} need attention", attention_count));
+            status_parts.push(format!("{} need attention", attention_count));
         }
-        if parts.len() == 1 {
-            parts[0].clone()
-        } else {
-            format!("{}, {}", parts[0], parts[1..].join(", "))
-        }
+        let suffix = format!("({})", status_parts.join(", "));
+        breadcrumb.display_with_suffix(&suffix)
     };
     let t = theme();
     let header = Paragraph::new(header_text)
