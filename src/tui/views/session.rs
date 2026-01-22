@@ -124,9 +124,14 @@ fn build_header_text(
             .get_project(session.info.project_id)
             .map(|p| p.name.as_str())
             .unwrap_or("?");
+        let branch_name = project_store
+            .get_branch(session.info.branch_id)
+            .map(|b| b.name.as_str())
+            .unwrap_or("?");
         format!(
-            "{} / {} - {}{}{}",
+            "{} / {} / {} - {}{}{}",
             project_name,
+            branch_name,
             session.info.name,
             session.info.state.display_name(),
             exit_info,

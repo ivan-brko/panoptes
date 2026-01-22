@@ -27,6 +27,16 @@ use crate::tui::views::{
 };
 use crate::tui::Tui;
 
+/// Focus state for the homepage (projects overview)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HomepageFocus {
+    /// Projects list is focused
+    #[default]
+    Projects,
+    /// Sessions list is focused
+    Sessions,
+}
+
 /// Type of branch reference (local or remote)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchRefType {
@@ -317,6 +327,8 @@ pub struct AppState {
     pub worktree_project_name: String,
     /// Loading message to display during blocking operations
     pub loading_message: Option<String>,
+    /// Focus state for homepage (projects vs sessions list)
+    pub homepage_focus: HomepageFocus,
 }
 
 impl AppState {
@@ -869,6 +881,7 @@ impl App {
 
         let project_count = self.project_store.project_count();
         let session_count = self.sessions.len();
+        let both_exist = project_count > 0 && session_count > 0;
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -882,9 +895,29 @@ impl App {
                 self.state.input_mode = InputMode::AddingProject;
                 self.state.new_project_path.clear();
             }
+            KeyCode::Tab => {
+                // Toggle focus between projects and sessions (only when both exist)
+                if both_exist {
+                    self.state.homepage_focus = match self.state.homepage_focus {
+                        HomepageFocus::Projects => HomepageFocus::Sessions,
+                        HomepageFocus::Sessions => HomepageFocus::Projects,
+                    };
+                }
+            }
             KeyCode::Down => {
-                // Navigate projects if any, otherwise sessions
-                if project_count > 0 {
+                // Navigate based on current focus
+                if both_exist {
+                    match self.state.homepage_focus {
+                        HomepageFocus::Projects => {
+                            self.state.selected_project_index =
+                                (self.state.selected_project_index + 1) % project_count;
+                        }
+                        HomepageFocus::Sessions => {
+                            self.state.selected_session_index =
+                                (self.state.selected_session_index + 1) % session_count;
+                        }
+                    }
+                } else if project_count > 0 {
                     self.state.selected_project_index =
                         (self.state.selected_project_index + 1) % project_count;
                 } else if session_count > 0 {
@@ -893,7 +926,25 @@ impl App {
                 }
             }
             KeyCode::Up => {
-                if project_count > 0 {
+                // Navigate based on current focus
+                if both_exist {
+                    match self.state.homepage_focus {
+                        HomepageFocus::Projects => {
+                            self.state.selected_project_index = self
+                                .state
+                                .selected_project_index
+                                .checked_sub(1)
+                                .unwrap_or(project_count - 1);
+                        }
+                        HomepageFocus::Sessions => {
+                            self.state.selected_session_index = self
+                                .state
+                                .selected_session_index
+                                .checked_sub(1)
+                                .unwrap_or(session_count - 1);
+                        }
+                    }
+                } else if project_count > 0 {
                     self.state.selected_project_index = self
                         .state
                         .selected_project_index
@@ -908,8 +959,31 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                // Open selected project or session
-                if project_count > 0 {
+                // Open selected project or session based on focus
+                if both_exist {
+                    match self.state.homepage_focus {
+                        HomepageFocus::Projects => {
+                            let projects = self.project_store.projects_sorted();
+                            if let Some(project) = projects.get(self.state.selected_project_index) {
+                                self.state.navigate_to_project(project.id);
+                            }
+                        }
+                        HomepageFocus::Sessions => {
+                            if let Some(session) = self
+                                .sessions
+                                .get_by_index(self.state.selected_session_index)
+                            {
+                                let session_id = session.info.id;
+                                self.state.navigate_to_session(session_id);
+                                self.sessions.acknowledge_attention(session_id);
+                                if self.config.notification_method == "title" {
+                                    SessionManager::reset_terminal_title();
+                                }
+                                self.resize_active_session_pty()?;
+                            }
+                        }
+                    }
+                } else if project_count > 0 {
                     let projects = self.project_store.projects_sorted();
                     if let Some(project) = projects.get(self.state.selected_project_index) {
                         self.state.navigate_to_project(project.id);
@@ -931,16 +1005,43 @@ impl App {
                 }
             }
             KeyCode::Char('d') => {
-                // Delete selected project (if projects exist) or session (if only sessions)
-                if project_count > 0 {
-                    // Projects exist - delete selected project
+                // Delete from currently focused list
+                if both_exist {
+                    match self.state.homepage_focus {
+                        HomepageFocus::Projects => {
+                            let projects = self.project_store.projects_sorted();
+                            if let Some(project) = projects.get(self.state.selected_project_index) {
+                                self.state.pending_delete_project = Some(project.id);
+                                self.state.input_mode = InputMode::ConfirmingProjectDelete;
+                            }
+                        }
+                        HomepageFocus::Sessions => {
+                            if let Some(session) = self
+                                .sessions
+                                .get_by_index(self.state.selected_session_index)
+                            {
+                                let id = session.info.id;
+                                if let Err(e) = self.sessions.destroy_session(id) {
+                                    tracing::error!("Failed to destroy session: {}", e);
+                                }
+                                let new_count = self.sessions.len();
+                                if self.state.selected_session_index >= new_count
+                                    && self.state.selected_session_index > 0
+                                {
+                                    self.state.selected_session_index -= 1;
+                                }
+                            }
+                        }
+                    }
+                } else if project_count > 0 {
+                    // Only projects - delete selected project
                     let projects = self.project_store.projects_sorted();
                     if let Some(project) = projects.get(self.state.selected_project_index) {
                         self.state.pending_delete_project = Some(project.id);
                         self.state.input_mode = InputMode::ConfirmingProjectDelete;
                     }
                 } else if session_count > 0 {
-                    // No projects, sessions in focus - delete selected session
+                    // Only sessions - delete selected session
                     if let Some(session) = self
                         .sessions
                         .get_by_index(self.state.selected_session_index)
@@ -960,7 +1061,20 @@ impl App {
             }
             KeyCode::Char(c) if c.is_ascii_digit() => {
                 if let Some(num) = c.to_digit(10) {
-                    if project_count > 0 && num > 0 && (num as usize) <= project_count {
+                    if both_exist {
+                        match self.state.homepage_focus {
+                            HomepageFocus::Projects => {
+                                if num > 0 && (num as usize) <= project_count {
+                                    self.state.selected_project_index = (num as usize) - 1;
+                                }
+                            }
+                            HomepageFocus::Sessions => {
+                                if num > 0 && (num as usize) <= session_count {
+                                    self.state.selected_session_index = (num as usize) - 1;
+                                }
+                            }
+                        }
+                    } else if project_count > 0 && num > 0 && (num as usize) <= project_count {
                         self.state.selected_project_index = (num as usize) - 1;
                     } else if project_count == 0 && num > 0 && (num as usize) <= session_count {
                         self.state.selected_session_index = (num as usize) - 1;

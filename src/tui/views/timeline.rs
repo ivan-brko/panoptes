@@ -123,7 +123,6 @@ pub fn render_timeline(
                     .get_branch(session.info.branch_id)
                     .map(|b| b.name.as_str())
                     .unwrap_or("?");
-                let context = format!("{}/{}", project_name, branch_name);
 
                 // Format time ago
                 let duration = now.signed_duration_since(session.info.last_activity);
@@ -149,14 +148,16 @@ pub fn render_timeline(
                     ("  ", Color::White)
                 };
 
+                // Format: project / branch / session [state] - time
                 let content = Line::from(vec![
                     Span::raw(prefix),
                     Span::styled(badge, Style::default().fg(badge_color)),
                     Span::raw(format!(
-                        "{}: {} ({}) [{}] - {}",
+                        "{}: {} / {} / {} [{}] - {}",
                         i + 1,
+                        project_name,
+                        branch_name,
                         session.info.name,
-                        context,
                         state_display,
                         time_ago
                     )),
@@ -233,8 +234,8 @@ fn render_attention_section(
             let content = Line::from(vec![
                 Span::styled("● ", Style::default().fg(badge_color)),
                 Span::raw(format!(
-                    "{} ({}/{}) {}",
-                    session.info.name, project_name, branch_name, state_text
+                    "{} / {} / {} {}",
+                    project_name, branch_name, session.info.name, state_text
                 )),
             ]);
 
