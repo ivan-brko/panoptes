@@ -65,6 +65,8 @@ pub fn render_project_detail(
     // Branch list, worktree creation dialog, or delete confirmation
     if state.input_mode == InputMode::ConfirmingProjectDelete {
         render_project_delete_confirmation(frame, chunks[1], state, project, sessions, config);
+    } else if state.input_mode == InputMode::ConfirmingBranchDelete {
+        render_branch_delete_confirmation(frame, chunks[1], state, project_store, sessions, config);
     } else if state.input_mode == InputMode::CreatingWorktree {
         render_worktree_creation(frame, chunks[1], state, project);
     } else if state.input_mode == InputMode::SelectingDefaultBase {
@@ -169,6 +171,9 @@ pub fn render_project_detail(
     // Footer
     let help_text = match state.input_mode {
         InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
+        InputMode::ConfirmingBranchDelete => {
+            "w: toggle worktree deletion | y: confirm | n/Esc: cancel".to_string()
+        }
         InputMode::CreatingWorktree => {
             "Type: name | ↑/↓: select base | s: set default | Enter: create | Esc: cancel"
                 .to_string()
@@ -180,7 +185,7 @@ pub fn render_project_detail(
         InputMode::RenamingProject => "Type: project name | Enter: save | Esc: cancel".to_string(),
         _ => {
             let base =
-                "w: new worktree | b: set default base | r: rename | d: delete | ↑/↓: navigate | Enter: open | Esc: back | q: quit";
+                "w: new worktree | b: set default base | r: rename | d: delete branch | D: delete project | ↑/↓: navigate | Enter: open | Esc: back | q: quit";
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
@@ -428,4 +433,142 @@ pub fn render_project_delete_confirmation(
         notes,
     };
     render_confirm_dialog(frame, area, config);
+}
+
+/// Render the branch delete confirmation dialog
+pub fn render_branch_delete_confirmation(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    project_store: &ProjectStore,
+    sessions: &SessionManager,
+    _config: &Config,
+) {
+    let t = theme();
+
+    let branch = state
+        .pending_delete_branch
+        .and_then(|id| project_store.get_branch(id));
+    let branch_name = branch
+        .map(|b| b.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+    let is_worktree = branch.map(|b| b.is_worktree).unwrap_or(false);
+
+    // Count sessions for this branch
+    let (session_count, active_count) = if let Some(branch_id) = state.pending_delete_branch {
+        (
+            sessions.session_count_for_branch(branch_id),
+            sessions.active_session_count_for_branch(branch_id),
+        )
+    } else {
+        (0, 0)
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Delete branch: ", Style::default().fg(t.text)),
+            Span::styled(
+                &branch_name,
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("?", Style::default().fg(t.text)),
+        ]),
+        Line::from(""),
+    ];
+
+    // Warning about active sessions
+    if active_count > 0 {
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "⚠  {} active session{} will be terminated",
+                active_count,
+                if active_count == 1 { "" } else { "s" }
+            ),
+            Style::default()
+                .fg(t.border_warning)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(""));
+    } else if session_count > 0 {
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "{} session{} will be removed",
+                session_count,
+                if session_count == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(t.text_muted),
+        )]));
+        lines.push(Line::from(""));
+    }
+
+    // Worktree deletion toggle
+    if is_worktree {
+        let checkbox = if state.delete_worktree_on_disk {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let checkbox_style = if state.delete_worktree_on_disk {
+            Style::default()
+                .fg(t.border_warning)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(t.text_muted)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(checkbox, checkbox_style),
+            Span::styled(" Also delete worktree from disk", Style::default().fg(t.text)),
+            Span::styled(
+                " (press w to toggle)",
+                Style::default().fg(t.text_muted),
+            ),
+        ]));
+        if state.delete_worktree_on_disk {
+            lines.push(Line::from(vec![Span::styled(
+                "    ⚠  This will permanently delete the directory!",
+                Style::default()
+                    .fg(t.border_warning)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+        }
+        lines.push(Line::from(""));
+    } else {
+        lines.push(Line::from(vec![Span::styled(
+            "This branch is not a worktree (tracked branch only)",
+            Style::default().fg(t.text_muted),
+        )]));
+        lines.push(Line::from(""));
+    }
+
+    // Confirmation prompt
+    lines.push(Line::from(vec![
+        Span::styled("Press ", Style::default().fg(t.text)),
+        Span::styled(
+            "y",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" to confirm, ", Style::default().fg(t.text)),
+        Span::styled(
+            "n",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" or ", Style::default().fg(t.text)),
+        Span::styled(
+            "Esc",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" to cancel", Style::default().fg(t.text)),
+    ]));
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.border_warning))
+            .title("Confirm Delete"),
+    );
+
+    frame.render_widget(paragraph, area);
 }

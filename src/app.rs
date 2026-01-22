@@ -100,6 +100,8 @@ pub enum InputMode {
     SelectingDefaultBase,
     /// Confirming session deletion
     ConfirmingSessionDelete,
+    /// Confirming branch/worktree deletion
+    ConfirmingBranchDelete,
     /// Confirming project deletion
     ConfirmingProjectDelete,
     /// Confirming application quit
@@ -247,6 +249,10 @@ pub struct AppState {
     pub pending_delete_session: Option<SessionId>,
     /// Project pending deletion (for confirmation dialog)
     pub pending_delete_project: Option<ProjectId>,
+    /// Branch pending deletion (for confirmation dialog)
+    pub pending_delete_branch: Option<BranchId>,
+    /// Whether to also delete the git worktree on disk when deleting a branch
+    pub delete_worktree_on_disk: bool,
     /// Project being renamed
     pub renaming_project: Option<ProjectId>,
     /// Whether the application should quit
@@ -768,6 +774,7 @@ impl App {
                 }
             }
             InputMode::ConfirmingSessionDelete => self.handle_confirming_delete_key(key),
+            InputMode::ConfirmingBranchDelete => self.handle_confirming_branch_delete_key(key),
             InputMode::ConfirmingProjectDelete => self.handle_confirming_project_delete_key(key),
             InputMode::ConfirmingQuit => self.handle_confirming_quit_key(key),
             InputMode::RenamingProject => self.handle_renaming_project_key(key),
@@ -958,7 +965,16 @@ impl App {
                 self.start_default_base_selection(project_id);
             }
             KeyCode::Char('d') => {
-                // Prompt for confirmation before deleting project
+                // Delete selected branch/worktree
+                let branches = self.project_store.branches_for_project_sorted(project_id);
+                if let Some(branch) = branches.get(self.state.selected_branch_index) {
+                    self.state.pending_delete_branch = Some(branch.id);
+                    self.state.delete_worktree_on_disk = branch.is_worktree; // Default to deleting if it's a worktree
+                    self.state.input_mode = InputMode::ConfirmingBranchDelete;
+                }
+            }
+            KeyCode::Char('D') => {
+                // Delete entire project (Shift+D)
                 self.state.pending_delete_project = Some(project_id);
                 self.state.input_mode = InputMode::ConfirmingProjectDelete;
             }
@@ -2059,6 +2075,120 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 // Cancel deletion
                 self.state.pending_delete_session = None;
+                self.state.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key when confirming branch/worktree deletion
+    fn handle_confirming_branch_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Char('w') => {
+                // Toggle worktree deletion option
+                self.state.delete_worktree_on_disk = !self.state.delete_worktree_on_disk;
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                // Confirm deletion
+                if let Some(branch_id) = self.state.pending_delete_branch.take() {
+                    // Get branch info before removing
+                    let branch_info = self.project_store.get_branch(branch_id).cloned();
+
+                    // Destroy all sessions for this branch
+                    let sessions_to_destroy: Vec<_> = self
+                        .sessions
+                        .sessions_for_branch(branch_id)
+                        .iter()
+                        .map(|s| s.info.id)
+                        .collect();
+
+                    for session_id in sessions_to_destroy {
+                        if let Err(e) = self.sessions.destroy_session(session_id) {
+                            tracing::error!("Failed to destroy session: {}", e);
+                        }
+                    }
+
+                    // If user opted to delete worktree on disk
+                    if self.state.delete_worktree_on_disk {
+                        if let Some(branch) = &branch_info {
+                            if branch.is_worktree {
+                                // Get the project to access the repo
+                                if let Some(project_id) = self.state.view.project_id() {
+                                    if let Some(project) =
+                                        self.project_store.get_project(project_id)
+                                    {
+                                        match crate::git::GitOps::open(&project.repo_path) {
+                                            Ok(git) => {
+                                                if let Err(e) =
+                                                    crate::git::worktree::remove_worktree(
+                                                        git.repository(),
+                                                        &branch.name,
+                                                        true,
+                                                    )
+                                                {
+                                                    tracing::error!(
+                                                        "Failed to remove worktree: {}",
+                                                        e
+                                                    );
+                                                    self.state.error_message = Some(format!(
+                                                        "Failed to remove worktree: {}",
+                                                        e
+                                                    ));
+                                                } else {
+                                                    tracing::info!(
+                                                        "Removed worktree for branch: {}",
+                                                        branch.name
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Failed to open git repo: {}", e);
+                                                self.state.error_message =
+                                                    Some(format!("Failed to open git repo: {}", e));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Remove branch from the store
+                    self.project_store.remove_branch(branch_id);
+
+                    // Save to disk
+                    if let Err(e) = self.project_store.save() {
+                        tracing::error!("Failed to save project store: {}", e);
+                        self.state.error_message =
+                            Some(format!("Failed to save project store: {}", e));
+                    }
+
+                    tracing::info!("Deleted branch: {}", branch_id);
+
+                    // Adjust selected index if needed
+                    if let Some(project_id) = self.state.view.project_id() {
+                        let new_count = self
+                            .project_store
+                            .branches_for_project(project_id)
+                            .len();
+                        if self.state.selected_branch_index >= new_count && new_count > 0 {
+                            self.state.selected_branch_index = new_count - 1;
+                        } else if new_count == 0 {
+                            self.state.selected_branch_index = 0;
+                        }
+                    }
+                }
+                self.state.delete_worktree_on_disk = false;
+                self.state.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                // Cancel deletion
+                self.state.pending_delete_branch = None;
+                self.state.delete_worktree_on_disk = false;
                 self.state.input_mode = InputMode::Normal;
             }
             _ => {}
