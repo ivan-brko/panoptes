@@ -7,7 +7,7 @@ use chrono::Utc;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::app::{AppState, InputMode};
+use crate::app::{AppState, HomepageFocus, InputMode};
 use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
@@ -167,9 +167,13 @@ pub fn render_projects_overview(
         InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         InputMode::ConfirmingQuit => "y/Enter: quit | n/Esc: cancel".to_string(),
         _ => {
-            let base = if project_store.project_count() > 0 {
+            let has_projects = project_store.project_count() > 0;
+            let has_sessions = !sessions.is_empty();
+            let base = if has_projects && has_sessions {
+                "n: new project | d: delete | Tab: switch focus | t: timeline | ↑/↓: navigate | Enter: open | Esc/q: quit"
+            } else if has_projects {
                 "n: new project | d: delete | t: timeline | ↑/↓: navigate | Enter: open | Esc/q: quit"
-            } else if !sessions.is_empty() {
+            } else if has_sessions {
                 "n: new project | t: timeline | ↑/↓: navigate | Enter: open | Esc/q: quit"
             } else {
                 "n: new project | t: timeline | Esc/q: quit"
@@ -229,8 +233,8 @@ fn render_attention_section(
             let content = Line::from(vec![
                 Span::styled("● ", Style::default().fg(badge_color)),
                 Span::raw(format!(
-                    "{} ({}/{}) {}",
-                    session.info.name, project_name, branch_name, state_text
+                    "{} / {} / {} {}",
+                    project_name, branch_name, session.info.name, state_text
                 )),
             ]);
 
@@ -405,6 +409,7 @@ fn render_main_content(
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(area);
 
+        let projects_focused = state.homepage_focus == HomepageFocus::Projects;
         render_project_list(
             frame,
             split[0],
@@ -412,6 +417,7 @@ fn render_main_content(
             project_store,
             sessions,
             idle_threshold_secs,
+            projects_focused,
         );
         render_quick_sessions(
             frame,
@@ -420,6 +426,7 @@ fn render_main_content(
             project_store,
             sessions,
             idle_threshold_secs,
+            !projects_focused,
         );
     } else if has_projects {
         render_project_list(
@@ -429,6 +436,7 @@ fn render_main_content(
             project_store,
             sessions,
             idle_threshold_secs,
+            true, // Always focused when alone
         );
     } else {
         render_quick_sessions(
@@ -438,6 +446,7 @@ fn render_main_content(
             project_store,
             sessions,
             idle_threshold_secs,
+            true, // Always focused when alone
         );
     }
 }
@@ -450,6 +459,7 @@ fn render_project_list(
     project_store: &ProjectStore,
     sessions: &SessionManager,
     idle_threshold_secs: u64,
+    focused: bool,
 ) {
     let t = theme();
     let selected_index = state.selected_project_index;
@@ -459,7 +469,7 @@ fn render_project_list(
         .iter()
         .enumerate()
         .map(|(i, project)| {
-            let selected = i == selected_index;
+            let selected = i == selected_index && focused;
             let prefix = if selected { "▶ " } else { "  " };
 
             // Count branches and active sessions for this project
@@ -500,7 +510,13 @@ fn render_project_list(
         })
         .collect();
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("Projects"));
+    let border_color = if focused { t.border_focused } else { t.border };
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Projects")
+            .border_style(Style::default().fg(border_color)),
+    );
     frame.render_widget(list, area);
 }
 
@@ -512,6 +528,7 @@ fn render_quick_sessions(
     project_store: &ProjectStore,
     sessions: &SessionManager,
     idle_threshold_secs: u64,
+    focused: bool,
 ) {
     let t = theme();
     let now = Utc::now();
@@ -523,7 +540,7 @@ fn render_quick_sessions(
         .iter()
         .enumerate()
         .map(|(i, session)| {
-            let selected = i == selected_index;
+            let selected = i == selected_index && focused;
             let prefix = if selected { "▶ " } else { "  " };
 
             // Check if session needs attention
@@ -538,7 +555,6 @@ fn render_quick_sessions(
                 .get_branch(session.info.branch_id)
                 .map(|b| b.name.as_str())
                 .unwrap_or("?");
-            let context = format!("{}/{}", project_name, branch_name);
 
             // Build the state display with idle duration if applicable
             let state_display = match &session.info.state {
@@ -561,14 +577,16 @@ fn render_quick_sessions(
                 ("  ", t.text)
             };
 
+            // Format: project / branch / session [state]
             let content = Line::from(vec![
                 Span::raw(prefix),
                 Span::styled(badge, Style::default().fg(badge_color)),
                 Span::raw(format!(
-                    "{}: {} ({}) [{}]",
+                    "{}: {} / {} / {} [{}]",
                     i + 1,
+                    project_name,
+                    branch_name,
                     session.info.name,
-                    context,
                     state_display
                 )),
             ]);
@@ -583,6 +601,12 @@ fn render_quick_sessions(
         .collect();
 
     let title = format!("Sessions ({})", session_list.len());
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+    let border_color = if focused { t.border_focused } else { t.border };
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(border_color)),
+    );
     frame.render_widget(list, area);
 }
