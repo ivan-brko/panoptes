@@ -209,10 +209,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             spawn_config.session_id.to_string(),
         );
         // Force Claude Code to use consistent header mode (prevents flickering on resize)
-        env.insert(
-            "CLAUDE_CODE_FORCE_FULL_LOGO".to_string(),
-            "1".to_string(),
-        );
+        env.insert("CLAUDE_CODE_FORCE_FULL_LOGO".to_string(), "1".to_string());
         env
     }
 

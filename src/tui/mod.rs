@@ -2,6 +2,7 @@
 //!
 //! This module handles all terminal rendering and UI components using Ratatui.
 
+pub mod frame;
 pub mod theme;
 pub mod views;
 pub mod widgets;
@@ -11,8 +12,8 @@ pub use theme::{theme, Theme};
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{
         disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
@@ -33,6 +34,8 @@ pub struct Tui {
     keyboard_enhancement_enabled: bool,
     /// Whether bracketed paste mode is enabled
     bracketed_paste_enabled: bool,
+    /// Whether mouse capture is enabled
+    mouse_capture_enabled: bool,
 }
 
 impl Tui {
@@ -44,6 +47,7 @@ impl Tui {
             terminal,
             keyboard_enhancement_enabled: false,
             bracketed_paste_enabled: false,
+            mouse_capture_enabled: false,
         })
     }
 
@@ -66,6 +70,11 @@ impl Tui {
         // Enable bracketed paste mode so paste events are detected
         if stdout().execute(EnableBracketedPaste).is_ok() {
             self.bracketed_paste_enabled = true;
+        }
+
+        // Enable mouse capture for scroll wheel support
+        if stdout().execute(EnableMouseCapture).is_ok() {
+            self.mouse_capture_enabled = true;
         }
 
         self.terminal.hide_cursor()?;
@@ -93,12 +102,33 @@ impl Tui {
             self.bracketed_paste_enabled = false;
         }
 
+        // Disable mouse capture
+        if self.mouse_capture_enabled {
+            let _ = stdout().execute(DisableMouseCapture);
+            self.mouse_capture_enabled = false;
+        }
+
         // Now restore the terminal
         self.terminal.show_cursor()?;
         stdout().execute(LeaveAlternateScreen)?;
         disable_raw_mode()?;
 
         Ok(())
+    }
+
+    /// Enable mouse capture (for scroll wheel support)
+    pub fn enable_mouse_capture(&mut self) {
+        if !self.mouse_capture_enabled && stdout().execute(EnableMouseCapture).is_ok() {
+            self.mouse_capture_enabled = true;
+        }
+    }
+
+    /// Disable mouse capture (allows native text selection)
+    pub fn disable_mouse_capture(&mut self) {
+        if self.mouse_capture_enabled {
+            let _ = stdout().execute(DisableMouseCapture);
+            self.mouse_capture_enabled = false;
+        }
     }
 
     /// Get terminal size
@@ -132,6 +162,11 @@ impl Drop for Tui {
         // Disable bracketed paste mode
         if self.bracketed_paste_enabled {
             let _ = stdout().execute(DisableBracketedPaste);
+        }
+
+        // Disable mouse capture
+        if self.mouse_capture_enabled {
+            let _ = stdout().execute(DisableMouseCapture);
         }
 
         // Now restore the terminal

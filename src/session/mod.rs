@@ -8,7 +8,7 @@ pub mod pty;
 pub mod vterm;
 
 pub use manager::SessionManager;
-pub use pty::PtyHandle;
+pub use pty::{mouse_event_to_bytes, PtyHandle};
 pub use vterm::VirtualTerminal;
 
 use std::collections::VecDeque;

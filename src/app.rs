@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -17,10 +19,11 @@ use crate::hooks::{
 };
 use crate::logging::{LogBuffer, LogFileInfo};
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::{SessionId, SessionManager};
+use crate::session::{mouse_event_to_bytes, SessionId, SessionManager};
+use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
-    render_branch_detail, render_log_viewer, render_project_detail, render_projects_overview,
-    render_session_view, render_timeline,
+    render_branch_detail, render_loading_indicator, render_log_viewer, render_project_detail,
+    render_projects_overview, render_session_view, render_timeline,
 };
 use crate::tui::Tui;
 
@@ -89,20 +92,40 @@ pub enum InputMode {
     AddingProject,
     /// Adding a new project - typing optional name (after path validation)
     AddingProjectName,
-    /// Fetching branches from git remotes (shows spinner)
+    /// Fetching branches from git remotes (shows spinner) - DEPRECATED
     FetchingBranches,
-    /// Creating a new worktree - typing branch name
+    /// Creating a new worktree - typing branch name - DEPRECATED (use WorktreeSelectBranch)
     CreatingWorktree,
-    /// Selecting default base branch
+    /// Selecting default base branch - DEPRECATED (use WorktreeSelectBase)
     SelectingDefaultBase,
     /// Confirming session deletion
     ConfirmingSessionDelete,
+    /// Confirming branch/worktree deletion
+    ConfirmingBranchDelete,
     /// Confirming project deletion
     ConfirmingProjectDelete,
     /// Confirming application quit
     ConfirmingQuit,
     /// Renaming a project
     RenamingProject,
+    /// Worktree creation Step 1: Search/select existing branch or create new
+    WorktreeSelectBranch,
+    /// Worktree creation Step 2: Select base branch for new branch
+    WorktreeSelectBase,
+    /// Worktree creation Step 3: Confirmation before creation
+    WorktreeConfirm,
+}
+
+/// Type of worktree creation being performed
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorktreeCreationType {
+    /// Checkout existing local branch into a worktree
+    #[default]
+    ExistingLocal,
+    /// Create local tracking branch from remote and checkout into worktree
+    RemoteTracking,
+    /// Create a new branch from a base and checkout into worktree
+    NewBranch,
 }
 
 /// Current view being displayed
@@ -236,12 +259,18 @@ pub struct AppState {
     pub filtered_branch_refs: Vec<BranchRef>,
     /// Selected index in base branch selector
     pub base_branch_selector_index: usize,
+    /// The currently selected base branch (independent of filtering)
+    pub selected_base_branch: Option<BranchRef>,
     /// Whether git fetch encountered an error (show warning)
     pub fetch_error: Option<String>,
     /// Session pending deletion (for confirmation dialog)
     pub pending_delete_session: Option<SessionId>,
     /// Project pending deletion (for confirmation dialog)
     pub pending_delete_project: Option<ProjectId>,
+    /// Branch pending deletion (for confirmation dialog)
+    pub pending_delete_branch: Option<BranchId>,
+    /// Whether to also delete the git worktree on disk when deleting a branch
+    pub delete_worktree_on_disk: bool,
     /// Project being renamed
     pub renaming_project: Option<ProjectId>,
     /// Whether the application should quit
@@ -260,6 +289,34 @@ pub struct AppState {
     pub log_viewer_scroll: usize,
     /// Whether log viewer auto-scrolls to new entries
     pub log_viewer_auto_scroll: bool,
+    /// Scroll offset for session view (0 = live view, >0 = scrolled back)
+    pub session_scroll_offset: usize,
+
+    // --- New worktree creation wizard state ---
+    /// Search text in WorktreeSelectBranch step
+    pub worktree_search_text: String,
+    /// All available branches (local + remote) for worktree creation
+    pub worktree_all_branches: Vec<BranchRef>,
+    /// Filtered branches matching search text
+    pub worktree_filtered_branches: Vec<BranchRef>,
+    /// Selected index in branch list (0..N = branches, N = "create new" option)
+    pub worktree_list_index: usize,
+    /// Final local branch name (for new branch or from remote)
+    pub worktree_branch_name: String,
+    /// Selected existing/remote branch (for ExistingLocal/RemoteTracking)
+    pub worktree_source_branch: Option<BranchRef>,
+    /// Base branch for creating new branches (step 2)
+    pub worktree_base_branch: Option<BranchRef>,
+    /// Search text in WorktreeSelectBase step
+    pub worktree_base_search_text: String,
+    /// Selected index in base branch list (step 2)
+    pub worktree_base_list_index: usize,
+    /// Type of worktree creation being performed
+    pub worktree_creation_type: WorktreeCreationType,
+    /// Project name for worktree path (cached during wizard)
+    pub worktree_project_name: String,
+    /// Loading message to display during blocking operations
+    pub loading_message: Option<String>,
 }
 
 impl AppState {
@@ -337,6 +394,8 @@ impl AppState {
         self.session_return_view = Some(self.view);
         self.view = View::SessionView;
         self.active_session = Some(session_id);
+        // Reset scroll offset when entering session view
+        self.session_scroll_offset = 0;
         // Auto-activate session mode so keys go directly to PTY
         self.input_mode = InputMode::Session;
     }
@@ -459,7 +518,7 @@ impl App {
 
     /// Main event loop
     async fn event_loop(&mut self) -> Result<()> {
-        let tick_rate = Duration::from_millis(50);
+        let tick_rate = Duration::from_millis(16); // ~60fps for smooth rendering
 
         // Always render on first frame
         self.state.needs_render = true;
@@ -493,6 +552,11 @@ impl App {
                         self.state.pending_resize = true;
                         self.state.needs_render = true;
                     }
+                    Event::Mouse(mouse) => {
+                        if self.handle_mouse_event(mouse)? {
+                            self.state.needs_render = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -504,11 +568,15 @@ impl App {
                     if last_resize.elapsed() >= Duration::from_millis(50) {
                         self.state.pending_resize = false;
                         let size = self.tui.size()?;
-                        // Output area is: total height - header (3) - footer (3) - borders (2)
-                        let output_rows = size.height.saturating_sub(8);
-                        // Output width is: total width - borders (2)
-                        let output_cols = size.width.saturating_sub(2);
-                        self.sessions.resize_all(output_cols, output_rows);
+
+                        // Use FrameLayout for consistent size calculation
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(
+                            ratatui::prelude::Rect::new(0, 0, size.width, size.height),
+                            &frame_config,
+                        );
+                        let (rows, cols) = layout.pty_size();
+                        self.sessions.resize_all(cols, rows);
                         self.state.needs_render = true;
                     }
                 }
@@ -637,6 +705,71 @@ impl App {
         Ok(())
     }
 
+    /// Handle a mouse event
+    ///
+    /// Returns true if the event caused a state change requiring re-render.
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) -> Result<bool> {
+        // Only handle mouse events in session view with active session
+        if self.state.view != View::SessionView {
+            return Ok(false);
+        }
+
+        let Some(session_id) = self.state.active_session else {
+            return Ok(false);
+        };
+
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return Ok(false);
+        };
+
+        // Check if Claude Code has mouse mode enabled
+        let mouse_enabled = session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+
+        if mouse_enabled {
+            // Forward mouse events to PTY when Claude Code wants them
+            // (for vim, etc. with mouse support)
+            let terminal_size = self.tui.size()?;
+            let frame_config = FrameConfig::default();
+            let layout = FrameLayout::calculate(
+                ratatui::prelude::Rect::new(0, 0, terminal_size.width, terminal_size.height),
+                &frame_config,
+            );
+            if let Some(bytes) = mouse_event_to_bytes(mouse, layout.content) {
+                session.write(&bytes)?;
+                return Ok(true);
+            }
+        } else {
+            // Handle scroll wheel for our own scrollback when mouse mode is disabled
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    let max_scroll = session.vterm.max_scrollback();
+                    // Scroll up by 3 lines (same as claude-wrapper)
+                    self.state.session_scroll_offset = self
+                        .state
+                        .session_scroll_offset
+                        .saturating_add(3)
+                        .min(max_scroll);
+                    session
+                        .vterm
+                        .set_scrollback(self.state.session_scroll_offset);
+                    return Ok(true);
+                }
+                MouseEventKind::ScrollDown => {
+                    // Scroll down by 3 lines (same as claude-wrapper)
+                    self.state.session_scroll_offset =
+                        self.state.session_scroll_offset.saturating_sub(3);
+                    session
+                        .vterm
+                        .set_scrollback(self.state.session_scroll_offset);
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Handle a key event
     fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
         // Handle Ctrl+C specially
@@ -685,9 +818,31 @@ impl App {
                 }
             }
             InputMode::ConfirmingSessionDelete => self.handle_confirming_delete_key(key),
+            InputMode::ConfirmingBranchDelete => self.handle_confirming_branch_delete_key(key),
             InputMode::ConfirmingProjectDelete => self.handle_confirming_project_delete_key(key),
             InputMode::ConfirmingQuit => self.handle_confirming_quit_key(key),
             InputMode::RenamingProject => self.handle_renaming_project_key(key),
+            InputMode::WorktreeSelectBranch => {
+                if let View::ProjectDetail(project_id) = self.state.view {
+                    self.handle_worktree_select_branch_key(key, project_id)
+                } else {
+                    Ok(())
+                }
+            }
+            InputMode::WorktreeSelectBase => {
+                if let View::ProjectDetail(project_id) = self.state.view {
+                    self.handle_worktree_select_base_key(key, project_id)
+                } else {
+                    Ok(())
+                }
+            }
+            InputMode::WorktreeConfirm => {
+                if let View::ProjectDetail(project_id) = self.state.view {
+                    self.handle_worktree_confirm_key(key, project_id)
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -766,6 +921,7 @@ impl App {
                     {
                         let session_id = session.info.id;
                         self.state.navigate_to_session(session_id);
+                        self.tui.enable_mouse_capture();
                         self.sessions.acknowledge_attention(session_id);
                         if self.config.notification_method == "title" {
                             SessionManager::reset_terminal_title();
@@ -866,17 +1022,21 @@ impl App {
                 }
             }
             KeyCode::Char('w') => {
-                // Start creating a new worktree
-                self.start_worktree_creation(project_id);
+                // Start creating a new worktree (new wizard flow)
+                self.start_worktree_wizard(project_id);
             }
             KeyCode::Char('b') => {
                 // Set default base branch
                 self.start_default_base_selection(project_id);
             }
             KeyCode::Char('d') => {
-                // Prompt for confirmation before deleting project
-                self.state.pending_delete_project = Some(project_id);
-                self.state.input_mode = InputMode::ConfirmingProjectDelete;
+                // Delete selected branch/worktree
+                let branches = self.project_store.branches_for_project_sorted(project_id);
+                if let Some(branch) = branches.get(self.state.selected_branch_index) {
+                    self.state.pending_delete_branch = Some(branch.id);
+                    self.state.delete_worktree_on_disk = branch.is_worktree; // Default to deleting if it's a worktree
+                    self.state.input_mode = InputMode::ConfirmingBranchDelete;
+                }
             }
             KeyCode::Char('r') => {
                 // Start renaming project
@@ -928,6 +1088,7 @@ impl App {
                 if index < session_count {
                     let session_id = branch_sessions[index].info.id;
                     self.state.navigate_to_session(session_id);
+                    self.tui.enable_mouse_capture();
                     self.sessions.acknowledge_attention(session_id);
                     if self.config.notification_method == "title" {
                         SessionManager::reset_terminal_title();
@@ -983,6 +1144,7 @@ impl App {
                 if let Some(session) = self.sessions.get_by_index(index) {
                     let session_id = session.info.id;
                     self.state.navigate_to_session(session_id);
+                    self.tui.enable_mouse_capture();
                     self.sessions.acknowledge_attention(session_id);
                     if self.config.notification_method == "title" {
                         SessionManager::reset_terminal_title();
@@ -1049,30 +1211,64 @@ impl App {
 
     /// Handle key in session view (normal mode)
     fn handle_session_view_normal_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 // Go back to the view we came from
                 self.state.return_from_session();
+                // Re-enable mouse capture when leaving session view
+                self.tui.enable_mouse_capture();
             }
             KeyCode::Enter => {
                 // Re-activate session mode (send keys to PTY)
                 self.state.input_mode = InputMode::Session;
+                // Re-enable mouse capture for scroll wheel
+                self.tui.enable_mouse_capture();
             }
             KeyCode::PageUp => {
-                // Scroll up in session output
+                // Scroll up in session output (toward older content)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        let scroll_amount = 10; // Scroll by 10 lines
-                        session.vterm.scroll_up(scroll_amount);
+                        // Calculate viewport height for scroll amount
+                        let terminal_size = self.tui.size().unwrap_or_default();
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                        let viewport_height = layout.content.height as usize;
+                        let max_scroll = session.vterm.max_scrollback();
+
+                        // Update app-level scroll offset with constraints
+                        self.state.session_scroll_offset = self
+                            .state
+                            .session_scroll_offset
+                            .saturating_add(viewport_height)
+                            .min(max_scroll);
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
             }
             KeyCode::PageDown => {
-                // Scroll down in session output
+                // Scroll down in session output (toward newer content)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        let scroll_amount = 10;
-                        session.vterm.scroll_down(scroll_amount);
+                        // Calculate viewport height for scroll amount
+                        let terminal_size = self.tui.size().unwrap_or_default();
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                        let viewport_height = layout.content.height as usize;
+
+                        // Update app-level scroll offset
+                        self.state.session_scroll_offset = self
+                            .state
+                            .session_scroll_offset
+                            .saturating_sub(viewport_height);
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
             }
@@ -1080,8 +1276,11 @@ impl App {
                 // Scroll to top (oldest content)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        let max = session.vterm.max_scrollback();
-                        session.vterm.set_scrollback(max);
+                        let max_scroll = session.vterm.max_scrollback();
+                        self.state.session_scroll_offset = max_scroll;
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
             }
@@ -1089,6 +1288,7 @@ impl App {
                 // Scroll to bottom (live view)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
+                        self.state.session_scroll_offset = 0;
                         session.vterm.scroll_to_bottom();
                     }
                 }
@@ -1106,6 +1306,8 @@ impl App {
                     {
                         let session_id = session.info.id;
                         self.state.active_session = Some(session_id);
+                        // Reset scroll offset when switching sessions
+                        self.state.session_scroll_offset = 0;
                         self.sessions.acknowledge_attention(session_id);
                         if self.config.notification_method == "title" {
                             SessionManager::reset_terminal_title();
@@ -1126,6 +1328,8 @@ impl App {
                         {
                             let session_id = session.info.id;
                             self.state.active_session = Some(session_id);
+                            // Reset scroll offset when switching sessions
+                            self.state.session_scroll_offset = 0;
                             self.sessions.acknowledge_attention(session_id);
                             if self.config.notification_method == "title" {
                                 SessionManager::reset_terminal_title();
@@ -1157,7 +1361,22 @@ impl App {
             KeyCode::PageUp => {
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        session.vterm.scroll_up(10);
+                        // Calculate viewport height for scroll amount
+                        let terminal_size = self.tui.size().unwrap_or_default();
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                        let viewport_height = layout.content.height as usize;
+                        let max_scroll = session.vterm.max_scrollback();
+
+                        // Update app-level scroll offset with constraints
+                        self.state.session_scroll_offset = self
+                            .state
+                            .session_scroll_offset
+                            .saturating_add(viewport_height)
+                            .min(max_scroll);
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
                 return Ok(());
@@ -1165,7 +1384,20 @@ impl App {
             KeyCode::PageDown => {
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        session.vterm.scroll_down(10);
+                        // Calculate viewport height for scroll amount
+                        let terminal_size = self.tui.size().unwrap_or_default();
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                        let viewport_height = layout.content.height as usize;
+
+                        // Update app-level scroll offset
+                        self.state.session_scroll_offset = self
+                            .state
+                            .session_scroll_offset
+                            .saturating_sub(viewport_height);
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
                 return Ok(());
@@ -1174,8 +1406,11 @@ impl App {
                 // Ctrl+Home: scroll to top
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
-                        let max = session.vterm.max_scrollback();
-                        session.vterm.set_scrollback(max);
+                        let max_scroll = session.vterm.max_scrollback();
+                        self.state.session_scroll_offset = max_scroll;
+                        session
+                            .vterm
+                            .set_scrollback(self.state.session_scroll_offset);
                     }
                 }
                 return Ok(());
@@ -1184,12 +1419,23 @@ impl App {
                 // Ctrl+End: scroll to bottom (live view)
                 if let Some(session_id) = self.state.active_session {
                     if let Some(session) = self.sessions.get_mut(session_id) {
+                        self.state.session_scroll_offset = 0;
                         session.vterm.scroll_to_bottom();
                     }
                 }
                 return Ok(());
             }
             _ => {}
+        }
+
+        // Reset scroll to live view when typing
+        if self.state.session_scroll_offset > 0 {
+            self.state.session_scroll_offset = 0;
+            if let Some(session_id) = self.state.active_session {
+                if let Some(session) = self.sessions.get_mut(session_id) {
+                    session.vterm.scroll_to_bottom();
+                }
+            }
         }
 
         // Send key to active session
@@ -1212,8 +1458,10 @@ impl App {
             // Option/Alt+Escape: forward Escape to Claude Code
             self.forward_esc_to_pty()?;
         } else {
-            // Plain Escape: exit session mode
+            // Plain Escape: deactivate session mode
             self.state.input_mode = InputMode::Normal;
+            // Disable mouse capture to allow text selection
+            self.tui.disable_mouse_capture();
         }
         Ok(())
     }
@@ -1309,6 +1557,7 @@ impl App {
 
                         // Navigate to the new session (auto-activates Session mode)
                         self.state.navigate_to_session(session_id);
+                        self.tui.enable_mouse_capture();
                         self.sessions.acknowledge_attention(session_id);
                         if self.config.notification_method == "title" {
                             SessionManager::reset_terminal_title();
@@ -1582,6 +1831,7 @@ impl App {
                 self.state.new_branch_name.clear();
                 self.state.available_branch_refs.clear();
                 self.state.filtered_branch_refs.clear();
+                self.state.selected_base_branch = None;
                 self.state.fetch_error = None;
             }
             KeyCode::Up => {
@@ -1593,6 +1843,12 @@ impl App {
                         .base_branch_selector_index
                         .checked_sub(1)
                         .unwrap_or(count - 1);
+                    // Update selected_base_branch when navigating
+                    self.state.selected_base_branch = self
+                        .state
+                        .filtered_branch_refs
+                        .get(self.state.base_branch_selector_index)
+                        .cloned();
                 }
             }
             KeyCode::Down => {
@@ -1601,6 +1857,12 @@ impl App {
                 if count > 0 {
                     self.state.base_branch_selector_index =
                         (self.state.base_branch_selector_index + 1) % count;
+                    // Update selected_base_branch when navigating
+                    self.state.selected_base_branch = self
+                        .state
+                        .filtered_branch_refs
+                        .get(self.state.base_branch_selector_index)
+                        .cloned();
                 }
             }
             KeyCode::Char('s') if key.modifiers.is_empty() => {
@@ -1638,7 +1900,12 @@ impl App {
 
                 let result = if !branch_name_typed.is_empty() {
                     // Create NEW branch from selected base, then create worktree
-                    let base_ref = selected_branch.map(|b| b.name);
+                    // Use selected_base_branch which is preserved even when filtered out
+                    let base_ref = self
+                        .state
+                        .selected_base_branch
+                        .as_ref()
+                        .map(|b| b.name.clone());
                     self.create_worktree(project_id, &branch_name_typed, true, base_ref.as_deref())
                 } else if let Some(selected) = selected_branch {
                     // Checkout existing branch as worktree (empty name = checkout selected)
@@ -1675,6 +1942,7 @@ impl App {
                 self.state.input_mode = InputMode::Normal;
                 self.state.available_branch_refs.clear();
                 self.state.filtered_branch_refs.clear();
+                self.state.selected_base_branch = None;
                 self.state.fetch_error = None;
             }
             KeyCode::Backspace => {
@@ -1702,7 +1970,23 @@ impl App {
 
     /// Select the default base branch in the filtered list
     fn select_default_base_branch(&mut self) {
-        // Find index of default base branch in filtered list
+        // Find default base branch in the available (unfiltered) list first
+        // This ensures we track the actual default even when filtered out
+        if let Some(default_branch) = self
+            .state
+            .available_branch_refs
+            .iter()
+            .find(|b| b.is_default_base)
+        {
+            self.state.selected_base_branch = Some(default_branch.clone());
+        } else if let Some(first) = self.state.available_branch_refs.first() {
+            // If no default, use first available branch
+            self.state.selected_base_branch = Some(first.clone());
+        } else {
+            self.state.selected_base_branch = None;
+        }
+
+        // Find index of default base branch in filtered list for UI highlighting
         if let Some(idx) = self
             .state
             .filtered_branch_refs
@@ -1711,7 +1995,7 @@ impl App {
         {
             self.state.base_branch_selector_index = idx;
         } else if !self.state.filtered_branch_refs.is_empty() {
-            // If no default, select first item
+            // If no default in filtered list, select first item
             self.state.base_branch_selector_index = 0;
         }
     }
@@ -1862,6 +2146,129 @@ impl App {
         Ok(())
     }
 
+    /// Handle key when confirming branch/worktree deletion
+    fn handle_confirming_branch_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Char('w') => {
+                // Toggle worktree deletion option
+                self.state.delete_worktree_on_disk = !self.state.delete_worktree_on_disk;
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                // Confirm deletion
+                if let Some(branch_id) = self.state.pending_delete_branch.take() {
+                    // Get branch info before removing
+                    let branch_info = self.project_store.get_branch(branch_id).cloned();
+
+                    // Destroy all sessions for this branch
+                    let sessions_to_destroy: Vec<_> = self
+                        .sessions
+                        .sessions_for_branch(branch_id)
+                        .iter()
+                        .map(|s| s.info.id)
+                        .collect();
+
+                    for session_id in sessions_to_destroy {
+                        if let Err(e) = self.sessions.destroy_session(session_id) {
+                            tracing::error!("Failed to destroy session: {}", e);
+                        }
+                    }
+
+                    // If user opted to delete worktree on disk
+                    if self.state.delete_worktree_on_disk {
+                        if let Some(branch) = &branch_info {
+                            if branch.is_worktree {
+                                // Get the project to access the repo
+                                if let Some(project_id) = self.state.view.project_id() {
+                                    // Clone the repo_path to avoid borrow conflicts
+                                    let repo_path = self
+                                        .project_store
+                                        .get_project(project_id)
+                                        .map(|p| p.repo_path.clone());
+
+                                    if let Some(repo_path) = repo_path {
+                                        // Show loading indicator
+                                        let _ = self.show_loading(&format!(
+                                            "Removing worktree '{}'...",
+                                            branch.name
+                                        ));
+
+                                        match crate::git::GitOps::open(&repo_path) {
+                                            Ok(git) => {
+                                                if let Err(e) =
+                                                    crate::git::worktree::remove_worktree(
+                                                        git.repository(),
+                                                        &branch.name,
+                                                        true,
+                                                    )
+                                                {
+                                                    tracing::error!(
+                                                        "Failed to remove worktree: {}",
+                                                        e
+                                                    );
+                                                    self.state.error_message = Some(format!(
+                                                        "Failed to remove worktree: {}",
+                                                        e
+                                                    ));
+                                                } else {
+                                                    tracing::info!(
+                                                        "Removed worktree for branch: {}",
+                                                        branch.name
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Failed to open git repo: {}", e);
+                                                self.state.error_message =
+                                                    Some(format!("Failed to open git repo: {}", e));
+                                            }
+                                        }
+
+                                        self.clear_loading();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Remove branch from the store
+                    self.project_store.remove_branch(branch_id);
+
+                    // Save to disk
+                    if let Err(e) = self.project_store.save() {
+                        tracing::error!("Failed to save project store: {}", e);
+                        self.state.error_message =
+                            Some(format!("Failed to save project store: {}", e));
+                    }
+
+                    tracing::info!("Deleted branch: {}", branch_id);
+
+                    // Adjust selected index if needed
+                    if let Some(project_id) = self.state.view.project_id() {
+                        let new_count = self.project_store.branches_for_project(project_id).len();
+                        if self.state.selected_branch_index >= new_count && new_count > 0 {
+                            self.state.selected_branch_index = new_count - 1;
+                        } else if new_count == 0 {
+                            self.state.selected_branch_index = 0;
+                        }
+                    }
+                }
+                self.state.delete_worktree_on_disk = false;
+                self.state.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                // Cancel deletion
+                self.state.pending_delete_branch = None;
+                self.state.delete_worktree_on_disk = false;
+                self.state.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Handle key when confirming project deletion
     fn handle_confirming_project_delete_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
@@ -1979,7 +2386,400 @@ impl App {
         Ok(())
     }
 
+    // ========================================================================
+    // New Worktree Creation Wizard Handlers
+    // ========================================================================
+
+    /// Handle key in WorktreeSelectBranch mode (Step 1)
+    ///
+    /// User can:
+    /// - Type to filter existing branches
+    /// - Arrow keys to navigate the list
+    /// - Enter on existing local branch → WorktreeConfirm (ExistingLocal)
+    /// - Enter on remote branch → WorktreeConfirm (RemoteTracking)
+    /// - Enter on "Create new branch" → WorktreeSelectBase
+    /// - Esc to cancel
+    fn handle_worktree_select_branch_key(
+        &mut self,
+        key: KeyEvent,
+        project_id: ProjectId,
+    ) -> Result<()> {
+        // project_id reserved for potential future use
+        let _ = project_id;
+
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        let filtered_count = self.state.worktree_filtered_branches.len();
+        // The "Create new branch" option is at index = filtered_count when search text is non-empty
+        let has_create_option = !self.state.worktree_search_text.is_empty();
+        let total_options = if has_create_option {
+            filtered_count + 1
+        } else {
+            filtered_count
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                self.cancel_worktree_wizard();
+            }
+            KeyCode::Up => {
+                if total_options > 0 {
+                    self.state.worktree_list_index = self
+                        .state
+                        .worktree_list_index
+                        .checked_sub(1)
+                        .unwrap_or(total_options - 1);
+                }
+            }
+            KeyCode::Down => {
+                if total_options > 0 {
+                    self.state.worktree_list_index =
+                        (self.state.worktree_list_index + 1) % total_options;
+                }
+            }
+            KeyCode::Enter => {
+                if self.state.worktree_list_index < filtered_count {
+                    // Selected an existing branch
+                    let selected = self.state.worktree_filtered_branches
+                        [self.state.worktree_list_index]
+                        .clone();
+
+                    if selected.ref_type == BranchRefType::Local {
+                        // Existing local branch → go directly to confirm
+                        self.state.worktree_source_branch = Some(selected.clone());
+                        self.state.worktree_branch_name = selected.name.clone();
+                        self.state.worktree_creation_type = WorktreeCreationType::ExistingLocal;
+                        self.state.input_mode = InputMode::WorktreeConfirm;
+                    } else {
+                        // Remote branch → will create tracking branch
+                        // Extract local name from remote ref (e.g., "origin/feature" -> "feature")
+                        let local_name = selected
+                            .name
+                            .split_once('/')
+                            .map(|(_, b)| b.to_string())
+                            .unwrap_or_else(|| selected.name.clone());
+
+                        self.state.worktree_source_branch = Some(selected);
+                        self.state.worktree_branch_name = local_name;
+                        self.state.worktree_creation_type = WorktreeCreationType::RemoteTracking;
+                        self.state.input_mode = InputMode::WorktreeConfirm;
+                    }
+                } else if has_create_option {
+                    // Selected "Create new branch" option
+                    self.state.worktree_branch_name = self.state.worktree_search_text.clone();
+                    self.state.worktree_creation_type = WorktreeCreationType::NewBranch;
+
+                    // Initialize base branch selection
+                    self.state.worktree_base_search_text.clear();
+                    self.state.worktree_base_list_index = 0;
+
+                    // Find and select the default base branch
+                    if let Some(idx) = self
+                        .state
+                        .worktree_all_branches
+                        .iter()
+                        .position(|b| b.is_default_base)
+                    {
+                        self.state.worktree_base_list_index = idx;
+                        self.state.worktree_base_branch =
+                            Some(self.state.worktree_all_branches[idx].clone());
+                    } else if let Some(first) = self.state.worktree_all_branches.first() {
+                        self.state.worktree_base_branch = Some(first.clone());
+                    }
+
+                    self.state.input_mode = InputMode::WorktreeSelectBase;
+                }
+            }
+            KeyCode::Backspace => {
+                self.state.worktree_search_text.pop();
+                self.update_worktree_filtered_branches();
+                // Reset selection to top
+                self.state.worktree_list_index = 0;
+            }
+            KeyCode::Char(c) => {
+                self.state.worktree_search_text.push(c);
+                self.update_worktree_filtered_branches();
+                // Reset selection to top
+                self.state.worktree_list_index = 0;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key in WorktreeSelectBase mode (Step 2)
+    ///
+    /// User can:
+    /// - Type to filter base branches
+    /// - Arrow keys to navigate the list
+    /// - Enter to confirm and go to WorktreeConfirm
+    /// - Esc to go back to WorktreeSelectBranch
+    fn handle_worktree_select_base_key(
+        &mut self,
+        key: KeyEvent,
+        project_id: ProjectId,
+    ) -> Result<()> {
+        // project_id reserved for potential future use (e.g., setting default base branch)
+        let _ = project_id;
+
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        // Filter branches based on base search text
+        let filtered: Vec<BranchRef> = if self.state.worktree_base_search_text.is_empty() {
+            self.state.worktree_all_branches.clone()
+        } else {
+            let query = self.state.worktree_base_search_text.to_lowercase();
+            self.state
+                .worktree_all_branches
+                .iter()
+                .filter(|b| b.name.to_lowercase().contains(&query))
+                .cloned()
+                .collect()
+        };
+        let filtered_count = filtered.len();
+
+        match key.code {
+            KeyCode::Esc => {
+                // Go back to step 1
+                self.state.input_mode = InputMode::WorktreeSelectBranch;
+                self.state.worktree_base_search_text.clear();
+            }
+            KeyCode::Up => {
+                if filtered_count > 0 {
+                    self.state.worktree_base_list_index = self
+                        .state
+                        .worktree_base_list_index
+                        .checked_sub(1)
+                        .unwrap_or(filtered_count - 1);
+                    // Update selected base branch
+                    if let Some(branch) = filtered.get(self.state.worktree_base_list_index) {
+                        self.state.worktree_base_branch = Some(branch.clone());
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if filtered_count > 0 {
+                    self.state.worktree_base_list_index =
+                        (self.state.worktree_base_list_index + 1) % filtered_count;
+                    // Update selected base branch
+                    if let Some(branch) = filtered.get(self.state.worktree_base_list_index) {
+                        self.state.worktree_base_branch = Some(branch.clone());
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                // Confirm base branch selection, go to confirmation
+                if let Some(branch) = filtered.get(self.state.worktree_base_list_index) {
+                    self.state.worktree_base_branch = Some(branch.clone());
+                }
+                self.state.input_mode = InputMode::WorktreeConfirm;
+            }
+            KeyCode::Backspace => {
+                self.state.worktree_base_search_text.pop();
+                self.state.worktree_base_list_index = 0;
+            }
+            KeyCode::Char(c) => {
+                self.state.worktree_base_search_text.push(c);
+                self.state.worktree_base_list_index = 0;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key in WorktreeConfirm mode (Step 3)
+    ///
+    /// User can:
+    /// - Enter to create the worktree
+    /// - Esc to go back to the previous step
+    fn handle_worktree_confirm_key(&mut self, key: KeyEvent, project_id: ProjectId) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                // Go back to appropriate step
+                match self.state.worktree_creation_type {
+                    WorktreeCreationType::NewBranch => {
+                        self.state.input_mode = InputMode::WorktreeSelectBase;
+                    }
+                    _ => {
+                        self.state.input_mode = InputMode::WorktreeSelectBranch;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                // Create the worktree
+                let result = match self.state.worktree_creation_type {
+                    WorktreeCreationType::ExistingLocal => {
+                        // Create worktree from existing local branch (don't create branch)
+                        self.create_worktree(
+                            project_id,
+                            &self.state.worktree_branch_name.clone(),
+                            false,
+                            None,
+                        )
+                    }
+                    WorktreeCreationType::RemoteTracking => {
+                        // Create local tracking branch from remote, then worktree
+                        let base_ref = self
+                            .state
+                            .worktree_source_branch
+                            .as_ref()
+                            .map(|b| b.name.clone());
+                        self.create_worktree(
+                            project_id,
+                            &self.state.worktree_branch_name.clone(),
+                            true,
+                            base_ref.as_deref(),
+                        )
+                    }
+                    WorktreeCreationType::NewBranch => {
+                        // Create new branch from base, then worktree
+                        let base_ref = self
+                            .state
+                            .worktree_base_branch
+                            .as_ref()
+                            .map(|b| b.name.clone());
+                        self.create_worktree(
+                            project_id,
+                            &self.state.worktree_branch_name.clone(),
+                            true,
+                            base_ref.as_deref(),
+                        )
+                    }
+                };
+
+                if let Err(e) = result {
+                    tracing::error!("Failed to create worktree: {}", e);
+                    self.state.error_message = Some(format!("Failed to create worktree: {}", e));
+                }
+
+                self.cancel_worktree_wizard();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Cancel and clean up the worktree wizard state
+    fn cancel_worktree_wizard(&mut self) {
+        self.state.input_mode = InputMode::Normal;
+        self.state.worktree_search_text.clear();
+        self.state.worktree_all_branches.clear();
+        self.state.worktree_filtered_branches.clear();
+        self.state.worktree_list_index = 0;
+        self.state.worktree_branch_name.clear();
+        self.state.worktree_source_branch = None;
+        self.state.worktree_base_branch = None;
+        self.state.worktree_base_search_text.clear();
+        self.state.worktree_base_list_index = 0;
+        self.state.worktree_creation_type = WorktreeCreationType::ExistingLocal;
+        self.state.worktree_project_name.clear();
+        self.state.fetch_error = None;
+    }
+
+    /// Update filtered branches based on search text
+    fn update_worktree_filtered_branches(&mut self) {
+        if self.state.worktree_search_text.is_empty() {
+            self.state.worktree_filtered_branches = self.state.worktree_all_branches.clone();
+        } else {
+            let query = self.state.worktree_search_text.to_lowercase();
+            self.state.worktree_filtered_branches = self
+                .state
+                .worktree_all_branches
+                .iter()
+                .filter(|b| b.name.to_lowercase().contains(&query))
+                .cloned()
+                .collect();
+        }
+    }
+
+    /// Start the new worktree creation wizard (Step 1)
+    fn start_worktree_wizard(&mut self, project_id: ProjectId) {
+        // Clear all wizard state
+        self.state.worktree_search_text.clear();
+        self.state.worktree_list_index = 0;
+        self.state.worktree_branch_name.clear();
+        self.state.worktree_source_branch = None;
+        self.state.worktree_base_branch = None;
+        self.state.worktree_base_search_text.clear();
+        self.state.worktree_base_list_index = 0;
+        self.state.worktree_creation_type = WorktreeCreationType::ExistingLocal;
+        self.state.fetch_error = None;
+
+        // Get project info and clone what we need
+        let (project_name, repo_path, default_base_branch) = {
+            let Some(project) = self.project_store.get_project(project_id) else {
+                self.state.error_message = Some("Project not found".to_string());
+                return;
+            };
+            (
+                project.name.clone(),
+                project.repo_path.clone(),
+                project.default_base_branch.clone(),
+            )
+        };
+        self.state.worktree_project_name = project_name;
+
+        // Try to open git repo and fetch branches
+        let Ok(git) = crate::git::GitOps::open(&repo_path) else {
+            self.state.error_message = Some("Failed to open git repository".to_string());
+            return;
+        };
+
+        // Try to fetch from remotes (may fail if offline)
+        let _ = self.show_loading("Fetching branches from remotes...");
+        if let Err(e) = git.fetch_all_remotes() {
+            tracing::warn!("Failed to fetch remotes: {}", e);
+            self.state.fetch_error = Some(format!("Fetch failed: {}", e));
+        }
+        self.clear_loading();
+
+        // Get all branch refs
+        let default_base = default_base_branch.as_deref();
+        match git.list_all_branch_refs(default_base) {
+            Ok(refs) => {
+                self.state.worktree_all_branches = refs
+                    .into_iter()
+                    .map(|r| {
+                        let ref_type = match r.ref_type {
+                            crate::git::BranchRefInfoType::Local => BranchRefType::Local,
+                            crate::git::BranchRefInfoType::Remote => BranchRefType::Remote,
+                        };
+                        BranchRef {
+                            ref_type,
+                            name: r.name.clone(),
+                            display_name: r.name,
+                            is_default_base: r.is_default_base,
+                        }
+                    })
+                    .collect();
+                self.state.worktree_filtered_branches = self.state.worktree_all_branches.clone();
+            }
+            Err(e) => {
+                tracing::error!("Failed to list branches: {}", e);
+                self.state.error_message = Some(format!("Failed to list branches: {}", e));
+                return;
+            }
+        }
+
+        // Transition to step 1
+        self.state.input_mode = InputMode::WorktreeSelectBranch;
+    }
+
+    // ========================================================================
+    // End New Worktree Creation Wizard Handlers
+    // ========================================================================
+
     /// Start worktree creation flow: fetch branches, then show dialog
+    /// DEPRECATED: Use start_worktree_wizard instead for new worktree creation
+    #[allow(dead_code)]
     fn start_worktree_creation(&mut self, project_id: ProjectId) {
         self.state.new_branch_name.clear();
         self.state.base_branch_selector_index = 0;
@@ -2007,26 +2807,35 @@ impl App {
 
     /// Fetch remotes and populate branch refs for a project
     fn fetch_and_populate_branch_refs(&mut self, project_id: ProjectId) {
-        let Some(project) = self.project_store.get_project(project_id) else {
-            self.state.available_branch_refs.clear();
-            self.state.filtered_branch_refs.clear();
-            return;
+        // Get project info and clone what we need
+        let (repo_path, default_base_branch) = {
+            let Some(project) = self.project_store.get_project(project_id) else {
+                self.state.available_branch_refs.clear();
+                self.state.filtered_branch_refs.clear();
+                return;
+            };
+            (
+                project.repo_path.clone(),
+                project.default_base_branch.clone(),
+            )
         };
 
-        let Ok(git) = crate::git::GitOps::open(&project.repo_path) else {
+        let Ok(git) = crate::git::GitOps::open(&repo_path) else {
             self.state.available_branch_refs.clear();
             self.state.filtered_branch_refs.clear();
             return;
         };
 
         // Try to fetch from remotes (may fail if offline, continue anyway)
+        let _ = self.show_loading("Fetching branches from remotes...");
         if let Err(e) = git.fetch_all_remotes() {
             tracing::warn!("Failed to fetch remotes: {}", e);
             self.state.fetch_error = Some(format!("Fetch failed: {}", e));
         }
+        self.clear_loading();
 
         // Get all branch refs
-        let default_base = project.default_base_branch.as_deref();
+        let default_base = default_base_branch.as_deref();
         match git.list_all_branch_refs(default_base) {
             Ok(refs) => {
                 // Convert git::BranchRefInfo to app::BranchRef
@@ -2065,35 +2874,55 @@ impl App {
         create_branch: bool,
         base_ref: Option<&str>,
     ) -> Result<()> {
-        if let Some(project) = self.project_store.get_project(project_id) {
-            let git = crate::git::GitOps::open(&project.repo_path)?;
-            let worktree_path = crate::git::worktree::worktree_path_for_branch(
-                &self.config.worktrees_dir,
-                branch_name,
-            );
+        // Get project info and clone what we need
+        let (repo_path, project_name, session_subdir) = {
+            let Some(project) = self.project_store.get_project(project_id) else {
+                return Ok(());
+            };
+            (
+                project.repo_path.clone(),
+                project.name.clone(),
+                project.session_subdir.clone(),
+            )
+        };
 
-            crate::git::worktree::create_worktree(
-                git.repository(),
-                branch_name,
-                &worktree_path,
-                create_branch,
-                base_ref,
-            )?;
+        let git = crate::git::GitOps::open(&repo_path)?;
+        let worktree_path = crate::git::worktree::worktree_path_for_branch(
+            &self.config.worktrees_dir,
+            &project_name,
+            branch_name,
+        );
 
-            // Apply project's subfolder to get effective working dir for sessions
-            let effective_working_dir = project.effective_working_dir(&worktree_path);
+        // Show loading indicator for worktree creation
+        let _ = self.show_loading(&format!("Creating worktree for '{}'...", branch_name));
 
-            let branch = crate::project::Branch::new(
-                project_id,
-                branch_name.to_string(),
-                effective_working_dir,
-                false, // is_default
-                true,  // is_worktree
-            );
-            self.project_store.add_branch(branch);
-            self.project_store.save()?;
-            tracing::info!("Created worktree for branch: {}", branch_name);
-        }
+        crate::git::worktree::create_worktree(
+            git.repository(),
+            branch_name,
+            &worktree_path,
+            create_branch,
+            base_ref,
+        )?;
+
+        self.clear_loading();
+
+        // Apply project's session_subdir to get effective working dir for sessions
+        let effective_working_dir = match &session_subdir {
+            Some(subdir) => worktree_path.join(subdir),
+            None => worktree_path,
+        };
+
+        let branch = crate::project::Branch::new(
+            project_id,
+            branch_name.to_string(),
+            effective_working_dir,
+            false, // is_default
+            true,  // is_worktree
+        );
+        self.project_store.add_branch(branch);
+        self.project_store.save()?;
+        tracing::info!("Created worktree for branch: {}", branch_name);
+
         Ok(())
     }
 
@@ -2106,6 +2935,7 @@ impl App {
         if let Some(session) = attention_sessions.first() {
             let session_id = session.info.id;
             self.state.navigate_to_session(session_id);
+            self.tui.enable_mouse_capture();
             // Auto-enter session mode so user is immediately active in the session
             self.sessions.acknowledge_attention(session_id);
             if self.config.notification_method == "title" {
@@ -2132,6 +2962,21 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Show a loading indicator with the given message and force a render
+    ///
+    /// This is used before blocking operations to provide visual feedback
+    /// to the user that something is happening.
+    fn show_loading(&mut self, message: &str) -> Result<()> {
+        self.state.loading_message = Some(message.to_string());
+        self.render()?;
+        Ok(())
+    }
+
+    /// Clear the loading indicator
+    fn clear_loading(&mut self) {
+        self.state.loading_message = None;
     }
 
     /// Render the current state
@@ -2189,6 +3034,11 @@ impl App {
                         state.log_viewer_auto_scroll,
                     );
                 }
+            }
+
+            // Render loading overlay if a blocking operation is in progress
+            if let Some(message) = &state.loading_message {
+                render_loading_indicator(frame, area, message);
             }
         })?;
 

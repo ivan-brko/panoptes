@@ -1,8 +1,9 @@
 //! PTY (Pseudo-Terminal) management for spawning and interacting with processes
 
 use anyhow::{Context, Result};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use ratatui::prelude::Rect;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -234,6 +235,89 @@ fn key_event_to_bytes(key: KeyEvent) -> Vec<u8> {
         KeyCode::Null => vec![0],
         _ => vec![],
     }
+}
+
+/// Convert a mouse event to SGR mouse escape sequence bytes
+///
+/// # Arguments
+/// * `mouse` - The mouse event from crossterm
+/// * `content_area` - The content area rect where the PTY is rendered
+///
+/// # Returns
+/// * `Some(bytes)` - SGR mouse escape sequence to send to PTY
+/// * `None` - if the mouse event is outside the content area or not relevant
+///
+/// SGR format: `\x1b[<button;col;row{M|m}`
+/// - M = press/motion, m = release
+/// - Coordinates are 1-indexed
+pub fn mouse_event_to_bytes(mouse: MouseEvent, content_area: Rect) -> Option<Vec<u8>> {
+    // Check if mouse is within content area
+    if mouse.column < content_area.x
+        || mouse.column >= content_area.x + content_area.width
+        || mouse.row < content_area.y
+        || mouse.row >= content_area.y + content_area.height
+    {
+        return None;
+    }
+
+    // Translate screen coordinates to content-relative coordinates (1-indexed for SGR)
+    let col = (mouse.column - content_area.x) + 1;
+    let row = (mouse.row - content_area.y) + 1;
+
+    // Determine button code and press/release
+    let (button, is_release) = match mouse.kind {
+        MouseEventKind::Down(btn) => {
+            let code = match btn {
+                MouseButton::Left => 0,
+                MouseButton::Middle => 1,
+                MouseButton::Right => 2,
+            };
+            (code, false)
+        }
+        MouseEventKind::Up(btn) => {
+            let code = match btn {
+                MouseButton::Left => 0,
+                MouseButton::Middle => 1,
+                MouseButton::Right => 2,
+            };
+            (code, true)
+        }
+        MouseEventKind::Drag(btn) => {
+            // Drag is button + 32
+            let code = match btn {
+                MouseButton::Left => 32,
+                MouseButton::Middle => 33,
+                MouseButton::Right => 34,
+            };
+            (code, false)
+        }
+        MouseEventKind::ScrollUp => (64, false),
+        MouseEventKind::ScrollDown => (65, false),
+        MouseEventKind::ScrollLeft => (66, false),
+        MouseEventKind::ScrollRight => (67, false),
+        MouseEventKind::Moved => {
+            // Mouse motion without button - button code 35
+            (35, false)
+        }
+    };
+
+    // Add modifier bits to button code
+    let mut final_button = button;
+    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+        final_button += 4;
+    }
+    if mouse.modifiers.contains(KeyModifiers::ALT) {
+        final_button += 8;
+    }
+    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+        final_button += 16;
+    }
+
+    // Generate SGR escape sequence
+    let suffix = if is_release { 'm' } else { 'M' };
+    let sequence = format!("\x1b[<{};{};{}{}", final_button, col, row, suffix);
+
+    Some(sequence.into_bytes())
 }
 
 #[cfg(test)]
