@@ -1021,7 +1021,7 @@ impl App {
                     self.state.navigate_to_branch(project_id, branch.id);
                 }
             }
-            KeyCode::Char('w') => {
+            KeyCode::Char('n') => {
                 // Start creating a new worktree (new wizard flow)
                 self.start_worktree_wizard(project_id);
             }
@@ -1898,7 +1898,7 @@ impl App {
                 let selected_idx = self.state.base_branch_selector_index;
                 let selected_branch = self.state.filtered_branch_refs.get(selected_idx).cloned();
 
-                let result = if !branch_name_typed.is_empty() {
+                let result: Result<()> = if !branch_name_typed.is_empty() {
                     // Create NEW branch from selected base, then create worktree
                     // Use selected_base_branch which is preserved even when filtered out
                     let base_ref = self
@@ -1907,6 +1907,7 @@ impl App {
                         .as_ref()
                         .map(|b| b.name.clone());
                     self.create_worktree(project_id, &branch_name_typed, true, base_ref.as_deref())
+                        .map(|_| ())
                 } else if let Some(selected) = selected_branch {
                     // Checkout existing branch as worktree (empty name = checkout selected)
                     // For local branches, just create worktree
@@ -1931,6 +1932,7 @@ impl App {
                     };
 
                     self.create_worktree(project_id, &branch_name, create_branch, base_ref)
+                        .map(|_| ())
                 } else {
                     Ok(())
                 };
@@ -2655,12 +2657,22 @@ impl App {
                     }
                 };
 
-                if let Err(e) = result {
-                    tracing::error!("Failed to create worktree: {}", e);
-                    self.state.error_message = Some(format!("Failed to create worktree: {}", e));
-                }
+                // Capture branch_id before canceling wizard (which clears state)
+                let created_branch_id = match &result {
+                    Ok(branch_id) => Some(*branch_id),
+                    Err(e) => {
+                        tracing::error!("Failed to create worktree: {}", e);
+                        self.state.error_message = Some(format!("Failed to create worktree: {}", e));
+                        None
+                    }
+                };
 
                 self.cancel_worktree_wizard();
+
+                // Navigate to the newly created branch
+                if let Some(branch_id) = created_branch_id {
+                    self.state.navigate_to_branch(project_id, branch_id);
+                }
             }
             _ => {}
         }
@@ -2867,17 +2879,19 @@ impl App {
     }
 
     /// Create a worktree for a branch
+    ///
+    /// Returns the BranchId of the newly created branch on success.
     fn create_worktree(
         &mut self,
         project_id: ProjectId,
         branch_name: &str,
         create_branch: bool,
         base_ref: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<BranchId> {
         // Get project info and clone what we need
         let (repo_path, project_name, session_subdir) = {
             let Some(project) = self.project_store.get_project(project_id) else {
-                return Ok(());
+                anyhow::bail!("Project not found");
             };
             (
                 project.repo_path.clone(),
@@ -2919,11 +2933,12 @@ impl App {
             false, // is_default
             true,  // is_worktree
         );
+        let branch_id = branch.id;
         self.project_store.add_branch(branch);
         self.project_store.save()?;
         tracing::info!("Created worktree for branch: {}", branch_name);
 
-        Ok(())
+        Ok(branch_id)
     }
 
     /// Jump to the next session needing attention (oldest first)
