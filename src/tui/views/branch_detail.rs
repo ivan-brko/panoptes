@@ -8,12 +8,13 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{AppState, InputMode};
 use crate::config::Config;
+use crate::focus_timing::FocusTimer;
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionManager, SessionState};
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
-use crate::tui::views::format_attention_hint;
 use crate::tui::views::Breadcrumb;
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
 
 /// Render the branch detail view showing sessions
 #[allow(clippy::too_many_arguments)]
@@ -26,6 +27,7 @@ pub fn render_branch_detail(
     project_store: &ProjectStore,
     sessions: &SessionManager,
     config: &Config,
+    focus_timer: Option<&FocusTimer>,
 ) {
     let idle_threshold = config.idle_threshold_secs;
     let project = project_store.get_project(project_id);
@@ -42,7 +44,7 @@ pub fn render_branch_detail(
 
     // Header with breadcrumb
     let t = theme();
-    let header_text = match (project, branch) {
+    let breadcrumb_text = match (project, branch) {
         (Some(project), Some(branch)) => {
             let active_count = sessions.active_session_count_for_branch(branch_id);
             let attention_count = sessions.attention_count_for_branch(branch_id, idle_threshold);
@@ -63,6 +65,7 @@ pub fn render_branch_detail(
         }
         _ => "Panoptes > ? > ?".to_string(),
     };
+    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
 
     let header = Paragraph::new(header_text)
         .style(t.header_style())
@@ -160,11 +163,15 @@ pub fn render_branch_detail(
         InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
         InputMode::ConfirmingSessionDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         _ => {
-            let base = "n: new session | d: delete | ↑/↓: navigate | Enter: open | Esc/q: back";
+            let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
+            let base = format!(
+                "n: new session | d: delete | {} | ↑/↓: navigate | Enter: open | Esc/q: back",
+                timer_hint
+            );
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
-                base.to_string()
+                base
             }
         }
     };

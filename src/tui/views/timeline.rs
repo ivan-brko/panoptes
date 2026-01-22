@@ -8,13 +8,15 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::AppState;
 use crate::config::Config;
+use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::theme::theme;
-use crate::tui::views::format_attention_hint;
 use crate::tui::views::Breadcrumb;
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
 
 /// Render the activity timeline view showing all sessions sorted by activity
+#[allow(clippy::too_many_arguments)]
 pub fn render_timeline(
     frame: &mut Frame,
     area: Rect,
@@ -22,6 +24,7 @@ pub fn render_timeline(
     sessions: &SessionManager,
     project_store: &ProjectStore,
     config: &Config,
+    focus_timer: Option<&FocusTimer>,
 ) {
     let idle_threshold = config.idle_threshold_secs;
     let attention_count = sessions.total_attention_count(idle_threshold);
@@ -57,7 +60,7 @@ pub fn render_timeline(
     // Header with breadcrumb
     let t = theme();
     let active_count = sessions.total_active_count();
-    let header_text = {
+    let breadcrumb_text = {
         let breadcrumb = Breadcrumb::new().push("Timeline");
         let mut status_parts = vec![format!("{} sessions", all_sessions.len())];
         if active_count > 0 {
@@ -68,6 +71,7 @@ pub fn render_timeline(
         }
         breadcrumb.display_with_suffix(&format!("({})", status_parts.join(", ")))
     };
+    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
 
     let header = Paragraph::new(header_text)
         .style(t.header_style())
@@ -180,11 +184,12 @@ pub fn render_timeline(
 
     // Footer
     let footer_index = if attention_count > 0 { 3 } else { 2 };
-    let base_help = "↑/↓: navigate | Enter: open | Esc/q: back";
+    let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
+    let base_help = format!("{} | ↑/↓: navigate | Enter: open | Esc/q: back", timer_hint);
     let help_text = if let Some(hint) = format_attention_hint(sessions, config) {
         format!("{} | {}", hint, base_help)
     } else {
-        base_help.to_string()
+        base_help
     };
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))

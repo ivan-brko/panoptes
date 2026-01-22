@@ -6,11 +6,13 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::focus_timing::stats::{aggregate_by_project, calculate_overall_stats, FocusSession};
+use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
 use crate::tui::theme::theme;
-use crate::tui::views::Breadcrumb;
+use crate::tui::views::{format_focus_timer_hint, format_header_with_timer, Breadcrumb};
 
 /// Render the focus statistics view
+#[allow(clippy::too_many_arguments)]
 pub fn render_focus_stats(
     frame: &mut Frame,
     area: Rect,
@@ -18,6 +20,7 @@ pub fn render_focus_stats(
     project_store: &ProjectStore,
     selected_index: usize,
     focus_events_supported: bool,
+    focus_timer: Option<&FocusTimer>,
 ) {
     let t = theme();
 
@@ -34,7 +37,7 @@ pub fn render_focus_stats(
 
     // Header with breadcrumb
     let overall = calculate_overall_stats(sessions);
-    let header_text = {
+    let breadcrumb_text = {
         let breadcrumb = Breadcrumb::new().push("Focus Stats");
         let status = format!(
             "({} sessions, {} avg focus)",
@@ -43,6 +46,7 @@ pub fn render_focus_stats(
         );
         breadcrumb.display_with_suffix(&status)
     };
+    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
 
     let header = Paragraph::new(header_text)
         .style(t.header_style())
@@ -63,7 +67,11 @@ pub fn render_focus_stats(
     render_session_list(frame, chunks[2], sessions, project_store, selected_index);
 
     // Footer
-    let footer_text = "j/k: navigate | Esc/q: back | Enter: details";
+    let timer_hint = format_focus_timer_hint(focus_timer.map(|t| t.is_running()).unwrap_or(false));
+    let footer_text = format!(
+        "{} | j/k: navigate | Esc/q: back | Enter: details",
+        timer_hint
+    );
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));

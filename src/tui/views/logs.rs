@@ -9,11 +9,13 @@ use ratatui::widgets::{
     Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
+use crate::focus_timing::FocusTimer;
 use crate::logging::{LogBuffer, LogFileInfo, LogLevel};
 use crate::tui::theme::theme;
-use crate::tui::views::Breadcrumb;
+use crate::tui::views::{format_focus_timer_hint, format_header_with_timer, Breadcrumb};
 
 /// Render the log viewer showing all log entries
+#[allow(clippy::too_many_arguments)]
 pub fn render_log_viewer(
     frame: &mut Frame,
     area: Rect,
@@ -21,6 +23,7 @@ pub fn render_log_viewer(
     log_file_info: &LogFileInfo,
     scroll_offset: usize,
     auto_scroll: bool,
+    focus_timer: Option<&FocusTimer>,
 ) {
     let entries = log_buffer.all_entries();
     let entry_count = entries.len();
@@ -39,13 +42,14 @@ pub fn render_log_viewer(
     let t = theme();
     let breadcrumb = Breadcrumb::new().push("Logs");
     let auto_scroll_status = if auto_scroll { " [auto-scroll]" } else { "" };
-    let header_text = format!(
+    let breadcrumb_text = format!(
         "{} - {} ({} entries{})",
         breadcrumb.display(),
         log_file_info.path.display(),
         entry_count,
         auto_scroll_status
     );
+    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
     let header = Paragraph::new(header_text)
         .style(t.header_style())
         .block(Block::default().borders(Borders::BOTTOM));
@@ -140,7 +144,11 @@ pub fn render_log_viewer(
     }
 
     // Footer with navigation help
-    let footer_text = "↑/k ↓/j: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | Esc/q: back";
+    let timer_hint = format_focus_timer_hint(focus_timer.map(|t| t.is_running()).unwrap_or(false));
+    let footer_text = format!(
+        "{} | ↑/k ↓/j: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | Esc/q: back",
+        timer_hint
+    );
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));

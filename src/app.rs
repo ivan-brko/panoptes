@@ -960,18 +960,14 @@ impl App {
             return Ok(());
         }
 
+        // Handle focus timer shortcuts (t, T, Ctrl+t)
+        if self.handle_focus_timer_shortcut(key) {
+            return Ok(());
+        }
+
         let project_count = self.project_store.project_count();
         let session_count = self.sessions.len();
         let both_exist = project_count > 0 && session_count > 0;
-
-        // Handle Ctrl+t to stop focus timer (global in normal mode)
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == KeyCode::Char('t')
-            && self.state.focus_timer.is_some()
-        {
-            self.stop_focus_timer();
-            return Ok(());
-        }
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -980,16 +976,6 @@ impl App {
             KeyCode::Char('a') => {
                 // Activity timeline
                 self.state.navigate_to_timeline();
-            }
-            KeyCode::Char('t') => {
-                // Start focus timer
-                self.start_focus_timer_dialog();
-            }
-            KeyCode::Char('T') => {
-                // View focus stats
-                self.load_focus_sessions();
-                self.state.view = View::FocusStats;
-                self.state.focus_stats_selected_index = 0;
             }
             KeyCode::Char('n') => {
                 // Start adding a new project
@@ -1200,6 +1186,11 @@ impl App {
             return Ok(());
         }
 
+        // Handle focus timer shortcuts (t, T, Ctrl+t)
+        if self.handle_focus_timer_shortcut(key) {
+            return Ok(());
+        }
+
         let project_id = match self.state.view {
             View::ProjectDetail(id) => id,
             _ => return Ok(()),
@@ -1285,6 +1276,11 @@ impl App {
             return Ok(());
         }
 
+        // Handle focus timer shortcuts (t, T, Ctrl+t)
+        if self.handle_focus_timer_shortcut(key) {
+            return Ok(());
+        }
+
         let branch_sessions = self.sessions.sessions_for_branch(branch_id);
         let session_count = branch_sessions.len();
 
@@ -1344,6 +1340,11 @@ impl App {
             return Ok(());
         }
 
+        // Handle focus timer shortcuts (t, T, Ctrl+t)
+        if self.handle_focus_timer_shortcut(key) {
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.state.navigate_back();
@@ -1376,6 +1377,11 @@ impl App {
     fn handle_log_viewer_key(&mut self, key: KeyEvent) -> Result<()> {
         // Only process key press events (not release/repeat)
         if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        // Handle focus timer shortcuts (t, T, Ctrl+t)
+        if self.handle_focus_timer_shortcut(key) {
             return Ok(());
         }
 
@@ -1431,6 +1437,11 @@ impl App {
             return Ok(());
         }
 
+        // Handle focus timer shortcuts (t, T, Ctrl+t)
+        if self.handle_focus_timer_shortcut(key) {
+            return Ok(());
+        }
+
         let session_count = self.state.focus_sessions.len();
 
         match key.code {
@@ -1442,10 +1453,6 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.state.select_prev(session_count);
-            }
-            // Start a new focus timer from stats view
-            KeyCode::Char('t') => {
-                self.start_focus_timer_dialog();
             }
             _ => {}
         }
@@ -1492,6 +1499,32 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Handle common focus timer shortcuts. Returns true if the key was handled.
+    fn handle_focus_timer_shortcut(&mut self, key: KeyEvent) -> bool {
+        // Ctrl+t: stop timer (if running)
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('t')
+            && self.state.focus_timer.is_some()
+        {
+            self.stop_focus_timer();
+            return true;
+        }
+
+        match key.code {
+            KeyCode::Char('t') => {
+                self.start_focus_timer_dialog();
+                true
+            }
+            KeyCode::Char('T') => {
+                self.load_focus_sessions();
+                self.state.view = View::FocusStats;
+                self.state.focus_stats_selected_index = 0;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Start the focus timer dialog
@@ -1611,6 +1644,12 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
+
+        // Handle focus timer shortcuts (t, T, Ctrl+t) - only in Normal mode
+        if self.handle_focus_timer_shortcut(key) {
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 // Go back to the view we came from
@@ -3463,7 +3502,15 @@ impl App {
 
             match state.view {
                 View::ProjectsOverview => {
-                    render_projects_overview(frame, area, state, project_store, sessions, config);
+                    render_projects_overview(
+                        frame,
+                        area,
+                        state,
+                        project_store,
+                        sessions,
+                        config,
+                        state.focus_timer.as_ref(),
+                    );
                 }
                 View::ProjectDetail(project_id) => {
                     render_project_detail(
@@ -3474,6 +3521,7 @@ impl App {
                         project_store,
                         sessions,
                         config,
+                        state.focus_timer.as_ref(),
                     );
                 }
                 View::BranchDetail(project_id, branch_id) => {
@@ -3486,13 +3534,22 @@ impl App {
                         project_store,
                         sessions,
                         config,
+                        state.focus_timer.as_ref(),
                     );
                 }
                 View::SessionView => {
                     render_session_view(frame, area, state, sessions, project_store, config);
                 }
                 View::ActivityTimeline => {
-                    render_timeline(frame, area, state, sessions, project_store, config);
+                    render_timeline(
+                        frame,
+                        area,
+                        state,
+                        sessions,
+                        project_store,
+                        config,
+                        state.focus_timer.as_ref(),
+                    );
                 }
                 View::LogViewer => {
                     render_log_viewer(
@@ -3502,6 +3559,7 @@ impl App {
                         log_file_info,
                         state.log_viewer_scroll,
                         state.log_viewer_auto_scroll,
+                        state.focus_timer.as_ref(),
                     );
                 }
                 View::FocusStats => {
@@ -3512,6 +3570,7 @@ impl App {
                         project_store,
                         state.focus_stats_selected_index,
                         state.focus_events_supported,
+                        state.focus_timer.as_ref(),
                     );
                 }
             }
