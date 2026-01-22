@@ -42,6 +42,14 @@ pub struct Config {
     /// Esc hold threshold in milliseconds for exiting session mode (default: 400ms)
     #[serde(default = "default_esc_hold_threshold_ms")]
     pub esc_hold_threshold_ms: u64,
+
+    /// Default focus timer duration in minutes (default: 25)
+    #[serde(default = "default_focus_timer_minutes")]
+    pub focus_timer_minutes: u64,
+
+    /// Focus stats retention in days (default: 30)
+    #[serde(default = "default_focus_stats_retention_days")]
+    pub focus_stats_retention_days: u64,
 }
 
 fn default_idle_threshold() -> u64 {
@@ -68,6 +76,14 @@ fn default_esc_hold_threshold_ms() -> u64 {
     400
 }
 
+fn default_focus_timer_minutes() -> u64 {
+    25 // Pomodoro-style default
+}
+
+fn default_focus_stats_retention_days() -> u64 {
+    30
+}
+
 impl Default for Config {
     fn default() -> Self {
         let base = config_dir();
@@ -82,6 +98,8 @@ impl Default for Config {
             theme_preset: default_theme_preset(),
             notification_method: default_notification_method(),
             esc_hold_threshold_ms: default_esc_hold_threshold_ms(),
+            focus_timer_minutes: default_focus_timer_minutes(),
+            focus_stats_retention_days: default_focus_stats_retention_days(),
         }
     }
 }

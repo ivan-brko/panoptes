@@ -14,6 +14,10 @@ use crossterm::event::{
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::focus_timing::stats::FocusSession;
+use crate::focus_timing::store::FocusStore;
+use crate::focus_timing::tracker::FocusTracker;
+use crate::focus_timing::FocusTimer;
 use crate::hooks::{
     self, HookEventReceiver, HookEventSender, ServerHandle, DEFAULT_CHANNEL_BUFFER,
 };
@@ -22,10 +26,11 @@ use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionId, SessionManager};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
-    render_branch_detail, render_loading_indicator, render_log_viewer, render_project_detail,
-    render_projects_overview, render_session_view, render_timeline,
+    render_branch_detail, render_focus_stats, render_loading_indicator, render_log_viewer,
+    render_notifications, render_project_detail, render_projects_overview, render_session_view,
+    render_timeline, render_timer_input_dialog,
 };
-use crate::tui::Tui;
+use crate::tui::{NotificationManager, NotificationType, Tui};
 
 /// Focus state for the homepage (projects overview)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -127,6 +132,8 @@ pub enum InputMode {
     WorktreeSelectBase,
     /// Worktree creation Step 3: Confirmation before creation
     WorktreeConfirm,
+    /// Starting a focus timer - entering duration
+    StartingFocusTimer,
 }
 
 /// Type of worktree creation being performed
@@ -157,6 +164,8 @@ pub enum View {
     ActivityTimeline,
     /// Log viewer showing application logs
     LogViewer,
+    /// Focus timing statistics view
+    FocusStats,
 }
 
 impl View {
@@ -185,6 +194,11 @@ impl View {
         matches!(self, View::ActivityTimeline)
     }
 
+    /// Check if this view is the focus stats view
+    pub fn is_focus_stats(&self) -> bool {
+        matches!(self, View::FocusStats)
+    }
+
     /// Get the parent view for navigation (Esc key)
     pub fn parent(&self) -> Option<View> {
         match self {
@@ -194,6 +208,7 @@ impl View {
             View::SessionView => None, // Handled specially based on context
             View::ActivityTimeline => Some(View::ProjectsOverview),
             View::LogViewer => Some(View::ProjectsOverview),
+            View::FocusStats => Some(View::ProjectsOverview),
         }
     }
 
@@ -332,6 +347,24 @@ pub struct AppState {
     pub loading_message: Option<String>,
     /// Focus state for homepage (projects vs sessions list)
     pub homepage_focus: HomepageFocus,
+
+    // --- Focus timing state ---
+    /// Focus tracker for recording focus intervals
+    pub focus_tracker: FocusTracker,
+    /// Active focus timer (if any)
+    pub focus_timer: Option<FocusTimer>,
+    /// Notification manager for displaying alerts
+    pub notifications: NotificationManager,
+    /// Whether terminal currently has focus
+    pub terminal_focused: bool,
+    /// Whether focus events are supported by terminal
+    pub focus_events_supported: bool,
+    /// Input buffer for timer duration entry
+    pub focus_timer_input: String,
+    /// Selected index in focus stats view
+    pub focus_stats_selected_index: usize,
+    /// Cached focus sessions for stats view
+    pub focus_sessions: Vec<FocusSession>,
 }
 
 impl AppState {
@@ -344,6 +377,7 @@ impl AppState {
             View::ActivityTimeline => self.selected_timeline_index,
             View::SessionView => 0,
             View::LogViewer => self.log_viewer_scroll,
+            View::FocusStats => self.focus_stats_selected_index,
         }
     }
 
@@ -356,6 +390,7 @@ impl AppState {
             View::ActivityTimeline => self.selected_timeline_index = index,
             View::SessionView => {}
             View::LogViewer => self.log_viewer_scroll = index,
+            View::FocusStats => self.focus_stats_selected_index = index,
         }
     }
 
@@ -572,7 +607,20 @@ impl App {
                             self.state.needs_render = true;
                         }
                     }
-                    _ => {}
+                    Event::FocusGained => {
+                        self.state.terminal_focused = true;
+                        self.state.focus_events_supported = true;
+                        self.state.focus_tracker.handle_focus_gained();
+                        // Timer runs on wall-clock time, no pause/resume needed
+                        self.state.needs_render = true;
+                    }
+                    Event::FocusLost => {
+                        self.state.terminal_focused = false;
+                        self.state.focus_events_supported = true;
+                        self.state.focus_tracker.handle_focus_lost();
+                        // Timer runs on wall-clock time, no pause/resume needed
+                        self.state.needs_render = true;
+                    }
                 }
             }
 
@@ -640,6 +688,34 @@ impl App {
                 );
                 self.state.needs_render = true;
             }
+
+            // Check focus timer completion
+            let timer_complete = self
+                .state
+                .focus_timer
+                .as_ref()
+                .map(|t| (t.is_complete(), t.target_duration));
+
+            if let Some((true, target)) = timer_complete {
+                // Query focus tracker for the focused time during this timer window
+                let focused = self.state.focus_tracker.focused_time_in_last(target);
+                // Complete and save the timer
+                self.complete_focus_timer(focused);
+                // Show notification
+                self.state.notifications.push(
+                    NotificationType::TimerComplete { focused, target },
+                    Some(Duration::from_secs(30)),
+                );
+                // Terminal bell
+                if self.config.notification_method == "bell" {
+                    print!("\x07");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+                self.state.needs_render = true;
+            }
+
+            // Tick notifications (remove expired)
+            self.state.notifications.tick();
 
             // Check if we should quit
             if self.state.should_quit {
@@ -858,6 +934,7 @@ impl App {
                     Ok(())
                 }
             }
+            InputMode::StartingFocusTimer => self.handle_starting_focus_timer_key(key),
         }
     }
 
@@ -872,6 +949,7 @@ impl App {
             View::SessionView => self.handle_session_view_normal_key(key),
             View::ActivityTimeline => self.handle_timeline_key(key),
             View::LogViewer => self.handle_log_viewer_key(key),
+            View::FocusStats => self.handle_focus_stats_key(key),
         }
     }
 
@@ -886,12 +964,32 @@ impl App {
         let session_count = self.sessions.len();
         let both_exist = project_count > 0 && session_count > 0;
 
+        // Handle Ctrl+t to stop focus timer (global in normal mode)
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('t')
+            && self.state.focus_timer.is_some()
+        {
+            self.stop_focus_timer();
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.state.input_mode = InputMode::ConfirmingQuit;
             }
-            KeyCode::Char('t') => {
+            KeyCode::Char('a') => {
+                // Activity timeline
                 self.state.navigate_to_timeline();
+            }
+            KeyCode::Char('t') => {
+                // Start focus timer
+                self.start_focus_timer_dialog();
+            }
+            KeyCode::Char('T') => {
+                // View focus stats
+                self.load_focus_sessions();
+                self.state.view = View::FocusStats;
+                self.state.focus_stats_selected_index = 0;
             }
             KeyCode::Char('n') => {
                 // Start adding a new project
@@ -1324,6 +1422,187 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Handle key in focus stats view (normal mode)
+    fn handle_focus_stats_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        let session_count = self.state.focus_sessions.len();
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state.navigate_back();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.state.select_next(session_count);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.state.select_prev(session_count);
+            }
+            // Start a new focus timer from stats view
+            KeyCode::Char('t') => {
+                self.start_focus_timer_dialog();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key when starting a focus timer (entering duration)
+    fn handle_starting_focus_timer_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                // Cancel timer start
+                self.state.input_mode = InputMode::Normal;
+                self.state.focus_timer_input.clear();
+            }
+            KeyCode::Enter => {
+                // Start the timer with entered duration (or default)
+                let minutes = if self.state.focus_timer_input.is_empty() {
+                    self.config.focus_timer_minutes
+                } else {
+                    self.state
+                        .focus_timer_input
+                        .parse()
+                        .unwrap_or(self.config.focus_timer_minutes)
+                };
+
+                self.start_focus_timer(minutes);
+                self.state.input_mode = InputMode::Normal;
+                self.state.focus_timer_input.clear();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                // Only allow digits
+                if self.state.focus_timer_input.len() < 3 {
+                    self.state.focus_timer_input.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                self.state.focus_timer_input.pop();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Start the focus timer dialog
+    fn start_focus_timer_dialog(&mut self) {
+        self.state.input_mode = InputMode::StartingFocusTimer;
+        self.state.focus_timer_input.clear();
+    }
+
+    /// Start a focus timer with the given duration
+    fn start_focus_timer(&mut self, minutes: u64) {
+        let mut timer = FocusTimer::new(minutes);
+
+        // Set context based on current view
+        if let Some(project_id) = self.state.view.project_id() {
+            timer = timer.with_project(project_id);
+        }
+        if let Some(branch_id) = self.state.view.branch_id() {
+            timer = timer.with_branch(branch_id);
+        }
+
+        // Set focus tracker context
+        self.state
+            .focus_tracker
+            .set_context(self.state.view.project_id(), self.state.view.branch_id());
+
+        timer.start();
+        self.state.focus_timer = Some(timer);
+
+        tracing::info!("Started focus timer for {} minutes", minutes);
+    }
+
+    /// Stop the active focus timer (user-initiated)
+    fn stop_focus_timer(&mut self) {
+        if let Some(mut timer) = self.state.focus_timer.take() {
+            let target = timer.target_duration;
+            if let Some(elapsed) = timer.stop() {
+                // Query focus tracker for the focused time during this timer window
+                let focused = self.state.focus_tracker.focused_time_in_last(elapsed);
+                self.save_focus_session(
+                    target,
+                    focused,
+                    elapsed,
+                    timer.project_id,
+                    timer.branch_id,
+                );
+            }
+        }
+    }
+
+    /// Complete the focus timer (called when timer reaches target)
+    /// Takes the focused_duration which was already calculated from focus_tracker
+    fn complete_focus_timer(&mut self, focused_duration: Duration) {
+        if let Some(mut timer) = self.state.focus_timer.take() {
+            let target = timer.target_duration;
+            if let Some(elapsed) = timer.stop() {
+                self.save_focus_session(
+                    target,
+                    focused_duration,
+                    elapsed,
+                    timer.project_id,
+                    timer.branch_id,
+                );
+            }
+        }
+    }
+
+    /// Load focus sessions from disk into state
+    fn load_focus_sessions(&mut self) {
+        let store = FocusStore::new();
+        match store.load() {
+            Ok(sessions) => {
+                self.state.focus_sessions = sessions;
+            }
+            Err(e) => {
+                tracing::error!("Failed to load focus sessions: {}", e);
+                self.state.focus_sessions = Vec::new();
+            }
+        }
+    }
+
+    /// Save a focus session result
+    fn save_focus_session(
+        &mut self,
+        target_duration: Duration,
+        focused_duration: Duration,
+        elapsed_duration: Duration,
+        project_id: Option<uuid::Uuid>,
+        branch_id: Option<uuid::Uuid>,
+    ) {
+        // Save the session
+        let session = FocusSession::from_timer_result(
+            target_duration,
+            focused_duration,
+            elapsed_duration,
+            project_id,
+            branch_id,
+        );
+
+        // Add to cached sessions
+        self.state.focus_sessions.push(session.clone());
+
+        // Persist to disk
+        let store = FocusStore::new();
+        if let Err(e) = store.add_session(session) {
+            tracing::error!("Failed to save focus session: {}", e);
+        }
+
+        tracing::info!(
+            "Focus session complete: {:.0}% focus",
+            (focused_duration.as_secs_f64() / target_duration.as_secs_f64()) * 100.0
+        );
     }
 
     /// Handle key in session view (normal mode)
@@ -2827,7 +3106,8 @@ impl App {
                     Ok(branch_id) => Some(*branch_id),
                     Err(e) => {
                         tracing::error!("Failed to create worktree: {}", e);
-                        self.state.error_message = Some(format!("Failed to create worktree: {}", e));
+                        self.state.error_message =
+                            Some(format!("Failed to create worktree: {}", e));
                         None
                     }
                 };
@@ -3224,6 +3504,32 @@ impl App {
                         state.log_viewer_auto_scroll,
                     );
                 }
+                View::FocusStats => {
+                    render_focus_stats(
+                        frame,
+                        area,
+                        &state.focus_sessions,
+                        project_store,
+                        state.focus_stats_selected_index,
+                        state.focus_events_supported,
+                    );
+                }
+            }
+
+            // Render timer input dialog if entering timer duration
+            if state.input_mode == InputMode::StartingFocusTimer {
+                render_timer_input_dialog(
+                    frame,
+                    area,
+                    &state.focus_timer_input,
+                    config.focus_timer_minutes,
+                );
+            }
+
+            // Render notifications overlay
+            let visible_notifications = state.notifications.visible();
+            if !visible_notifications.is_empty() {
+                render_notifications(frame, area, &visible_notifications);
             }
 
             // Render loading overlay if a blocking operation is in progress

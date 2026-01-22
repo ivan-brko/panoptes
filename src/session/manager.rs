@@ -537,6 +537,8 @@ mod tests {
             theme_preset: "dark".to_string(),
             notification_method: "bell".to_string(),
             esc_hold_threshold_ms: 400,
+            focus_timer_minutes: 25,
+            focus_stats_retention_days: 30,
         }
     }
 

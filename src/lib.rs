@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod app;
 pub mod config;
+pub mod focus_timing;
 pub mod git;
 pub mod hooks;
 pub mod logging;
