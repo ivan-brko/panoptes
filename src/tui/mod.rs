@@ -116,6 +116,21 @@ impl Tui {
         Ok(())
     }
 
+    /// Enable mouse capture (for scroll wheel support)
+    pub fn enable_mouse_capture(&mut self) {
+        if !self.mouse_capture_enabled && stdout().execute(EnableMouseCapture).is_ok() {
+            self.mouse_capture_enabled = true;
+        }
+    }
+
+    /// Disable mouse capture (allows native text selection)
+    pub fn disable_mouse_capture(&mut self) {
+        if self.mouse_capture_enabled {
+            let _ = stdout().execute(DisableMouseCapture);
+            self.mouse_capture_enabled = false;
+        }
+    }
+
     /// Get terminal size
     pub fn size(&self) -> Result<Rect> {
         Ok(self.terminal.size()?)

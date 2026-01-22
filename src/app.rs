@@ -847,6 +847,7 @@ impl App {
                     {
                         let session_id = session.info.id;
                         self.state.navigate_to_session(session_id);
+                        self.tui.enable_mouse_capture();
                         self.sessions.acknowledge_attention(session_id);
                         if self.config.notification_method == "title" {
                             SessionManager::reset_terminal_title();
@@ -1009,6 +1010,7 @@ impl App {
                 if index < session_count {
                     let session_id = branch_sessions[index].info.id;
                     self.state.navigate_to_session(session_id);
+                    self.tui.enable_mouse_capture();
                     self.sessions.acknowledge_attention(session_id);
                     if self.config.notification_method == "title" {
                         SessionManager::reset_terminal_title();
@@ -1064,6 +1066,7 @@ impl App {
                 if let Some(session) = self.sessions.get_by_index(index) {
                     let session_id = session.info.id;
                     self.state.navigate_to_session(session_id);
+                    self.tui.enable_mouse_capture();
                     self.sessions.acknowledge_attention(session_id);
                     if self.config.notification_method == "title" {
                         SessionManager::reset_terminal_title();
@@ -1130,14 +1133,22 @@ impl App {
 
     /// Handle key in session view (normal mode)
     fn handle_session_view_normal_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key press events (not release/repeat)
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 // Go back to the view we came from
                 self.state.return_from_session();
+                // Re-enable mouse capture when leaving session view
+                self.tui.enable_mouse_capture();
             }
             KeyCode::Enter => {
                 // Re-activate session mode (send keys to PTY)
                 self.state.input_mode = InputMode::Session;
+                // Re-enable mouse capture for scroll wheel
+                self.tui.enable_mouse_capture();
             }
             KeyCode::PageUp => {
                 // Scroll up in session output (toward older content)
@@ -1369,8 +1380,10 @@ impl App {
             // Option/Alt+Escape: forward Escape to Claude Code
             self.forward_esc_to_pty()?;
         } else {
-            // Plain Escape: exit session mode
+            // Plain Escape: deactivate session mode
             self.state.input_mode = InputMode::Normal;
+            // Disable mouse capture to allow text selection
+            self.tui.disable_mouse_capture();
         }
         Ok(())
     }
@@ -1466,6 +1479,7 @@ impl App {
 
                         // Navigate to the new session (auto-activates Session mode)
                         self.state.navigate_to_session(session_id);
+                        self.tui.enable_mouse_capture();
                         self.sessions.acknowledge_attention(session_id);
                         if self.config.notification_method == "title" {
                             SessionManager::reset_terminal_title();
@@ -2263,6 +2277,7 @@ impl App {
         if let Some(session) = attention_sessions.first() {
             let session_id = session.info.id;
             self.state.navigate_to_session(session_id);
+            self.tui.enable_mouse_capture();
             // Auto-enter session mode so user is immediately active in the session
             self.sessions.acknowledge_attention(session_id);
             if self.config.notification_method == "title" {
