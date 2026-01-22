@@ -239,6 +239,8 @@ pub struct AppState {
     pub filtered_branch_refs: Vec<BranchRef>,
     /// Selected index in base branch selector
     pub base_branch_selector_index: usize,
+    /// The currently selected base branch (independent of filtering)
+    pub selected_base_branch: Option<BranchRef>,
     /// Whether git fetch encountered an error (show warning)
     pub fetch_error: Option<String>,
     /// Session pending deletion (for confirmation dialog)
@@ -1753,6 +1755,7 @@ impl App {
                 self.state.new_branch_name.clear();
                 self.state.available_branch_refs.clear();
                 self.state.filtered_branch_refs.clear();
+                self.state.selected_base_branch = None;
                 self.state.fetch_error = None;
             }
             KeyCode::Up => {
@@ -1764,6 +1767,12 @@ impl App {
                         .base_branch_selector_index
                         .checked_sub(1)
                         .unwrap_or(count - 1);
+                    // Update selected_base_branch when navigating
+                    self.state.selected_base_branch = self
+                        .state
+                        .filtered_branch_refs
+                        .get(self.state.base_branch_selector_index)
+                        .cloned();
                 }
             }
             KeyCode::Down => {
@@ -1772,6 +1781,12 @@ impl App {
                 if count > 0 {
                     self.state.base_branch_selector_index =
                         (self.state.base_branch_selector_index + 1) % count;
+                    // Update selected_base_branch when navigating
+                    self.state.selected_base_branch = self
+                        .state
+                        .filtered_branch_refs
+                        .get(self.state.base_branch_selector_index)
+                        .cloned();
                 }
             }
             KeyCode::Char('s') if key.modifiers.is_empty() => {
@@ -1809,7 +1824,8 @@ impl App {
 
                 let result = if !branch_name_typed.is_empty() {
                     // Create NEW branch from selected base, then create worktree
-                    let base_ref = selected_branch.map(|b| b.name);
+                    // Use selected_base_branch which is preserved even when filtered out
+                    let base_ref = self.state.selected_base_branch.as_ref().map(|b| b.name.clone());
                     self.create_worktree(project_id, &branch_name_typed, true, base_ref.as_deref())
                 } else if let Some(selected) = selected_branch {
                     // Checkout existing branch as worktree (empty name = checkout selected)
@@ -1846,6 +1862,7 @@ impl App {
                 self.state.input_mode = InputMode::Normal;
                 self.state.available_branch_refs.clear();
                 self.state.filtered_branch_refs.clear();
+                self.state.selected_base_branch = None;
                 self.state.fetch_error = None;
             }
             KeyCode::Backspace => {
@@ -1873,7 +1890,23 @@ impl App {
 
     /// Select the default base branch in the filtered list
     fn select_default_base_branch(&mut self) {
-        // Find index of default base branch in filtered list
+        // Find default base branch in the available (unfiltered) list first
+        // This ensures we track the actual default even when filtered out
+        if let Some(default_branch) = self
+            .state
+            .available_branch_refs
+            .iter()
+            .find(|b| b.is_default_base)
+        {
+            self.state.selected_base_branch = Some(default_branch.clone());
+        } else if let Some(first) = self.state.available_branch_refs.first() {
+            // If no default, use first available branch
+            self.state.selected_base_branch = Some(first.clone());
+        } else {
+            self.state.selected_base_branch = None;
+        }
+
+        // Find index of default base branch in filtered list for UI highlighting
         if let Some(idx) = self
             .state
             .filtered_branch_refs
@@ -1882,7 +1915,7 @@ impl App {
         {
             self.state.base_branch_selector_index = idx;
         } else if !self.state.filtered_branch_refs.is_empty() {
-            // If no default, select first item
+            // If no default in filtered list, select first item
             self.state.base_branch_selector_index = 0;
         }
     }
