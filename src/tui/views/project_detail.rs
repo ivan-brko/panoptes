@@ -234,7 +234,7 @@ pub fn render_project_detail(
             "w: toggle worktree deletion | y: confirm | n/Esc: cancel".to_string()
         }
         InputMode::WorktreeSelectBranch => {
-            "Type: search | ↑/↓: navigate | Enter: select | Esc: cancel".to_string()
+            "Type to search/create | ↑/↓: navigate | Enter: select | Esc: cancel".to_string()
         }
         InputMode::WorktreeSelectBase => {
             "Type: filter | ↑/↓: navigate | Enter: confirm | Esc: back".to_string()
@@ -666,8 +666,8 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Search input
+            Constraint::Length(1), // Instruction text
             Constraint::Min(0),    // Branch list
-            Constraint::Length(3), // Footer hint
         ])
         .split(area);
 
@@ -678,11 +678,16 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
     } else {
         ""
     };
-    let search_title = format!("Search{}", fetch_warning);
+    let search_title = format!("Search or type new branch name{}", fetch_warning);
     let search_input = Paragraph::new(search_text)
         .style(t.input_style())
         .block(Block::default().borders(Borders::ALL).title(search_title));
     frame.render_widget(search_input, chunks[0]);
+
+    // Instruction text
+    let instruction = "Select existing branch or type a new name to create one";
+    let instruction_widget = Paragraph::new(instruction).style(Style::default().fg(t.text_muted));
+    frame.render_widget(instruction_widget, chunks[1]);
 
     // Branch list with "Create new" option
     let filtered_count = state.worktree_filtered_branches.len();
@@ -693,6 +698,14 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
         .iter()
         .enumerate()
         .map(|(i, branch)| {
+            // Already-tracked branches are greyed out and not selectable
+            if branch.is_already_tracked {
+                let type_prefix = branch.ref_type.prefix();
+                let content = format!("  {} {} (already open)", type_prefix, branch.name);
+                let style = Style::default().fg(Color::DarkGray);
+                return ListItem::new(content).style(style);
+            }
+
             let selected = i == state.worktree_list_index;
             let prefix = if selected { "▸ " } else { "  " };
             let type_prefix = branch.ref_type.prefix();
@@ -749,14 +762,7 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
 
     let title = format!("Select Branch ({} found)", filtered_count);
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, chunks[1]);
-
-    // Footer hint
-    let hint = "↑/↓: navigate | Enter: select | Esc: cancel";
-    let footer = Paragraph::new(hint)
-        .style(Style::default().fg(t.text_muted))
-        .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[2]);
+    frame.render_widget(list, chunks[2]);
 }
 
 /// Render the WorktreeSelectBase dialog (Step 2)
@@ -784,7 +790,6 @@ fn render_worktree_select_base(frame: &mut Frame, area: Rect, state: &AppState, 
             Constraint::Length(3), // Branch name display
             Constraint::Length(3), // Search input
             Constraint::Min(0),    // Base branch list
-            Constraint::Length(3), // Footer hint
         ])
         .split(area);
 
@@ -862,13 +867,6 @@ fn render_worktree_select_base(frame: &mut Frame, area: Rect, state: &AppState, 
     let title = format!("Select Base Branch ({} options)", filtered.len());
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, chunks[2]);
-
-    // Footer hint
-    let hint = "↑/↓: navigate | Enter: confirm | Esc: back";
-    let footer = Paragraph::new(hint)
-        .style(Style::default().fg(t.text_muted))
-        .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[3]);
 }
 
 /// Render the WorktreeConfirm dialog (Step 3)
