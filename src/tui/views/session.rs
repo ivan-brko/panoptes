@@ -12,8 +12,8 @@ use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
 use crate::tui::theme::theme;
-use crate::tui::views::format_attention_hint;
 use crate::tui::views::Breadcrumb;
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
 
 /// Render the session view
 pub fn render_session_view(
@@ -36,7 +36,9 @@ pub fn render_session_view(
     let layout = FrameLayout::calculate(area, &frame_config);
 
     // === HEADER ===
-    let header_text = build_header_text(session, state, project_store);
+    let breadcrumb_text = build_header_text(session, state, project_store);
+    let header_text =
+        format_header_with_timer(&breadcrumb_text, state.focus_timer.as_ref(), area.width);
     let header_color = session
         .map(|s| s.info.state.color())
         .unwrap_or(t.text_muted);
@@ -163,9 +165,10 @@ fn build_footer_text(
         }
         _ => {
             let scroll_hint = if is_scrolled { "End: live view | " } else { "" };
+            let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let base = format!(
-                "{}Enter: activate | Tab: next | PgUp/Dn: scroll | Activate for mouse scroll",
-                scroll_hint
+                "{}Enter: activate | Tab: next | {} | PgUp/Dn: scroll",
+                scroll_hint, timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)

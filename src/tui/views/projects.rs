@@ -9,13 +9,14 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{AppState, HomepageFocus, InputMode};
 use crate::config::Config;
+use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::theme::theme;
-use crate::tui::views::format_attention_hint;
 use crate::tui::views::render_project_delete_confirmation;
 use crate::tui::views::render_quit_confirm_dialog;
 use crate::tui::views::Breadcrumb;
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
 
 /// Render the projects overview
 pub fn render_projects_overview(
@@ -25,6 +26,7 @@ pub fn render_projects_overview(
     project_store: &ProjectStore,
     sessions: &SessionManager,
     config: &Config,
+    focus_timer: Option<&FocusTimer>,
 ) {
     let idle_threshold = config.idle_threshold_secs;
     let attention_count = sessions.total_attention_count(idle_threshold);
@@ -63,7 +65,7 @@ pub fn render_projects_overview(
 
     // Header with breadcrumb
     let active_count = sessions.total_active_count();
-    let header_text = {
+    let breadcrumb_text = {
         let breadcrumb = Breadcrumb::new();
         let mut status_parts = vec![format!("{} projects", project_store.project_count())];
         if active_count > 0 {
@@ -76,6 +78,7 @@ pub fn render_projects_overview(
         breadcrumb.display_with_suffix(&suffix)
     };
     let t = theme();
+    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
     let header = Paragraph::new(header_text)
         .style(t.header_style())
         .block(Block::default().borders(Borders::BOTTOM));
@@ -165,19 +168,26 @@ pub fn render_projects_overview(
         _ => {
             let has_projects = project_store.project_count() > 0;
             let has_sessions = !sessions.is_empty();
+            let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let base = if has_projects && has_sessions {
-                "n: new project | d: delete | Tab: switch focus | t: timeline | ↑/↓: navigate | Enter: open | Esc/q: quit"
+                format!("n: new project | d: delete | Tab: switch focus | a: timeline | {} | ↑/↓: navigate | Enter: open | Esc/q: quit", timer_hint)
             } else if has_projects {
-                "n: new project | d: delete | t: timeline | ↑/↓: navigate | Enter: open | Esc/q: quit"
+                format!("n: new project | d: delete | a: timeline | {} | ↑/↓: navigate | Enter: open | Esc/q: quit", timer_hint)
             } else if has_sessions {
-                "n: new project | t: timeline | ↑/↓: navigate | Enter: open | Esc/q: quit"
+                format!(
+                    "n: new project | a: timeline | {} | ↑/↓: navigate | Enter: open | Esc/q: quit",
+                    timer_hint
+                )
             } else {
-                "n: new project | t: timeline | Esc/q: quit"
+                format!(
+                    "n: new project | a: timeline | {} | Esc/q: quit",
+                    timer_hint
+                )
             };
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
-                base.to_string()
+                base
             }
         }
     };

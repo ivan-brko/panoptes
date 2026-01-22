@@ -8,15 +8,17 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{AppState, BranchRef, BranchRefType, InputMode, WorktreeCreationType};
 use crate::config::Config;
+use crate::focus_timing::FocusTimer;
 use crate::git::GitOps;
 use crate::project::{Project, ProjectId, ProjectStore};
 use crate::session::SessionManager;
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
-use crate::tui::views::format_attention_hint;
 use crate::tui::views::Breadcrumb;
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
 
 /// Render the project detail view showing branches
+#[allow(clippy::too_many_arguments)]
 pub fn render_project_detail(
     frame: &mut Frame,
     area: Rect,
@@ -25,6 +27,7 @@ pub fn render_project_detail(
     project_store: &ProjectStore,
     sessions: &SessionManager,
     config: &Config,
+    focus_timer: Option<&FocusTimer>,
 ) {
     let idle_threshold = config.idle_threshold_secs;
     let project = project_store.get_project(project_id);
@@ -40,7 +43,7 @@ pub fn render_project_detail(
 
     // Header with breadcrumb
     let t = theme();
-    let header_text = if let Some(project) = project {
+    let breadcrumb_text = if let Some(project) = project {
         let active_count = sessions.active_session_count_for_project(project_id);
         let attention_count = sessions.attention_count_for_project(project_id, idle_threshold);
 
@@ -60,6 +63,7 @@ pub fn render_project_detail(
     } else {
         "Panoptes > ?".to_string()
     };
+    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
 
     let header = Paragraph::new(header_text)
         .style(t.header_style())
@@ -250,12 +254,15 @@ pub fn render_project_detail(
         InputMode::FetchingBranches => "Fetching branches... | Esc: cancel".to_string(),
         InputMode::RenamingProject => "Type: project name | Enter: save | Esc: cancel".to_string(),
         _ => {
-            let base =
-                "n: new worktree | b: set default base | r: rename | d: delete branch | D: delete project | ↑/↓: navigate | Enter: open | Esc: back | q: quit";
+            let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
+            let base = format!(
+                "n: new worktree | b: set default base | r: rename | d: delete | {} | ↑/↓: navigate | Enter: open | Esc: back | q: quit",
+                timer_hint
+            );
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
-                base.to_string()
+                base
             }
         }
     };

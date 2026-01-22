@@ -149,10 +149,12 @@ impl FocusTracker {
             }
         }
 
-        // Add current focus period if still focused
+        // Add current focus period if still focused (clipped to window)
         if self.is_focused {
             if let Some(started_at) = self.focus_started_at {
-                total += started_at.elapsed();
+                let elapsed = started_at.elapsed();
+                // Clip to window - don't count focus time before the window started
+                total += elapsed.min(window);
             }
         }
 
@@ -176,10 +178,12 @@ impl FocusTracker {
             }
         }
 
-        // Add current focus period if still focused and same project
+        // Add current focus period if still focused and same project (clipped to window)
         if self.is_focused && self.current_project_id == Some(id) {
             if let Some(started_at) = self.focus_started_at {
-                total += started_at.elapsed();
+                let elapsed = started_at.elapsed();
+                // Clip to window - don't count focus time before the window started
+                total += elapsed.min(window);
             }
         }
 
@@ -203,10 +207,12 @@ impl FocusTracker {
             }
         }
 
-        // Add current focus period if still focused and same branch
+        // Add current focus period if still focused and same branch (clipped to window)
         if self.is_focused && self.current_branch_id == Some(id) {
             if let Some(started_at) = self.focus_started_at {
-                total += started_at.elapsed();
+                let elapsed = started_at.elapsed();
+                // Clip to window - don't count focus time before the window started
+                total += elapsed.min(window);
             }
         }
 
