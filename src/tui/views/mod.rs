@@ -32,3 +32,43 @@ pub fn format_attention_hint(sessions: &SessionManager, config: &Config) -> Opti
         .first()
         .map(|s| format!("Space: → {}", s.info.name))
 }
+
+/// Breadcrumb navigation path segments
+pub struct Breadcrumb {
+    segments: Vec<String>,
+}
+
+impl Breadcrumb {
+    /// Create a new breadcrumb with the root "Panoptes" segment
+    pub fn new() -> Self {
+        Self {
+            segments: vec!["Panoptes".to_string()],
+        }
+    }
+
+    /// Add a segment to the breadcrumb path
+    pub fn push(mut self, segment: impl Into<String>) -> Self {
+        self.segments.push(segment.into());
+        self
+    }
+
+    /// Format the breadcrumb as a display string with " > " separators
+    pub fn display(&self) -> String {
+        self.segments.join(" > ")
+    }
+
+    /// Format the breadcrumb with an optional suffix (e.g., status info)
+    pub fn display_with_suffix(&self, suffix: &str) -> String {
+        if suffix.is_empty() {
+            self.display()
+        } else {
+            format!("{} {}", self.display(), suffix)
+        }
+    }
+}
+
+impl Default for Breadcrumb {
+    fn default() -> Self {
+        Self::new()
+    }
+}

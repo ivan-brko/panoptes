@@ -13,6 +13,7 @@ use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
 use crate::tui::theme::theme;
 use crate::tui::views::format_attention_hint;
+use crate::tui::views::Breadcrumb;
 
 /// Render the session view
 pub fn render_session_view(
@@ -107,8 +108,8 @@ fn build_header_text(
 ) -> String {
     if let Some(session) = session {
         let mode_indicator = match state.input_mode {
-            InputMode::Session => " [SESSION MODE]",
-            _ => " [NORMAL]",
+            InputMode::Session => "[SESSION]",
+            _ => "[NORMAL]",
         };
         let exit_info = if session.info.state == SessionState::Exited {
             session
@@ -128,17 +129,19 @@ fn build_header_text(
             .get_branch(session.info.branch_id)
             .map(|b| b.name.as_str())
             .unwrap_or("?");
+        let breadcrumb = Breadcrumb::new()
+            .push(project_name)
+            .push(branch_name)
+            .push(&session.info.name);
         format!(
-            "{} / {} / {} - {}{}{}",
-            project_name,
-            branch_name,
-            session.info.name,
+            "{} - {}{} {}",
+            breadcrumb.display(),
             session.info.state.display_name(),
             exit_info,
             mode_indicator
         )
     } else {
-        "No session selected".to_string()
+        "Panoptes > ? > ? > ? - No session".to_string()
     }
 }
 

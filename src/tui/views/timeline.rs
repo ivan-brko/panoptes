@@ -10,7 +10,9 @@ use crate::app::AppState;
 use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
+use crate::tui::theme::theme;
 use crate::tui::views::format_attention_hint;
+use crate::tui::views::Breadcrumb;
 
 /// Render the activity timeline view showing all sessions sorted by activity
 pub fn render_timeline(
@@ -52,28 +54,23 @@ pub fn render_timeline(
     let mut all_sessions: Vec<_> = sessions.sessions_in_order();
     all_sessions.sort_by(|a, b| b.info.last_activity.cmp(&a.info.last_activity));
 
-    // Header
+    // Header with breadcrumb
+    let t = theme();
     let active_count = sessions.total_active_count();
     let header_text = {
-        let mut parts = vec![format!(
-            "Activity Timeline ({} sessions)",
-            all_sessions.len()
-        )];
+        let breadcrumb = Breadcrumb::new().push("Timeline");
+        let mut status_parts = vec![format!("{} sessions", all_sessions.len())];
         if active_count > 0 {
-            parts.push(format!("{} active", active_count));
+            status_parts.push(format!("{} active", active_count));
         }
         if attention_count > 0 {
-            parts.push(format!("{} need attention", attention_count));
+            status_parts.push(format!("{} need attention", attention_count));
         }
-        if parts.len() == 1 {
-            parts[0].clone()
-        } else {
-            format!("{}, {}", parts[0], parts[1..].join(", "))
-        }
+        breadcrumb.display_with_suffix(&format!("({})", status_parts.join(", ")))
     };
 
     let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan).bold())
+        .style(t.header_style())
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 

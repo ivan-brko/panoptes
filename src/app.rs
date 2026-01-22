@@ -1572,10 +1572,10 @@ impl App {
             // Option/Alt+Escape: forward Escape to Claude Code
             self.forward_esc_to_pty()?;
         } else {
-            // Plain Escape: deactivate session mode
-            self.state.input_mode = InputMode::Normal;
-            // Disable mouse capture to allow text selection
-            self.tui.disable_mouse_capture();
+            // Plain Escape: return from session view entirely
+            self.state.return_from_session();
+            // Re-enable mouse capture when leaving session view
+            self.tui.enable_mouse_capture();
         }
         Ok(())
     }

@@ -14,6 +14,7 @@ use crate::session::SessionManager;
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::format_attention_hint;
+use crate::tui::views::Breadcrumb;
 
 /// Render the project detail view showing branches
 pub fn render_project_detail(
@@ -37,29 +38,31 @@ pub fn render_project_detail(
         ])
         .split(area);
 
-    // Header
+    // Header with breadcrumb
+    let t = theme();
     let header_text = if let Some(project) = project {
         let active_count = sessions.active_session_count_for_project(project_id);
         let attention_count = sessions.attention_count_for_project(project_id, idle_threshold);
 
-        let mut parts = vec![format!("Project: {}", project.name)];
+        let breadcrumb = Breadcrumb::new().push(&project.name);
+        let mut status_parts = vec![];
         if active_count > 0 {
-            parts.push(format!("{} active", active_count));
+            status_parts.push(format!("{} active", active_count));
         }
         if attention_count > 0 {
-            parts.push(format!("{} need attention", attention_count));
+            status_parts.push(format!("{} need attention", attention_count));
         }
-        if parts.len() == 1 {
-            parts[0].clone()
+        if status_parts.is_empty() {
+            breadcrumb.display()
         } else {
-            format!("{} ({})", parts[0], parts[1..].join(", "))
+            breadcrumb.display_with_suffix(&format!("({})", status_parts.join(", ")))
         }
     } else {
-        "Project not found".to_string()
+        "Panoptes > ?".to_string()
     };
 
     let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan).bold())
+        .style(t.header_style())
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 

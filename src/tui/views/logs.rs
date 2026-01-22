@@ -10,6 +10,8 @@ use ratatui::widgets::{
 };
 
 use crate::logging::{LogBuffer, LogFileInfo, LogLevel};
+use crate::tui::theme::theme;
+use crate::tui::views::Breadcrumb;
 
 /// Render the log viewer showing all log entries
 pub fn render_log_viewer(
@@ -33,15 +35,19 @@ pub fn render_log_viewer(
         ])
         .split(area);
 
-    // Header with log file path and entry count
+    // Header with breadcrumb and log info
+    let t = theme();
+    let breadcrumb = Breadcrumb::new().push("Logs");
+    let auto_scroll_status = if auto_scroll { " [auto-scroll]" } else { "" };
     let header_text = format!(
-        "Log File: {} ({} entries{})",
+        "{} - {} ({} entries{})",
+        breadcrumb.display(),
         log_file_info.path.display(),
         entry_count,
-        if auto_scroll { ", auto-scroll ON" } else { "" }
+        auto_scroll_status
     );
     let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan).bold())
+        .style(t.header_style())
         .block(Block::default().borders(Borders::BOTTOM));
     frame.render_widget(header, chunks[0]);
 
