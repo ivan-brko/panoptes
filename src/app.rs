@@ -22,8 +22,8 @@ use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionId, SessionManager};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
-    render_branch_detail, render_log_viewer, render_project_detail, render_projects_overview,
-    render_session_view, render_timeline,
+    render_branch_detail, render_loading_indicator, render_log_viewer, render_project_detail,
+    render_projects_overview, render_session_view, render_timeline,
 };
 use crate::tui::Tui;
 
@@ -315,6 +315,8 @@ pub struct AppState {
     pub worktree_creation_type: WorktreeCreationType,
     /// Project name for worktree path (cached during wizard)
     pub worktree_project_name: String,
+    /// Loading message to display during blocking operations
+    pub loading_message: Option<String>,
 }
 
 impl AppState {
@@ -2180,10 +2182,20 @@ impl App {
                             if branch.is_worktree {
                                 // Get the project to access the repo
                                 if let Some(project_id) = self.state.view.project_id() {
-                                    if let Some(project) =
-                                        self.project_store.get_project(project_id)
-                                    {
-                                        match crate::git::GitOps::open(&project.repo_path) {
+                                    // Clone the repo_path to avoid borrow conflicts
+                                    let repo_path = self
+                                        .project_store
+                                        .get_project(project_id)
+                                        .map(|p| p.repo_path.clone());
+
+                                    if let Some(repo_path) = repo_path {
+                                        // Show loading indicator
+                                        let _ = self.show_loading(&format!(
+                                            "Removing worktree '{}'...",
+                                            branch.name
+                                        ));
+
+                                        match crate::git::GitOps::open(&repo_path) {
                                             Ok(git) => {
                                                 if let Err(e) =
                                                     crate::git::worktree::remove_worktree(
@@ -2213,6 +2225,8 @@ impl App {
                                                     Some(format!("Failed to open git repo: {}", e));
                                             }
                                         }
+
+                                        self.clear_loading();
                                     }
                                 }
                             }
@@ -2699,27 +2713,36 @@ impl App {
         self.state.worktree_creation_type = WorktreeCreationType::ExistingLocal;
         self.state.fetch_error = None;
 
-        // Get project info
-        let Some(project) = self.project_store.get_project(project_id) else {
-            self.state.error_message = Some("Project not found".to_string());
-            return;
+        // Get project info and clone what we need
+        let (project_name, repo_path, default_base_branch) = {
+            let Some(project) = self.project_store.get_project(project_id) else {
+                self.state.error_message = Some("Project not found".to_string());
+                return;
+            };
+            (
+                project.name.clone(),
+                project.repo_path.clone(),
+                project.default_base_branch.clone(),
+            )
         };
-        self.state.worktree_project_name = project.name.clone();
+        self.state.worktree_project_name = project_name;
 
         // Try to open git repo and fetch branches
-        let Ok(git) = crate::git::GitOps::open(&project.repo_path) else {
+        let Ok(git) = crate::git::GitOps::open(&repo_path) else {
             self.state.error_message = Some("Failed to open git repository".to_string());
             return;
         };
 
         // Try to fetch from remotes (may fail if offline)
+        let _ = self.show_loading("Fetching branches from remotes...");
         if let Err(e) = git.fetch_all_remotes() {
             tracing::warn!("Failed to fetch remotes: {}", e);
             self.state.fetch_error = Some(format!("Fetch failed: {}", e));
         }
+        self.clear_loading();
 
         // Get all branch refs
-        let default_base = project.default_base_branch.as_deref();
+        let default_base = default_base_branch.as_deref();
         match git.list_all_branch_refs(default_base) {
             Ok(refs) => {
                 self.state.worktree_all_branches = refs
@@ -2784,26 +2807,35 @@ impl App {
 
     /// Fetch remotes and populate branch refs for a project
     fn fetch_and_populate_branch_refs(&mut self, project_id: ProjectId) {
-        let Some(project) = self.project_store.get_project(project_id) else {
-            self.state.available_branch_refs.clear();
-            self.state.filtered_branch_refs.clear();
-            return;
+        // Get project info and clone what we need
+        let (repo_path, default_base_branch) = {
+            let Some(project) = self.project_store.get_project(project_id) else {
+                self.state.available_branch_refs.clear();
+                self.state.filtered_branch_refs.clear();
+                return;
+            };
+            (
+                project.repo_path.clone(),
+                project.default_base_branch.clone(),
+            )
         };
 
-        let Ok(git) = crate::git::GitOps::open(&project.repo_path) else {
+        let Ok(git) = crate::git::GitOps::open(&repo_path) else {
             self.state.available_branch_refs.clear();
             self.state.filtered_branch_refs.clear();
             return;
         };
 
         // Try to fetch from remotes (may fail if offline, continue anyway)
+        let _ = self.show_loading("Fetching branches from remotes...");
         if let Err(e) = git.fetch_all_remotes() {
             tracing::warn!("Failed to fetch remotes: {}", e);
             self.state.fetch_error = Some(format!("Fetch failed: {}", e));
         }
+        self.clear_loading();
 
         // Get all branch refs
-        let default_base = project.default_base_branch.as_deref();
+        let default_base = default_base_branch.as_deref();
         match git.list_all_branch_refs(default_base) {
             Ok(refs) => {
                 // Convert git::BranchRefInfo to app::BranchRef
@@ -2842,36 +2874,55 @@ impl App {
         create_branch: bool,
         base_ref: Option<&str>,
     ) -> Result<()> {
-        if let Some(project) = self.project_store.get_project(project_id) {
-            let git = crate::git::GitOps::open(&project.repo_path)?;
-            let worktree_path = crate::git::worktree::worktree_path_for_branch(
-                &self.config.worktrees_dir,
-                &project.name,
-                branch_name,
-            );
+        // Get project info and clone what we need
+        let (repo_path, project_name, session_subdir) = {
+            let Some(project) = self.project_store.get_project(project_id) else {
+                return Ok(());
+            };
+            (
+                project.repo_path.clone(),
+                project.name.clone(),
+                project.session_subdir.clone(),
+            )
+        };
 
-            crate::git::worktree::create_worktree(
-                git.repository(),
-                branch_name,
-                &worktree_path,
-                create_branch,
-                base_ref,
-            )?;
+        let git = crate::git::GitOps::open(&repo_path)?;
+        let worktree_path = crate::git::worktree::worktree_path_for_branch(
+            &self.config.worktrees_dir,
+            &project_name,
+            branch_name,
+        );
 
-            // Apply project's subfolder to get effective working dir for sessions
-            let effective_working_dir = project.effective_working_dir(&worktree_path);
+        // Show loading indicator for worktree creation
+        let _ = self.show_loading(&format!("Creating worktree for '{}'...", branch_name));
 
-            let branch = crate::project::Branch::new(
-                project_id,
-                branch_name.to_string(),
-                effective_working_dir,
-                false, // is_default
-                true,  // is_worktree
-            );
-            self.project_store.add_branch(branch);
-            self.project_store.save()?;
-            tracing::info!("Created worktree for branch: {}", branch_name);
-        }
+        crate::git::worktree::create_worktree(
+            git.repository(),
+            branch_name,
+            &worktree_path,
+            create_branch,
+            base_ref,
+        )?;
+
+        self.clear_loading();
+
+        // Apply project's session_subdir to get effective working dir for sessions
+        let effective_working_dir = match &session_subdir {
+            Some(subdir) => worktree_path.join(subdir),
+            None => worktree_path,
+        };
+
+        let branch = crate::project::Branch::new(
+            project_id,
+            branch_name.to_string(),
+            effective_working_dir,
+            false, // is_default
+            true,  // is_worktree
+        );
+        self.project_store.add_branch(branch);
+        self.project_store.save()?;
+        tracing::info!("Created worktree for branch: {}", branch_name);
+
         Ok(())
     }
 
@@ -2911,6 +2962,21 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Show a loading indicator with the given message and force a render
+    ///
+    /// This is used before blocking operations to provide visual feedback
+    /// to the user that something is happening.
+    fn show_loading(&mut self, message: &str) -> Result<()> {
+        self.state.loading_message = Some(message.to_string());
+        self.render()?;
+        Ok(())
+    }
+
+    /// Clear the loading indicator
+    fn clear_loading(&mut self) {
+        self.state.loading_message = None;
     }
 
     /// Render the current state
@@ -2968,6 +3034,11 @@ impl App {
                         state.log_viewer_auto_scroll,
                     );
                 }
+            }
+
+            // Render loading overlay if a blocking operation is in progress
+            if let Some(message) = &state.loading_message {
+                render_loading_indicator(frame, area, message);
             }
         })?;
 

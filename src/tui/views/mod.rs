@@ -14,7 +14,10 @@ mod session;
 mod timeline;
 
 pub use branch_detail::render_branch_detail;
-pub use confirm::{render_confirm_dialog, render_quit_confirm_dialog, ConfirmDialogConfig};
+pub use confirm::{
+    render_confirm_dialog, render_loading_indicator, render_quit_confirm_dialog,
+    ConfirmDialogConfig,
+};
 pub use logs::render_log_viewer;
 pub use project_detail::{render_project_delete_confirmation, render_project_detail};
 pub use projects::render_projects_overview;

@@ -165,3 +165,40 @@ pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
 
     frame.render_widget(paragraph, dialog_area);
 }
+
+/// Render a loading indicator overlay
+///
+/// Displays a centered dialog with a loading message during blocking operations.
+/// Uses cyan border to indicate informational/non-destructive status.
+pub fn render_loading_indicator(frame: &mut Frame, area: Rect, message: &str) {
+    let t = theme();
+
+    // Calculate centered dialog area
+    let dialog_width = 50_u16.min(area.width.saturating_sub(4));
+    let dialog_height = 5_u16.min(area.height.saturating_sub(2));
+
+    let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+    let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+
+    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+
+    // Clear the background
+    frame.render_widget(ratatui::widgets::Clear, dialog_area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            message,
+            Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+        )]),
+    ];
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.accent))
+            .title("Please Wait"),
+    );
+
+    frame.render_widget(paragraph, dialog_area);
+}
