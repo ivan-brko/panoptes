@@ -86,7 +86,7 @@ pub fn render_project_detail(
         if branches.is_empty() {
             let empty = Paragraph::new(
                 "No branches tracked yet.\n\n\
-                Press 'w' to create a worktree for a branch.",
+                Press 'n' to create a worktree for a branch.",
             )
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL).title("Branches"));
@@ -248,7 +248,7 @@ pub fn render_project_detail(
         InputMode::RenamingProject => "Type: project name | Enter: save | Esc: cancel".to_string(),
         _ => {
             let base =
-                "w: new worktree | b: set default base | r: rename | d: delete branch | D: delete project | ↑/↓: navigate | Enter: open | Esc: back | q: quit";
+                "n: new worktree | b: set default base | r: rename | d: delete branch | D: delete project | ↑/↓: navigate | Enter: open | Esc: back | q: quit";
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
