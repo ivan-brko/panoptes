@@ -67,6 +67,8 @@ pub struct BranchRef {
     pub display_name: String,
     /// Whether this is the default base branch
     pub is_default_base: bool,
+    /// Whether this branch already has a worktree tracked in Panoptes
+    pub is_already_tracked: bool,
 }
 
 impl BranchRef {
@@ -78,6 +80,7 @@ impl BranchRef {
             name,
             display_name,
             is_default_base: false,
+            is_already_tracked: false,
         }
     }
 
@@ -2527,40 +2530,30 @@ impl App {
             return Ok(());
         }
 
-        let filtered_count = self.state.worktree_filtered_branches.len();
-        // The "Create new branch" option is at index = filtered_count when search text is non-empty
-        let has_create_option = !self.state.worktree_search_text.is_empty();
-        let total_options = if has_create_option {
-            filtered_count + 1
-        } else {
-            filtered_count
-        };
-
         match key.code {
             KeyCode::Esc => {
                 self.cancel_worktree_wizard();
             }
             KeyCode::Up => {
-                if total_options > 0 {
-                    self.state.worktree_list_index = self
-                        .state
-                        .worktree_list_index
-                        .checked_sub(1)
-                        .unwrap_or(total_options - 1);
-                }
+                self.worktree_navigate_branches(-1);
             }
             KeyCode::Down => {
-                if total_options > 0 {
-                    self.state.worktree_list_index =
-                        (self.state.worktree_list_index + 1) % total_options;
-                }
+                self.worktree_navigate_branches(1);
             }
             KeyCode::Enter => {
+                let filtered_count = self.state.worktree_filtered_branches.len();
+                let has_create_option = !self.state.worktree_search_text.is_empty();
+
                 if self.state.worktree_list_index < filtered_count {
                     // Selected an existing branch
                     let selected = self.state.worktree_filtered_branches
                         [self.state.worktree_list_index]
                         .clone();
+
+                    // Block selection of already-tracked branches
+                    if selected.is_already_tracked {
+                        return Ok(());
+                    }
 
                     if selected.ref_type == BranchRefType::Local {
                         // Existing local branch → go directly to confirm
@@ -2611,18 +2604,76 @@ impl App {
             KeyCode::Backspace => {
                 self.state.worktree_search_text.pop();
                 self.update_worktree_filtered_branches();
-                // Reset selection to top
-                self.state.worktree_list_index = 0;
+                // Reset selection to first selectable
+                self.worktree_select_first_selectable();
             }
             KeyCode::Char(c) => {
                 self.state.worktree_search_text.push(c);
                 self.update_worktree_filtered_branches();
-                // Reset selection to top
-                self.state.worktree_list_index = 0;
+                // Reset selection to first selectable
+                self.worktree_select_first_selectable();
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Navigate up/down in the worktree branch list, skipping already-tracked branches
+    fn worktree_navigate_branches(&mut self, direction: i32) {
+        let filtered_count = self.state.worktree_filtered_branches.len();
+        let has_create_option = !self.state.worktree_search_text.is_empty();
+        let total_options = if has_create_option {
+            filtered_count + 1
+        } else {
+            filtered_count
+        };
+
+        if total_options == 0 {
+            return;
+        }
+
+        let current = self.state.worktree_list_index;
+        let mut next = current;
+
+        for _ in 0..total_options {
+            if direction > 0 {
+                next = (next + 1) % total_options;
+            } else {
+                next = next.checked_sub(1).unwrap_or(total_options - 1);
+            }
+            // The "Create new branch" option (at filtered_count) is always selectable
+            if next >= filtered_count {
+                self.state.worktree_list_index = next;
+                return;
+            }
+            // Check if this branch is selectable (not already tracked)
+            if !self.state.worktree_filtered_branches[next].is_already_tracked {
+                self.state.worktree_list_index = next;
+                return;
+            }
+        }
+        // If all branches are tracked, stay at current position
+    }
+
+    /// Select the first non-tracked branch in the list
+    fn worktree_select_first_selectable(&mut self) {
+        let filtered_count = self.state.worktree_filtered_branches.len();
+        let has_create_option = !self.state.worktree_search_text.is_empty();
+
+        // First, try to find a non-tracked branch
+        for (i, branch) in self.state.worktree_filtered_branches.iter().enumerate() {
+            if !branch.is_already_tracked {
+                self.state.worktree_list_index = i;
+                return;
+            }
+        }
+        // If all branches are tracked and there's a create option, select it
+        if has_create_option {
+            self.state.worktree_list_index = filtered_count;
+            return;
+        }
+        // Otherwise default to 0
+        self.state.worktree_list_index = 0;
     }
 
     /// Handle key in WorktreeSelectBase mode (Step 2)
@@ -2853,6 +2904,14 @@ impl App {
         };
         self.state.worktree_project_name = project_name;
 
+        // Get tracked branch names for this project
+        let tracked_branches: std::collections::HashSet<String> = self
+            .project_store
+            .branches_for_project(project_id)
+            .iter()
+            .map(|b| b.name.clone())
+            .collect();
+
         // Try to open git repo and fetch branches
         let Ok(git) = crate::git::GitOps::open(&repo_path) else {
             self.state.error_message = Some("Failed to open git repository".to_string());
@@ -2881,8 +2940,9 @@ impl App {
                         BranchRef {
                             ref_type,
                             name: r.name.clone(),
-                            display_name: r.name,
+                            display_name: r.name.clone(),
                             is_default_base: r.is_default_base,
+                            is_already_tracked: tracked_branches.contains(&r.name),
                         }
                     })
                     .collect();
@@ -2977,6 +3037,7 @@ impl App {
                             name: r.name.clone(),
                             display_name: r.name,
                             is_default_base: r.is_default_base,
+                            is_already_tracked: false, // Deprecated code path
                         }
                     })
                     .collect();
