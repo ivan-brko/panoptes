@@ -151,15 +151,17 @@ fn build_footer_text(
     match state.input_mode {
         InputMode::Session => {
             if is_scrolled {
-                "Esc: deactivate | PgUp/PgDn: scroll | Ctrl+End: live view".to_string()
+                "Esc: deactivate | PgUp/PgDn: scroll | Ctrl+End: live view | Deactivate to copy text"
+                    .to_string()
             } else {
-                "Esc: deactivate | \u{2325}Esc: send Esc | PgUp: scroll history".to_string()
+                "Esc: deactivate | \u{2325}Esc: send Esc | PgUp: scroll history | Deactivate to copy text"
+                    .to_string()
             }
         }
         _ => {
             let scroll_hint = if is_scrolled { "End: live view | " } else { "" };
             let base = format!(
-                "{}Enter: activate | Tab: next | PgUp/Dn: scroll",
+                "{}Enter: activate | Tab: next | PgUp/Dn: scroll | Activate for mouse scroll",
                 scroll_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
