@@ -104,11 +104,8 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
             let count = app.sessions.len();
             if count > 0 {
                 // Use the timeline index for cycling through all sessions
-                app.state.selected_timeline_index =
-                    (app.state.selected_timeline_index + 1) % count;
-                if let Some(session) = app
-                    .sessions
-                    .get_by_index(app.state.selected_timeline_index)
+                app.state.selected_timeline_index = (app.state.selected_timeline_index + 1) % count;
+                if let Some(session) = app.sessions.get_by_index(app.state.selected_timeline_index)
                 {
                     let session_id = session.info.id;
                     app.state.active_session = Some(session_id);
@@ -128,9 +125,8 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                 let count = app.sessions.len();
                 if num > 0 && (num as usize) <= count {
                     app.state.selected_timeline_index = (num as usize) - 1;
-                    if let Some(session) = app
-                        .sessions
-                        .get_by_index(app.state.selected_timeline_index)
+                    if let Some(session) =
+                        app.sessions.get_by_index(app.state.selected_timeline_index)
                     {
                         let session_id = session.info.id;
                         app.state.active_session = Some(session_id);

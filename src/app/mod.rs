@@ -20,9 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::config::Config;
 use crate::focus_timing::stats::{FocusContextBreakdown, FocusSession};
@@ -444,7 +442,9 @@ impl App {
     pub(crate) fn handle_normal_mode_key(&mut self, key: KeyEvent) -> Result<()> {
         use crate::input::normal;
         match self.state.view {
-            View::ProjectsOverview => normal::projects_overview::handle_projects_overview_key(self, key),
+            View::ProjectsOverview => {
+                normal::projects_overview::handle_projects_overview_key(self, key)
+            }
             View::ProjectDetail(_) => normal::project_detail::handle_project_detail_key(self, key),
             View::BranchDetail(project_id, branch_id) => {
                 normal::branch_detail::handle_branch_detail_key(self, key, project_id, branch_id)

@@ -118,8 +118,8 @@ fn handle_session_mode_esc(app: &mut App, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
-    if key.modifiers.contains(KeyModifiers::ALT) {
-        // Option/Alt+Escape: forward Escape to Claude Code
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        // Shift+Escape: forward Escape to Claude Code
         forward_esc_to_pty(app)?;
     } else {
         // Plain Escape: deactivate session mode (switch to Normal), stay in SessionView
