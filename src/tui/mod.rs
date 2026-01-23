@@ -3,11 +3,17 @@
 //! This module handles all terminal rendering and UI components using Ratatui.
 
 pub mod frame;
+pub mod header;
+pub mod header_notifications;
+pub mod layout;
 pub mod notifications;
 pub mod theme;
 pub mod views;
 pub mod widgets;
 
+pub use header::Header;
+pub use header_notifications::HeaderNotificationManager;
+pub use layout::ScreenLayout;
 pub use notifications::{Notification, NotificationManager, NotificationType};
 pub use theme::{theme, Theme};
 

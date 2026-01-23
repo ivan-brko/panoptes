@@ -11,8 +11,11 @@ use crate::focus_timing::stats::{
 };
 use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
+use crate::tui::header::Header;
+use crate::tui::header_notifications::HeaderNotificationManager;
+use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
-use crate::tui::views::{format_focus_timer_hint, format_header_with_timer, Breadcrumb};
+use crate::tui::views::{format_focus_timer_hint, Breadcrumb};
 
 /// Render the focus statistics view
 #[allow(clippy::too_many_arguments)]
@@ -24,42 +27,40 @@ pub fn render_focus_stats(
     selected_index: usize,
     focus_events_supported: bool,
     focus_timer: Option<&FocusTimer>,
+    header_notifications: &HeaderNotificationManager,
+    attention_count: usize,
 ) {
-    let t = theme();
+    // Build header
+    let overall = calculate_overall_stats(sessions);
+    let breadcrumb = Breadcrumb::new().push("Focus Stats");
+    let suffix = format!(
+        "({} sessions, {} avg focus)",
+        overall.session_count,
+        overall.format_average()
+    );
 
-    // Layout: header, stats summary, session list, footer
-    let chunks = Layout::default()
+    let header = Header::new(breadcrumb)
+        .with_suffix(suffix)
+        .with_timer(focus_timer)
+        .with_notifications(Some(header_notifications))
+        .with_attention_count(attention_count);
+
+    // Create layout with header and footer
+    let areas = ScreenLayout::new(area).with_header(header).render(frame);
+
+    // Split content area into summary and session list
+    let content_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
             Constraint::Length(6), // Summary stats
             Constraint::Min(0),    // Session list
-            Constraint::Length(3), // Footer
         ])
-        .split(area);
-
-    // Header with breadcrumb
-    let overall = calculate_overall_stats(sessions);
-    let breadcrumb_text = {
-        let breadcrumb = Breadcrumb::new().push("Focus Stats");
-        let status = format!(
-            "({} sessions, {} avg focus)",
-            overall.session_count,
-            overall.format_average()
-        );
-        breadcrumb.display_with_suffix(&status)
-    };
-    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
-
-    let header = Paragraph::new(header_text)
-        .style(t.header_style())
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[0]);
+        .split(areas.content);
 
     // Summary statistics
     render_summary_section(
         frame,
-        chunks[1],
+        content_chunks[0],
         &overall,
         sessions,
         project_store,
@@ -67,7 +68,13 @@ pub fn render_focus_stats(
     );
 
     // Session list
-    render_session_list(frame, chunks[2], sessions, project_store, selected_index);
+    render_session_list(
+        frame,
+        content_chunks[1],
+        sessions,
+        project_store,
+        selected_index,
+    );
 
     // Footer
     let timer_hint = format_focus_timer_hint(focus_timer.map(|t| t.is_running()).unwrap_or(false));
@@ -78,7 +85,7 @@ pub fn render_focus_stats(
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[3]);
+    frame.render_widget(footer, areas.footer());
 }
 
 /// Render the summary statistics section
