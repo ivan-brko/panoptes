@@ -669,12 +669,16 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
     let t = theme();
     let _ = config; // May be used later for worktree path preview
 
+    // Determine if we need to show a validation error
+    let has_validation_error = state.worktree_branch_validation_error.is_some();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Search input
-            Constraint::Length(1), // Instruction text
-            Constraint::Min(0),    // Branch list
+            Constraint::Length(3),                                        // Search input
+            Constraint::Length(1),                                        // Instruction text
+            Constraint::Length(if has_validation_error { 1 } else { 0 }), // Validation error (conditional)
+            Constraint::Min(0),                                           // Branch list
         ])
         .split(area);
 
@@ -695,6 +699,13 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
     let instruction = "Select existing branch or type a new name to create one";
     let instruction_widget = Paragraph::new(instruction).style(Style::default().fg(t.text_muted));
     frame.render_widget(instruction_widget, chunks[1]);
+
+    // Validation error (if any)
+    if let Some(error) = &state.worktree_branch_validation_error {
+        let error_text = format!("⚠ {}", error);
+        let error_widget = Paragraph::new(error_text).style(Style::default().fg(Color::Red));
+        frame.render_widget(error_widget, chunks[2]);
+    }
 
     // Branch list with "Create new" option
     let filtered_count = state.worktree_filtered_branches.len();
@@ -769,7 +780,7 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
 
     let title = format!("Select Branch ({} found)", filtered_count);
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, chunks[2]);
+    frame.render_widget(list, chunks[3]);
 }
 
 /// Render the WorktreeSelectBase dialog (Step 2)

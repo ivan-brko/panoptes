@@ -343,6 +343,8 @@ pub struct AppState {
     pub worktree_creation_type: WorktreeCreationType,
     /// Project name for worktree path (cached during wizard)
     pub worktree_project_name: String,
+    /// Validation error for branch name input (displayed in UI)
+    pub worktree_branch_validation_error: Option<String>,
     /// Loading message to display during blocking operations
     pub loading_message: Option<String>,
     /// Focus state for homepage (projects vs sessions list)
@@ -622,6 +624,16 @@ impl App {
                         self.state.needs_render = true;
                     }
                 }
+            }
+
+            // Force render when focus timer is running to update countdown display
+            if self
+                .state
+                .focus_timer
+                .as_ref()
+                .is_some_and(|t| t.is_running())
+            {
+                self.state.needs_render = true;
             }
 
             // Process debounced resize: wait 50ms after last resize event before actually resizing
@@ -2894,7 +2906,16 @@ impl App {
                         self.state.input_mode = InputMode::WorktreeConfirm;
                     }
                 } else if has_create_option {
-                    // Selected "Create new branch" option
+                    // Selected "Create new branch" option - validate the branch name first
+                    let branch_name = &self.state.worktree_search_text;
+                    if let Err(error) = crate::git::validate_branch_name(branch_name) {
+                        // Show validation error and don't proceed
+                        self.state.worktree_branch_validation_error = Some(error);
+                        return Ok(());
+                    }
+
+                    // Clear any previous error and proceed
+                    self.state.worktree_branch_validation_error = None;
                     self.state.worktree_branch_name = self.state.worktree_search_text.clone();
                     self.state.worktree_creation_type = WorktreeCreationType::NewBranch;
 
@@ -2924,12 +2945,20 @@ impl App {
                 self.update_worktree_filtered_branches();
                 // Reset selection to first selectable
                 self.worktree_select_first_selectable();
+                // Clear any previous validation error when user modifies input
+                self.state.worktree_branch_validation_error = None;
             }
             KeyCode::Char(c) => {
-                self.state.worktree_search_text.push(c);
-                self.update_worktree_filtered_branches();
-                // Reset selection to first selectable
-                self.worktree_select_first_selectable();
+                // Filter out obviously invalid characters as they are typed
+                if !crate::git::INVALID_BRANCH_CHARS.contains(&c) && !c.is_ascii_control() {
+                    self.state.worktree_search_text.push(c);
+                    self.update_worktree_filtered_branches();
+                    // Reset selection to first selectable
+                    self.worktree_select_first_selectable();
+                    // Clear any previous validation error when user modifies input
+                    self.state.worktree_branch_validation_error = None;
+                }
+                // If character is invalid, silently reject it (no feedback needed for single chars)
             }
             _ => {}
         }
@@ -3178,6 +3207,7 @@ impl App {
         self.state.worktree_creation_type = WorktreeCreationType::ExistingLocal;
         self.state.worktree_project_name.clear();
         self.state.fetch_error = None;
+        self.state.worktree_branch_validation_error = None;
     }
 
     /// Update filtered branches based on search text

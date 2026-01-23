@@ -14,8 +14,9 @@ pub use theme::{theme, Theme};
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{
         disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
@@ -38,6 +39,8 @@ pub struct Tui {
     bracketed_paste_enabled: bool,
     /// Whether mouse capture is enabled
     mouse_capture_enabled: bool,
+    /// Whether focus change reporting is enabled
+    focus_change_enabled: bool,
 }
 
 impl Tui {
@@ -50,6 +53,7 @@ impl Tui {
             keyboard_enhancement_enabled: false,
             bracketed_paste_enabled: false,
             mouse_capture_enabled: false,
+            focus_change_enabled: false,
         })
     }
 
@@ -77,6 +81,11 @@ impl Tui {
         // Enable mouse capture for scroll wheel support
         if stdout().execute(EnableMouseCapture).is_ok() {
             self.mouse_capture_enabled = true;
+        }
+
+        // Enable focus change reporting so we can track window focus
+        if stdout().execute(EnableFocusChange).is_ok() {
+            self.focus_change_enabled = true;
         }
 
         self.terminal.hide_cursor()?;
@@ -108,6 +117,12 @@ impl Tui {
         if self.mouse_capture_enabled {
             let _ = stdout().execute(DisableMouseCapture);
             self.mouse_capture_enabled = false;
+        }
+
+        // Disable focus change reporting
+        if self.focus_change_enabled {
+            let _ = stdout().execute(DisableFocusChange);
+            self.focus_change_enabled = false;
         }
 
         // Now restore the terminal
@@ -169,6 +184,11 @@ impl Drop for Tui {
         // Disable mouse capture
         if self.mouse_capture_enabled {
             let _ = stdout().execute(DisableMouseCapture);
+        }
+
+        // Disable focus change reporting
+        if self.focus_change_enabled {
+            let _ = stdout().execute(DisableFocusChange);
         }
 
         // Now restore the terminal
