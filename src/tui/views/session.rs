@@ -173,7 +173,7 @@ fn build_footer_text(
                 "Esc: deactivate | PgUp/PgDn: scroll | Ctrl+End: live view | Deactivate to copy text"
                     .to_string()
             } else {
-                "Esc: deactivate | \u{2325}Esc: send Esc | PgUp: scroll history | Deactivate to copy text"
+                "Esc: deactivate | \u{21E7}Esc: send Esc | PgUp: scroll history | Deactivate to copy text"
                     .to_string()
             }
         }
