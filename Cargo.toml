@@ -3,7 +3,7 @@ members = ["."]
 resolver = "2"
 
 [package]
-name = "panoptes"
+name = "panoptes-cc"
 version = "0.1.0"
 edition = "2021"
 description = "Terminal-based dashboard for managing multiple Claude Code sessions"
