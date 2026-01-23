@@ -51,10 +51,50 @@ impl FocusStore {
 
     /// Save all sessions to disk
     pub fn save(&self, sessions: &[FocusSession]) -> Result<()> {
+        use crate::config::{categorize_io_error, DiskErrorKind};
+
         let content =
             serde_json::to_string_pretty(sessions).context("Failed to serialize focus sessions")?;
 
-        std::fs::write(&self.store_path, content).context("Failed to write focus sessions file")?;
+        // Ensure parent directory exists
+        if let Some(parent) = self.store_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                let kind = categorize_io_error(&e);
+                match kind {
+                    DiskErrorKind::PermissionDenied => {
+                        anyhow::bail!(
+                            "Permission denied creating {:?}. Check file permissions.",
+                            parent
+                        );
+                    }
+                    DiskErrorKind::DiskFull => {
+                        anyhow::bail!("Disk full - cannot save focus sessions");
+                    }
+                    _ => {
+                        return Err(e).context("Failed to create directory for focus sessions");
+                    }
+                }
+            }
+        }
+
+        if let Err(e) = std::fs::write(&self.store_path, &content) {
+            let kind = categorize_io_error(&e);
+            match kind {
+                DiskErrorKind::DiskFull => {
+                    anyhow::bail!(
+                        "Disk full - free space needed to save focus sessions. Session data may be lost."
+                    );
+                }
+                DiskErrorKind::PermissionDenied => {
+                    anyhow::bail!(
+                        "Permission denied writing focus sessions. Check file permissions."
+                    );
+                }
+                _ => {
+                    return Err(e).context("Failed to write focus sessions file");
+                }
+            }
+        }
 
         Ok(())
     }

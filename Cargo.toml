@@ -8,7 +8,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Terminal-based dashboard for managing multiple Claude Code sessions"
 license = "MIT"
-readme = "docs/PRODUCT.md"
+readme = "README.md"
+repository = "https://github.com/ivan-brko/panoptes"
+homepage = "https://github.com/ivan-brko/panoptes"
+keywords = ["terminal", "tui", "claude", "ai", "productivity"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.70"
 
 [lib]
 name = "panoptes"

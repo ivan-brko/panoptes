@@ -2,24 +2,34 @@
 
 A terminal dashboard for managing multiple Claude Code sessions simultaneously.
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+
 Named after the many-eyed giant of Greek mythology, Panoptes gives developers a bird's-eye view of all their AI coding assistant sessions across different projects.
 
 ## Features
 
-- **Multi-Session Management** - Run as many Claude Code sessions as you need, each independent with its own conversation history
+- **Multi-Session Management** - Run multiple Claude Code sessions in parallel, each with its own conversation and context
 - **Project & Branch Organization** - Sessions organized by git repository and branch, with git worktree support for branch isolation
-- **Real-Time State Tracking** - See what each session is doing at any moment (Thinking, Executing, Waiting, Idle)
-- **Attention System** - Terminal bell notifications when sessions need your input, with visual badges showing attention state
+- **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Idle
+- **Attention System** - Get notified when sessions need your input, with visual badges and terminal bell alerts
 - **Activity Timeline** - View all sessions sorted by recent activity across all projects
+- **Focus Timer** - Built-in Pomodoro-style focus timer with per-project time tracking
 - **Keyboard-Driven Interface** - Fast navigation with vim-style keys and number shortcuts
 - **Session Naming** - Name sessions for easy identification ("frontend-auth", "api-refactor")
-- **Clean Exit** - Sessions are automatically cleaned up when you quit
 
-## Installation
+## Quick Start
+
+### Prerequisites
+
+- Rust 1.70 or later
+- [Claude Code CLI](https://claude.ai/code) installed and configured
+
+### Build & Run
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/panoptes.git
+git clone https://github.com/ivan-brko/panoptes.git
 cd panoptes
 
 # Build release binary
@@ -29,194 +39,103 @@ cargo build --release
 ./target/release/panoptes
 ```
 
-## Quick Start
+### First Steps
 
-1. Launch Panoptes: `cargo run` or `./target/release/panoptes`
-2. Press `a` to add your first project (enter the path to a git repository)
-3. Navigate to a project with `Enter`, then to a branch with `Enter`
-4. Press `n` to create a new session on that branch
-5. Enter a name for the session and press Enter
-6. You're now in Session mode - type to interact with Claude Code
-7. Press `Esc` to exit Session mode, `Esc` again to go back through the hierarchy
-8. Press `q` to quit (sessions are cleaned up automatically)
+1. Press `a` to add your first project (enter the path to a git repository)
+2. Navigate to a project with `Enter`, then to a branch with `Enter`
+3. Press `n` to create a new session
+4. Enter a name for the session and press `Enter`
+5. You're now in Session mode - type to interact with Claude Code
+6. Press `Shift+Escape` to exit Session mode
+7. Press `Esc` to navigate back through the hierarchy
 
-## Views
+## Documentation
 
-Panoptes has a hierarchical navigation model:
-
-1. **Projects Overview** - Grid of all your projects with session counts
-2. **Project Detail** - Branches within a selected project
-3. **Branch Detail** - Sessions for a specific branch
-4. **Session View** - Fullscreen view of a single Claude Code session
-5. **Activity Timeline** - All sessions sorted by recent activity (press `t`)
-6. **Log Viewer** - Application logs for debugging (press `l`)
-
-Navigate forward with `Enter`, backward with `Esc`.
+- **[Installation Guide](docs/INSTALLATION.md)** - Detailed setup instructions
+- **[Keyboard Reference](docs/KEYBOARD_REFERENCE.md)** - Complete keyboard shortcut reference
+- **[Configuration Guide](docs/CONFIG_GUIDE.md)** - All configuration options explained
+- **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common issues and solutions
+- **[Product Overview](docs/PRODUCT.md)** - Detailed feature descriptions
+- **[Technical Architecture](docs/TECHNICAL.md)** - How Panoptes works under the hood
 
 ## Keyboard Shortcuts
 
-### Projects Overview
+### Essential Navigation
 
 | Key | Action |
 |-----|--------|
-| `a` | Add a new project |
-| `n` | Create session (in selected project's default branch) |
-| `d` | Delete selected project (prompts for confirmation) |
-| `r` | Rename selected project |
-| `t` | Open activity timeline |
-| `l` | Open log viewer |
+| `Enter` | Open selected item / Enter session mode |
+| `Esc` | Go back / Exit session mode |
+| `Shift+Esc` | Quick exit from session mode |
 | `Space` | Jump to next session needing attention |
-| `j` / `Down` | Move selection down |
-| `k` / `Up` | Move selection up |
-| `Enter` | Open selected project |
-| `1-9` | Select project by number |
-| `q` | Quit |
+| `Tab` | Switch to next session (in session view) |
+| `q` | Quit (with confirmation) |
 
-### Project Detail View
+### Project Management
 
 | Key | Action |
 |-----|--------|
-| `w` | Create new worktree (opens branch selector) |
-| `j` / `Down` | Move selection down |
-| `k` / `Up` | Move selection up |
-| `Enter` | Open selected branch |
-| `1-9` | Select branch by number |
-| `Esc` | Return to projects overview |
-| `q` | Quit |
+| `a` | Add new project |
+| `n` | New session / New worktree |
+| `d` | Delete selected item |
+| `r` | Rename project |
+| `R` | Refresh branches |
 
-### Branch Detail View
+### Views
 
 | Key | Action |
 |-----|--------|
-| `n` | Create new session on this branch |
-| `d` | Delete selected session (prompts for confirmation) |
-| `j` / `Down` | Move selection down |
-| `k` / `Up` | Move selection up |
-| `Enter` | Open selected session |
-| `Esc` | Return to project detail |
-| `q` | Return to project detail |
+| `t` | Start focus timer / Open activity timeline |
+| `T` | Open focus statistics |
+| `l` | Open log viewer |
 
-### Session View (Normal Mode)
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Enter Session mode (interact with PTY) |
-| `Esc` | Return to previous view |
-| `Tab` | Switch to next session |
-| `PgUp` / `PgDn` | Scroll through session history |
-| `Ctrl+End` | Jump to bottom of output |
-| `q` | Return to previous view |
-
-### Session View (Session Mode)
-
-| Key | Action |
-|-----|--------|
-| `Esc` | Exit to Normal mode |
-| All other keys | Sent directly to Claude Code |
-
-### Activity Timeline
-
-| Key | Action |
-|-----|--------|
-| `j` / `Down` | Move selection down |
-| `k` / `Up` | Move selection up |
-| `Enter` | Open selected session |
-| `Esc` | Return to projects overview |
-| `q` | Return to projects overview |
-
-### Worktree Creation (Branch Selector)
-
-| Key | Action |
-|-----|--------|
-| Type | Filter branches / enter new branch name |
-| `j` / `Down` | Move selection down |
-| `k` / `Up` | Move selection up |
-| `Enter` | Create worktree (new or existing branch) |
-| `Esc` | Cancel |
-
-### Session Deletion Confirmation
-
-| Key | Action |
-|-----|--------|
-| `y` | Confirm deletion |
-| `n` / `Esc` | Cancel deletion |
-
-### Log Viewer
-
-| Key | Action |
-|-----|--------|
-| `j` / `Down` | Scroll down |
-| `k` / `Up` | Scroll up |
-| `g` | Jump to top |
-| `G` | Jump to bottom (auto-scroll) |
-| `Esc` / `q` | Return to projects overview |
-
-## Session States
-
-- **Starting** - Session is initializing
-- **Thinking** - Claude is processing your request
-- **Executing** - Claude is running a tool (editing files, running commands)
-- **Waiting** - Claude is waiting for your input
-- **Idle** - No recent activity
-- **Exited** - Session has ended
-
-## Attention System
-
-Panoptes helps you know when sessions need your attention:
-
-- **Terminal Bell** - When a session transitions to "Waiting" state (needs your input), a terminal bell sounds (unless you're viewing that session)
-- **Attention Badges** - Sessions display colored indicators:
-  - `●` (green) - Session just started needing attention
-  - `●` (yellow) - Session has been waiting for a while (idle threshold exceeded)
-- **Needs Attention Section** - The projects overview shows a dedicated section for sessions requiring attention
-- **Auto-Acknowledge** - Opening a session automatically acknowledges its attention state
-
-Configure the idle threshold in your config file (default: 300 seconds / 5 minutes).
+See [Keyboard Reference](docs/KEYBOARD_REFERENCE.md) for the complete list.
 
 ## Configuration
 
-Configuration is stored in `~/.panoptes/config.toml`. Settings:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `hook_port` | 9999 | Port for the HTTP hook server |
-| `max_output_lines` | 10,000 | Lines kept in output buffer per session |
-| `idle_threshold_secs` | 300 | Seconds before waiting session shows yellow badge |
-
-Example config file:
+Configuration is stored in `~/.panoptes/config.toml`:
 
 ```toml
-hook_port = 9999
-max_output_lines = 10000
-idle_threshold_secs = 300
+hook_port = 9999                # HTTP server port for Claude Code hooks
+idle_threshold_secs = 300       # Seconds before session shows attention badge
+notification_method = "bell"    # "bell", "title", or "none"
+focus_timer_minutes = 25        # Default focus timer duration
 ```
 
-## File Locations
+See [Configuration Guide](docs/CONFIG_GUIDE.md) for all options.
+
+## Session States
+
+| State | Description |
+|-------|-------------|
+| **Starting** | Session is initializing |
+| **Thinking** | Claude is processing your request |
+| **Executing** | Claude is running a tool (editing files, running commands) |
+| **Waiting** | Claude is waiting for your input |
+| **Idle** | No recent activity |
+| **Exited** | Session has ended |
+
+## Data Locations
 
 | Path | Purpose |
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration |
-| `~/.panoptes/projects.json` | Project and branch persistence |
-| `~/.panoptes/hooks/` | Hook scripts for Claude Code |
-| `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
+| `~/.panoptes/projects.json` | Projects and branches |
+| `~/.panoptes/focus_sessions.json` | Focus timer history |
+| `~/.panoptes/worktrees/` | Git worktrees |
+| `~/.panoptes/hooks/` | Hook scripts |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
-
-## Documentation
-
-- [Product Overview](docs/PRODUCT.md) - Detailed feature descriptions
-- [Technical Stack](docs/TECHNICAL.md) - Architecture and dependencies
-- [Implementation Phases](docs/PHASES.md) - Development roadmap
 
 ## Development
 
 ```bash
 cargo build              # Build debug
-cargo build --release    # Build release
-cargo test               # Run all tests (134 tests)
+cargo build --release    # Build release (with LTO)
+cargo test               # Run all tests
 cargo clippy             # Lint
 cargo fmt                # Format code
 ```
 
 ## License
 
-MIT
+MIT - see [LICENSE](LICENSE) for details.
