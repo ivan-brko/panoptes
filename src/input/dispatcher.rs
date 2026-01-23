@@ -28,9 +28,9 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.state.input_mode {
         InputMode::Normal => app.handle_normal_mode_key(key),
         InputMode::Session => super::session_mode::handle_session_mode_key(app, key),
-        InputMode::CreatingSession => app.handle_creating_session_key(key),
-        InputMode::AddingProject => app.handle_adding_project_key(key),
-        InputMode::AddingProjectName => app.handle_adding_project_name_key(key),
+        InputMode::CreatingSession => super::text_input::handle_creating_session_key(app, key),
+        InputMode::AddingProject => super::text_input::handle_adding_project_key(app, key),
+        InputMode::AddingProjectName => super::text_input::handle_adding_project_name_key(app, key),
         InputMode::FetchingBranches => {
             // While fetching, only allow Esc to cancel
             if key.code == KeyCode::Esc {
@@ -58,7 +58,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::ConfirmingBranchDelete => app.handle_confirming_branch_delete_key(key),
         InputMode::ConfirmingProjectDelete => app.handle_confirming_project_delete_key(key),
         InputMode::ConfirmingQuit => app.handle_confirming_quit_key(key),
-        InputMode::RenamingProject => app.handle_renaming_project_key(key),
+        InputMode::RenamingProject => super::text_input::handle_renaming_project_key(app, key),
         InputMode::WorktreeSelectBranch => {
             if let View::ProjectDetail(project_id) = app.state.view {
                 app.handle_worktree_select_branch_key(key, project_id)
