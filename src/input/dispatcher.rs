@@ -41,7 +41,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::CreatingWorktree => {
             // Need to get project_id from current view
             if let View::ProjectDetail(project_id) = app.state.view {
-                app.handle_creating_worktree_key(key, project_id)
+                crate::wizards::worktree::handle_creating_worktree_key(app, key, project_id)
             } else {
                 Ok(())
             }
@@ -49,7 +49,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::SelectingDefaultBase => {
             // Need to get project_id from current view
             if let View::ProjectDetail(project_id) = app.state.view {
-                app.handle_selecting_default_base_key(key, project_id)
+                crate::wizards::worktree::handle_selecting_default_base_key(app, key, project_id)
             } else {
                 Ok(())
             }
@@ -61,21 +61,21 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::RenamingProject => super::text_input::handle_renaming_project_key(app, key),
         InputMode::WorktreeSelectBranch => {
             if let View::ProjectDetail(project_id) = app.state.view {
-                app.handle_worktree_select_branch_key(key, project_id)
+                crate::wizards::worktree::handle_worktree_select_branch_key(app, key, project_id)
             } else {
                 Ok(())
             }
         }
         InputMode::WorktreeSelectBase => {
             if let View::ProjectDetail(project_id) = app.state.view {
-                app.handle_worktree_select_base_key(key, project_id)
+                crate::wizards::worktree::handle_worktree_select_base_key(app, key, project_id)
             } else {
                 Ok(())
             }
         }
         InputMode::WorktreeConfirm => {
             if let View::ProjectDetail(project_id) = app.state.view {
-                app.handle_worktree_confirm_key(key, project_id)
+                crate::wizards::worktree::handle_worktree_confirm_key(app, key, project_id)
             } else {
                 Ok(())
             }
