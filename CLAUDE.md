@@ -164,6 +164,7 @@ PTY Output → Session buffer → TUI render
 - State enums with display/color helpers for TUI rendering
 - Always run `cargo fmt` before committing
 - Types are extracted into submodules but re-exported from parent modules for ergonomic imports
+- When adding/changing/removing keyboard shortcuts, always update the corresponding footer help text in `src/tui/views/`. The implementation (in `src/input/`) and documentation (in `src/tui/views/`) must stay in sync.
 
 ## Documentation
 
