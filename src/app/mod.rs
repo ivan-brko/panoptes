@@ -986,103 +986,6 @@ impl App {
         Ok(())
     }
 
-    /// Handle key when starting a focus timer (entering duration)
-    pub(crate) fn handle_starting_focus_timer_key(&mut self, key: KeyEvent) -> Result<()> {
-        // Only process key press events (not release/repeat)
-        if key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                // Cancel timer start
-                self.state.input_mode = InputMode::Normal;
-                self.state.focus_timer_input.clear();
-            }
-            KeyCode::Enter => {
-                // Start the timer with entered duration (or default)
-                let minutes = if self.state.focus_timer_input.is_empty() {
-                    self.config.focus_timer_minutes
-                } else {
-                    self.state
-                        .focus_timer_input
-                        .parse()
-                        .unwrap_or(self.config.focus_timer_minutes)
-                };
-
-                self.start_focus_timer(minutes);
-                self.state.input_mode = InputMode::Normal;
-                self.state.focus_timer_input.clear();
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                // Only allow digits
-                if self.state.focus_timer_input.len() < 3 {
-                    self.state.focus_timer_input.push(c);
-                }
-            }
-            KeyCode::Backspace => {
-                self.state.focus_timer_input.pop();
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Handle key when confirming focus session deletion
-    pub(crate) fn handle_confirming_focus_session_delete_key(&mut self, key: KeyEvent) -> Result<()> {
-        if key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                // Confirm deletion
-                if let Some(session_id) = self.state.pending_delete_focus_session.take() {
-                    // Delete from persistent storage
-                    let store = FocusStore::new();
-                    if let Err(e) = store.delete_session(session_id) {
-                        tracing::error!("Failed to delete focus session: {}", e);
-                    }
-
-                    // Reload sessions from disk to sync state
-                    self.load_focus_sessions();
-
-                    // Adjust selection if needed
-                    let session_count = self.state.focus_sessions.len();
-                    if self.state.focus_stats_selected_index >= session_count && session_count > 0 {
-                        self.state.focus_stats_selected_index = session_count - 1;
-                    }
-                }
-                self.state.input_mode = InputMode::Normal;
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                // Cancel deletion
-                self.state.pending_delete_focus_session = None;
-                self.state.input_mode = InputMode::Normal;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Handle key when viewing focus session details
-    pub(crate) fn handle_viewing_focus_session_detail_key(&mut self, key: KeyEvent) -> Result<()> {
-        if key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-        // Any key closes the detail dialog
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
-                self.state.viewing_focus_session = None;
-                self.state.input_mode = InputMode::Normal;
-            }
-            _ => {
-                // Close on any other key as well
-                self.state.viewing_focus_session = None;
-                self.state.input_mode = InputMode::Normal;
-            }
-        }
-        Ok(())
-    }
 
     /// Handle common focus timer shortcuts. Returns true if the key was handled.
     fn handle_focus_timer_shortcut(&mut self, key: KeyEvent) -> bool {
@@ -1117,7 +1020,7 @@ impl App {
     }
 
     /// Start a focus timer with the given duration
-    fn start_focus_timer(&mut self, minutes: u64) {
+    pub(crate) fn start_focus_timer(&mut self, minutes: u64) {
         let mut timer = FocusTimer::new(minutes);
 
         // Set context based on current view
@@ -1207,7 +1110,7 @@ impl App {
     }
 
     /// Load focus sessions from disk into state
-    fn load_focus_sessions(&mut self) {
+    pub(crate) fn load_focus_sessions(&mut self) {
         let store = FocusStore::new();
         match store.load() {
             Ok(sessions) => {
@@ -1669,244 +1572,6 @@ impl App {
                     &self.state.new_branch_name,
                 );
                 self.select_default_base_branch();
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Handle key when confirming session deletion
-    pub(crate) fn handle_confirming_delete_key(&mut self, key: KeyEvent) -> Result<()> {
-        if key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                // Confirm deletion
-                if let Some(session_id) = self.state.pending_delete_session.take() {
-                    // Get branch_id before destroying (for selection adjustment)
-                    let branch_id = self.state.view.branch_id();
-
-                    if let Err(e) = self.sessions.destroy_session(session_id) {
-                        tracing::error!("Failed to destroy session: {}", e);
-                    }
-
-                    // Adjust selection if needed
-                    if let Some(branch_id) = branch_id {
-                        let new_count = self.sessions.sessions_for_branch(branch_id).len();
-                        if self.state.selected_session_index >= new_count && new_count > 0 {
-                            self.state.selected_session_index = new_count - 1;
-                        }
-                    }
-                }
-                self.state.input_mode = InputMode::Normal;
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                // Cancel deletion
-                self.state.pending_delete_session = None;
-                self.state.input_mode = InputMode::Normal;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Handle key when confirming branch/worktree deletion
-    pub(crate) fn handle_confirming_branch_delete_key(&mut self, key: KeyEvent) -> Result<()> {
-        if key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-        match key.code {
-            KeyCode::Char('w') => {
-                // Toggle worktree deletion option
-                self.state.delete_worktree_on_disk = !self.state.delete_worktree_on_disk;
-            }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                // Confirm deletion
-                if let Some(branch_id) = self.state.pending_delete_branch.take() {
-                    // Get branch info before removing
-                    let branch_info = self.project_store.get_branch(branch_id).cloned();
-
-                    // Destroy all sessions for this branch
-                    let sessions_to_destroy: Vec<_> = self
-                        .sessions
-                        .sessions_for_branch(branch_id)
-                        .iter()
-                        .map(|s| s.info.id)
-                        .collect();
-
-                    for session_id in sessions_to_destroy {
-                        if let Err(e) = self.sessions.destroy_session(session_id) {
-                            tracing::error!("Failed to destroy session: {}", e);
-                        }
-                    }
-
-                    // If user opted to delete worktree on disk
-                    if self.state.delete_worktree_on_disk {
-                        if let Some(branch) = &branch_info {
-                            if branch.is_worktree {
-                                // Get the project to access the repo
-                                if let Some(project_id) = self.state.view.project_id() {
-                                    // Clone the repo_path to avoid borrow conflicts
-                                    let repo_path = self
-                                        .project_store
-                                        .get_project(project_id)
-                                        .map(|p| p.repo_path.clone());
-
-                                    if let Some(repo_path) = repo_path {
-                                        // Show loading indicator
-                                        let _ = self.show_loading(&format!(
-                                            "Removing worktree '{}'...",
-                                            branch.name
-                                        ));
-
-                                        match crate::git::GitOps::open(&repo_path) {
-                                            Ok(git) => {
-                                                if let Err(e) =
-                                                    crate::git::worktree::remove_worktree(
-                                                        git.repository(),
-                                                        &branch.name,
-                                                        true,
-                                                    )
-                                                {
-                                                    tracing::error!(
-                                                        "Failed to remove worktree: {}",
-                                                        e
-                                                    );
-                                                    self.state.error_message = Some(format!(
-                                                        "Failed to remove worktree: {}",
-                                                        e
-                                                    ));
-                                                } else {
-                                                    tracing::info!(
-                                                        "Removed worktree for branch: {}",
-                                                        branch.name
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::error!("Failed to open git repo: {}", e);
-                                                self.state.error_message =
-                                                    Some(format!("Failed to open git repo: {}", e));
-                                            }
-                                        }
-
-                                        self.clear_loading();
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Remove branch from the store
-                    self.project_store.remove_branch(branch_id);
-
-                    // Save to disk
-                    if let Err(e) = self.project_store.save() {
-                        tracing::error!("Failed to save project store: {}", e);
-                        self.state.error_message =
-                            Some(format!("Failed to save project store: {}", e));
-                    }
-
-                    tracing::info!("Deleted branch: {}", branch_id);
-
-                    // Adjust selected index if needed
-                    if let Some(project_id) = self.state.view.project_id() {
-                        let new_count = self.project_store.branches_for_project(project_id).len();
-                        if self.state.selected_branch_index >= new_count && new_count > 0 {
-                            self.state.selected_branch_index = new_count - 1;
-                        } else if new_count == 0 {
-                            self.state.selected_branch_index = 0;
-                        }
-                    }
-                }
-                self.state.delete_worktree_on_disk = false;
-                self.state.input_mode = InputMode::Normal;
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                // Cancel deletion
-                self.state.pending_delete_branch = None;
-                self.state.delete_worktree_on_disk = false;
-                self.state.input_mode = InputMode::Normal;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Handle key when confirming project deletion
-    pub(crate) fn handle_confirming_project_delete_key(&mut self, key: KeyEvent) -> Result<()> {
-        if key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                // Confirm deletion
-                if let Some(project_id) = self.state.pending_delete_project.take() {
-                    // Destroy all sessions for this project
-                    let sessions_to_destroy: Vec<_> = self
-                        .sessions
-                        .sessions_for_project(project_id)
-                        .iter()
-                        .map(|s| s.info.id)
-                        .collect();
-
-                    for session_id in sessions_to_destroy {
-                        if let Err(e) = self.sessions.destroy_session(session_id) {
-                            tracing::error!("Failed to destroy session: {}", e);
-                        }
-                    }
-
-                    // Remove project and its branches from the store
-                    self.project_store.remove_project(project_id);
-
-                    // Save to disk
-                    if let Err(e) = self.project_store.save() {
-                        tracing::error!("Failed to save project store: {}", e);
-                        self.state.error_message =
-                            Some(format!("Failed to save project store: {}", e));
-                    }
-
-                    tracing::info!("Deleted project: {}", project_id);
-
-                    // Navigate back to projects overview
-                    self.state.view = View::ProjectsOverview;
-
-                    // Adjust selected index if needed
-                    let new_project_count = self.project_store.project_count();
-                    if self.state.selected_project_index >= new_project_count
-                        && new_project_count > 0
-                    {
-                        self.state.selected_project_index = new_project_count - 1;
-                    } else if new_project_count == 0 {
-                        self.state.selected_project_index = 0;
-                    }
-                }
-                self.state.input_mode = InputMode::Normal;
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                // Cancel deletion
-                self.state.pending_delete_project = None;
-                self.state.input_mode = InputMode::Normal;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Handle key while confirming quit
-    pub(crate) fn handle_confirming_quit_key(&mut self, key: KeyEvent) -> Result<()> {
-        if key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                // Confirm quit
-                self.state.should_quit = true;
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                // Cancel quit
-                self.state.input_mode = InputMode::Normal;
             }
             _ => {}
         }
@@ -2588,14 +2253,14 @@ impl App {
     ///
     /// This is used before blocking operations to provide visual feedback
     /// to the user that something is happening.
-    fn show_loading(&mut self, message: &str) -> Result<()> {
+    pub(crate) fn show_loading(&mut self, message: &str) -> Result<()> {
         self.state.loading_message = Some(message.to_string());
         self.render()?;
         Ok(())
     }
 
     /// Clear the loading indicator
-    fn clear_loading(&mut self) {
+    pub(crate) fn clear_loading(&mut self) {
         self.state.loading_message = None;
     }
 
