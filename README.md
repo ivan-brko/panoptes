@@ -28,20 +28,25 @@ Named after the hundred-eyed giant of Greek mythology.
 
 ### Prerequisites
 
-- Rust 1.70 or later
 - [Claude Code CLI](https://claude.ai/code) installed and configured
 
-### Build & Run
+### Install
 
 ```bash
-# Clone the repository
+cargo install panoptes-cc
+```
+
+Then run:
+```bash
+panoptes
+```
+
+### Build from Source
+
+```bash
 git clone https://github.com/ivan-brko/panoptes.git
 cd panoptes
-
-# Build release binary
 cargo build --release
-
-# Run
 ./target/release/panoptes
 ```
 
