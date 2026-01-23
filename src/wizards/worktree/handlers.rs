@@ -5,7 +5,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, InputMode};
+use crate::app::{App, InputMode, MAX_BRANCH_NAME_LEN};
 use crate::project::ProjectId;
 use crate::wizards::worktree::{
     filter_branch_refs, BranchRef, BranchRefType, WorktreeCreationType,
@@ -50,12 +50,14 @@ pub fn handle_worktree_select_branch_key(
             let filtered_count = app.state.worktree_wizard.filtered_branches.len();
             let has_create_option = !app.state.worktree_wizard.search_text.is_empty();
 
-            if app.state.worktree_wizard.list_index < filtered_count {
-                // Selected an existing branch
-                let selected = app.state.worktree_wizard.filtered_branches
-                    [app.state.worktree_wizard.list_index]
-                    .clone();
-
+            // Use checked access for safety
+            if let Some(selected) = app
+                .state
+                .worktree_wizard
+                .filtered_branches
+                .get(app.state.worktree_wizard.list_index)
+                .cloned()
+            {
                 // Block selection of already-tracked branches
                 if selected.is_already_tracked {
                     return Ok(());
@@ -81,7 +83,7 @@ pub fn handle_worktree_select_branch_key(
                     app.state.worktree_wizard.creation_type = WorktreeCreationType::RemoteTracking;
                     app.state.input_mode = InputMode::WorktreeConfirm;
                 }
-            } else if has_create_option {
+            } else if has_create_option && app.state.worktree_wizard.list_index >= filtered_count {
                 // Selected "Create new branch" option - validate the branch name first
                 let branch_name = &app.state.worktree_wizard.search_text;
                 if let Err(error) = crate::git::validate_branch_name(branch_name) {
@@ -127,6 +129,10 @@ pub fn handle_worktree_select_branch_key(
             app.state.worktree_wizard.branch_validation_error = None;
         }
         KeyCode::Char(c) => {
+            // Enforce length limit for branch names
+            if app.state.worktree_wizard.search_text.len() >= MAX_BRANCH_NAME_LEN {
+                return Ok(());
+            }
             // Convert space to underscore for branch names
             let c = if c == ' ' { '_' } else { c };
             // Filter out obviously invalid characters as they are typed
@@ -187,26 +193,37 @@ pub fn handle_worktree_select_base_key(
         }
         KeyCode::Up => {
             if filtered_count > 0 {
-                app.state.worktree_wizard.base_list_index = app
+                // Clamp current index first to handle stale indices
+                let current = app
                     .state
                     .worktree_wizard
                     .base_list_index
-                    .checked_sub(1)
-                    .unwrap_or(filtered_count - 1);
+                    .min(filtered_count.saturating_sub(1));
+                app.state.worktree_wizard.base_list_index =
+                    current.checked_sub(1).unwrap_or(filtered_count - 1);
                 // Update selected base branch
                 if let Some(branch) = filtered.get(app.state.worktree_wizard.base_list_index) {
                     app.state.worktree_wizard.base_branch = Some(branch.clone());
                 }
+            } else {
+                app.state.worktree_wizard.base_list_index = 0;
             }
         }
         KeyCode::Down => {
             if filtered_count > 0 {
-                app.state.worktree_wizard.base_list_index =
-                    (app.state.worktree_wizard.base_list_index + 1) % filtered_count;
+                // Clamp current index first to handle stale indices
+                let current = app
+                    .state
+                    .worktree_wizard
+                    .base_list_index
+                    .min(filtered_count.saturating_sub(1));
+                app.state.worktree_wizard.base_list_index = (current + 1) % filtered_count;
                 // Update selected base branch
                 if let Some(branch) = filtered.get(app.state.worktree_wizard.base_list_index) {
                     app.state.worktree_wizard.base_branch = Some(branch.clone());
                 }
+            } else {
+                app.state.worktree_wizard.base_list_index = 0;
             }
         }
         KeyCode::Enter => {
@@ -218,11 +235,31 @@ pub fn handle_worktree_select_base_key(
         }
         KeyCode::Backspace => {
             app.state.worktree_wizard.base_search_text.pop();
+            // Reset index when search changes
             app.state.worktree_wizard.base_list_index = 0;
+            // Clamp to new filtered count
+            let new_filtered_count = if app.state.worktree_wizard.base_search_text.is_empty() {
+                app.state.worktree_wizard.all_branches.len()
+            } else {
+                let query = app.state.worktree_wizard.base_search_text.to_lowercase();
+                app.state
+                    .worktree_wizard
+                    .all_branches
+                    .iter()
+                    .filter(|b| b.name.to_lowercase().contains(&query))
+                    .count()
+            };
+            app.state
+                .worktree_wizard
+                .clamp_base_list_index(new_filtered_count);
         }
         KeyCode::Char(c) => {
-            app.state.worktree_wizard.base_search_text.push(c);
-            app.state.worktree_wizard.base_list_index = 0;
+            // Enforce length limit for base search (same as branch names)
+            if app.state.worktree_wizard.base_search_text.len() < MAX_BRANCH_NAME_LEN {
+                app.state.worktree_wizard.base_search_text.push(c);
+                // Reset index when search changes
+                app.state.worktree_wizard.base_list_index = 0;
+            }
         }
         _ => {}
     }
@@ -354,31 +391,40 @@ pub fn handle_creating_worktree_key(
             // Navigate up (wrapping)
             let count = app.state.filtered_branch_refs.len();
             if count > 0 {
-                app.state.base_branch_selector_index = app
+                // Clamp current index first to handle stale indices
+                let current = app
                     .state
                     .base_branch_selector_index
-                    .checked_sub(1)
-                    .unwrap_or(count - 1);
+                    .min(count.saturating_sub(1));
+                app.state.base_branch_selector_index = current.checked_sub(1).unwrap_or(count - 1);
                 // Update selected_base_branch when navigating
                 app.state.selected_base_branch = app
                     .state
                     .filtered_branch_refs
                     .get(app.state.base_branch_selector_index)
                     .cloned();
+            } else {
+                app.state.base_branch_selector_index = 0;
             }
         }
         KeyCode::Down => {
             // Navigate down (wrapping)
             let count = app.state.filtered_branch_refs.len();
             if count > 0 {
-                app.state.base_branch_selector_index =
-                    (app.state.base_branch_selector_index + 1) % count;
+                // Clamp current index first to handle stale indices
+                let current = app
+                    .state
+                    .base_branch_selector_index
+                    .min(count.saturating_sub(1));
+                app.state.base_branch_selector_index = (current + 1) % count;
                 // Update selected_base_branch when navigating
                 app.state.selected_base_branch = app
                     .state
                     .filtered_branch_refs
                     .get(app.state.base_branch_selector_index)
                     .cloned();
+            } else {
+                app.state.base_branch_selector_index = 0;
             }
         }
         KeyCode::Char('s') if key.modifiers.is_empty() => {
@@ -470,6 +516,10 @@ pub fn handle_creating_worktree_key(
             select_default_base_branch(app);
         }
         KeyCode::Char(c) => {
+            // Enforce length limit for branch names
+            if app.state.new_branch_name.len() >= MAX_BRANCH_NAME_LEN {
+                return Ok(());
+            }
             // Convert space to underscore for branch names
             let c = if c == ' ' { '_' } else { c };
             app.state.new_branch_name.push(c);
@@ -505,18 +555,27 @@ pub fn handle_selecting_default_base_key(
         KeyCode::Up => {
             let count = app.state.filtered_branch_refs.len();
             if count > 0 {
-                app.state.base_branch_selector_index = app
+                // Clamp current index first to handle stale indices
+                let current = app
                     .state
                     .base_branch_selector_index
-                    .checked_sub(1)
-                    .unwrap_or(count - 1);
+                    .min(count.saturating_sub(1));
+                app.state.base_branch_selector_index = current.checked_sub(1).unwrap_or(count - 1);
+            } else {
+                app.state.base_branch_selector_index = 0;
             }
         }
         KeyCode::Down => {
             let count = app.state.filtered_branch_refs.len();
             if count > 0 {
-                app.state.base_branch_selector_index =
-                    (app.state.base_branch_selector_index + 1) % count;
+                // Clamp current index first to handle stale indices
+                let current = app
+                    .state
+                    .base_branch_selector_index
+                    .min(count.saturating_sub(1));
+                app.state.base_branch_selector_index = (current + 1) % count;
+            } else {
+                app.state.base_branch_selector_index = 0;
             }
         }
         KeyCode::Enter => {
@@ -550,10 +609,15 @@ pub fn handle_selecting_default_base_key(
             select_default_base_branch(app);
         }
         KeyCode::Char(c) => {
-            app.state.new_branch_name.push(c);
-            app.state.filtered_branch_refs =
-                filter_branch_refs(&app.state.available_branch_refs, &app.state.new_branch_name);
-            select_default_base_branch(app);
+            // Enforce length limit for branch name filter
+            if app.state.new_branch_name.len() < MAX_BRANCH_NAME_LEN {
+                app.state.new_branch_name.push(c);
+                app.state.filtered_branch_refs = filter_branch_refs(
+                    &app.state.available_branch_refs,
+                    &app.state.new_branch_name,
+                );
+                select_default_base_branch(app);
+            }
         }
         _ => {}
     }
@@ -575,10 +639,16 @@ fn worktree_navigate_branches(app: &mut App, direction: i32) {
     };
 
     if total_options == 0 {
+        app.state.worktree_wizard.list_index = 0;
         return;
     }
 
-    let current = app.state.worktree_wizard.list_index;
+    // Clamp current index to valid range first
+    let current = app
+        .state
+        .worktree_wizard
+        .list_index
+        .min(total_options.saturating_sub(1));
     let mut next = current;
 
     for _ in 0..total_options {
@@ -592,10 +662,12 @@ fn worktree_navigate_branches(app: &mut App, direction: i32) {
             app.state.worktree_wizard.list_index = next;
             return;
         }
-        // Check if this branch is selectable (not already tracked)
-        if !app.state.worktree_wizard.filtered_branches[next].is_already_tracked {
-            app.state.worktree_wizard.list_index = next;
-            return;
+        // Check if this branch is selectable (not already tracked) - use checked access
+        if let Some(branch) = app.state.worktree_wizard.filtered_branches.get(next) {
+            if !branch.is_already_tracked {
+                app.state.worktree_wizard.list_index = next;
+                return;
+            }
         }
     }
     // If all branches are tracked, stay at current position
@@ -651,6 +723,8 @@ fn update_worktree_filtered_branches(app: &mut App) {
             .cloned()
             .collect();
     }
+    // Clamp index to valid range after filtering
+    app.state.worktree_wizard.clamp_list_index();
 }
 
 /// Select the default base branch in the filtered list (legacy flow)

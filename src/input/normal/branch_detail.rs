@@ -40,9 +40,9 @@ pub fn handle_branch_detail_key(
             app.state.select_prev(session_count);
         }
         KeyCode::Enter => {
-            let index = app.state.selected_session_index;
-            if index < session_count {
-                let session_id = branch_sessions[index].info.id;
+            // Use checked access to handle potential race conditions
+            if let Some(session) = branch_sessions.get(app.state.selected_session_index) {
+                let session_id = session.info.id;
                 app.state.navigate_to_session(session_id);
                 app.tui.enable_mouse_capture();
                 app.sessions.acknowledge_attention(session_id);
@@ -63,14 +63,11 @@ pub fn handle_branch_detail_key(
             }
         }
         KeyCode::Char('d') => {
-            // Prompt for confirmation before deleting session
-            if session_count > 0 {
-                let index = app.state.selected_session_index;
-                if index < session_count {
-                    let session_id = branch_sessions[index].info.id;
-                    app.state.pending_delete_session = Some(session_id);
-                    app.state.input_mode = InputMode::ConfirmingSessionDelete;
-                }
+            // Prompt for confirmation before deleting session (use checked access)
+            if let Some(session) = branch_sessions.get(app.state.selected_session_index) {
+                let session_id = session.info.id;
+                app.state.pending_delete_session = Some(session_id);
+                app.state.input_mode = InputMode::ConfirmingSessionDelete;
             }
         }
         _ => {}

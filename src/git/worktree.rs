@@ -39,7 +39,10 @@ pub fn create_worktree(
 ) -> Result<PathBuf> {
     // Check if worktree path already exists
     if worktree_path.exists() {
-        anyhow::bail!("Worktree path already exists: {:?}", worktree_path);
+        anyhow::bail!(
+            "Worktree path already exists: {}. Choose a different branch name or remove the existing directory.",
+            worktree_path.display()
+        );
     }
 
     // Ensure parent directory exists

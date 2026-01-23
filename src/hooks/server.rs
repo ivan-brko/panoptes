@@ -52,11 +52,26 @@ pub type HookEventSender = mpsc::Sender<HookEvent>;
 /// Receiver half of the hook event channel
 pub type HookEventReceiver = mpsc::Receiver<HookEvent>;
 
+/// Server status for health reporting
+#[derive(Debug, Clone)]
+pub enum ServerStatus {
+    /// Server is running normally
+    Running,
+    /// Server encountered an error and stopped
+    Error(String),
+    /// Server was shut down gracefully
+    Shutdown,
+}
+
+/// Receiver for server status updates
+pub type ServerStatusReceiver = mpsc::Receiver<ServerStatus>;
+
 /// Handle to control the running server
 pub struct ServerHandle {
     shutdown_tx: Option<oneshot::Sender<()>>,
     addr: SocketAddr,
     dropped_events: Arc<DroppedEventsCounter>,
+    status_rx: ServerStatusReceiver,
 }
 
 impl ServerHandle {
@@ -73,6 +88,23 @@ impl ServerHandle {
     /// Reset and get the number of dropped events
     pub fn take_dropped_events(&self) -> u64 {
         self.dropped_events.reset()
+    }
+
+    /// Check for server status updates (non-blocking)
+    ///
+    /// Returns `Some(status)` if the server has reported a status change,
+    /// or `None` if the server is still running normally.
+    pub fn check_status(&mut self) -> Option<ServerStatus> {
+        match self.status_rx.try_recv() {
+            Ok(status) => Some(status),
+            Err(mpsc::error::TryRecvError::Empty) => None,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                // Channel closed unexpectedly - server task is gone
+                Some(ServerStatus::Error(
+                    "Server task terminated unexpectedly".to_string(),
+                ))
+            }
+        }
     }
 
     /// Shutdown the server gracefully
@@ -123,27 +155,55 @@ pub async fn start(port: u16, sender: HookEventSender) -> Result<ServerHandle> {
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            // Check if it's an address-in-use error
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                return Err(anyhow::anyhow!(
+                    "Port {} is already in use. Another instance of Panoptes or another application \
+                     may be using this port. Check if Panoptes is already running, or configure a \
+                     different hook_port in ~/.panoptes/config.toml",
+                    port
+                ));
+            }
+            return Err(anyhow::anyhow!("Failed to bind to port {}: {}", port, e));
+        }
+    };
     let bound_addr = listener.local_addr()?;
 
     info!("Hook server listening on {}", bound_addr);
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    // Status channel for reporting server health (buffer 1 since we only need latest status)
+    let (status_tx, status_rx) = mpsc::channel::<ServerStatus>(1);
 
     tokio::spawn(async move {
-        axum::serve(listener, app)
+        let result = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 shutdown_rx.await.ok();
                 info!("Hook server shutting down");
             })
-            .await
-            .ok();
+            .await;
+
+        // Report status based on result
+        match result {
+            Ok(()) => {
+                debug!("Hook server exited normally");
+                let _ = status_tx.send(ServerStatus::Shutdown).await;
+            }
+            Err(e) => {
+                error!("Hook server crashed: {}", e);
+                let _ = status_tx.send(ServerStatus::Error(e.to_string())).await;
+            }
+        }
     });
 
     Ok(ServerHandle {
         shutdown_tx: Some(shutdown_tx),
         addr: bound_addr,
         dropped_events,
+        status_rx,
     })
 }
 
