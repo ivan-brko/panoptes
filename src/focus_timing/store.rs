@@ -152,6 +152,7 @@ mod tests {
             Duration::from_secs(30 * 60),
             None,
             None,
+            vec![],
         );
 
         store.save(&[session.clone()]).unwrap();
@@ -172,6 +173,7 @@ mod tests {
             Duration::from_secs(25 * 60),
             None,
             None,
+            vec![],
         );
         let session2 = FocusSession::from_timer_result(
             Duration::from_secs(15 * 60),
@@ -179,6 +181,7 @@ mod tests {
             Duration::from_secs(15 * 60),
             None,
             None,
+            vec![],
         );
 
         store.add_session(session1).unwrap();
@@ -201,6 +204,7 @@ mod tests {
             Duration::from_secs(25 * 60),
             None,
             None,
+            vec![],
         );
         store.add_session(session).unwrap();
 
