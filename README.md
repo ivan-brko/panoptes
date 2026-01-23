@@ -1,16 +1,22 @@
 # Panoptes
 
-A terminal dashboard for managing multiple Claude Code sessions simultaneously.
+**Press `Space` to jump to the next session that needs you.**
+
+![Panoptes Overview](panoptes_screenshot.png)
+
+Running multiple Claude Code sessions across different projects? Panoptes shows them all in one terminal — who's thinking, who's executing, who's waiting for input. Get notified when sessions need attention. Switch instantly with a keystroke.
+
+It's a minimal wrapper, not a new tool to learn. You still use Claude Code exactly as before — Panoptes just makes juggling multiple sessions painless.
+
+Named after the hundred-eyed giant of Greek mythology.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
-Named after the many-eyed giant of Greek mythology, Panoptes gives developers a bird's-eye view of all their AI coding assistant sessions across different projects.
-
 ## Features
 
 - **Multi-Session Management** - Run multiple Claude Code sessions in parallel, each with its own conversation and context
-- **Project & Branch Organization** - Sessions organized by git repository and branch, with git worktree support for branch isolation
+- **Project & Branch Organization** - Sessions organized by git repository and branch. Panoptes automatically creates isolated worktrees so each branch has its own working directory — no manual setup required
 - **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Idle
 - **Attention System** - Get notified when sessions need your input, with visual badges and terminal bell alerts
 - **Activity Timeline** - View all sessions sorted by recent activity across all projects
@@ -22,20 +28,25 @@ Named after the many-eyed giant of Greek mythology, Panoptes gives developers a 
 
 ### Prerequisites
 
-- Rust 1.70 or later
 - [Claude Code CLI](https://claude.ai/code) installed and configured
 
-### Build & Run
+### Install
 
 ```bash
-# Clone the repository
+cargo install panoptes-cc
+```
+
+Then run:
+```bash
+panoptes
+```
+
+### Build from Source
+
+```bash
 git clone https://github.com/ivan-brko/panoptes.git
 cd panoptes
-
-# Build release binary
 cargo build --release
-
-# Run
 ./target/release/panoptes
 ```
 
