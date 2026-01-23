@@ -626,6 +626,16 @@ impl App {
                 }
             }
 
+            // Force render when focus timer is running to update countdown display
+            if self
+                .state
+                .focus_timer
+                .as_ref()
+                .is_some_and(|t| t.is_running())
+            {
+                self.state.needs_render = true;
+            }
+
             // Process debounced resize: wait 50ms after last resize event before actually resizing
             // Resize ALL sessions to keep their PTYs in sync with terminal dimensions
             if self.state.pending_resize {
