@@ -13,6 +13,11 @@ const PASTE_START: &[u8] = b"\x1b[200~";
 /// Bracketed paste end sequence
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// Maximum time to retry writes before giving up
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Delay between retry attempts when buffer is full
+const WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// Handle to a PTY with spawned process
 pub struct PtyHandle {
     master: Box<dyn MasterPty + Send>,
@@ -96,25 +101,50 @@ impl PtyHandle {
         })
     }
 
+    /// Write all bytes with retry logic for non-blocking PTY
+    ///
+    /// Handles WouldBlock (EAGAIN) errors by retrying with small delays.
+    /// Times out after WRITE_TIMEOUT to avoid infinite loops.
+    fn write_all_with_retry(&mut self, data: &[u8]) -> Result<()> {
+        let mut written = 0;
+        let start = std::time::Instant::now();
+
+        while written < data.len() {
+            if start.elapsed() > WRITE_TIMEOUT {
+                anyhow::bail!(
+                    "Timed out writing to PTY after {:?} ({} of {} bytes written)",
+                    WRITE_TIMEOUT,
+                    written,
+                    data.len()
+                );
+            }
+
+            match self.writer.write(&data[written..]) {
+                Ok(0) => anyhow::bail!("Write returned 0 bytes"),
+                Ok(n) => written += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(WRITE_RETRY_DELAY);
+                }
+                Err(e) => return Err(e).context("Failed to write to PTY"),
+            }
+        }
+        Ok(())
+    }
+
     /// Write raw bytes to the PTY
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.writer
-            .write_all(data)
-            .context("Failed to write to PTY")?;
+        self.write_all_with_retry(data)?;
         self.writer.flush().context("Failed to flush PTY writer")?;
         Ok(())
     }
 
     /// Write pasted text to the PTY, wrapped in bracketed paste sequences
     pub fn write_paste(&mut self, text: &str) -> Result<()> {
-        self.writer
-            .write_all(PASTE_START)
+        self.write_all_with_retry(PASTE_START)
             .context("Failed to write paste start sequence")?;
-        self.writer
-            .write_all(text.as_bytes())
+        self.write_all_with_retry(text.as_bytes())
             .context("Failed to write paste content")?;
-        self.writer
-            .write_all(PASTE_END)
+        self.write_all_with_retry(PASTE_END)
             .context("Failed to write paste end sequence")?;
         self.writer.flush().context("Failed to flush PTY writer")?;
         Ok(())

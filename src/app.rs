@@ -632,7 +632,9 @@ impl App {
                         self.state.needs_render = true;
                     }
                     Event::Paste(text) => {
-                        self.handle_paste_event(&text)?;
+                        if let Err(e) = self.handle_paste_event(&text) {
+                            self.state.error_message = Some(format!("Paste failed: {}", e));
+                        }
                         self.state.needs_render = true;
                     }
                     Event::Resize(_, _) => {
