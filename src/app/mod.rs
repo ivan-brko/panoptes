@@ -50,24 +50,23 @@ use crate::wizards::worktree::filter_branch_refs;
 /// Main application struct
 pub struct App {
     /// Application configuration (used for project flows)
-    #[allow(dead_code)]
-    config: Config,
+    pub(crate) config: Config,
     /// Application state
-    state: AppState,
+    pub(crate) state: AppState,
     /// Project store for project/branch persistence
-    project_store: ProjectStore,
+    pub(crate) project_store: ProjectStore,
     /// Session manager
-    sessions: SessionManager,
+    pub(crate) sessions: SessionManager,
     /// Hook event receiver
     hook_rx: HookEventReceiver,
     /// Hook server handle (kept alive and used for dropped events tracking)
     hook_server: ServerHandle,
     /// Terminal UI
-    tui: Tui,
+    pub(crate) tui: Tui,
     /// Log buffer for real-time log viewing
-    log_buffer: Arc<LogBuffer>,
+    pub(crate) log_buffer: Arc<LogBuffer>,
     /// Information about the current log file
-    log_file_info: LogFileInfo,
+    pub(crate) log_file_info: LogFileInfo,
 }
 
 impl App {
@@ -154,7 +153,7 @@ impl App {
                         if self.state.error_message.is_some() {
                             self.state.error_message = None;
                         }
-                        self.handle_key_event(key)?;
+                        crate::input::dispatcher::handle_key_event(self, key)?;
                         self.state.needs_render = true;
                     }
                     Event::Paste(text) => {
@@ -440,91 +439,12 @@ impl App {
         Ok(false)
     }
 
-    /// Handle a key event
-    fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
-        // Handle Ctrl+C specially
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            // In Session mode, fall through to forward Ctrl+C to PTY
-            if self.state.input_mode != InputMode::Session {
-                // Show warning in all other modes
-                self.state.error_message = Some("Ctrl+C disabled. Press 'q' to quit.".to_string());
-                return Ok(());
-            }
-        }
-
-        // Global: Jump to next session needing attention (Space key)
-        // Only works in Normal mode (not in text input modes or Session mode)
-        if key.code == KeyCode::Char(' ') && self.state.input_mode == InputMode::Normal {
-            return self.jump_to_next_attention();
-        }
-
-        match self.state.input_mode {
-            InputMode::Normal => self.handle_normal_mode_key(key),
-            InputMode::Session => self.handle_session_mode_key(key),
-            InputMode::CreatingSession => self.handle_creating_session_key(key),
-            InputMode::AddingProject => self.handle_adding_project_key(key),
-            InputMode::AddingProjectName => self.handle_adding_project_name_key(key),
-            InputMode::FetchingBranches => {
-                // While fetching, only allow Esc to cancel
-                if key.code == KeyCode::Esc {
-                    self.state.input_mode = InputMode::Normal;
-                }
-                Ok(())
-            }
-            InputMode::CreatingWorktree => {
-                // Need to get project_id from current view
-                if let View::ProjectDetail(project_id) = self.state.view {
-                    self.handle_creating_worktree_key(key, project_id)
-                } else {
-                    Ok(())
-                }
-            }
-            InputMode::SelectingDefaultBase => {
-                // Need to get project_id from current view
-                if let View::ProjectDetail(project_id) = self.state.view {
-                    self.handle_selecting_default_base_key(key, project_id)
-                } else {
-                    Ok(())
-                }
-            }
-            InputMode::ConfirmingSessionDelete => self.handle_confirming_delete_key(key),
-            InputMode::ConfirmingBranchDelete => self.handle_confirming_branch_delete_key(key),
-            InputMode::ConfirmingProjectDelete => self.handle_confirming_project_delete_key(key),
-            InputMode::ConfirmingQuit => self.handle_confirming_quit_key(key),
-            InputMode::RenamingProject => self.handle_renaming_project_key(key),
-            InputMode::WorktreeSelectBranch => {
-                if let View::ProjectDetail(project_id) = self.state.view {
-                    self.handle_worktree_select_branch_key(key, project_id)
-                } else {
-                    Ok(())
-                }
-            }
-            InputMode::WorktreeSelectBase => {
-                if let View::ProjectDetail(project_id) = self.state.view {
-                    self.handle_worktree_select_base_key(key, project_id)
-                } else {
-                    Ok(())
-                }
-            }
-            InputMode::WorktreeConfirm => {
-                if let View::ProjectDetail(project_id) = self.state.view {
-                    self.handle_worktree_confirm_key(key, project_id)
-                } else {
-                    Ok(())
-                }
-            }
-            InputMode::StartingFocusTimer => self.handle_starting_focus_timer_key(key),
-            InputMode::ConfirmingFocusSessionDelete => {
-                self.handle_confirming_focus_session_delete_key(key)
-            }
-            InputMode::ViewingFocusSessionDetail => {
-                self.handle_viewing_focus_session_detail_key(key)
-            }
-        }
-    }
+    // ========================================================================
+    // Input Handlers (called by input::dispatcher)
+    // ========================================================================
 
     /// Handle key in normal mode
-    fn handle_normal_mode_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_normal_mode_key(&mut self, key: KeyEvent) -> Result<()> {
         match self.state.view {
             View::ProjectsOverview => self.handle_projects_overview_key(key),
             View::ProjectDetail(_) => self.handle_project_detail_key(key),
@@ -1069,7 +989,7 @@ impl App {
     }
 
     /// Handle key when starting a focus timer (entering duration)
-    fn handle_starting_focus_timer_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_starting_focus_timer_key(&mut self, key: KeyEvent) -> Result<()> {
         // Only process key press events (not release/repeat)
         if key.kind != KeyEventKind::Press {
             return Ok(());
@@ -1111,7 +1031,7 @@ impl App {
     }
 
     /// Handle key when confirming focus session deletion
-    fn handle_confirming_focus_session_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_confirming_focus_session_delete_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
@@ -1147,7 +1067,7 @@ impl App {
     }
 
     /// Handle key when viewing focus session details
-    fn handle_viewing_focus_session_detail_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_viewing_focus_session_detail_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
@@ -1479,7 +1399,7 @@ impl App {
     }
 
     /// Handle key in session mode (keys go to PTY)
-    fn handle_session_mode_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_session_mode_key(&mut self, key: KeyEvent) -> Result<()> {
         // Handle Esc key
         if key.code == KeyCode::Esc {
             return self.handle_session_mode_esc(key);
@@ -1612,7 +1532,7 @@ impl App {
     }
 
     /// Handle key while creating a new session
-    fn handle_creating_session_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_creating_session_key(&mut self, key: KeyEvent) -> Result<()> {
         // Only process key press events (not release/repeat)
         if key.kind != KeyEventKind::Press {
             return Ok(());
@@ -1717,7 +1637,7 @@ impl App {
     }
 
     /// Handle key when adding a new project (path input step)
-    fn handle_adding_project_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_adding_project_key(&mut self, key: KeyEvent) -> Result<()> {
         // Only process key press events (not release/repeat)
         if key.kind != KeyEventKind::Press {
             return Ok(());
@@ -1863,7 +1783,7 @@ impl App {
     }
 
     /// Handle key when entering project name (second step of project addition)
-    fn handle_adding_project_name_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_adding_project_name_key(&mut self, key: KeyEvent) -> Result<()> {
         // Only process key press events (not release/repeat)
         if key.kind != KeyEventKind::Press {
             return Ok(());
@@ -1953,7 +1873,7 @@ impl App {
     /// - Type branch name to create NEW branch (leave empty to checkout existing)
     /// - Navigate list to select base branch (for new) or target branch (for checkout)
     /// - Press 's' to set current selection as default base
-    fn handle_creating_worktree_key(&mut self, key: KeyEvent, project_id: ProjectId) -> Result<()> {
+    pub(crate) fn handle_creating_worktree_key(&mut self, key: KeyEvent, project_id: ProjectId) -> Result<()> {
         // Only process key press events (not release/repeat)
         if key.kind != KeyEventKind::Press {
             return Ok(());
@@ -2165,7 +2085,7 @@ impl App {
     }
 
     /// Handle key when selecting default base branch (via 'b' in project view)
-    fn handle_selecting_default_base_key(
+    pub(crate) fn handle_selecting_default_base_key(
         &mut self,
         key: KeyEvent,
         project_id: ProjectId,
@@ -2247,7 +2167,7 @@ impl App {
     }
 
     /// Handle key when confirming session deletion
-    fn handle_confirming_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_confirming_delete_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
@@ -2283,7 +2203,7 @@ impl App {
     }
 
     /// Handle key when confirming branch/worktree deletion
-    fn handle_confirming_branch_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_confirming_branch_delete_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
@@ -2406,7 +2326,7 @@ impl App {
     }
 
     /// Handle key when confirming project deletion
-    fn handle_confirming_project_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_confirming_project_delete_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
@@ -2466,7 +2386,7 @@ impl App {
     }
 
     /// Handle key while confirming quit
-    fn handle_confirming_quit_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_confirming_quit_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
@@ -2485,7 +2405,7 @@ impl App {
     }
 
     /// Handle key while renaming a project
-    fn handle_renaming_project_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_renaming_project_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
@@ -2535,7 +2455,7 @@ impl App {
     /// - Enter on remote branch → WorktreeConfirm (RemoteTracking)
     /// - Enter on "Create new branch" → WorktreeSelectBase
     /// - Esc to cancel
-    fn handle_worktree_select_branch_key(
+    pub(crate) fn handle_worktree_select_branch_key(
         &mut self,
         key: KeyEvent,
         project_id: ProjectId,
@@ -2717,7 +2637,7 @@ impl App {
     /// - Arrow keys to navigate the list
     /// - Enter to confirm and go to WorktreeConfirm
     /// - Esc to go back to WorktreeSelectBranch
-    fn handle_worktree_select_base_key(
+    pub(crate) fn handle_worktree_select_base_key(
         &mut self,
         key: KeyEvent,
         project_id: ProjectId,
@@ -2797,7 +2717,7 @@ impl App {
     /// User can:
     /// - Enter to create the worktree
     /// - Esc to go back to the previous step
-    fn handle_worktree_confirm_key(&mut self, key: KeyEvent, project_id: ProjectId) -> Result<()> {
+    pub(crate) fn handle_worktree_confirm_key(&mut self, key: KeyEvent, project_id: ProjectId) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             return Ok(());
         }
@@ -3153,7 +3073,7 @@ impl App {
     }
 
     /// Jump to the next session needing attention (oldest first)
-    fn jump_to_next_attention(&mut self) -> Result<()> {
+    pub(crate) fn jump_to_next_attention(&mut self) -> Result<()> {
         let attention_sessions = self
             .sessions
             .sessions_needing_attention(self.config.idle_threshold_secs);
