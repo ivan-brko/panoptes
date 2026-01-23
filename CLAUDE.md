@@ -30,22 +30,29 @@ PTY Output → Session buffer → TUI render
 ### Module Responsibilities
 
 - **app/**: Application orchestration and state management
-  - `mod.rs`: Main `App` struct and event loop orchestration. Routes input and hook events, handles graceful shutdown with session cleanup
+  - `mod.rs`: Main `App` struct and event loop. Routes input and hook events, handles graceful shutdown with session cleanup, rendering
   - `view.rs`: `View` enum (ProjectsOverview, ProjectDetail, BranchDetail, SessionView, ActivityTimeline, LogViewer, FocusStats) with navigation helpers
   - `input_mode.rs`: `InputMode` enum for input handling modes
   - `state.rs`: `AppState` struct containing all application state, `HomepageFocus` enum, and navigation helper methods
-  - `event_loop.rs`: (Placeholder) Main event loop logic
-- **input/**: Input handling (placeholder structure for future extraction)
+- **input/**: Input handling organized by mode
   - `mod.rs`: Module exports
-  - `dispatcher.rs`: (Placeholder) Main input dispatch logic
-  - `dialogs.rs`: (Placeholder) Confirmation dialog handlers
-  - `session_mode.rs`: (Placeholder) PTY mode handling
-  - `text_input.rs`: (Placeholder) Text input handlers
+  - `dispatcher.rs`: Main input dispatch logic - routes key events to mode-specific handlers
+  - `session_mode.rs`: Session mode handlers - PTY forwarding, mouse events, paste handling
+  - `text_input.rs`: Text input handlers - session naming, project path input, project renaming
+  - `dialogs.rs`: Confirmation dialog handlers - delete confirmations, focus timer dialogs
   - `normal/`: Normal mode handlers by view
-    - `projects_overview.rs`, `project_detail.rs`, `branch_detail.rs`, `session_view.rs`, `timeline.rs`, `log_viewer.rs`, `focus_stats.rs`
+    - `projects_overview.rs`: Projects grid navigation, project selection
+    - `project_detail.rs`: Branch list navigation, worktree creation
+    - `branch_detail.rs`: Session list navigation, branch deletion
+    - `session_view.rs`: Session scrolling, session switching
+    - `timeline.rs`: Activity timeline navigation
+    - `log_viewer.rs`: Log scrolling and navigation
+    - `focus_stats.rs`: Focus stats navigation
 - **wizards/**: Multi-step wizard workflows
   - `worktree/`: Worktree creation wizard
+    - `mod.rs`: Module exports
     - `types.rs`: `BranchRef`, `BranchRefType`, `WorktreeCreationType`, `filter_branch_refs()`
+    - `handlers.rs`: Wizard step handlers - branch selection, base selection, confirmation
   - `project/`: (Placeholder) Project addition wizard
 - **config.rs**: Configuration loading/saving. Defines paths (~/.panoptes/), hook port (9999), limits, `idle_threshold_secs`
 - **session/**: Session lifecycle management
@@ -122,14 +129,19 @@ PTY Output → Session buffer → TUI render
 3. Create render function in `src/tui/views/new_view.rs`
 4. Export from `src/tui/views/mod.rs`
 5. Add case to render dispatch in `src/app/mod.rs` (in `render()` method)
-6. Create input handler in `src/app/mod.rs` (e.g., `handle_new_view_key()`)
-7. Add case to `handle_normal_mode_key()` in `src/app/mod.rs`
+6. Create input handler in `src/input/normal/new_view.rs`
+7. Export handler from `src/input/normal/mod.rs`
+8. Add case to `handle_normal_mode_key()` in `src/app/mod.rs`
 
 ### Adding a New Input Mode
 
 1. Add variant to `InputMode` enum in `src/app/input_mode.rs`
-2. Create handler function in `src/app/mod.rs` (e.g., `handle_new_mode_key()`)
-3. Add case to `handle_key_event()` in `src/app/mod.rs`
+2. Create handler function in appropriate module:
+   - Text input modes: `src/input/text_input.rs`
+   - Dialog modes: `src/input/dialogs.rs`
+   - Session modes: `src/input/session_mode.rs`
+   - Wizard modes: `src/wizards/<wizard>/handlers.rs`
+3. Add case to `handle_key_event()` in `src/input/dispatcher.rs`
 
 ### Adding a New Agent Type
 

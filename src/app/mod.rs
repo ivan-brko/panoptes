@@ -4,7 +4,6 @@
 //! that ties together session management, hook handling, and terminal UI.
 
 // Submodules
-mod event_loop;
 mod input_mode;
 mod state;
 mod view;
