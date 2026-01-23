@@ -5,7 +5,9 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::focus_timing::stats::{aggregate_by_project, calculate_overall_stats, FocusSession};
+use crate::focus_timing::stats::{
+    aggregate_by_project, calculate_overall_stats, format_duration, FocusSession,
+};
 use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
 use crate::tui::theme::theme;
@@ -69,7 +71,7 @@ pub fn render_focus_stats(
     // Footer
     let timer_hint = format_focus_timer_hint(focus_timer.map(|t| t.is_running()).unwrap_or(false));
     let footer_text = format!(
-        "{} | j/k: navigate | Esc/q: back | Enter: details",
+        "{} | j/k: navigate | Enter: details | d: delete | Esc/q: back",
         timer_hint
     );
     let footer = Paragraph::new(footer_text)
@@ -304,6 +306,191 @@ pub fn render_timer_input_dialog(frame: &mut Frame, area: Rect, input: &str, def
     );
 
     frame.render_widget(dialog, dialog_area);
+}
+
+/// Render the focus session delete confirmation dialog
+pub fn render_focus_session_delete_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    session: &FocusSession,
+    project_store: &ProjectStore,
+) {
+    let t = theme();
+
+    // Calculate centered dialog area
+    let dialog_width = 50_u16.min(area.width.saturating_sub(4));
+    let dialog_height = 9_u16.min(area.height.saturating_sub(2));
+
+    let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+    let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+
+    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+
+    // Clear the background
+    frame.render_widget(ratatui::widgets::Clear, dialog_area);
+
+    // Get project name for display
+    let project_name = session
+        .project_id
+        .and_then(|id| project_store.get_project(id))
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "-".to_string());
+
+    let time_str = session.completed_at.format("%m/%d %H:%M").to_string();
+    let session_desc = format!(
+        "{} - {} ({})",
+        session.format_percentage(),
+        project_name,
+        time_str
+    );
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Delete session: ", Style::default().fg(t.text)),
+            Span::styled(
+                session_desc,
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("?", Style::default().fg(t.text)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Press ", Style::default().fg(t.text)),
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to confirm, ", Style::default().fg(t.text)),
+            Span::styled(
+                "n",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" or ", Style::default().fg(t.text)),
+            Span::styled(
+                "Esc",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to cancel", Style::default().fg(t.text)),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.border_warning))
+            .title("Confirm Delete"),
+    );
+
+    frame.render_widget(paragraph, dialog_area);
+}
+
+/// Render the focus session detail dialog
+pub fn render_focus_session_detail_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    session: &FocusSession,
+    project_store: &ProjectStore,
+) {
+    let t = theme();
+
+    // Calculate centered dialog area
+    let dialog_width = 45_u16.min(area.width.saturating_sub(4));
+    let dialog_height = 14_u16.min(area.height.saturating_sub(2));
+
+    let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+    let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+
+    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+
+    // Clear the background
+    frame.render_widget(ratatui::widgets::Clear, dialog_area);
+
+    // Get project/branch names
+    let project_name = session
+        .project_id
+        .and_then(|id| project_store.get_project(id))
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "-".to_string());
+
+    let branch_name = session
+        .branch_id
+        .and_then(|id| project_store.get_branch(id))
+        .map(|b| b.name.clone())
+        .unwrap_or_else(|| "-".to_string());
+
+    // Calculate unfocused time (elapsed - focused)
+    let unfocused = session
+        .total_elapsed
+        .saturating_sub(session.focused_duration);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Target:     "),
+            Span::styled(session.format_target(), Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Focused:    "),
+            Span::styled(session.format_focused(), Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Elapsed:    "),
+            Span::styled(
+                format_duration(session.total_elapsed),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  Unfocused:  "),
+            Span::styled(format_duration(unfocused), Style::default().fg(Color::Red)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Focus:      "),
+            Span::styled(
+                session.format_percentage(),
+                Style::default().fg(if session.focus_percentage >= 80.0 {
+                    Color::Green
+                } else if session.focus_percentage >= 50.0 {
+                    Color::Yellow
+                } else {
+                    Color::Red
+                }),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Project:    "),
+            Span::styled(project_name, Style::default().fg(t.accent)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Branch:     "),
+            Span::styled(branch_name, Style::default().fg(t.accent)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Completed:  "),
+            Span::styled(
+                session.completed_at.format("%m/%d %H:%M").to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[Esc] Close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.accent))
+            .title(" Session Details "),
+    );
+
+    frame.render_widget(paragraph, dialog_area);
 }
 
 #[cfg(test)]

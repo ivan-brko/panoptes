@@ -97,6 +97,22 @@ impl FocusStore {
     pub fn session_count(&self) -> Result<usize> {
         Ok(self.load()?.len())
     }
+
+    /// Delete a session by ID and save
+    ///
+    /// Returns true if the session was found and deleted, false if not found.
+    pub fn delete_session(&self, session_id: uuid::Uuid) -> Result<bool> {
+        let mut sessions = self.load()?;
+        let original_len = sessions.len();
+        sessions.retain(|s| s.id != session_id);
+
+        if sessions.len() < original_len {
+            self.save(&sessions)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 impl Default for FocusStore {

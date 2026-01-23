@@ -26,9 +26,10 @@ use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionId, SessionManager};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
-    render_branch_detail, render_focus_stats, render_loading_indicator, render_log_viewer,
-    render_notifications, render_project_detail, render_projects_overview, render_session_view,
-    render_timeline, render_timer_input_dialog,
+    render_branch_detail, render_focus_session_delete_dialog, render_focus_session_detail_dialog,
+    render_focus_stats, render_loading_indicator, render_log_viewer, render_notifications,
+    render_project_detail, render_projects_overview, render_session_view, render_timeline,
+    render_timer_input_dialog,
 };
 use crate::tui::{NotificationManager, NotificationType, Tui};
 
@@ -134,6 +135,10 @@ pub enum InputMode {
     WorktreeConfirm,
     /// Starting a focus timer - entering duration
     StartingFocusTimer,
+    /// Confirming focus session deletion
+    ConfirmingFocusSessionDelete,
+    /// Viewing focus session details
+    ViewingFocusSessionDetail,
 }
 
 /// Type of worktree creation being performed
@@ -367,6 +372,10 @@ pub struct AppState {
     pub focus_stats_selected_index: usize,
     /// Cached focus sessions for stats view
     pub focus_sessions: Vec<FocusSession>,
+    /// Focus session pending deletion (for confirmation dialog)
+    pub pending_delete_focus_session: Option<uuid::Uuid>,
+    /// Focus session being viewed in detail dialog
+    pub viewing_focus_session: Option<FocusSession>,
 }
 
 impl AppState {
@@ -424,6 +433,28 @@ impl AppState {
     /// Navigate to the parent view
     pub fn navigate_back(&mut self) {
         if let Some(parent) = self.view.parent() {
+            // Update focus context based on the parent view
+            match parent {
+                View::ProjectsOverview
+                | View::ActivityTimeline
+                | View::LogViewer
+                | View::FocusStats => {
+                    // Leaving project context - clear the context
+                    self.focus_tracker.set_context(None, None);
+                }
+                View::ProjectDetail(project_id) => {
+                    // Going back from BranchDetail to ProjectDetail - keep project, clear branch
+                    self.focus_tracker.set_context(Some(project_id), None);
+                }
+                View::BranchDetail(project_id, branch_id) => {
+                    // Going back to branch detail - set both
+                    self.focus_tracker
+                        .set_context(Some(project_id), Some(branch_id));
+                }
+                View::SessionView => {
+                    // Unlikely to navigate back TO session view, but handle it
+                }
+            }
             self.view = parent;
         }
     }
@@ -432,12 +463,17 @@ impl AppState {
     pub fn navigate_to_project(&mut self, project_id: ProjectId) {
         self.view = View::ProjectDetail(project_id);
         self.selected_branch_index = 0;
+        // Update focus tracker context to attribute time to this project
+        self.focus_tracker.set_context(Some(project_id), None);
     }
 
     /// Navigate to a branch detail view
     pub fn navigate_to_branch(&mut self, project_id: ProjectId, branch_id: BranchId) {
         self.view = View::BranchDetail(project_id, branch_id);
         self.selected_session_index = 0;
+        // Update focus tracker context to attribute time to this project and branch
+        self.focus_tracker
+            .set_context(Some(project_id), Some(branch_id));
     }
 
     /// Navigate to session view (auto-activates session mode)
@@ -947,6 +983,12 @@ impl App {
                 }
             }
             InputMode::StartingFocusTimer => self.handle_starting_focus_timer_key(key),
+            InputMode::ConfirmingFocusSessionDelete => {
+                self.handle_confirming_focus_session_delete_key(key)
+            }
+            InputMode::ViewingFocusSessionDetail => {
+                self.handle_viewing_focus_session_detail_key(key)
+            }
         }
     }
 
@@ -1466,6 +1508,30 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.state.select_prev(session_count);
             }
+            KeyCode::Enter => {
+                // Show session details
+                if !self.state.focus_sessions.is_empty() {
+                    // Get selected session from sorted list (same order as rendering)
+                    let mut sorted: Vec<_> = self.state.focus_sessions.iter().collect();
+                    sorted.sort_by(|a, b| b.completed_at.cmp(&a.completed_at));
+                    if let Some(session) = sorted.get(self.state.focus_stats_selected_index) {
+                        self.state.viewing_focus_session = Some((*session).clone());
+                        self.state.input_mode = InputMode::ViewingFocusSessionDetail;
+                    }
+                }
+            }
+            KeyCode::Char('d') => {
+                // Prompt for confirmation before deleting focus session
+                if !self.state.focus_sessions.is_empty() {
+                    // Get selected session from sorted list (same order as rendering)
+                    let mut sorted: Vec<_> = self.state.focus_sessions.iter().collect();
+                    sorted.sort_by(|a, b| b.completed_at.cmp(&a.completed_at));
+                    if let Some(session) = sorted.get(self.state.focus_stats_selected_index) {
+                        self.state.pending_delete_focus_session = Some(session.id);
+                        self.state.input_mode = InputMode::ConfirmingFocusSessionDelete;
+                    }
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1509,6 +1575,62 @@ impl App {
                 self.state.focus_timer_input.pop();
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key when confirming focus session deletion
+    fn handle_confirming_focus_session_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                // Confirm deletion
+                if let Some(session_id) = self.state.pending_delete_focus_session.take() {
+                    // Delete from persistent storage
+                    let store = FocusStore::new();
+                    if let Err(e) = store.delete_session(session_id) {
+                        tracing::error!("Failed to delete focus session: {}", e);
+                    }
+
+                    // Reload sessions from disk to sync state
+                    self.load_focus_sessions();
+
+                    // Adjust selection if needed
+                    let session_count = self.state.focus_sessions.len();
+                    if self.state.focus_stats_selected_index >= session_count && session_count > 0 {
+                        self.state.focus_stats_selected_index = session_count - 1;
+                    }
+                }
+                self.state.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                // Cancel deletion
+                self.state.pending_delete_focus_session = None;
+                self.state.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key when viewing focus session details
+    fn handle_viewing_focus_session_detail_key(&mut self, key: KeyEvent) -> Result<()> {
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+        // Any key closes the detail dialog
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.state.viewing_focus_session = None;
+                self.state.input_mode = InputMode::Normal;
+            }
+            _ => {
+                // Close on any other key as well
+                self.state.viewing_focus_session = None;
+                self.state.input_mode = InputMode::Normal;
+            }
         }
         Ok(())
     }
@@ -3613,6 +3735,24 @@ impl App {
                     &state.focus_timer_input,
                     config.focus_timer_minutes,
                 );
+            }
+
+            // Render focus session delete confirmation dialog
+            if state.input_mode == InputMode::ConfirmingFocusSessionDelete {
+                if let Some(session_id) = state.pending_delete_focus_session {
+                    // Find the session in the list
+                    if let Some(session) = state.focus_sessions.iter().find(|s| s.id == session_id)
+                    {
+                        render_focus_session_delete_dialog(frame, area, session, project_store);
+                    }
+                }
+            }
+
+            // Render focus session detail dialog
+            if state.input_mode == InputMode::ViewingFocusSessionDetail {
+                if let Some(ref session) = state.viewing_focus_session {
+                    render_focus_session_detail_dialog(frame, area, session, project_store);
+                }
             }
 
             // Render notifications overlay
