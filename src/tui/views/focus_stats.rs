@@ -6,7 +6,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::focus_timing::stats::{
-    aggregate_by_project, calculate_overall_stats, format_duration, FocusSession,
+    aggregate_by_project, calculate_overall_stats, format_duration, FocusContextBreakdown,
+    FocusSession,
 };
 use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
@@ -396,9 +397,25 @@ pub fn render_focus_session_detail_dialog(
 ) {
     let t = theme();
 
-    // Calculate centered dialog area
+    // Calculate unfocused time (elapsed - focused)
+    let unfocused = session
+        .total_elapsed
+        .saturating_sub(session.focused_duration);
+
+    // Build breakdown lines if we have them
+    let breakdown_lines = build_breakdown_lines(&session.context_breakdown, project_store);
+    let has_breakdown = !breakdown_lines.is_empty();
+
+    // Base height: 12 lines (header, stats, completed, footer, etc.)
+    // Add breakdown lines if present (header + entries + spacing)
+    let base_height = 12_u16;
+    let breakdown_height = if has_breakdown {
+        (breakdown_lines.len() + 2) as u16 // +2 for header and separator
+    } else {
+        3 // For project/branch lines when no breakdown
+    };
+    let dialog_height = (base_height + breakdown_height).min(area.height.saturating_sub(2));
     let dialog_width = 45_u16.min(area.width.saturating_sub(4));
-    let dialog_height = 14_u16.min(area.height.saturating_sub(2));
 
     let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
     let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
@@ -408,25 +425,7 @@ pub fn render_focus_session_detail_dialog(
     // Clear the background
     frame.render_widget(ratatui::widgets::Clear, dialog_area);
 
-    // Get project/branch names
-    let project_name = session
-        .project_id
-        .and_then(|id| project_store.get_project(id))
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| "-".to_string());
-
-    let branch_name = session
-        .branch_id
-        .and_then(|id| project_store.get_branch(id))
-        .map(|b| b.name.clone())
-        .unwrap_or_else(|| "-".to_string());
-
-    // Calculate unfocused time (elapsed - focused)
-    let unfocused = session
-        .total_elapsed
-        .saturating_sub(session.focused_duration);
-
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(vec![
             Span::raw("  Target:     "),
@@ -460,28 +459,55 @@ pub fn render_focus_session_detail_dialog(
                 }),
             ),
         ]),
-        Line::from(""),
-        Line::from(vec![
+    ];
+
+    // Add breakdown or legacy project/branch display
+    if has_breakdown {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Time Breakdown:",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for line in breakdown_lines {
+            lines.push(line);
+        }
+    } else {
+        // Legacy display for old sessions without breakdown
+        let project_name = session
+            .project_id
+            .and_then(|id| project_store.get_project(id))
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "-".to_string());
+
+        let branch_name = session
+            .branch_id
+            .and_then(|id| project_store.get_branch(id))
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|| "-".to_string());
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
             Span::raw("  Project:    "),
             Span::styled(project_name, Style::default().fg(t.accent)),
-        ]),
-        Line::from(vec![
+        ]));
+        lines.push(Line::from(vec![
             Span::raw("  Branch:     "),
             Span::styled(branch_name, Style::default().fg(t.accent)),
-        ]),
-        Line::from(vec![
-            Span::raw("  Completed:  "),
-            Span::styled(
-                session.completed_at.format("%m/%d %H:%M").to_string(),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "[Esc] Close",
+        ]));
+    }
+
+    lines.push(Line::from(vec![
+        Span::raw("  Completed:  "),
+        Span::styled(
+            session.completed_at.format("%m/%d %H:%M").to_string(),
             Style::default().fg(Color::DarkGray),
-        )),
-    ];
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "[Esc] Close",
+        Style::default().fg(Color::DarkGray),
+    )));
 
     let paragraph = Paragraph::new(lines).block(
         Block::default()
@@ -491,6 +517,59 @@ pub fn render_focus_session_detail_dialog(
     );
 
     frame.render_widget(paragraph, dialog_area);
+}
+
+/// Build lines for the context breakdown display
+fn build_breakdown_lines(
+    breakdown: &[FocusContextBreakdown],
+    project_store: &ProjectStore,
+) -> Vec<Line<'static>> {
+    if breakdown.is_empty() {
+        return vec![];
+    }
+
+    // Sort by duration descending
+    let mut sorted: Vec<_> = breakdown.iter().collect();
+    sorted.sort_by(|a, b| b.duration.cmp(&a.duration));
+
+    // Calculate total for percentages
+    let total_secs: u64 = sorted.iter().map(|b| b.duration.as_secs()).sum();
+
+    sorted
+        .iter()
+        .map(|entry| {
+            let name = entry
+                .project_id
+                .and_then(|id| project_store.get_project(id))
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "Other".to_string());
+
+            let percentage = if total_secs > 0 {
+                (entry.duration.as_secs() as f64 / total_secs as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            // Truncate name if too long
+            let display_name = if name.len() > 14 {
+                format!("{}...", &name[..11])
+            } else {
+                name
+            };
+
+            Line::from(vec![
+                Span::raw(format!("    {:<14} ", display_name)),
+                Span::styled(
+                    format_duration(entry.duration),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!("  ({:.0}%)", percentage),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        })
+        .collect()
 }
 
 #[cfg(test)]

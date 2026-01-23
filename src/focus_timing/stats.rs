@@ -11,6 +11,18 @@ use uuid::Uuid;
 
 use crate::project::{BranchId, ProjectId};
 
+/// Time spent in a specific project/branch context during a focus session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FocusContextBreakdown {
+    /// Associated project if any
+    pub project_id: Option<ProjectId>,
+    /// Associated branch if any
+    pub branch_id: Option<BranchId>,
+    /// Duration spent in this context
+    #[serde(with = "duration_serde")]
+    pub duration: Duration,
+}
+
 /// A completed focus timer session record
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FocusSession {
@@ -33,6 +45,9 @@ pub struct FocusSession {
     pub branch_id: Option<BranchId>,
     /// When the session was completed
     pub completed_at: DateTime<Utc>,
+    /// Per-project/branch time breakdown during the session
+    #[serde(default)]
+    pub context_breakdown: Vec<FocusContextBreakdown>,
 }
 
 impl FocusSession {
@@ -43,6 +58,7 @@ impl FocusSession {
         total_elapsed: Duration,
         project_id: Option<ProjectId>,
         branch_id: Option<BranchId>,
+        context_breakdown: Vec<FocusContextBreakdown>,
     ) -> Self {
         let focus_percentage = if target_duration.as_secs() > 0 {
             (focused_duration.as_secs_f64() / target_duration.as_secs_f64()) * 100.0
@@ -59,6 +75,7 @@ impl FocusSession {
             project_id,
             branch_id,
             completed_at: Utc::now(),
+            context_breakdown,
         }
     }
 
@@ -208,6 +225,7 @@ mod tests {
             Duration::from_secs(30 * 60), // 30 min elapsed
             None,
             None,
+            vec![],
         );
 
         assert_eq!(session.focus_percentage, 80.0);
@@ -224,6 +242,7 @@ mod tests {
             Duration::from_secs(25 * 60),
             None,
             None,
+            vec![],
         );
         let session2 = FocusSession::from_timer_result(
             Duration::from_secs(25 * 60),
@@ -231,6 +250,7 @@ mod tests {
             Duration::from_secs(30 * 60),
             None,
             None,
+            vec![],
         );
 
         stats.add_session(&session1);
@@ -252,6 +272,7 @@ mod tests {
                 Duration::from_secs(25 * 60),
                 Some(project1),
                 None,
+                vec![],
             ),
             FocusSession::from_timer_result(
                 Duration::from_secs(25 * 60),
@@ -259,6 +280,7 @@ mod tests {
                 Duration::from_secs(30 * 60),
                 Some(project1),
                 None,
+                vec![],
             ),
             FocusSession::from_timer_result(
                 Duration::from_secs(15 * 60),
@@ -266,6 +288,7 @@ mod tests {
                 Duration::from_secs(15 * 60),
                 Some(project2),
                 None,
+                vec![],
             ),
         ];
 

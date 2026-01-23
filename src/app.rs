@@ -14,7 +14,7 @@ use crossterm::event::{
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::focus_timing::stats::FocusSession;
+use crate::focus_timing::stats::{FocusContextBreakdown, FocusSession};
 use crate::focus_timing::store::FocusStore;
 use crate::focus_timing::tracker::FocusTracker;
 use crate::focus_timing::FocusTimer;
@@ -1697,12 +1697,28 @@ impl App {
             if let Some(elapsed) = timer.stop() {
                 // Query focus tracker for the focused time during this timer window
                 let focused = self.state.focus_tracker.focused_time_in_last(elapsed);
+                // Get per-project/branch breakdown
+                let breakdown_map = self
+                    .state
+                    .focus_tracker
+                    .focused_time_breakdown_in_last(elapsed);
+                let breakdown: Vec<FocusContextBreakdown> = breakdown_map
+                    .into_iter()
+                    .map(
+                        |((project_id, branch_id), duration)| FocusContextBreakdown {
+                            project_id,
+                            branch_id,
+                            duration,
+                        },
+                    )
+                    .collect();
                 self.save_focus_session(
                     target,
                     focused,
                     elapsed,
                     timer.project_id,
                     timer.branch_id,
+                    breakdown,
                 );
             }
         }
@@ -1714,12 +1730,28 @@ impl App {
         if let Some(mut timer) = self.state.focus_timer.take() {
             let target = timer.target_duration;
             if let Some(elapsed) = timer.stop() {
+                // Get per-project/branch breakdown
+                let breakdown_map = self
+                    .state
+                    .focus_tracker
+                    .focused_time_breakdown_in_last(elapsed);
+                let breakdown: Vec<FocusContextBreakdown> = breakdown_map
+                    .into_iter()
+                    .map(
+                        |((project_id, branch_id), duration)| FocusContextBreakdown {
+                            project_id,
+                            branch_id,
+                            duration,
+                        },
+                    )
+                    .collect();
                 self.save_focus_session(
                     target,
                     focused_duration,
                     elapsed,
                     timer.project_id,
                     timer.branch_id,
+                    breakdown,
                 );
             }
         }
@@ -1747,6 +1779,7 @@ impl App {
         elapsed_duration: Duration,
         project_id: Option<uuid::Uuid>,
         branch_id: Option<uuid::Uuid>,
+        context_breakdown: Vec<FocusContextBreakdown>,
     ) {
         // Save the session
         let session = FocusSession::from_timer_result(
@@ -1755,6 +1788,7 @@ impl App {
             elapsed_duration,
             project_id,
             branch_id,
+            context_breakdown,
         );
 
         // Add to cached sessions

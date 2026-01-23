@@ -2,7 +2,7 @@
 //!
 //! Tracks when the terminal has focus and records intervals for statistics.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -217,6 +217,46 @@ impl FocusTracker {
         }
 
         total
+    }
+
+    /// Calculate focused time breakdown by project/branch context in a time window
+    ///
+    /// Returns a HashMap where keys are (project_id, branch_id) tuples and values
+    /// are the total Duration spent focused in that context within the window.
+    pub fn focused_time_breakdown_in_last(
+        &self,
+        window: Duration,
+    ) -> HashMap<(Option<ProjectId>, Option<BranchId>), Duration> {
+        let cutoff = Utc::now() - chrono::Duration::seconds(window.as_secs() as i64);
+        let mut breakdown: HashMap<(Option<ProjectId>, Option<BranchId>), Duration> =
+            HashMap::new();
+
+        // Process recorded intervals
+        for interval in &self.intervals {
+            if interval.ended_at > cutoff {
+                let start = if interval.started_at < cutoff {
+                    cutoff
+                } else {
+                    interval.started_at
+                };
+                let diff = interval.ended_at - start;
+                let duration = Duration::from_secs(diff.num_seconds().max(0) as u64);
+
+                let key = (interval.project_id, interval.branch_id);
+                *breakdown.entry(key).or_default() += duration;
+            }
+        }
+
+        // Add current focus period if still focused (clipped to window)
+        if self.is_focused {
+            if let Some(started_at) = self.focus_started_at {
+                let elapsed = started_at.elapsed().min(window);
+                let key = (self.current_project_id, self.current_branch_id);
+                *breakdown.entry(key).or_default() += elapsed;
+            }
+        }
+
+        breakdown
     }
 
     /// Get all recorded intervals (for debugging/export)
