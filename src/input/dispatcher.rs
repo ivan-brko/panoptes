@@ -47,9 +47,15 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
                 Ok(())
             }
         }
-        InputMode::ConfirmingSessionDelete => super::dialogs::handle_confirming_delete_key(app, key),
-        InputMode::ConfirmingBranchDelete => super::dialogs::handle_confirming_branch_delete_key(app, key),
-        InputMode::ConfirmingProjectDelete => super::dialogs::handle_confirming_project_delete_key(app, key),
+        InputMode::ConfirmingSessionDelete => {
+            super::dialogs::handle_confirming_delete_key(app, key)
+        }
+        InputMode::ConfirmingBranchDelete => {
+            super::dialogs::handle_confirming_branch_delete_key(app, key)
+        }
+        InputMode::ConfirmingProjectDelete => {
+            super::dialogs::handle_confirming_project_delete_key(app, key)
+        }
         InputMode::ConfirmingQuit => super::dialogs::handle_confirming_quit_key(app, key),
         InputMode::RenamingProject => super::text_input::handle_renaming_project_key(app, key),
         InputMode::WorktreeSelectBranch => {
@@ -77,6 +83,8 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::ConfirmingFocusSessionDelete => {
             super::dialogs::handle_confirming_focus_session_delete_key(app, key)
         }
-        InputMode::ViewingFocusSessionDetail => super::dialogs::handle_viewing_focus_session_detail_key(app, key),
+        InputMode::ViewingFocusSessionDetail => {
+            super::dialogs::handle_viewing_focus_session_detail_key(app, key)
+        }
     }
 }

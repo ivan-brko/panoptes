@@ -130,9 +130,7 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
                     app.state.navigate_to_project(project.id);
                 }
             } else if session_count > 0 {
-                if let Some(session) =
-                    app.sessions.get_by_index(app.state.selected_session_index)
-                {
+                if let Some(session) = app.sessions.get_by_index(app.state.selected_session_index) {
                     let session_id = session.info.id;
                     app.state.navigate_to_session(session_id);
                     app.tui.enable_mouse_capture();
@@ -181,9 +179,7 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
                 }
             } else if session_count > 0 {
                 // Only sessions - delete selected session
-                if let Some(session) =
-                    app.sessions.get_by_index(app.state.selected_session_index)
-                {
+                if let Some(session) = app.sessions.get_by_index(app.state.selected_session_index) {
                     let id = session.info.id;
                     if let Err(e) = app.sessions.destroy_session(id) {
                         tracing::error!("Failed to destroy session: {}", e);

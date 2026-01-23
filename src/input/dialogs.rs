@@ -198,10 +198,7 @@ pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Resu
                                                 &branch.name,
                                                 true,
                                             ) {
-                                                tracing::error!(
-                                                    "Failed to remove worktree: {}",
-                                                    e
-                                                );
+                                                tracing::error!("Failed to remove worktree: {}", e);
                                                 app.state.error_message = Some(format!(
                                                     "Failed to remove worktree: {}",
                                                     e
@@ -233,8 +230,7 @@ pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Resu
                 // Save to disk
                 if let Err(e) = app.project_store.save() {
                     tracing::error!("Failed to save project store: {}", e);
-                    app.state.error_message =
-                        Some(format!("Failed to save project store: {}", e));
+                    app.state.error_message = Some(format!("Failed to save project store: {}", e));
                 }
 
                 tracing::info!("Deleted branch: {}", branch_id);
@@ -292,8 +288,7 @@ pub fn handle_confirming_project_delete_key(app: &mut App, key: KeyEvent) -> Res
                 // Save to disk
                 if let Err(e) = app.project_store.save() {
                     tracing::error!("Failed to save project store: {}", e);
-                    app.state.error_message =
-                        Some(format!("Failed to save project store: {}", e));
+                    app.state.error_message = Some(format!("Failed to save project store: {}", e));
                 }
 
                 tracing::info!("Deleted project: {}", project_id);

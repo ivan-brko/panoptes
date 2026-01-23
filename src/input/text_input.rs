@@ -39,9 +39,7 @@ pub fn handle_creating_session_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 .state
                 .creating_session_working_dir
                 .take()
-                .unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
             // Get project/branch context (nil if unassociated)
             let project_id = app
@@ -174,8 +172,7 @@ pub fn handle_adding_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
             if app.state.show_path_completions {
                 let count = app.state.path_completions.len();
                 if count > 0 {
-                    app.state.path_completion_index =
-                        (app.state.path_completion_index + 1) % count;
+                    app.state.path_completion_index = (app.state.path_completion_index + 1) % count;
                 }
             }
         }

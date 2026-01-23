@@ -7,7 +7,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, InputMode};
 use crate::project::ProjectId;
-use crate::wizards::worktree::{filter_branch_refs, BranchRef, BranchRefType, WorktreeCreationType};
+use crate::wizards::worktree::{
+    filter_branch_refs, BranchRef, BranchRefType, WorktreeCreationType,
+};
 
 // ============================================================================
 // New Worktree Creation Wizard Handlers
@@ -125,6 +127,8 @@ pub fn handle_worktree_select_branch_key(
             app.state.worktree_wizard.branch_validation_error = None;
         }
         KeyCode::Char(c) => {
+            // Convert space to underscore for branch names
+            let c = if c == ' ' { '_' } else { c };
             // Filter out obviously invalid characters as they are typed
             if !crate::git::INVALID_BRANCH_CHARS.contains(&c) && !c.is_ascii_control() {
                 app.state.worktree_wizard.search_text.push(c);
@@ -460,19 +464,17 @@ pub fn handle_creating_worktree_key(
         }
         KeyCode::Backspace => {
             app.state.new_branch_name.pop();
-            app.state.filtered_branch_refs = filter_branch_refs(
-                &app.state.available_branch_refs,
-                &app.state.new_branch_name,
-            );
+            app.state.filtered_branch_refs =
+                filter_branch_refs(&app.state.available_branch_refs, &app.state.new_branch_name);
             // Find and select the default base branch if exists
             select_default_base_branch(app);
         }
         KeyCode::Char(c) => {
+            // Convert space to underscore for branch names
+            let c = if c == ' ' { '_' } else { c };
             app.state.new_branch_name.push(c);
-            app.state.filtered_branch_refs = filter_branch_refs(
-                &app.state.available_branch_refs,
-                &app.state.new_branch_name,
-            );
+            app.state.filtered_branch_refs =
+                filter_branch_refs(&app.state.available_branch_refs, &app.state.new_branch_name);
             // Find and select the default base branch if exists
             select_default_base_branch(app);
         }
@@ -543,18 +545,14 @@ pub fn handle_selecting_default_base_key(
         }
         KeyCode::Backspace => {
             app.state.new_branch_name.pop();
-            app.state.filtered_branch_refs = filter_branch_refs(
-                &app.state.available_branch_refs,
-                &app.state.new_branch_name,
-            );
+            app.state.filtered_branch_refs =
+                filter_branch_refs(&app.state.available_branch_refs, &app.state.new_branch_name);
             select_default_base_branch(app);
         }
         KeyCode::Char(c) => {
             app.state.new_branch_name.push(c);
-            app.state.filtered_branch_refs = filter_branch_refs(
-                &app.state.available_branch_refs,
-                &app.state.new_branch_name,
-            );
+            app.state.filtered_branch_refs =
+                filter_branch_refs(&app.state.available_branch_refs, &app.state.new_branch_name);
             select_default_base_branch(app);
         }
         _ => {}
@@ -609,7 +607,13 @@ fn worktree_select_first_selectable(app: &mut App) {
     let has_create_option = !app.state.worktree_wizard.search_text.is_empty();
 
     // First, try to find a non-tracked branch
-    for (i, branch) in app.state.worktree_wizard.filtered_branches.iter().enumerate() {
+    for (i, branch) in app
+        .state
+        .worktree_wizard
+        .filtered_branches
+        .iter()
+        .enumerate()
+    {
         if !branch.is_already_tracked {
             app.state.worktree_wizard.list_index = i;
             return;
