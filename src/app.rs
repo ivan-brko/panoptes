@@ -31,7 +31,7 @@ use crate::tui::views::{
     render_project_detail, render_projects_overview, render_session_view, render_timeline,
     render_timer_input_dialog,
 };
-use crate::tui::{NotificationManager, NotificationType, Tui};
+use crate::tui::{HeaderNotificationManager, NotificationManager, NotificationType, Tui};
 
 /// Focus state for the homepage (projects overview)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -360,8 +360,10 @@ pub struct AppState {
     pub focus_tracker: FocusTracker,
     /// Active focus timer (if any)
     pub focus_timer: Option<FocusTimer>,
-    /// Notification manager for displaying alerts
+    /// Notification manager for displaying alerts (overlay notifications)
     pub notifications: NotificationManager,
+    /// Header notification manager for transient header messages
+    pub header_notifications: HeaderNotificationManager,
     /// Whether terminal currently has focus
     pub terminal_focused: bool,
     /// Whether focus events are supported by terminal
@@ -764,6 +766,7 @@ impl App {
 
             // Tick notifications (remove expired)
             self.state.notifications.tick();
+            self.state.header_notifications.tick();
 
             // Check if we should quit
             if self.state.should_quit {
@@ -3638,7 +3641,10 @@ impl App {
             }
             self.resize_active_session_pty()?;
         } else {
-            self.state.error_message = Some("No sessions need attention".to_string());
+            // Show a transient header notification instead of an error
+            self.state
+                .header_notifications
+                .push("No session waiting for input");
         }
         Ok(())
     }
@@ -3696,6 +3702,7 @@ impl App {
                         sessions,
                         config,
                         state.focus_timer.as_ref(),
+                        &state.header_notifications,
                     );
                 }
                 View::ProjectDetail(project_id) => {
@@ -3708,6 +3715,7 @@ impl App {
                         sessions,
                         config,
                         state.focus_timer.as_ref(),
+                        &state.header_notifications,
                     );
                 }
                 View::BranchDetail(project_id, branch_id) => {
@@ -3721,10 +3729,19 @@ impl App {
                         sessions,
                         config,
                         state.focus_timer.as_ref(),
+                        &state.header_notifications,
                     );
                 }
                 View::SessionView => {
-                    render_session_view(frame, area, state, sessions, project_store, config);
+                    render_session_view(
+                        frame,
+                        area,
+                        state,
+                        sessions,
+                        project_store,
+                        config,
+                        &state.header_notifications,
+                    );
                 }
                 View::ActivityTimeline => {
                     render_timeline(
@@ -3735,9 +3752,12 @@ impl App {
                         project_store,
                         config,
                         state.focus_timer.as_ref(),
+                        &state.header_notifications,
                     );
                 }
                 View::LogViewer => {
+                    let attention_count =
+                        sessions.total_attention_count(config.idle_threshold_secs);
                     render_log_viewer(
                         frame,
                         area,
@@ -3746,9 +3766,13 @@ impl App {
                         state.log_viewer_scroll,
                         state.log_viewer_auto_scroll,
                         state.focus_timer.as_ref(),
+                        &state.header_notifications,
+                        attention_count,
                     );
                 }
                 View::FocusStats => {
+                    let attention_count =
+                        sessions.total_attention_count(config.idle_threshold_secs);
                     render_focus_stats(
                         frame,
                         area,
@@ -3757,6 +3781,8 @@ impl App {
                         state.focus_stats_selected_index,
                         state.focus_events_supported,
                         state.focus_timer.as_ref(),
+                        &state.header_notifications,
+                        attention_count,
                     );
                 }
             }

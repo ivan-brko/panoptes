@@ -11,8 +11,10 @@ use ratatui::widgets::{
 
 use crate::focus_timing::FocusTimer;
 use crate::logging::{LogBuffer, LogFileInfo, LogLevel};
-use crate::tui::theme::theme;
-use crate::tui::views::{format_focus_timer_hint, format_header_with_timer, Breadcrumb};
+use crate::tui::header::Header;
+use crate::tui::header_notifications::HeaderNotificationManager;
+use crate::tui::layout::ScreenLayout;
+use crate::tui::views::{format_focus_timer_hint, Breadcrumb};
 
 /// Render the log viewer showing all log entries
 #[allow(clippy::too_many_arguments)]
@@ -24,39 +26,33 @@ pub fn render_log_viewer(
     scroll_offset: usize,
     auto_scroll: bool,
     focus_timer: Option<&FocusTimer>,
+    header_notifications: &HeaderNotificationManager,
+    attention_count: usize,
 ) {
     let entries = log_buffer.all_entries();
     let entry_count = entries.len();
 
-    // Layout: header, content, footer
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(0),    // Log entries
-            Constraint::Length(3), // Footer
-        ])
-        .split(area);
-
-    // Header with breadcrumb and log info
-    let t = theme();
-    let breadcrumb = Breadcrumb::new().push("Logs");
+    // Build header
     let auto_scroll_status = if auto_scroll { " [auto-scroll]" } else { "" };
-    let breadcrumb_text = format!(
-        "{} - {} ({} entries{})",
-        breadcrumb.display(),
+    let breadcrumb = Breadcrumb::new().push("Logs");
+    let suffix = format!(
+        "- {} ({} entries{})",
         log_file_info.path.display(),
         entry_count,
         auto_scroll_status
     );
-    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
-    let header = Paragraph::new(header_text)
-        .style(t.header_style())
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[0]);
+
+    let header = Header::new(breadcrumb)
+        .with_suffix(suffix)
+        .with_timer(focus_timer)
+        .with_notifications(Some(header_notifications))
+        .with_attention_count(attention_count);
+
+    // Create layout with header and footer
+    let areas = ScreenLayout::new(area).with_header(header).render(frame);
 
     // Calculate visible area height (minus borders)
-    let visible_height = chunks[1].height.saturating_sub(2) as usize;
+    let visible_height = areas.content.height.saturating_sub(2) as usize;
 
     // If auto-scroll is enabled, calculate scroll to show latest entries
     let effective_scroll = if auto_scroll && entry_count > visible_height {
@@ -70,7 +66,7 @@ pub fn render_log_viewer(
         let empty = Paragraph::new("No log entries yet.")
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL).title("Logs"));
-        frame.render_widget(empty, chunks[1]);
+        frame.render_widget(empty, areas.content);
     } else {
         // Get visible entries based on scroll position
         let visible_entries: Vec<_> = entries
@@ -120,7 +116,7 @@ pub fn render_log_viewer(
         );
 
         let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-        frame.render_widget(list, chunks[1]);
+        frame.render_widget(list, areas.content);
 
         // Scrollbar
         if entry_count > visible_height {
@@ -134,10 +130,10 @@ pub fn render_log_viewer(
 
             // Render scrollbar in the content area (inside the right border)
             let scrollbar_area = Rect {
-                x: chunks[1].x + chunks[1].width - 1,
-                y: chunks[1].y + 1,
+                x: areas.content.x + areas.content.width - 1,
+                y: areas.content.y + 1,
                 width: 1,
-                height: chunks[1].height.saturating_sub(2),
+                height: areas.content.height.saturating_sub(2),
             };
             frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
         }
@@ -152,5 +148,5 @@ pub fn render_log_viewer(
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[2]);
+    frame.render_widget(footer, areas.footer());
 }

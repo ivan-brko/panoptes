@@ -11,9 +11,11 @@ use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
+use crate::tui::header::Header;
+use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
 
 /// Render the session view
 pub fn render_session_view(
@@ -23,9 +25,11 @@ pub fn render_session_view(
     sessions: &SessionManager,
     project_store: &ProjectStore,
     config: &Config,
+    header_notifications: &HeaderNotificationManager,
 ) {
     let t = theme();
     let session = state.active_session.and_then(|id| sessions.get(id));
+    let attention_count = sessions.total_attention_count(config.idle_threshold_secs);
 
     // Pre-calculate layout using FrameLayout
     let frame_config = FrameConfig {
@@ -36,17 +40,23 @@ pub fn render_session_view(
     let layout = FrameLayout::calculate(area, &frame_config);
 
     // === HEADER ===
-    let breadcrumb_text = build_header_text(session, state, project_store);
-    let header_text =
-        format_header_with_timer(&breadcrumb_text, state.focus_timer.as_ref(), area.width);
+    // Build breadcrumb and suffix
+    let (breadcrumb, suffix) = build_header_breadcrumb(session, state, project_store);
+
+    // Session header has custom coloring based on session state
     let header_color = session
         .map(|s| s.info.state.color())
         .unwrap_or(t.text_muted);
+    let custom_style = Style::default().fg(header_color).bold();
 
-    let header = Paragraph::new(header_text)
-        .style(Style::default().fg(header_color).bold())
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, layout.header);
+    let header = Header::new(breadcrumb)
+        .with_suffix(suffix)
+        .with_timer(state.focus_timer.as_ref())
+        .with_notifications(Some(header_notifications))
+        .with_attention_count(attention_count)
+        .with_custom_style(custom_style);
+
+    header.render(frame, layout.header);
 
     // === FRAME BORDER ===
     let frame_color = if state.input_mode == InputMode::Session {
@@ -103,11 +113,12 @@ pub fn render_session_view(
     frame.render_widget(footer, layout.footer);
 }
 
-fn build_header_text(
+/// Build breadcrumb and suffix for the session header
+fn build_header_breadcrumb(
     session: Option<&Session>,
     state: &AppState,
     project_store: &ProjectStore,
-) -> String {
+) -> (Breadcrumb, String) {
     if let Some(session) = session {
         let mode_indicator = match state.input_mode {
             InputMode::Session => "[SESSION]",
@@ -135,15 +146,18 @@ fn build_header_text(
             .push(project_name)
             .push(branch_name)
             .push(&session.info.name);
-        format!(
-            "{} - {}{} {}",
-            breadcrumb.display(),
+        let suffix = format!(
+            "- {}{} {}",
             session.info.state.display_name(),
             exit_info,
             mode_indicator
-        )
+        );
+        (breadcrumb, suffix)
     } else {
-        "Panoptes > ? > ? > ? - No session".to_string()
+        (
+            Breadcrumb::new().push("?").push("?").push("?"),
+            "- No session".to_string(),
+        )
     }
 }
 

@@ -12,13 +12,17 @@ use crate::config::Config;
 use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
+use crate::tui::header::Header;
+use crate::tui::header_notifications::HeaderNotificationManager;
+use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::render_project_delete_confirmation;
 use crate::tui::views::render_quit_confirm_dialog;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
 
 /// Render the projects overview
+#[allow(clippy::too_many_arguments)]
 pub fn render_projects_overview(
     frame: &mut Frame,
     area: Rect,
@@ -27,69 +31,70 @@ pub fn render_projects_overview(
     sessions: &SessionManager,
     config: &Config,
     focus_timer: Option<&FocusTimer>,
+    header_notifications: &HeaderNotificationManager,
 ) {
     let idle_threshold = config.idle_threshold_secs;
     let attention_count = sessions.total_attention_count(idle_threshold);
     let attention_sessions = sessions.sessions_needing_attention(idle_threshold);
     let has_dropped_events = state.dropped_events_count > 0;
     let has_error = state.error_message.is_some();
+    let t = theme();
 
-    // Build constraints dynamically based on what we need to show
-    let mut constraints = vec![Constraint::Length(3)]; // Header
+    // Build header
+    let active_count = sessions.total_active_count();
+    let breadcrumb = Breadcrumb::new();
+    let mut status_parts = vec![format!("{} projects", project_store.project_count())];
+    if active_count > 0 {
+        status_parts.push(format!("{} active", active_count));
+    }
+    if attention_count > 0 {
+        status_parts.push(format!("{} need attention", attention_count));
+    }
+    let suffix = format!("({})", status_parts.join(", "));
+
+    let header = Header::new(breadcrumb)
+        .with_suffix(suffix)
+        .with_timer(focus_timer)
+        .with_notifications(Some(header_notifications))
+        .with_attention_count(attention_count);
+
+    // Create layout with header and footer
+    let areas = ScreenLayout::new(area).with_header(header).render(frame);
+
+    // Dynamic content layout based on error/warning banners and attention section
+    let mut content_constraints: Vec<Constraint> = Vec::new();
 
     // Error message banner
     if has_error {
-        constraints.push(Constraint::Length(1));
+        content_constraints.push(Constraint::Length(1));
     }
 
     // Warning banner for dropped events
     if has_dropped_events {
-        constraints.push(Constraint::Length(1));
+        content_constraints.push(Constraint::Length(1));
     }
 
     // Attention section
     if attention_count > 0 && state.input_mode == InputMode::Normal {
         let attention_height = (attention_sessions.len() + 2).min(8) as u16;
-        constraints.push(Constraint::Length(attention_height));
+        content_constraints.push(Constraint::Length(attention_height));
     }
 
-    constraints.push(Constraint::Min(0)); // Main content
-    constraints.push(Constraint::Length(3)); // Footer
+    // Main content
+    content_constraints.push(Constraint::Min(0));
 
-    let chunks = Layout::default()
+    let content_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
+        .constraints(content_constraints)
+        .split(areas.content);
 
     let mut chunk_idx = 0;
-
-    // Header with breadcrumb
-    let active_count = sessions.total_active_count();
-    let breadcrumb_text = {
-        let breadcrumb = Breadcrumb::new();
-        let mut status_parts = vec![format!("{} projects", project_store.project_count())];
-        if active_count > 0 {
-            status_parts.push(format!("{} active", active_count));
-        }
-        if attention_count > 0 {
-            status_parts.push(format!("{} need attention", attention_count));
-        }
-        let suffix = format!("({})", status_parts.join(", "));
-        breadcrumb.display_with_suffix(&suffix)
-    };
-    let t = theme();
-    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
-    let header = Paragraph::new(header_text)
-        .style(t.header_style())
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[chunk_idx]);
-    chunk_idx += 1;
 
     // Error message banner
     if let Some(error_msg) = &state.error_message {
         let error_text = format!("✖ {} (press any key to dismiss)", error_msg);
         let error_banner = Paragraph::new(error_text).style(t.error_banner_style());
-        frame.render_widget(error_banner, chunks[chunk_idx]);
+        frame.render_widget(error_banner, content_chunks[chunk_idx]);
         chunk_idx += 1;
     }
 
@@ -100,7 +105,7 @@ pub fn render_projects_overview(
             state.dropped_events_count
         );
         let warning = Paragraph::new(warning_text).style(t.warning_banner_style());
-        frame.render_widget(warning, chunks[chunk_idx]);
+        frame.render_widget(warning, content_chunks[chunk_idx]);
         chunk_idx += 1;
     }
 
@@ -108,7 +113,7 @@ pub fn render_projects_overview(
     if attention_count > 0 && state.input_mode == InputMode::Normal {
         render_attention_section(
             frame,
-            chunks[chunk_idx],
+            content_chunks[chunk_idx],
             &attention_sessions,
             project_store,
             idle_threshold,
@@ -116,37 +121,30 @@ pub fn render_projects_overview(
         chunk_idx += 1;
     }
 
-    let main_chunk_index = chunk_idx;
+    let main_area = content_chunks[chunk_idx];
 
     // Main content area
     match state.input_mode {
         InputMode::CreatingSession => {
-            render_session_creation(frame, chunks[main_chunk_index], state);
+            render_session_creation(frame, main_area, state);
         }
         InputMode::AddingProject => {
-            render_project_addition(frame, chunks[main_chunk_index], state);
+            render_project_addition(frame, main_area, state);
         }
         InputMode::AddingProjectName => {
-            render_project_name_input(frame, chunks[main_chunk_index], state);
+            render_project_name_input(frame, main_area, state);
         }
         InputMode::ConfirmingProjectDelete => {
             // Get the project being deleted
             let project = state
                 .pending_delete_project
                 .and_then(|id| project_store.get_project(id));
-            render_project_delete_confirmation(
-                frame,
-                chunks[main_chunk_index],
-                state,
-                project,
-                sessions,
-                config,
-            );
+            render_project_delete_confirmation(frame, main_area, state, project, sessions, config);
         }
         _ => {
             render_main_content(
                 frame,
-                chunks[main_chunk_index],
+                main_area,
                 state,
                 project_store,
                 sessions,
@@ -155,8 +153,7 @@ pub fn render_projects_overview(
         }
     }
 
-    // Footer with help (always last chunk)
-    let footer_index = chunks.len() - 1;
+    // Footer with help
     let help_text = match state.input_mode {
         InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
         InputMode::AddingProject => {
@@ -194,7 +191,7 @@ pub fn render_projects_overview(
     let footer = Paragraph::new(help_text)
         .style(t.muted_style())
         .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[footer_index]);
+    frame.render_widget(footer, areas.footer());
 
     // Render quit confirmation dialog as overlay
     if state.input_mode == InputMode::ConfirmingQuit {

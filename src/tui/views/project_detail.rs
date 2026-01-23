@@ -12,10 +12,13 @@ use crate::focus_timing::FocusTimer;
 use crate::git::GitOps;
 use crate::project::{Project, ProjectId, ProjectStore};
 use crate::session::SessionManager;
+use crate::tui::header::Header;
+use crate::tui::header_notifications::HeaderNotificationManager;
+use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
 
 /// Render the project detail view showing branches
 #[allow(clippy::too_many_arguments)]
@@ -28,26 +31,16 @@ pub fn render_project_detail(
     sessions: &SessionManager,
     config: &Config,
     focus_timer: Option<&FocusTimer>,
+    header_notifications: &HeaderNotificationManager,
 ) {
     let idle_threshold = config.idle_threshold_secs;
     let project = project_store.get_project(project_id);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(0),    // Branch list
-            Constraint::Length(3), // Footer
-        ])
-        .split(area);
-
-    // Header with breadcrumb
-    let t = theme();
-    let breadcrumb_text = if let Some(project) = project {
+    // Build header
+    let attention_count = sessions.attention_count_for_project(project_id, idle_threshold);
+    let (breadcrumb, suffix) = if let Some(project) = project {
         let active_count = sessions.active_session_count_for_project(project_id);
-        let attention_count = sessions.attention_count_for_project(project_id, idle_threshold);
-
-        let breadcrumb = Breadcrumb::new().push(&project.name);
+        let bc = Breadcrumb::new().push(&project.name);
         let mut status_parts = vec![];
         if active_count > 0 {
             status_parts.push(format!("{} active", active_count));
@@ -55,38 +48,49 @@ pub fn render_project_detail(
         if attention_count > 0 {
             status_parts.push(format!("{} need attention", attention_count));
         }
-        if status_parts.is_empty() {
-            breadcrumb.display()
+        let suffix = if status_parts.is_empty() {
+            String::new()
         } else {
-            breadcrumb.display_with_suffix(&format!("({})", status_parts.join(", ")))
-        }
+            format!("({})", status_parts.join(", "))
+        };
+        (bc, suffix)
     } else {
-        "Panoptes > ?".to_string()
+        (Breadcrumb::new().push("?"), String::new())
     };
-    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
 
-    let header = Paragraph::new(header_text)
-        .style(t.header_style())
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[0]);
+    let header = Header::new(breadcrumb)
+        .with_suffix(suffix)
+        .with_timer(focus_timer)
+        .with_notifications(Some(header_notifications))
+        .with_attention_count(attention_count);
+
+    // Create layout with header and footer
+    let areas = ScreenLayout::new(area).with_header(header).render(frame);
 
     // Branch list, worktree creation dialog, or delete confirmation
     if state.input_mode == InputMode::ConfirmingBranchDelete {
-        render_branch_delete_confirmation(frame, chunks[1], state, project_store, sessions, config);
+        render_branch_delete_confirmation(
+            frame,
+            areas.content,
+            state,
+            project_store,
+            sessions,
+            config,
+        );
     } else if state.input_mode == InputMode::WorktreeSelectBranch {
-        render_worktree_select_branch(frame, chunks[1], state, config);
+        render_worktree_select_branch(frame, areas.content, state, config);
     } else if state.input_mode == InputMode::WorktreeSelectBase {
-        render_worktree_select_base(frame, chunks[1], state, config);
+        render_worktree_select_base(frame, areas.content, state, config);
     } else if state.input_mode == InputMode::WorktreeConfirm {
-        render_worktree_confirm(frame, chunks[1], state, config);
+        render_worktree_confirm(frame, areas.content, state, config);
     } else if state.input_mode == InputMode::CreatingWorktree {
-        render_worktree_creation(frame, chunks[1], state, project);
+        render_worktree_creation(frame, areas.content, state, project);
     } else if state.input_mode == InputMode::SelectingDefaultBase {
-        render_default_base_selection(frame, chunks[1], state);
+        render_default_base_selection(frame, areas.content, state);
     } else if state.input_mode == InputMode::FetchingBranches {
-        render_fetching_branches(frame, chunks[1]);
+        render_fetching_branches(frame, areas.content);
     } else if state.input_mode == InputMode::RenamingProject {
-        render_rename_dialog(frame, chunks[1], state);
+        render_rename_dialog(frame, areas.content, state);
     } else if let Some(project) = project {
         let branches = project_store.branches_for_project_sorted(project_id);
 
@@ -97,7 +101,7 @@ pub fn render_project_detail(
             )
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL).title("Branches"));
-            frame.render_widget(empty, chunks[1]);
+            frame.render_widget(empty, areas.content);
         } else {
             let selected_index = state.selected_branch_index;
 
@@ -223,13 +227,13 @@ pub fn render_project_detail(
 
             let title = format!("Branches ({})", branches.len());
             let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-            frame.render_widget(list, chunks[1]);
+            frame.render_widget(list, areas.content);
         }
     } else {
         let error = Paragraph::new("Project not found")
             .style(Style::default().fg(Color::Red))
             .block(Block::default().borders(Borders::ALL).title("Error"));
-        frame.render_widget(error, chunks[1]);
+        frame.render_widget(error, areas.content);
     }
 
     // Footer
@@ -269,7 +273,7 @@ pub fn render_project_detail(
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[2]);
+    frame.render_widget(footer, areas.footer());
 }
 
 /// Render the worktree creation dialog with base branch selector

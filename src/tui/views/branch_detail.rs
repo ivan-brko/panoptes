@@ -11,10 +11,13 @@ use crate::config::Config;
 use crate::focus_timing::FocusTimer;
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{SessionManager, SessionState};
+use crate::tui::header::Header;
+use crate::tui::header_notifications::HeaderNotificationManager;
+use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
 
 /// Render the branch detail view showing sessions
 #[allow(clippy::too_many_arguments)]
@@ -28,28 +31,19 @@ pub fn render_branch_detail(
     sessions: &SessionManager,
     config: &Config,
     focus_timer: Option<&FocusTimer>,
+    header_notifications: &HeaderNotificationManager,
 ) {
     let idle_threshold = config.idle_threshold_secs;
     let project = project_store.get_project(project_id);
     let branch = project_store.get_branch(branch_id);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(0),    // Session list
-            Constraint::Length(3), // Footer
-        ])
-        .split(area);
-
-    // Header with breadcrumb
-    let t = theme();
-    let breadcrumb_text = match (project, branch) {
+    // Build header
+    let attention_count = sessions.attention_count_for_branch(branch_id, idle_threshold);
+    let (breadcrumb, suffix) = match (project, branch) {
         (Some(project), Some(branch)) => {
             let active_count = sessions.active_session_count_for_branch(branch_id);
-            let attention_count = sessions.attention_count_for_branch(branch_id, idle_threshold);
 
-            let breadcrumb = Breadcrumb::new().push(&project.name).push(&branch.name);
+            let bc = Breadcrumb::new().push(&project.name).push(&branch.name);
             let mut status_parts = vec![];
             if active_count > 0 {
                 status_parts.push(format!("{} active", active_count));
@@ -57,26 +51,30 @@ pub fn render_branch_detail(
             if attention_count > 0 {
                 status_parts.push(format!("{} need attention", attention_count));
             }
-            if status_parts.is_empty() {
-                breadcrumb.display()
+            let suffix = if status_parts.is_empty() {
+                String::new()
             } else {
-                breadcrumb.display_with_suffix(&format!("({})", status_parts.join(", ")))
-            }
+                format!("({})", status_parts.join(", "))
+            };
+            (bc, suffix)
         }
-        _ => "Panoptes > ? > ?".to_string(),
+        _ => (Breadcrumb::new().push("?").push("?"), String::new()),
     };
-    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
 
-    let header = Paragraph::new(header_text)
-        .style(t.header_style())
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[0]);
+    let header = Header::new(breadcrumb)
+        .with_suffix(suffix)
+        .with_timer(focus_timer)
+        .with_notifications(Some(header_notifications))
+        .with_attention_count(attention_count);
+
+    // Create layout with header and footer
+    let areas = ScreenLayout::new(area).with_header(header).render(frame);
 
     // Main content area - either session creation input, delete confirmation, or session list
     if state.input_mode == InputMode::CreatingSession {
-        render_session_creation(frame, chunks[1], state);
+        render_session_creation(frame, areas.content, state);
     } else if state.input_mode == InputMode::ConfirmingSessionDelete {
-        render_delete_confirmation(frame, chunks[1], state, sessions);
+        render_delete_confirmation(frame, areas.content, state, sessions);
     } else if let Some(branch) = branch {
         let branch_sessions = sessions.sessions_for_branch(branch_id);
 
@@ -90,7 +88,7 @@ pub fn render_branch_detail(
             let empty = Paragraph::new(empty_text)
                 .style(Style::default().fg(Color::DarkGray))
                 .block(Block::default().borders(Borders::ALL).title("Sessions"));
-            frame.render_widget(empty, chunks[1]);
+            frame.render_widget(empty, areas.content);
         } else {
             let selected_index = state.selected_session_index;
             let now = Utc::now();
@@ -149,13 +147,13 @@ pub fn render_branch_detail(
 
             let title = format!("Sessions ({})", branch_sessions.len());
             let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-            frame.render_widget(list, chunks[1]);
+            frame.render_widget(list, areas.content);
         }
     } else {
         let error = Paragraph::new("Branch not found")
             .style(Style::default().fg(Color::Red))
             .block(Block::default().borders(Borders::ALL).title("Error"));
-        frame.render_widget(error, chunks[1]);
+        frame.render_widget(error, areas.content);
     }
 
     // Footer
@@ -178,7 +176,7 @@ pub fn render_branch_detail(
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[2]);
+    frame.render_widget(footer, areas.footer());
 }
 
 /// Render the session creation input

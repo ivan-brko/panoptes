@@ -11,9 +11,11 @@ use crate::config::Config;
 use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
-use crate::tui::theme::theme;
+use crate::tui::header::Header;
+use crate::tui::header_notifications::HeaderNotificationManager;
+use crate::tui::layout::ScreenLayout;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint, format_header_with_timer};
+use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
 
 /// Render the activity timeline view showing all sessions sorted by activity
 #[allow(clippy::too_many_arguments)]
@@ -25,72 +27,59 @@ pub fn render_timeline(
     project_store: &ProjectStore,
     config: &Config,
     focus_timer: Option<&FocusTimer>,
+    header_notifications: &HeaderNotificationManager,
 ) {
     let idle_threshold = config.idle_threshold_secs;
     let attention_count = sessions.total_attention_count(idle_threshold);
     let attention_sessions = sessions.sessions_needing_attention(idle_threshold);
 
-    // Dynamic layout based on whether we have sessions needing attention
-    let chunks = if attention_count > 0 {
-        let attention_height = (attention_sessions.len() + 2).min(8) as u16; // Cap at 8 lines
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),                // Header
-                Constraint::Length(attention_height), // Attention section
-                Constraint::Min(0),                   // Session list
-                Constraint::Length(3),                // Footer
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Min(0),    // Session list
-                Constraint::Length(3), // Footer
-            ])
-            .split(area)
-    };
-
     // Get all sessions and sort by last_activity (most recent first)
     let mut all_sessions: Vec<_> = sessions.sessions_in_order();
     all_sessions.sort_by(|a, b| b.info.last_activity.cmp(&a.info.last_activity));
 
-    // Header with breadcrumb
-    let t = theme();
+    // Build header
     let active_count = sessions.total_active_count();
-    let breadcrumb_text = {
-        let breadcrumb = Breadcrumb::new().push("Timeline");
-        let mut status_parts = vec![format!("{} sessions", all_sessions.len())];
-        if active_count > 0 {
-            status_parts.push(format!("{} active", active_count));
-        }
-        if attention_count > 0 {
-            status_parts.push(format!("{} need attention", attention_count));
-        }
-        breadcrumb.display_with_suffix(&format!("({})", status_parts.join(", ")))
+    let breadcrumb = Breadcrumb::new().push("Timeline");
+    let mut status_parts = vec![format!("{} sessions", all_sessions.len())];
+    if active_count > 0 {
+        status_parts.push(format!("{} active", active_count));
+    }
+    if attention_count > 0 {
+        status_parts.push(format!("{} need attention", attention_count));
+    }
+    let suffix = format!("({})", status_parts.join(", "));
+
+    let header = Header::new(breadcrumb)
+        .with_suffix(suffix)
+        .with_timer(focus_timer)
+        .with_notifications(Some(header_notifications))
+        .with_attention_count(attention_count);
+
+    // Create layout with header and footer
+    let areas = ScreenLayout::new(area).with_header(header).render(frame);
+
+    // Split content area for attention section if needed
+    let (attention_area, main_area) = if attention_count > 0 {
+        let attention_height = (attention_sessions.len() + 2).min(8) as u16;
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(attention_height), Constraint::Min(0)])
+            .split(areas.content);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, areas.content)
     };
-    let header_text = format_header_with_timer(&breadcrumb_text, focus_timer, area.width);
 
-    let header = Paragraph::new(header_text)
-        .style(t.header_style())
-        .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(header, chunks[0]);
-
-    // Attention section (if needed)
-    let main_chunk_index = if attention_count > 0 {
+    // Render attention section if needed
+    if let Some(attention_area) = attention_area {
         render_attention_section(
             frame,
-            chunks[1],
+            attention_area,
             &attention_sessions,
             project_store,
             idle_threshold,
         );
-        2
-    } else {
-        1
-    };
+    }
 
     // Session list
     if all_sessions.is_empty() {
@@ -100,7 +89,7 @@ pub fn render_timeline(
         )
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL).title("Sessions"));
-        frame.render_widget(empty, chunks[main_chunk_index]);
+        frame.render_widget(empty, main_area);
     } else {
         let selected_index = state.selected_timeline_index;
         let now = Utc::now();
@@ -179,11 +168,10 @@ pub fn render_timeline(
                 .borders(Borders::ALL)
                 .title("Recent Activity"),
         );
-        frame.render_widget(list, chunks[main_chunk_index]);
+        frame.render_widget(list, main_area);
     }
 
     // Footer
-    let footer_index = if attention_count > 0 { 3 } else { 2 };
     let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
     let base_help = format!("{} | ↑/↓: navigate | Enter: open | Esc/q: back", timer_hint);
     let help_text = if let Some(hint) = format_attention_hint(sessions, config) {
@@ -194,7 +182,7 @@ pub fn render_timeline(
     let footer = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[footer_index]);
+    frame.render_widget(footer, areas.footer());
 }
 
 /// Render the "Needs Attention" section for timeline view
