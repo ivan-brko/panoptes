@@ -26,6 +26,39 @@ pub enum HomepageFocus {
     Sessions,
 }
 
+/// Worktree creation wizard state
+///
+/// Groups all fields related to the multi-step worktree creation wizard.
+/// This state is initialized in `start_worktree_wizard()` and cleared in
+/// `cancel_worktree_wizard()`.
+#[derive(Debug, Clone, Default)]
+pub struct WorktreeWizardState {
+    /// Search text in WorktreeSelectBranch step
+    pub search_text: String,
+    /// All available branches (local + remote) for worktree creation
+    pub all_branches: Vec<BranchRef>,
+    /// Filtered branches matching search text
+    pub filtered_branches: Vec<BranchRef>,
+    /// Selected index in branch list (0..N = branches, N = "create new" option)
+    pub list_index: usize,
+    /// Final local branch name (for new branch or from remote)
+    pub branch_name: String,
+    /// Selected existing/remote branch (for ExistingLocal/RemoteTracking)
+    pub source_branch: Option<BranchRef>,
+    /// Base branch for creating new branches (step 2)
+    pub base_branch: Option<BranchRef>,
+    /// Search text in WorktreeSelectBase step
+    pub base_search_text: String,
+    /// Selected index in base branch list (step 2)
+    pub base_list_index: usize,
+    /// Type of worktree creation being performed
+    pub creation_type: WorktreeCreationType,
+    /// Project name for worktree path (cached during wizard)
+    pub project_name: String,
+    /// Validation error for branch name input (displayed in UI)
+    pub branch_validation_error: Option<String>,
+}
+
 /// Application state
 #[derive(Default)]
 pub struct AppState {
@@ -71,10 +104,6 @@ pub struct AppState {
     pub pending_default_branch: String,
     /// Buffer for new branch name input (worktree creation)
     pub new_branch_name: String,
-    /// Cached branches from git (for branch selector) - legacy, keep for compatibility
-    pub available_branches: Vec<String>,
-    /// Branches matching current search filter - legacy, keep for compatibility
-    pub filtered_branches: Vec<String>,
     /// Selected index in branch selector (0 = "Create new")
     pub branch_selector_index: usize,
     /// Available branch refs (local and remote) for worktree creation
@@ -116,31 +145,9 @@ pub struct AppState {
     /// Scroll offset for session view (0 = live view, >0 = scrolled back)
     pub session_scroll_offset: usize,
 
-    // --- New worktree creation wizard state ---
-    /// Search text in WorktreeSelectBranch step
-    pub worktree_search_text: String,
-    /// All available branches (local + remote) for worktree creation
-    pub worktree_all_branches: Vec<BranchRef>,
-    /// Filtered branches matching search text
-    pub worktree_filtered_branches: Vec<BranchRef>,
-    /// Selected index in branch list (0..N = branches, N = "create new" option)
-    pub worktree_list_index: usize,
-    /// Final local branch name (for new branch or from remote)
-    pub worktree_branch_name: String,
-    /// Selected existing/remote branch (for ExistingLocal/RemoteTracking)
-    pub worktree_source_branch: Option<BranchRef>,
-    /// Base branch for creating new branches (step 2)
-    pub worktree_base_branch: Option<BranchRef>,
-    /// Search text in WorktreeSelectBase step
-    pub worktree_base_search_text: String,
-    /// Selected index in base branch list (step 2)
-    pub worktree_base_list_index: usize,
-    /// Type of worktree creation being performed
-    pub worktree_creation_type: WorktreeCreationType,
-    /// Project name for worktree path (cached during wizard)
-    pub worktree_project_name: String,
-    /// Validation error for branch name input (displayed in UI)
-    pub worktree_branch_validation_error: Option<String>,
+    /// Worktree creation wizard state (grouped together)
+    pub worktree_wizard: WorktreeWizardState,
+
     /// Loading message to display during blocking operations
     pub loading_message: Option<String>,
     /// Focus state for homepage (projects vs sessions list)

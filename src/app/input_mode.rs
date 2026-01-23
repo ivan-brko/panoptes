@@ -16,8 +16,6 @@ pub enum InputMode {
     AddingProject,
     /// Adding a new project - typing optional name (after path validation)
     AddingProjectName,
-    /// Fetching branches from git remotes (shows spinner) - DEPRECATED
-    FetchingBranches,
     /// Creating a new worktree - typing branch name - DEPRECATED (use WorktreeSelectBranch)
     CreatingWorktree,
     /// Selecting default base branch - DEPRECATED (use WorktreeSelectBase)

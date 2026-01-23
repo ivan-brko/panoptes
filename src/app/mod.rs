@@ -10,7 +10,7 @@ mod view;
 
 // Re-exports from submodules
 pub use input_mode::InputMode;
-pub use state::{AppState, HomepageFocus};
+pub use state::{AppState, HomepageFocus, WorktreeWizardState};
 pub use view::View;
 
 // Re-exports from wizards (for backwards compatibility)
@@ -670,14 +670,7 @@ impl App {
     /// Start the new worktree creation wizard (Step 1)
     pub(crate) fn start_worktree_wizard(&mut self, project_id: ProjectId) {
         // Clear all wizard state
-        self.state.worktree_search_text.clear();
-        self.state.worktree_list_index = 0;
-        self.state.worktree_branch_name.clear();
-        self.state.worktree_source_branch = None;
-        self.state.worktree_base_branch = None;
-        self.state.worktree_base_search_text.clear();
-        self.state.worktree_base_list_index = 0;
-        self.state.worktree_creation_type = WorktreeCreationType::ExistingLocal;
+        self.state.worktree_wizard = WorktreeWizardState::default();
         self.state.fetch_error = None;
 
         // Get project info and clone what we need
@@ -692,7 +685,7 @@ impl App {
                 project.default_base_branch.clone(),
             )
         };
-        self.state.worktree_project_name = project_name;
+        self.state.worktree_wizard.project_name = project_name;
 
         // Get tracked branch names for this project
         let tracked_branches: std::collections::HashSet<String> = self
@@ -720,7 +713,7 @@ impl App {
         let default_base = default_base_branch.as_deref();
         match git.list_all_branch_refs(default_base) {
             Ok(refs) => {
-                self.state.worktree_all_branches = refs
+                self.state.worktree_wizard.all_branches = refs
                     .into_iter()
                     .map(|r| {
                         let ref_type = match r.ref_type {
@@ -736,7 +729,8 @@ impl App {
                         }
                     })
                     .collect();
-                self.state.worktree_filtered_branches = self.state.worktree_all_branches.clone();
+                self.state.worktree_wizard.filtered_branches =
+                    self.state.worktree_wizard.all_branches.clone();
             }
             Err(e) => {
                 tracing::error!("Failed to list branches: {}", e);

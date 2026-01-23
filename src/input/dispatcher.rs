@@ -31,13 +31,6 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::CreatingSession => super::text_input::handle_creating_session_key(app, key),
         InputMode::AddingProject => super::text_input::handle_adding_project_key(app, key),
         InputMode::AddingProjectName => super::text_input::handle_adding_project_name_key(app, key),
-        InputMode::FetchingBranches => {
-            // While fetching, only allow Esc to cancel
-            if key.code == KeyCode::Esc {
-                app.state.input_mode = InputMode::Normal;
-            }
-            Ok(())
-        }
         InputMode::CreatingWorktree => {
             // Need to get project_id from current view
             if let View::ProjectDetail(project_id) = app.state.view {
