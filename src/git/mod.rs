@@ -277,6 +277,68 @@ pub fn is_git_repository(path: &Path) -> bool {
     Repository::discover(path).is_ok()
 }
 
+/// Validates a branch name according to git rules (git check-ref-format).
+///
+/// Returns `Ok(())` if the name is valid, or `Err(message)` with a specific error.
+///
+/// Git branch names cannot:
+/// - Be empty
+/// - Contain spaces, `~`, `^`, `:`, `?`, `*`, `[`, `\`, or control characters
+/// - Begin or end with `/` or `.`
+/// - Contain `..`, `@{`, or consecutive slashes `//`
+/// - End with `.lock`
+pub fn validate_branch_name(name: &str) -> Result<(), String> {
+    // Check for empty name
+    if name.is_empty() {
+        return Err("Branch name cannot be empty".to_string());
+    }
+
+    // Check for invalid characters
+    const INVALID_CHARS: &[char] = &[' ', '~', '^', ':', '?', '*', '[', '\\'];
+    for c in name.chars() {
+        if INVALID_CHARS.contains(&c) {
+            return Err(format!("Branch name cannot contain '{}'", c));
+        }
+        // Check for control characters (ASCII 0-31 and 127)
+        if c.is_ascii_control() {
+            return Err("Branch name cannot contain control characters".to_string());
+        }
+    }
+
+    // Check for starting/ending with / or .
+    if name.starts_with('/') || name.ends_with('/') {
+        return Err("Branch name cannot start or end with '/'".to_string());
+    }
+    if name.starts_with('.') || name.ends_with('.') {
+        return Err("Branch name cannot start or end with '.'".to_string());
+    }
+
+    // Check for consecutive slashes
+    if name.contains("//") {
+        return Err("Branch name cannot contain consecutive slashes '//'".to_string());
+    }
+
+    // Check for ..
+    if name.contains("..") {
+        return Err("Branch name cannot contain '..'".to_string());
+    }
+
+    // Check for @{
+    if name.contains("@{") {
+        return Err("Branch name cannot contain '@{'".to_string());
+    }
+
+    // Check for .lock suffix
+    if name.ends_with(".lock") {
+        return Err("Branch name cannot end with '.lock'".to_string());
+    }
+
+    Ok(())
+}
+
+/// Characters that are invalid in git branch names and should be filtered during input
+pub const INVALID_BRANCH_CHARS: &[char] = &[' ', '~', '^', ':', '?', '*', '[', '\\'];
+
 /// Get the repository root from any path within it
 pub fn find_repo_root(path: &Path) -> Result<PathBuf> {
     let repo = Repository::discover(path)
@@ -419,5 +481,65 @@ mod tests {
 
         let current = git_ops.current_branch().unwrap();
         assert!(current.is_some());
+    }
+
+    #[test]
+    fn test_validate_branch_name_valid() {
+        // Valid branch names
+        assert!(validate_branch_name("feature/new-thing").is_ok());
+        assert!(validate_branch_name("fix-bug-123").is_ok());
+        assert!(validate_branch_name("my-branch").is_ok());
+        assert!(validate_branch_name("feature/deeply/nested/branch").is_ok());
+        assert!(validate_branch_name("UPPERCASE").is_ok());
+        assert!(validate_branch_name("123-numeric").is_ok());
+    }
+
+    #[test]
+    fn test_validate_branch_name_empty() {
+        assert!(validate_branch_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_invalid_chars() {
+        assert!(validate_branch_name("feature branch").is_err()); // space
+        assert!(validate_branch_name("branch~name").is_err()); // tilde
+        assert!(validate_branch_name("branch^name").is_err()); // caret
+        assert!(validate_branch_name("branch:name").is_err()); // colon
+        assert!(validate_branch_name("branch?name").is_err()); // question mark
+        assert!(validate_branch_name("branch*name").is_err()); // asterisk
+        assert!(validate_branch_name("branch[name").is_err()); // bracket
+        assert!(validate_branch_name("branch\\name").is_err()); // backslash
+    }
+
+    #[test]
+    fn test_validate_branch_name_slash_dot_edges() {
+        assert!(validate_branch_name("/branch").is_err()); // starts with /
+        assert!(validate_branch_name("branch/").is_err()); // ends with /
+        assert!(validate_branch_name(".branch").is_err()); // starts with .
+        assert!(validate_branch_name("branch.").is_err()); // ends with .
+    }
+
+    #[test]
+    fn test_validate_branch_name_consecutive_slashes() {
+        assert!(validate_branch_name("feature//branch").is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_double_dot() {
+        assert!(validate_branch_name("branch..name").is_err());
+        assert!(validate_branch_name("feature/..").is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_at_brace() {
+        assert!(validate_branch_name("branch@{name").is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_lock_suffix() {
+        assert!(validate_branch_name("branch.lock").is_err());
+        assert!(validate_branch_name("feature/branch.lock").is_err());
+        // But this should be fine:
+        assert!(validate_branch_name("branch.locked").is_ok());
     }
 }
