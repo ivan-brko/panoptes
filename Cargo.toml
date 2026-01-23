@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "claude-wrapper"]
+members = ["."]
 resolver = "2"
 
 [package]
