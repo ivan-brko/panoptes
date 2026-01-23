@@ -16,6 +16,24 @@ struct StoreData {
     branches: Vec<Branch>,
 }
 
+/// Backup a corrupted file by renaming it with a .backup extension
+fn backup_corrupted_file(path: &Path) {
+    let backup_path = path.with_extension("json.backup");
+    if let Err(e) = std::fs::rename(path, &backup_path) {
+        tracing::warn!(
+            "Failed to backup corrupted file {} to {}: {}",
+            path.display(),
+            backup_path.display(),
+            e
+        );
+    } else {
+        tracing::info!(
+            "Corrupted projects file backed up to {}",
+            backup_path.display()
+        );
+    }
+}
+
 /// Store for persisting projects and branches
 #[derive(Debug)]
 pub struct ProjectStore {
@@ -189,15 +207,41 @@ impl ProjectStore {
     }
 
     /// Load store from a specific path
+    ///
+    /// If the file is corrupted, this will create a backup and return an empty store.
     pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::with_path(path.to_path_buf()));
         }
 
-        let content = std::fs::read_to_string(path).context("Failed to read projects file")?;
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to read projects file: {}", e);
+                // Try to create a backup
+                backup_corrupted_file(path);
+                return Err(anyhow::anyhow!(
+                    "Could not read projects file ({}). Starting with empty project list.",
+                    e
+                ));
+            }
+        };
 
-        let data: StoreData =
-            serde_json::from_str(&content).context("Failed to parse projects file")?;
+        let data: StoreData = match serde_json::from_str(&content) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("Projects file is corrupted: {}", e);
+                // Create backup of corrupted file
+                backup_corrupted_file(path);
+                return Err(anyhow::anyhow!(
+                    "Projects file is corrupted and could not be parsed ({}). \
+                     A backup has been created at {}.backup. \
+                     Starting with empty project list.",
+                    e,
+                    path.display()
+                ));
+            }
+        };
 
         let projects = data.projects.into_iter().map(|p| (p.id, p)).collect();
         let branches = data.branches.into_iter().map(|b| (b.id, b)).collect();

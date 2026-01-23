@@ -158,6 +158,10 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
                             app.sessions.get_by_index(app.state.selected_session_index)
                         {
                             let id = session.info.id;
+                            // Clear active_session if it was the destroyed session
+                            if app.state.active_session == Some(id) {
+                                app.state.active_session = None;
+                            }
                             if let Err(e) = app.sessions.destroy_session(id) {
                                 tracing::error!("Failed to destroy session: {}", e);
                             }
@@ -181,6 +185,10 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
                 // Only sessions - delete selected session
                 if let Some(session) = app.sessions.get_by_index(app.state.selected_session_index) {
                     let id = session.info.id;
+                    // Clear active_session if it was the destroyed session
+                    if app.state.active_session == Some(id) {
+                        app.state.active_session = None;
+                    }
                     if let Err(e) = app.sessions.destroy_session(id) {
                         tracing::error!("Failed to destroy session: {}", e);
                     }

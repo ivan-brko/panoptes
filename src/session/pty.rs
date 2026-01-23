@@ -190,6 +190,30 @@ impl PtyHandle {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Check if the child process has exited and return exit status
+    ///
+    /// Returns:
+    /// - `None` if the process is still running
+    /// - `Some((exit_code, success))` if the process has exited
+    ///   - exit_code: The exit code (or 255 for signal termination)
+    ///   - success: Whether it was a successful exit (code 0)
+    pub fn exit_status(&mut self) -> Option<(i32, bool)> {
+        match self.child.try_wait() {
+            Ok(None) => None, // Still running
+            Ok(Some(status)) => {
+                // Process has exited - get exit code
+                // portable_pty ExitStatus wraps std::process::ExitStatus
+                let code = status.exit_code() as i32;
+                let success = status.success();
+                Some((code, success))
+            }
+            Err(_) => {
+                // Error checking status - treat as exited abnormally
+                Some((255, false))
+            }
+        }
+    }
+
     /// Kill the child process
     pub fn kill(&mut self) -> Result<()> {
         self.child

@@ -352,6 +352,15 @@ impl Session {
         self.pty.is_alive()
     }
 
+    /// Get the exit status of the session's process (if exited)
+    ///
+    /// Returns:
+    /// - `None` if the process is still running
+    /// - `Some((exit_code, success))` if the process has exited
+    pub fn exit_status(&mut self) -> Option<(i32, bool)> {
+        self.pty.exit_status()
+    }
+
     /// Kill the session's process
     pub fn kill(&mut self) -> anyhow::Result<()> {
         self.pty.kill()

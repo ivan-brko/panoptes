@@ -175,9 +175,28 @@ impl SessionManager {
     pub fn check_alive(&mut self) -> bool {
         let mut changed = false;
         for session in self.sessions.values_mut() {
-            if !session.is_alive() && session.info.state != SessionState::Exited {
-                session.set_state(SessionState::Exited);
-                changed = true;
+            if session.info.state != SessionState::Exited {
+                // Check exit status to detect crashes vs normal termination
+                if let Some((exit_code, success)) = session.exit_status() {
+                    if success {
+                        tracing::debug!(
+                            session_id = %session.info.id,
+                            session_name = %session.info.name,
+                            "Session exited normally"
+                        );
+                        session.info.exit_reason = None;
+                    } else {
+                        tracing::warn!(
+                            session_id = %session.info.id,
+                            session_name = %session.info.name,
+                            exit_code = exit_code,
+                            "Session exited abnormally"
+                        );
+                        session.info.exit_reason = Some(format!("Exit code: {}", exit_code));
+                    }
+                    session.set_state(SessionState::Exited);
+                    changed = true;
+                }
             }
         }
         changed

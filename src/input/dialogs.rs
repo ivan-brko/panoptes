@@ -115,8 +115,23 @@ pub fn handle_confirming_delete_key(app: &mut App, key: KeyEvent) -> Result<()> 
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             // Confirm deletion
             if let Some(session_id) = app.state.pending_delete_session.take() {
+                // Validate session still exists before deleting
+                if app.sessions.get(session_id).is_none() {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "Session no longer exists when confirming delete"
+                    );
+                    app.state.input_mode = InputMode::Normal;
+                    return Ok(());
+                }
+
                 // Get branch_id before destroying (for selection adjustment)
                 let branch_id = app.state.view.branch_id();
+
+                // Clear active_session if it was the destroyed session
+                if app.state.active_session == Some(session_id) {
+                    app.state.active_session = None;
+                }
 
                 if let Err(e) = app.sessions.destroy_session(session_id) {
                     tracing::error!("Failed to destroy session: {}", e);
@@ -155,8 +170,17 @@ pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Resu
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             // Confirm deletion
             if let Some(branch_id) = app.state.pending_delete_branch.take() {
-                // Get branch info before removing
+                // Validate branch still exists before deleting
                 let branch_info = app.project_store.get_branch(branch_id).cloned();
+                if branch_info.is_none() {
+                    tracing::warn!(
+                        branch_id = %branch_id,
+                        "Branch no longer exists when confirming delete"
+                    );
+                    app.state.input_mode = InputMode::Normal;
+                    app.state.delete_worktree_on_disk = false;
+                    return Ok(());
+                }
 
                 // Destroy all sessions for this branch
                 let sessions_to_destroy: Vec<_> = app
@@ -167,6 +191,10 @@ pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Resu
                     .collect();
 
                 for session_id in sessions_to_destroy {
+                    // Clear active_session if it was destroyed
+                    if app.state.active_session == Some(session_id) {
+                        app.state.active_session = None;
+                    }
                     if let Err(e) = app.sessions.destroy_session(session_id) {
                         tracing::error!("Failed to destroy session: {}", e);
                     }
@@ -268,6 +296,16 @@ pub fn handle_confirming_project_delete_key(app: &mut App, key: KeyEvent) -> Res
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             // Confirm deletion
             if let Some(project_id) = app.state.pending_delete_project.take() {
+                // Validate project still exists before deleting
+                if app.project_store.get_project(project_id).is_none() {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        "Project no longer exists when confirming delete"
+                    );
+                    app.state.input_mode = InputMode::Normal;
+                    return Ok(());
+                }
+
                 // Destroy all sessions for this project
                 let sessions_to_destroy: Vec<_> = app
                     .sessions
@@ -277,6 +315,10 @@ pub fn handle_confirming_project_delete_key(app: &mut App, key: KeyEvent) -> Res
                     .collect();
 
                 for session_id in sessions_to_destroy {
+                    // Clear active_session if it was destroyed
+                    if app.state.active_session == Some(session_id) {
+                        app.state.active_session = None;
+                    }
                     if let Err(e) = app.sessions.destroy_session(session_id) {
                         tracing::error!("Failed to destroy session: {}", e);
                     }

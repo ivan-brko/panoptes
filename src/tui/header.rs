@@ -104,13 +104,34 @@ impl<'a> Header<'a> {
         };
         left_parts.push(breadcrumb_text);
 
-        // Notification message (if any)
-        let notification_msg = self.notifications.and_then(|n| n.current_message());
-        if let Some(msg) = notification_msg {
-            left_parts.push(format!("| {}", msg));
-        }
+        // Notification message: persistent (error) takes priority over transient
+        let notification_info: Option<(&str, bool)> = self.notifications.and_then(|n| {
+            // Check for persistent notification first (error/critical)
+            if let Some(msg) = n.persistent() {
+                Some((msg, true))
+            } else {
+                n.current_message().map(|msg| (msg, false))
+            }
+        });
 
         let left_text = left_parts.join(" ");
+
+        // Add notification message separately with appropriate styling
+        let left_spans: Vec<Span> = if let Some((msg, is_error)) = notification_info {
+            let notification_style = if is_error {
+                Style::default().fg(t.state_exited).bold() // Use red/exited color for errors
+            } else {
+                Style::default()
+            };
+            vec![
+                Span::raw(left_text),
+                Span::raw(" | "),
+                Span::styled(msg, notification_style),
+            ]
+        } else {
+            vec![Span::raw(left_text)]
+        };
+        let left_text_len: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
 
         // Build the right side content
         let mut right_spans: Vec<Span> = Vec::new();
@@ -146,14 +167,13 @@ impl<'a> Header<'a> {
 
         // Calculate layout
         let width = area.width.saturating_sub(2) as usize; // Account for borders
-        let left_len = left_text.chars().count();
         let right_text: String = right_spans.iter().map(|s| s.content.as_ref()).collect();
         let right_len = right_text.chars().count();
 
         // Build the final line with padding
-        let padding = width.saturating_sub(left_len + right_len);
+        let padding = width.saturating_sub(left_text_len + right_len);
 
-        let mut line_spans = vec![Span::raw(left_text)];
+        let mut line_spans = left_spans;
         if padding > 0 {
             line_spans.push(Span::raw(" ".repeat(padding)));
         }

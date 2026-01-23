@@ -59,12 +59,15 @@ impl HeaderNotification {
 /// Manages a FIFO queue of header notifications
 ///
 /// Shows one notification at a time, removing expired ones automatically.
+/// Also supports a persistent notification that is always displayed (e.g., for errors).
 #[derive(Debug, Default)]
 pub struct HeaderNotificationManager {
     /// Queue of notifications (oldest first)
     queue: VecDeque<HeaderNotification>,
     /// Maximum queue size to prevent unbounded growth
     max_queue_size: usize,
+    /// Persistent notification that doesn't expire (for critical errors like server down)
+    persistent: Option<String>,
 }
 
 impl HeaderNotificationManager {
@@ -73,7 +76,31 @@ impl HeaderNotificationManager {
         Self {
             queue: VecDeque::new(),
             max_queue_size: 10, // Reasonable limit
+            persistent: None,
         }
+    }
+
+    /// Set a persistent notification (displayed until cleared)
+    ///
+    /// Use this for critical status messages like server errors.
+    /// Persistent notifications take priority over transient ones.
+    pub fn set_persistent(&mut self, message: String) {
+        self.persistent = Some(message);
+    }
+
+    /// Clear the persistent notification
+    pub fn clear_persistent(&mut self) {
+        self.persistent = None;
+    }
+
+    /// Get the persistent notification, if any
+    pub fn persistent(&self) -> Option<&str> {
+        self.persistent.as_deref()
+    }
+
+    /// Check if there's a persistent notification
+    pub fn has_persistent(&self) -> bool {
+        self.persistent.is_some()
     }
 
     /// Push a new notification onto the queue

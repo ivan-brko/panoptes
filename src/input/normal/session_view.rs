@@ -103,8 +103,13 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
             // Switch to next session
             let count = app.sessions.len();
             if count > 0 {
+                // Clamp current index to valid range before incrementing
+                let current = app
+                    .state
+                    .selected_timeline_index
+                    .min(count.saturating_sub(1));
                 // Use the timeline index for cycling through all sessions
-                app.state.selected_timeline_index = (app.state.selected_timeline_index + 1) % count;
+                app.state.selected_timeline_index = (current + 1) % count;
                 if let Some(session) = app.sessions.get_by_index(app.state.selected_timeline_index)
                 {
                     let session_id = session.info.id;
@@ -117,27 +122,27 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                     }
                     app.resize_active_session_pty()?;
                 }
+            } else {
+                // No sessions - reset index
+                app.state.selected_timeline_index = 0;
             }
         }
         KeyCode::Char(c) if c.is_ascii_digit() => {
-            // Jump to session by number
+            // Jump to session by number (1-indexed, 0 means session 10)
             if let Some(num) = c.to_digit(10) {
-                let count = app.sessions.len();
-                if num > 0 && (num as usize) <= count {
-                    app.state.selected_timeline_index = (num as usize) - 1;
-                    if let Some(session) =
-                        app.sessions.get_by_index(app.state.selected_timeline_index)
-                    {
-                        let session_id = session.info.id;
-                        app.state.active_session = Some(session_id);
-                        // Reset scroll offset when switching sessions
-                        app.state.session_scroll_offset = 0;
-                        app.sessions.acknowledge_attention(session_id);
-                        if app.config.notification_method == "title" {
-                            SessionManager::reset_terminal_title();
-                        }
-                        app.resize_active_session_pty()?;
+                let target_index = if num == 0 { 9 } else { (num as usize) - 1 };
+                // Use checked access for safety
+                if let Some(session) = app.sessions.get_by_index(target_index) {
+                    let session_id = session.info.id;
+                    app.state.selected_timeline_index = target_index;
+                    app.state.active_session = Some(session_id);
+                    // Reset scroll offset when switching sessions
+                    app.state.session_scroll_offset = 0;
+                    app.sessions.acknowledge_attention(session_id);
+                    if app.config.notification_method == "title" {
+                        SessionManager::reset_terminal_title();
                     }
+                    app.resize_active_session_pty()?;
                 }
             }
         }

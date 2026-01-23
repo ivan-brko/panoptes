@@ -101,34 +101,50 @@ impl Tui {
 
     /// Exit TUI mode (restore terminal)
     pub fn exit(&mut self) -> Result<()> {
+        tracing::debug!("Starting TUI exit sequence");
+
         // Pop keyboard enhancement FIRST (while still in raw mode)
         // The terminal may send a response sequence, which we need to consume
         if self.keyboard_enhancement_enabled {
-            let _ = stdout().execute(PopKeyboardEnhancementFlags);
-            let _ = stdout().flush();
+            if let Err(e) = stdout().execute(PopKeyboardEnhancementFlags) {
+                tracing::warn!("Failed to pop keyboard enhancement flags: {}", e);
+            }
+            if let Err(e) = stdout().flush() {
+                tracing::warn!("Failed to flush stdout after keyboard enhancement: {}", e);
+            }
             // Drain any pending terminal responses (CSI u sequences)
             while event::poll(Duration::from_millis(10)).unwrap_or(false) {
                 let _ = event::read();
             }
             self.keyboard_enhancement_enabled = false;
+            tracing::debug!("Keyboard enhancement disabled");
         }
 
         // Disable bracketed paste mode
         if self.bracketed_paste_enabled {
-            let _ = stdout().execute(DisableBracketedPaste);
+            if let Err(e) = stdout().execute(DisableBracketedPaste) {
+                tracing::warn!("Failed to disable bracketed paste: {}", e);
+            }
             self.bracketed_paste_enabled = false;
+            tracing::debug!("Bracketed paste disabled");
         }
 
         // Disable mouse capture
         if self.mouse_capture_enabled {
-            let _ = stdout().execute(DisableMouseCapture);
+            if let Err(e) = stdout().execute(DisableMouseCapture) {
+                tracing::warn!("Failed to disable mouse capture: {}", e);
+            }
             self.mouse_capture_enabled = false;
+            tracing::debug!("Mouse capture disabled");
         }
 
         // Disable focus change reporting
         if self.focus_change_enabled {
-            let _ = stdout().execute(DisableFocusChange);
+            if let Err(e) = stdout().execute(DisableFocusChange) {
+                tracing::warn!("Failed to disable focus change reporting: {}", e);
+            }
             self.focus_change_enabled = false;
+            tracing::debug!("Focus change reporting disabled");
         }
 
         // Now restore the terminal
@@ -136,6 +152,7 @@ impl Tui {
         stdout().execute(LeaveAlternateScreen)?;
         disable_raw_mode()?;
 
+        tracing::debug!("TUI exit sequence completed");
         Ok(())
     }
 
@@ -171,11 +188,18 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
+        // Note: During drop, tracing may not be available, so errors go to stderr
+        // for emergency diagnostics
+
         // Pop keyboard enhancement FIRST (while still in raw mode)
         // The terminal may send a response sequence, which we need to consume
         if self.keyboard_enhancement_enabled {
-            let _ = stdout().execute(PopKeyboardEnhancementFlags);
-            let _ = stdout().flush();
+            if let Err(e) = stdout().execute(PopKeyboardEnhancementFlags) {
+                eprintln!("TUI teardown: failed to pop keyboard enhancement: {}", e);
+            }
+            if let Err(e) = stdout().flush() {
+                eprintln!("TUI teardown: failed to flush stdout: {}", e);
+            }
             // Drain any pending terminal responses (CSI u sequences)
             while event::poll(Duration::from_millis(10)).unwrap_or(false) {
                 let _ = event::read();
@@ -184,23 +208,35 @@ impl Drop for Tui {
 
         // Disable bracketed paste mode
         if self.bracketed_paste_enabled {
-            let _ = stdout().execute(DisableBracketedPaste);
+            if let Err(e) = stdout().execute(DisableBracketedPaste) {
+                eprintln!("TUI teardown: failed to disable bracketed paste: {}", e);
+            }
         }
 
         // Disable mouse capture
         if self.mouse_capture_enabled {
-            let _ = stdout().execute(DisableMouseCapture);
+            if let Err(e) = stdout().execute(DisableMouseCapture) {
+                eprintln!("TUI teardown: failed to disable mouse capture: {}", e);
+            }
         }
 
         // Disable focus change reporting
         if self.focus_change_enabled {
-            let _ = stdout().execute(DisableFocusChange);
+            if let Err(e) = stdout().execute(DisableFocusChange) {
+                eprintln!("TUI teardown: failed to disable focus change: {}", e);
+            }
         }
 
         // Now restore the terminal
-        let _ = self.terminal.show_cursor();
-        let _ = stdout().execute(LeaveAlternateScreen);
-        let _ = disable_raw_mode();
+        if let Err(e) = self.terminal.show_cursor() {
+            eprintln!("TUI teardown: failed to show cursor: {}", e);
+        }
+        if let Err(e) = stdout().execute(LeaveAlternateScreen) {
+            eprintln!("TUI teardown: failed to leave alternate screen: {}", e);
+        }
+        if let Err(e) = disable_raw_mode() {
+            eprintln!("TUI teardown: failed to disable raw mode: {}", e);
+        }
     }
 }
 

@@ -59,6 +59,32 @@ pub struct WorktreeWizardState {
     pub branch_validation_error: Option<String>,
 }
 
+impl WorktreeWizardState {
+    /// Clamp list_index to valid range for filtered_branches
+    ///
+    /// Call this after updating filtered_branches to ensure index is valid.
+    /// Accounts for the "create new" option if search text is not empty.
+    pub fn clamp_list_index(&mut self) {
+        let filtered_count = self.filtered_branches.len();
+        let has_create_option = !self.search_text.is_empty();
+        let max_index = if has_create_option {
+            filtered_count // "create new" is at index filtered_count
+        } else {
+            filtered_count.saturating_sub(1)
+        };
+        self.list_index = self.list_index.min(max_index);
+    }
+
+    /// Clamp base_list_index to valid range for the given filtered count
+    pub fn clamp_base_list_index(&mut self, filtered_count: usize) {
+        if filtered_count == 0 {
+            self.base_list_index = 0;
+        } else {
+            self.base_list_index = self.base_list_index.min(filtered_count - 1);
+        }
+    }
+}
+
 /// Application state
 #[derive(Default)]
 pub struct AppState {
@@ -208,18 +234,30 @@ impl AppState {
     /// Select the next item in the current view
     pub fn select_next(&mut self, item_count: usize) {
         if item_count > 0 {
-            let current = self.current_selected_index();
+            // Clamp current index to valid range first to handle stale indices
+            let current = self
+                .current_selected_index()
+                .min(item_count.saturating_sub(1));
             let next = (current + 1) % item_count;
             self.set_current_selected_index(next);
+        } else {
+            // Reset index when collection is empty
+            self.set_current_selected_index(0);
         }
     }
 
     /// Select the previous item in the current view
     pub fn select_prev(&mut self, item_count: usize) {
         if item_count > 0 {
-            let current = self.current_selected_index();
+            // Clamp current index to valid range first to handle stale indices
+            let current = self
+                .current_selected_index()
+                .min(item_count.saturating_sub(1));
             let prev = current.checked_sub(1).unwrap_or(item_count - 1);
             self.set_current_selected_index(prev);
+        } else {
+            // Reset index when collection is empty
+            self.set_current_selected_index(0);
         }
     }
 
@@ -233,6 +271,12 @@ impl AppState {
     /// Navigate to the parent view
     pub fn navigate_back(&mut self) {
         if let Some(parent) = self.view.parent() {
+            // If leaving session view, reset session mode state
+            if self.view == View::SessionView {
+                self.active_session = None;
+                self.input_mode = InputMode::Normal;
+            }
+
             // Update focus context based on the parent view
             match parent {
                 View::ProjectsOverview
@@ -256,6 +300,14 @@ impl AppState {
                 }
             }
             self.view = parent;
+
+            // Reset input mode if it's not Normal (handles cases where user was in a text input mode)
+            if self.input_mode != InputMode::Normal && self.input_mode != InputMode::Session {
+                // Only reset text input modes - keep Session mode if going to SessionView
+                if self.view != View::SessionView {
+                    self.input_mode = InputMode::Normal;
+                }
+            }
         }
     }
 

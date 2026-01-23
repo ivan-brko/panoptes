@@ -25,8 +25,18 @@ impl GitOps {
     ///
     /// Starting from `path`, walks up the directory tree to find a .git directory.
     pub fn discover(path: &Path) -> Result<Self> {
-        let repo = Repository::discover(path)
-            .with_context(|| format!("Failed to discover git repository from {:?}", path))?;
+        let repo = Repository::discover(path).map_err(|e| {
+            // Provide user-friendly error messages for common cases
+            let path_display = path.display();
+            if e.code() == git2::ErrorCode::NotFound {
+                anyhow::anyhow!(
+                    "Not a git repository: {}. Initialize with 'git init' or clone an existing repository.",
+                    path_display
+                )
+            } else {
+                anyhow::anyhow!("Failed to open git repository at {}: {}", path_display, e)
+            }
+        })?;
         Ok(Self { repo })
     }
 
@@ -172,11 +182,25 @@ impl GitOps {
             .args(["fetch", "--all"])
             .current_dir(workdir)
             .output()
-            .context("Failed to execute git fetch")?;
+            .context("Failed to execute git fetch. Is git installed and in PATH?")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("git fetch failed: {}", stderr.trim());
+            let stderr = stderr.trim();
+            // Provide more helpful messages for common errors
+            if stderr.contains("Could not resolve hostname") || stderr.contains("unable to access")
+            {
+                anyhow::bail!(
+                    "Network error during git fetch: {}. Check your internet connection.",
+                    stderr
+                );
+            } else if stderr.contains("Permission denied")
+                || stderr.contains("authentication failed")
+            {
+                anyhow::bail!("Authentication failed during git fetch: {}. Check your SSH keys or credentials.", stderr);
+            } else {
+                anyhow::bail!("git fetch failed: {}", stderr);
+            }
         }
 
         Ok(())

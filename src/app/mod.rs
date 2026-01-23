@@ -27,7 +27,7 @@ use crate::focus_timing::stats::{FocusContextBreakdown, FocusSession};
 use crate::focus_timing::store::FocusStore;
 use crate::focus_timing::FocusTimer;
 use crate::hooks::{
-    self, HookEventReceiver, HookEventSender, ServerHandle, DEFAULT_CHANNEL_BUFFER,
+    self, HookEventReceiver, HookEventSender, ServerHandle, ServerStatus, DEFAULT_CHANNEL_BUFFER,
 };
 use crate::logging::{LogBuffer, LogFileInfo};
 use crate::project::{BranchId, ProjectId, ProjectStore};
@@ -41,6 +41,18 @@ use crate::tui::views::{
 };
 use crate::tui::{NotificationType, Tui};
 use crate::wizards::worktree::filter_branch_refs;
+
+// === Input Length Limits ===
+// Maximum lengths for text input fields to prevent memory exhaustion from large pastes
+
+/// Maximum length for project paths (generous for deeply nested paths)
+pub const MAX_PROJECT_PATH_LEN: usize = 4096;
+/// Maximum length for session names
+pub const MAX_SESSION_NAME_LEN: usize = 256;
+/// Maximum length for branch names
+pub const MAX_BRANCH_NAME_LEN: usize = 256;
+/// Maximum length for project names
+pub const MAX_PROJECT_NAME_LEN: usize = 256;
 
 /// Main application struct
 pub struct App {
@@ -246,6 +258,16 @@ impl App {
                 .sessions
                 .cleanup_exited_sessions(self.config.exited_retention_secs);
             if cleaned_up > 0 {
+                // Validate active_session reference - clear if pointing to cleaned session
+                if let Some(session_id) = self.state.active_session {
+                    if self.sessions.get(session_id).is_none() {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "Clearing stale active_session reference after cleanup"
+                        );
+                        self.state.active_session = None;
+                    }
+                }
                 self.state.needs_render = true;
             }
 
@@ -259,6 +281,25 @@ impl App {
                     self.state.dropped_events_count
                 );
                 self.state.needs_render = true;
+            }
+
+            // Check hook server health status
+            if let Some(status) = self.hook_server.check_status() {
+                match status {
+                    ServerStatus::Error(msg) => {
+                        tracing::error!("Hook server error: {}", msg);
+                        self.state.header_notifications.set_persistent(
+                            "Hook server stopped - session state updates unavailable".to_string(),
+                        );
+                        self.state.needs_render = true;
+                    }
+                    ServerStatus::Shutdown => {
+                        tracing::debug!("Hook server shut down normally");
+                    }
+                    ServerStatus::Running => {
+                        // Normal operation, nothing to do
+                    }
+                }
             }
 
             // Check focus timer completion
@@ -338,23 +379,81 @@ impl App {
 
         match self.state.input_mode {
             InputMode::AddingProject => {
-                self.state.new_project_path.push_str(cleaned);
+                let (truncated, was_truncated) = Self::truncate_to_limit(
+                    cleaned,
+                    &self.state.new_project_path,
+                    MAX_PROJECT_PATH_LEN,
+                );
+                self.state.new_project_path.push_str(&truncated);
                 self.update_path_completions();
+                if was_truncated {
+                    self.state.header_notifications.push(format!(
+                        "Pasted text truncated to {} characters",
+                        MAX_PROJECT_PATH_LEN
+                    ));
+                }
             }
             InputMode::AddingProjectName | InputMode::RenamingProject => {
-                self.state.new_project_name.push_str(cleaned);
+                let (truncated, was_truncated) = Self::truncate_to_limit(
+                    cleaned,
+                    &self.state.new_project_name,
+                    MAX_PROJECT_NAME_LEN,
+                );
+                self.state.new_project_name.push_str(&truncated);
+                if was_truncated {
+                    self.state.header_notifications.push(format!(
+                        "Pasted text truncated to {} characters",
+                        MAX_PROJECT_NAME_LEN
+                    ));
+                }
             }
             InputMode::CreatingSession => {
-                self.state.new_session_name.push_str(cleaned);
+                let (truncated, was_truncated) = Self::truncate_to_limit(
+                    cleaned,
+                    &self.state.new_session_name,
+                    MAX_SESSION_NAME_LEN,
+                );
+                self.state.new_session_name.push_str(&truncated);
+                if was_truncated {
+                    self.state.header_notifications.push(format!(
+                        "Pasted text truncated to {} characters",
+                        MAX_SESSION_NAME_LEN
+                    ));
+                }
             }
             InputMode::CreatingWorktree | InputMode::SelectingDefaultBase => {
-                self.state.new_branch_name.push_str(cleaned);
+                let (truncated, was_truncated) = Self::truncate_to_limit(
+                    cleaned,
+                    &self.state.new_branch_name,
+                    MAX_BRANCH_NAME_LEN,
+                );
+                self.state.new_branch_name.push_str(&truncated);
                 // Update filtered branches
                 self.state.filtered_branch_refs = filter_branch_refs(
                     &self.state.available_branch_refs,
                     &self.state.new_branch_name,
                 );
                 self.select_default_base_branch();
+                if was_truncated {
+                    self.state.header_notifications.push(format!(
+                        "Pasted text truncated to {} characters",
+                        MAX_BRANCH_NAME_LEN
+                    ));
+                }
+            }
+            InputMode::WorktreeSelectBranch => {
+                let (truncated, was_truncated) = Self::truncate_to_limit(
+                    cleaned,
+                    &self.state.worktree_wizard.search_text,
+                    MAX_BRANCH_NAME_LEN,
+                );
+                self.state.worktree_wizard.search_text.push_str(&truncated);
+                if was_truncated {
+                    self.state.header_notifications.push(format!(
+                        "Pasted text truncated to {} characters",
+                        MAX_BRANCH_NAME_LEN
+                    ));
+                }
             }
             InputMode::Session => {
                 // Send pasted text to PTY (wrapped in brackets if app enabled it)
@@ -367,6 +466,22 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Truncate text to fit within max_len when appended to existing string
+    ///
+    /// Returns (truncated_text, was_truncated)
+    fn truncate_to_limit(text: &str, existing: &str, max_len: usize) -> (String, bool) {
+        let available = max_len.saturating_sub(existing.len());
+        if text.len() <= available {
+            (text.to_string(), false)
+        } else if available == 0 {
+            (String::new(), true)
+        } else {
+            // Truncate at char boundary
+            let truncated: String = text.chars().take(available).collect();
+            (truncated, true)
+        }
     }
 
     /// Handle a mouse event
@@ -588,6 +703,10 @@ impl App {
             Err(e) => {
                 tracing::error!("Failed to load focus sessions: {}", e);
                 self.state.focus_sessions = Vec::new();
+                // Notify user that history couldn't be loaded
+                self.state
+                    .header_notifications
+                    .push(format!("Could not load focus session history: {}", e));
             }
         }
     }
@@ -619,6 +738,11 @@ impl App {
         let store = FocusStore::new();
         if let Err(e) = store.add_session(session) {
             tracing::error!("Failed to save focus session: {}", e);
+            // Notify user - session is kept in memory but not persisted
+            self.state.header_notifications.push(format!(
+                "Focus session not saved: {}. Data retained in memory.",
+                e
+            ));
         }
 
         tracing::info!(

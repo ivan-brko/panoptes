@@ -8,7 +8,9 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use uuid::Uuid;
 
-use crate::app::{App, InputMode};
+use crate::app::{
+    App, InputMode, MAX_PROJECT_NAME_LEN, MAX_PROJECT_PATH_LEN, MAX_SESSION_NAME_LEN,
+};
 use crate::session::SessionManager;
 
 /// Handle key while creating a new session
@@ -107,7 +109,10 @@ pub fn handle_creating_session_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.state.new_session_name.pop();
         }
         KeyCode::Char(c) => {
-            app.state.new_session_name.push(c);
+            // Enforce length limit for session names
+            if app.state.new_session_name.len() < MAX_SESSION_NAME_LEN {
+                app.state.new_session_name.push(c);
+            }
         }
         _ => {}
     }
@@ -146,11 +151,11 @@ pub fn handle_adding_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
             if app.state.show_path_completions {
                 let count = app.state.path_completions.len();
                 if count > 0 {
-                    app.state.path_completion_index = app
-                        .state
-                        .path_completion_index
-                        .checked_sub(1)
-                        .unwrap_or(count - 1);
+                    // Clamp current index first to handle stale indices
+                    let current = app.state.path_completion_index.min(count.saturating_sub(1));
+                    app.state.path_completion_index = current.checked_sub(1).unwrap_or(count - 1);
+                } else {
+                    app.state.path_completion_index = 0;
                 }
             }
         }
@@ -159,11 +164,11 @@ pub fn handle_adding_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
             if app.state.show_path_completions {
                 let count = app.state.path_completions.len();
                 if count > 0 {
-                    app.state.path_completion_index = app
-                        .state
-                        .path_completion_index
-                        .checked_sub(1)
-                        .unwrap_or(count - 1);
+                    // Clamp current index first to handle stale indices
+                    let current = app.state.path_completion_index.min(count.saturating_sub(1));
+                    app.state.path_completion_index = current.checked_sub(1).unwrap_or(count - 1);
+                } else {
+                    app.state.path_completion_index = 0;
                 }
             }
         }
@@ -172,7 +177,11 @@ pub fn handle_adding_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
             if app.state.show_path_completions {
                 let count = app.state.path_completions.len();
                 if count > 0 {
-                    app.state.path_completion_index = (app.state.path_completion_index + 1) % count;
+                    // Clamp current index first to handle stale indices
+                    let current = app.state.path_completion_index.min(count.saturating_sub(1));
+                    app.state.path_completion_index = (current + 1) % count;
+                } else {
+                    app.state.path_completion_index = 0;
                 }
             }
         }
@@ -251,8 +260,11 @@ pub fn handle_adding_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
             update_path_completions(app);
         }
         KeyCode::Char(c) => {
-            app.state.new_project_path.push(c);
-            update_path_completions(app);
+            // Enforce length limit for project paths
+            if app.state.new_project_path.len() < MAX_PROJECT_PATH_LEN {
+                app.state.new_project_path.push(c);
+                update_path_completions(app);
+            }
         }
         _ => {}
     }
@@ -337,7 +349,10 @@ pub fn handle_adding_project_name_key(app: &mut App, key: KeyEvent) -> Result<()
             app.state.new_project_name.pop();
         }
         KeyCode::Char(c) => {
-            app.state.new_project_name.push(c);
+            // Enforce length limit for project names
+            if app.state.new_project_name.len() < MAX_PROJECT_NAME_LEN {
+                app.state.new_project_name.push(c);
+            }
         }
         _ => {}
     }
@@ -375,7 +390,10 @@ pub fn handle_renaming_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.state.new_project_name.pop();
         }
         KeyCode::Char(c) => {
-            app.state.new_project_name.push(c);
+            // Enforce length limit for project names (used for renaming)
+            if app.state.new_project_name.len() < MAX_PROJECT_NAME_LEN {
+                app.state.new_project_name.push(c);
+            }
         }
         _ => {}
     }

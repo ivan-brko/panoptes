@@ -6,6 +6,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -15,6 +16,15 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use super::buffer::{LogBuffer, LogEntry, LogLevel};
+
+/// Number of consecutive write failures before emitting a warning
+const FAILURE_THRESHOLD: usize = 5;
+
+/// Global counter for consecutive write failures
+/// We use a static counter because the DualWriter is recreated on each write operation
+static FAILURE_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Track if we've already emitted a warning (to avoid spamming)
+static WARNING_EMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Information about the current log file
 #[derive(Debug, Clone)]
@@ -37,13 +47,43 @@ struct DualWriter {
 
 impl Write for DualWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // Write to file
+        // Write to file with failure tracking
+        let mut write_failed = false;
         if let Ok(mut file) = self.file.lock() {
-            let _ = file.write_all(buf);
-            let _ = file.flush();
+            let write_result = file.write_all(buf).and_then(|_| file.flush());
+            match write_result {
+                Ok(()) => {
+                    // Reset failure counter on success
+                    FAILURE_COUNT.store(0, Ordering::Relaxed);
+                    WARNING_EMITTED.store(false, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    write_failed = true;
+                    let count = FAILURE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Emit warning to stderr after threshold (only once until recovery)
+                    if count == FAILURE_THRESHOLD && !WARNING_EMITTED.swap(true, Ordering::Relaxed)
+                    {
+                        eprintln!(
+                            "WARNING: Log file writes failing repeatedly ({} failures): {}",
+                            count, e
+                        );
+                        eprintln!("         Log entries are being stored in memory but may not be persisted.");
+                    }
+                }
+            }
+        } else {
+            write_failed = true;
+            let count = FAILURE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if count == FAILURE_THRESHOLD && !WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "WARNING: Log file mutex poisoned after {} failures. Logs not being written to file.",
+                    count
+                );
+            }
         }
 
-        // Parse the log line and add to buffer
+        // Parse the log line and add to buffer (always, even if file write fails)
+        // This ensures logs are still visible in the TUI even if file writes fail
         if let Ok(line) = std::str::from_utf8(buf) {
             let line = line.trim();
             if !line.is_empty() {
@@ -54,7 +94,14 @@ impl Write for DualWriter {
             }
         }
 
-        Ok(buf.len())
+        // Return success to avoid breaking the logging pipeline
+        // The log entries are stored in the buffer even if file write fails
+        if write_failed {
+            // Return Ok anyway to not break tracing - logs are still in buffer
+            Ok(buf.len())
+        } else {
+            Ok(buf.len())
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
