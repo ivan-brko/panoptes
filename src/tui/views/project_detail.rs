@@ -87,8 +87,6 @@ pub fn render_project_detail(
         render_worktree_creation(frame, areas.content, state, project);
     } else if state.input_mode == InputMode::SelectingDefaultBase {
         render_default_base_selection(frame, areas.content, state);
-    } else if state.input_mode == InputMode::FetchingBranches {
-        render_fetching_branches(frame, areas.content);
     } else if state.input_mode == InputMode::RenamingProject {
         render_rename_dialog(frame, areas.content, state);
     } else if let Some(project) = project {
@@ -255,7 +253,6 @@ pub fn render_project_detail(
         InputMode::SelectingDefaultBase => {
             "Type: filter | ↑/↓: navigate | Enter: set default | Esc: cancel".to_string()
         }
-        InputMode::FetchingBranches => "Fetching branches... | Esc: cancel".to_string(),
         InputMode::RenamingProject => "Type: project name | Enter: save | Esc: cancel".to_string(),
         _ => {
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
@@ -433,16 +430,6 @@ fn render_default_base_selection(frame: &mut Frame, area: Rect, state: &AppState
     );
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, chunks[1]);
-}
-
-/// Render a spinner while fetching branches
-fn render_fetching_branches(frame: &mut Frame, area: Rect) {
-    let t = theme();
-    let content = Paragraph::new("Fetching branches from remotes...")
-        .style(Style::default().fg(t.text_muted))
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL).title("Please wait"));
-    frame.render_widget(content, area);
 }
 
 /// Render the project rename dialog
@@ -674,7 +661,7 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
     let _ = config; // May be used later for worktree path preview
 
     // Determine if we need to show a validation error
-    let has_validation_error = state.worktree_branch_validation_error.is_some();
+    let has_validation_error = state.worktree_wizard.branch_validation_error.is_some();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -687,7 +674,7 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
         .split(area);
 
     // Search input
-    let search_text = format!("> {}_", state.worktree_search_text);
+    let search_text = format!("> {}_", state.worktree_wizard.search_text);
     let fetch_warning = if state.fetch_error.is_some() {
         " (fetch failed, showing cached)"
     } else {
@@ -705,18 +692,19 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
     frame.render_widget(instruction_widget, chunks[1]);
 
     // Validation error (if any)
-    if let Some(error) = &state.worktree_branch_validation_error {
+    if let Some(error) = &state.worktree_wizard.branch_validation_error {
         let error_text = format!("⚠ {}", error);
         let error_widget = Paragraph::new(error_text).style(Style::default().fg(Color::Red));
         frame.render_widget(error_widget, chunks[2]);
     }
 
     // Branch list with "Create new" option
-    let filtered_count = state.worktree_filtered_branches.len();
-    let has_create_option = !state.worktree_search_text.is_empty();
+    let filtered_count = state.worktree_wizard.filtered_branches.len();
+    let has_create_option = !state.worktree_wizard.search_text.is_empty();
 
     let mut items: Vec<ListItem> = state
-        .worktree_filtered_branches
+        .worktree_wizard
+        .filtered_branches
         .iter()
         .enumerate()
         .map(|(i, branch)| {
@@ -728,7 +716,7 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
                 return ListItem::new(content).style(style);
             }
 
-            let selected = i == state.worktree_list_index;
+            let selected = i == state.worktree_wizard.list_index;
             let prefix = if selected { "▸ " } else { "  " };
             let type_prefix = branch.ref_type.prefix();
             let default_marker = if branch.is_default_base { " *" } else { "" };
@@ -766,11 +754,11 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
                 .style(Style::default().fg(t.border)),
         );
 
-        let selected = state.worktree_list_index == filtered_count;
+        let selected = state.worktree_wizard.list_index == filtered_count;
         let prefix = if selected { "▸ " } else { "  " };
         let content = format!(
             "{}+ Create new branch \"{}\"",
-            prefix, state.worktree_search_text
+            prefix, state.worktree_wizard.search_text
         );
         let style = if selected {
             Style::default()
@@ -816,7 +804,7 @@ fn render_worktree_select_base(frame: &mut Frame, area: Rect, state: &AppState, 
         .split(area);
 
     // Branch name display
-    let name_text = format!("Branch name: {}", state.worktree_branch_name);
+    let name_text = format!("Branch name: {}", state.worktree_wizard.branch_name);
     let name_display = Paragraph::new(name_text)
         .style(Style::default().fg(t.accent))
         .block(
@@ -827,7 +815,7 @@ fn render_worktree_select_base(frame: &mut Frame, area: Rect, state: &AppState, 
     frame.render_widget(name_display, chunks[0]);
 
     // Search input for base branch
-    let search_text = format!("> {}_", state.worktree_base_search_text);
+    let search_text = format!("> {}_", state.worktree_wizard.base_search_text);
     let search_input = Paragraph::new(search_text).style(t.input_style()).block(
         Block::default()
             .borders(Borders::ALL)
@@ -836,12 +824,13 @@ fn render_worktree_select_base(frame: &mut Frame, area: Rect, state: &AppState, 
     frame.render_widget(search_input, chunks[1]);
 
     // Filter branches based on search
-    let filtered: Vec<&BranchRef> = if state.worktree_base_search_text.is_empty() {
-        state.worktree_all_branches.iter().collect()
+    let filtered: Vec<&BranchRef> = if state.worktree_wizard.base_search_text.is_empty() {
+        state.worktree_wizard.all_branches.iter().collect()
     } else {
-        let query = state.worktree_base_search_text.to_lowercase();
+        let query = state.worktree_wizard.base_search_text.to_lowercase();
         state
-            .worktree_all_branches
+            .worktree_wizard
+            .all_branches
             .iter()
             .filter(|b| b.name.to_lowercase().contains(&query))
             .collect()
@@ -852,7 +841,7 @@ fn render_worktree_select_base(frame: &mut Frame, area: Rect, state: &AppState, 
         .iter()
         .enumerate()
         .map(|(i, branch)| {
-            let selected = i == state.worktree_base_list_index;
+            let selected = i == state.worktree_wizard.base_list_index;
             let prefix = if selected { "▸ " } else { "  " };
             let type_prefix = branch.ref_type.prefix();
             let default_marker = if branch.is_default_base {
@@ -900,14 +889,14 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
     // Calculate worktree path for display
     let worktree_path = crate::git::worktree::worktree_path_for_branch(
         &config.worktrees_dir,
-        &state.worktree_project_name,
-        &state.worktree_branch_name,
+        &state.worktree_wizard.project_name,
+        &state.worktree_wizard.branch_name,
     );
     let worktree_display = worktree_path.display().to_string();
 
     let mut lines = vec![Line::from("")];
 
-    match state.worktree_creation_type {
+    match state.worktree_wizard.creation_type {
         WorktreeCreationType::ExistingLocal => {
             lines.push(Line::from(vec![Span::styled(
                 "You are about to create a worktree from branch:",
@@ -915,13 +904,14 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
             )]));
             lines.push(Line::from(""));
             lines.push(Line::from(vec![Span::styled(
-                format!("    {}", state.worktree_branch_name),
+                format!("    {}", state.worktree_wizard.branch_name),
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
             )]));
         }
         WorktreeCreationType::RemoteTracking => {
             let remote_name = state
-                .worktree_source_branch
+                .worktree_wizard
+                .source_branch
                 .as_ref()
                 .map(|b| b.name.as_str())
                 .unwrap_or("unknown");
@@ -939,7 +929,7 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
             lines.push(Line::from(vec![Span::styled(
                 format!(
                     "This will create local branch \"{}\"",
-                    state.worktree_branch_name
+                    state.worktree_wizard.branch_name
                 ),
                 Style::default().fg(t.text),
             )]));
@@ -950,7 +940,8 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
         }
         WorktreeCreationType::NewBranch => {
             let base_name = state
-                .worktree_base_branch
+                .worktree_wizard
+                .base_branch
                 .as_ref()
                 .map(|b| b.name.as_str())
                 .unwrap_or("unknown");
@@ -961,7 +952,7 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
             )]));
             lines.push(Line::from(""));
             lines.push(Line::from(vec![Span::styled(
-                format!("    {}", state.worktree_branch_name),
+                format!("    {}", state.worktree_wizard.branch_name),
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
             )]));
             lines.push(Line::from(""));
