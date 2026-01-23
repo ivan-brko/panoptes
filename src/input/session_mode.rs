@@ -15,14 +15,10 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         return handle_session_mode_esc(app, key);
     }
 
-    // Only forward key press events (not release/repeat)
-    if key.kind != KeyEventKind::Press {
-        return Ok(());
-    }
-
     // Intercept scroll keys - don't forward to PTY
+    // Only handle Press events for scroll keys (not repeat) to prevent rapid scrolling
     match key.code {
-        KeyCode::PageUp => {
+        KeyCode::PageUp if key.kind == KeyEventKind::Press => {
             if let Some(session_id) = app.state.active_session {
                 if let Some(session) = app.sessions.get_mut(session_id) {
                     // Calculate viewport height for scroll amount
@@ -45,7 +41,7 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
             return Ok(());
         }
-        KeyCode::PageDown => {
+        KeyCode::PageDown if key.kind == KeyEventKind::Press => {
             if let Some(session_id) = app.state.active_session {
                 if let Some(session) = app.sessions.get_mut(session_id) {
                     // Calculate viewport height for scroll amount
@@ -66,7 +62,10 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
             return Ok(());
         }
-        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Home
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.kind == KeyEventKind::Press =>
+        {
             // Ctrl+Home: scroll to top
             if let Some(session_id) = app.state.active_session {
                 if let Some(session) = app.sessions.get_mut(session_id) {
@@ -79,7 +78,10 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
             return Ok(());
         }
-        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::End
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.kind == KeyEventKind::Press =>
+        {
             // Ctrl+End: scroll to bottom (live view)
             if let Some(session_id) = app.state.active_session {
                 if let Some(session) = app.sessions.get_mut(session_id) {
@@ -92,7 +94,10 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
 
-    // Reset scroll to live view when typing
+    // Reset scroll to live view when typing (only on Press/Repeat, not Release)
+    if key.kind == KeyEventKind::Release {
+        return Ok(());
+    }
     if app.state.session_scroll_offset > 0 {
         app.state.session_scroll_offset = 0;
         if let Some(session_id) = app.state.active_session {
