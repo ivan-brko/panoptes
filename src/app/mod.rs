@@ -341,10 +341,42 @@ impl App {
     }
 
     /// Process pending hook events from the channel
+    ///
+    /// Uses event coalescing: when multiple events arrive for the same session in a single
+    /// batch, only the latest event is processed. This prevents UI lag during rapid state
+    /// changes (e.g., quick tool executions).
+    ///
     /// Returns true if any events were processed
     fn process_hook_events(&mut self) -> bool {
-        let mut had_events = false;
+        use crate::hooks::HookEvent;
+        use std::collections::HashMap;
+
+        // Collect all pending events, coalescing by session_id (keep latest)
+        let mut coalesced: HashMap<String, HookEvent> = HashMap::new();
+        let mut event_count = 0;
+
         while let Ok(event) = self.hook_rx.try_recv() {
+            event_count += 1;
+            // Insert or replace - later events overwrite earlier ones for the same session
+            coalesced.insert(event.session_id.clone(), event);
+        }
+
+        if coalesced.is_empty() {
+            return false;
+        }
+
+        // Log coalescing stats if we coalesced any events
+        let coalesced_count = coalesced.len();
+        if event_count > coalesced_count {
+            tracing::debug!(
+                "Coalesced {} hook events down to {} (one per session)",
+                event_count,
+                coalesced_count
+            );
+        }
+
+        // Process coalesced events
+        for event in coalesced.into_values() {
             tracing::debug!(
                 "Hook event: session={}, event={}, tool={:?}",
                 event.session_id,
@@ -367,9 +399,8 @@ impl App {
                     );
                 }
             }
-            had_events = true;
         }
-        had_events
+        true
     }
 
     /// Handle paste event (for clipboard paste support)

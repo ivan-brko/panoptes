@@ -108,6 +108,10 @@ pub struct Branch {
     pub is_default: bool,
     /// Whether this branch uses a git worktree
     pub is_worktree: bool,
+    /// Whether this branch's working directory is missing (worktree deleted externally)
+    /// This is a transient state that is updated by refresh_branches()
+    #[serde(default)]
+    pub stale: bool,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp
@@ -131,6 +135,7 @@ impl Branch {
             working_dir,
             is_default,
             is_worktree,
+            stale: false,
             created_at: now,
             last_activity: now,
         }
@@ -138,7 +143,24 @@ impl Branch {
 
     /// Create the default branch for a project
     pub fn default_for_project(project_id: ProjectId, name: String, repo_path: PathBuf) -> Self {
-        Self::new(project_id, name, repo_path, true, false)
+        let mut branch = Self::new(project_id, name, repo_path, true, false);
+        branch.stale = false;
+        branch
+    }
+
+    /// Check if this branch's working directory exists
+    pub fn working_dir_exists(&self) -> bool {
+        self.working_dir.exists()
+    }
+
+    /// Mark this branch as stale (working directory missing)
+    pub fn mark_stale(&mut self) {
+        self.stale = true;
+    }
+
+    /// Clear stale status
+    pub fn clear_stale(&mut self) {
+        self.stale = false;
     }
 
     /// Update last activity timestamp

@@ -192,17 +192,30 @@ pub fn render_project_detail(
                     let attention_count =
                         sessions.attention_count_for_branch(branch.id, idle_threshold);
 
-                    let status = if active_count > 0 {
-                        format!("  {} active", active_count)
-                    } else {
+                    let mut status_parts = Vec::new();
+                    if active_count > 0 {
+                        status_parts.push(format!("{} active", active_count));
+                    }
+                    if branch.stale {
+                        status_parts.push("⚠ missing".to_string());
+                    }
+                    let status = if status_parts.is_empty() {
                         String::new()
+                    } else {
+                        format!("  ({})", status_parts.join(", "))
                     };
 
                     let content =
                         format!("{}{}: {}{}", prefix, item_index + 1, branch.name, status);
 
-                    // Color precedence: Yellow (attention) > Green (active) > White
-                    let style = if selected {
+                    // Color precedence: Red (stale) > Yellow (attention) > Green (active) > White
+                    let style = if branch.stale {
+                        if selected {
+                            Style::default().fg(Color::Red).bold()
+                        } else {
+                            Style::default().fg(Color::Red)
+                        }
+                    } else if selected {
                         if attention_count > 0 {
                             Style::default().fg(Color::Yellow).bold()
                         } else if active_count > 0 {
@@ -257,7 +270,7 @@ pub fn render_project_detail(
         _ => {
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let base = format!(
-                "n: new worktree | b: set default base | r: rename | d: delete | {} | ↑/↓: navigate | Enter: open | Esc: back | q: quit",
+                "n: new worktree | b: set default base | r: rename | R: refresh | d: delete | {} | ↑/↓: navigate | Enter: open | Esc: back | q: quit",
                 timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {

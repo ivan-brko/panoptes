@@ -80,6 +80,21 @@ pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.state.input_mode = InputMode::RenamingProject;
             }
         }
+        KeyCode::Char('R') => {
+            // Refresh branch status (check for stale worktrees)
+            let stale_count = app.project_store.refresh_branches(project_id);
+            if stale_count > 0 {
+                app.state.header_notifications.push(format!(
+                    "Refreshed: {} worktree{} missing",
+                    stale_count,
+                    if stale_count == 1 { "" } else { "s" }
+                ));
+            } else {
+                app.state
+                    .header_notifications
+                    .push("Refreshed: all worktrees OK");
+            }
+        }
         KeyCode::Char(c) if c.is_ascii_digit() => {
             if let Some(num) = c.to_digit(10) {
                 if num > 0 && (num as usize) <= branch_count {

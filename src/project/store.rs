@@ -201,6 +201,59 @@ impl ProjectStore {
             .count()
     }
 
+    /// Refresh branch status for a project
+    ///
+    /// This checks if each worktree's working directory still exists and
+    /// marks branches as stale if their directories are missing.
+    ///
+    /// Returns the number of branches that were marked stale.
+    pub fn refresh_branches(&mut self, project_id: ProjectId) -> usize {
+        let mut stale_count = 0;
+
+        // Get branch IDs for this project
+        let branch_ids: Vec<BranchId> = self
+            .branches
+            .values()
+            .filter(|b| b.project_id == project_id)
+            .map(|b| b.id)
+            .collect();
+
+        // Check each branch
+        for branch_id in branch_ids {
+            if let Some(branch) = self.branches.get_mut(&branch_id) {
+                let exists = branch.working_dir.exists();
+                let was_stale = branch.stale;
+
+                if exists {
+                    branch.stale = false;
+                } else if branch.is_worktree {
+                    // Only mark worktrees as stale if their directory is missing
+                    // The default branch (local checkout) might be in a state where
+                    // the repo itself was moved, which is a different problem
+                    branch.stale = true;
+                    if !was_stale {
+                        stale_count += 1;
+                        tracing::warn!(
+                            "Worktree '{}' marked stale: directory {:?} not found",
+                            branch.name,
+                            branch.working_dir
+                        );
+                    }
+                }
+            }
+        }
+
+        stale_count
+    }
+
+    /// Get stale branch count for a project
+    pub fn stale_branch_count(&self, project_id: ProjectId) -> usize {
+        self.branches
+            .values()
+            .filter(|b| b.project_id == project_id && b.stale)
+            .count()
+    }
+
     /// Load store from disk
     pub fn load() -> Result<Self> {
         Self::load_from(&projects_file_path())
@@ -260,10 +313,27 @@ impl ProjectStore {
 
     /// Save store to a specific path
     pub fn save_to(&self, path: &Path) -> Result<()> {
+        use crate::config::{categorize_io_error, DiskErrorKind};
+
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("Failed to create directory for projects file")?;
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                let kind = categorize_io_error(&e);
+                match kind {
+                    DiskErrorKind::PermissionDenied => {
+                        anyhow::bail!(
+                            "Permission denied creating directory {:?}. Check file permissions.",
+                            parent
+                        );
+                    }
+                    DiskErrorKind::DiskFull => {
+                        anyhow::bail!("Disk full - cannot create directory {:?}", parent);
+                    }
+                    _ => {
+                        return Err(e).context("Failed to create directory for projects file");
+                    }
+                }
+            }
         }
 
         let data = StoreData {
@@ -274,7 +344,25 @@ impl ProjectStore {
         let content =
             serde_json::to_string_pretty(&data).context("Failed to serialize projects")?;
 
-        std::fs::write(path, content).context("Failed to write projects file")?;
+        if let Err(e) = std::fs::write(path, &content) {
+            let kind = categorize_io_error(&e);
+            match kind {
+                DiskErrorKind::DiskFull => {
+                    anyhow::bail!(
+                        "Disk full - free space needed to save projects. Your changes may not be saved."
+                    );
+                }
+                DiskErrorKind::PermissionDenied => {
+                    anyhow::bail!(
+                        "Permission denied writing to {:?}. Check file permissions.",
+                        path
+                    );
+                }
+                _ => {
+                    return Err(e).context("Failed to write projects file");
+                }
+            }
+        }
 
         Ok(())
     }

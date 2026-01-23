@@ -4,6 +4,79 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Categories of disk errors for user-friendly messages
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskErrorKind {
+    /// Disk is full or quota exceeded
+    DiskFull,
+    /// Permission denied (read or write)
+    PermissionDenied,
+    /// File or directory not found
+    NotFound,
+    /// Other IO error
+    Other,
+}
+
+impl DiskErrorKind {
+    /// Get a user-friendly message for this error kind
+    pub fn user_message(&self) -> &'static str {
+        match self {
+            DiskErrorKind::DiskFull => "Disk full - free space needed to save",
+            DiskErrorKind::PermissionDenied => "Permission denied writing to ~/.panoptes/",
+            DiskErrorKind::NotFound => "File or directory not found",
+            DiskErrorKind::Other => "Failed to save data",
+        }
+    }
+}
+
+/// Categorize an IO error into a user-friendly category
+pub fn categorize_io_error(e: &std::io::Error) -> DiskErrorKind {
+    use std::io::ErrorKind;
+
+    match e.kind() {
+        // Disk full errors
+        ErrorKind::StorageFull => DiskErrorKind::DiskFull,
+        // On some systems, disk full might appear as WriteZero or Other
+        ErrorKind::WriteZero => DiskErrorKind::DiskFull,
+
+        // Permission errors
+        ErrorKind::PermissionDenied => DiskErrorKind::PermissionDenied,
+
+        // Not found
+        ErrorKind::NotFound => DiskErrorKind::NotFound,
+
+        // Check raw OS error for disk full on Unix
+        _ => {
+            #[cfg(unix)]
+            {
+                if let Some(os_error) = e.raw_os_error() {
+                    // ENOSPC (No space left on device) = 28 on Linux, 28 on macOS
+                    // EDQUOT (Disk quota exceeded) = 122 on Linux, 69 on macOS
+                    if os_error == 28 || os_error == 122 || os_error == 69 {
+                        return DiskErrorKind::DiskFull;
+                    }
+                    // EACCES = 13 on both
+                    if os_error == 13 {
+                        return DiskErrorKind::PermissionDenied;
+                    }
+                }
+            }
+            DiskErrorKind::Other
+        }
+    }
+}
+
+/// Create a user-friendly error message from an IO error
+pub fn friendly_io_error_message(e: &std::io::Error, context: &str) -> String {
+    let kind = categorize_io_error(e);
+    match kind {
+        DiskErrorKind::DiskFull => format!("{}: {}", context, kind.user_message()),
+        DiskErrorKind::PermissionDenied => format!("{}: {}", context, kind.user_message()),
+        DiskErrorKind::NotFound => format!("{}: file or directory not found", context),
+        DiskErrorKind::Other => format!("{}: {}", context, e),
+    }
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
