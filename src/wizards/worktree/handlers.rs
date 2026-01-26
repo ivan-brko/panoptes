@@ -63,7 +63,13 @@ pub fn handle_worktree_select_branch_key(
                     return Ok(());
                 }
 
-                if selected.ref_type == BranchRefType::Local {
+                // Check if branch has an untracked git worktree - import instead of create
+                if selected.has_git_worktree {
+                    app.state.worktree_wizard.source_branch = Some(selected.clone());
+                    app.state.worktree_wizard.branch_name = selected.name.clone();
+                    app.state.worktree_wizard.creation_type = WorktreeCreationType::ImportExisting;
+                    app.state.input_mode = InputMode::WorktreeConfirm;
+                } else if selected.ref_type == BranchRefType::Local {
                     // Existing local branch -> go directly to confirm
                     app.state.worktree_wizard.source_branch = Some(selected.clone());
                     app.state.worktree_wizard.branch_name = selected.name.clone();
@@ -293,7 +299,7 @@ pub fn handle_worktree_confirm_key(
             }
         }
         KeyCode::Enter => {
-            // Create the worktree
+            // Create or import the worktree
             let result = match app.state.worktree_wizard.creation_type {
                 WorktreeCreationType::ExistingLocal => {
                     // Create worktree from existing local branch (don't create branch)
@@ -332,6 +338,13 @@ pub fn handle_worktree_confirm_key(
                         &app.state.worktree_wizard.branch_name.clone(),
                         true,
                         base_ref.as_deref(),
+                    )
+                }
+                WorktreeCreationType::ImportExisting => {
+                    // Import existing git worktree that is not tracked by Panoptes
+                    app.import_existing_worktree(
+                        project_id,
+                        &app.state.worktree_wizard.branch_name.clone(),
                     )
                 }
             };

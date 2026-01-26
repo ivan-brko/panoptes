@@ -734,12 +734,28 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
             let type_prefix = branch.ref_type.prefix();
             let default_marker = if branch.is_default_base { " *" } else { "" };
 
+            // Show indicator for branches with untracked git worktrees
+            let worktree_marker = if branch.has_git_worktree {
+                " (has worktree)"
+            } else {
+                ""
+            };
+
             let content = format!(
-                "{}{} {}{}",
-                prefix, type_prefix, branch.name, default_marker
+                "{}{} {}{}{}",
+                prefix, type_prefix, branch.name, default_marker, worktree_marker
             );
 
-            let style = if selected {
+            // Branches with untracked git worktrees are highlighted in yellow
+            let style = if branch.has_git_worktree {
+                if selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                }
+            } else if selected {
                 if branch.is_default_base {
                     Style::default()
                         .fg(Color::Cyan)
@@ -978,20 +994,57 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
                 Style::default().fg(Color::Cyan),
             )]));
         }
+        WorktreeCreationType::ImportExisting => {
+            lines.push(Line::from(vec![Span::styled(
+                "Import existing worktree for branch:",
+                Style::default().fg(t.text),
+            )]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                format!("    {}", state.worktree_wizard.branch_name),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                "This worktree already exists in git but is not",
+                Style::default().fg(t.text_muted),
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                "tracked by Panoptes. Importing will add it to",
+                Style::default().fg(t.text_muted),
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                "your project without modifying the worktree.",
+                Style::default().fg(t.text_muted),
+            )]));
+        }
+    }
+
+    // For ImportExisting, we need to find the actual worktree path from git
+    let is_import = state.worktree_wizard.creation_type == WorktreeCreationType::ImportExisting;
+
+    if !is_import {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "Worktree location:",
+            Style::default().fg(t.text),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {}", worktree_display),
+            Style::default().fg(t.text_muted),
+        )]));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
-        "Worktree location:",
-        Style::default().fg(t.text),
-    )]));
-    lines.push(Line::from(vec![Span::styled(
-        format!("  {}", worktree_display),
-        Style::default().fg(t.text_muted),
-    )]));
+    lines.push(Line::from(""));
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(""));
+    let action_text = if is_import {
+        " to import, "
+    } else {
+        " to create, "
+    };
     lines.push(Line::from(vec![
         Span::styled("Press ", Style::default().fg(t.text)),
         Span::styled(
@@ -1000,7 +1053,7 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" to create, ", Style::default().fg(t.text)),
+        Span::styled(action_text, Style::default().fg(t.text)),
         Span::styled(
             "Esc",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1008,11 +1061,16 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
         Span::styled(" to go back", Style::default().fg(t.text)),
     ]));
 
+    let title = if is_import {
+        "Import Worktree"
+    } else {
+        "Create Worktree"
+    };
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(t.border))
-            .title("Create Worktree"),
+            .title(title),
     );
 
     frame.render_widget(paragraph, area);
