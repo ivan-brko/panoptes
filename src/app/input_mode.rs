@@ -50,4 +50,8 @@ pub enum InputMode {
     ConfirmingClaudeConfigDelete,
     /// Selecting Claude config for session creation or project default
     SelectingClaudeConfig,
+    /// Confirming Claude settings copy after worktree creation
+    ConfirmingClaudeSettingsCopy,
+    /// Confirming Claude settings migration before worktree deletion
+    ConfirmingClaudeSettingsMigrate,
 }

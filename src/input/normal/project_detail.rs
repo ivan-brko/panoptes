@@ -5,7 +5,8 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, InputMode, View};
+use crate::app::{App, ClaudeSettingsMigrateState, InputMode, View};
+use crate::claude_json::ClaudeJsonStore;
 
 /// Handle key in project detail view (normal mode)
 pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -67,8 +68,27 @@ pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
             // Delete selected branch/worktree
             let branches = app.project_store.branches_for_project_sorted(project_id);
             if let Some(branch) = branches.get(app.state.selected_branch_index) {
+                // Check for permissions migration first (worktrees only)
+                if branch.is_worktree {
+                    if let Some(project) = app.project_store.get_project(project_id) {
+                        if let Some(migrate_state) = check_claude_settings_for_migrate(
+                            app,
+                            &branch.working_dir,
+                            &project.repo_path,
+                            project_id,
+                            branch.id,
+                        ) {
+                            // Show migrate dialog first
+                            app.state.pending_claude_settings_migrate = Some(migrate_state);
+                            app.state.input_mode = InputMode::ConfirmingClaudeSettingsMigrate;
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // No migration needed - proceed to delete confirmation
                 app.state.pending_delete_branch = Some(branch.id);
-                app.state.delete_worktree_on_disk = branch.is_worktree; // Default to deleting if it's a worktree
+                app.state.delete_worktree_on_disk = branch.is_worktree;
                 app.state.input_mode = InputMode::ConfirmingBranchDelete;
             }
         }
@@ -141,4 +161,48 @@ pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// Check if Claude settings should be migrated before worktree deletion
+///
+/// Returns Some(ClaudeSettingsMigrateState) if the worktree has unique permissions
+/// that should be offered for migration to the main repo.
+fn check_claude_settings_for_migrate(
+    app: &App,
+    worktree_path: &std::path::Path,
+    main_path: &std::path::Path,
+    project_id: crate::project::ProjectId,
+    branch_id: crate::project::BranchId,
+) -> Option<ClaudeSettingsMigrateState> {
+    // Get the Claude config to use (project default or global default)
+    let project = app.project_store.get_project(project_id)?;
+    let config_id = project
+        .default_claude_config
+        .or_else(|| app.claude_config_store.get_default_id());
+
+    let claude_config = config_id.and_then(|id| app.claude_config_store.get(id));
+    let config_dir = claude_config.and_then(|c| c.config_dir.clone());
+
+    // Create store for this config directory
+    let store = ClaudeJsonStore::for_config_dir(config_dir.as_deref())?;
+
+    let worktree_str = worktree_path.to_string_lossy().to_string();
+    let main_str = main_path.to_string_lossy().to_string();
+
+    // Compare tools between worktree and main
+    let (_, unique_to_worktree, _) = store.compare_tools(&worktree_str, &main_str).ok()?;
+
+    // Only show dialog if there are unique tools to migrate
+    if unique_to_worktree.is_empty() {
+        return None;
+    }
+
+    Some(ClaudeSettingsMigrateState {
+        worktree_path: worktree_path.to_path_buf(),
+        main_path: main_path.to_path_buf(),
+        branch_id,
+        unique_tools: unique_to_worktree,
+        selected_yes: true,
+        claude_config_dir: config_dir,
+    })
 }

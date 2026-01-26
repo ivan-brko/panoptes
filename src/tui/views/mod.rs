@@ -8,6 +8,7 @@ use crate::session::SessionManager;
 
 mod branch_detail;
 mod claude_configs;
+mod claude_settings;
 mod confirm;
 mod focus_stats;
 mod logs;
@@ -21,6 +22,9 @@ pub use branch_detail::render_branch_detail;
 pub use claude_configs::{
     render_claude_configs, render_config_delete_dialog, render_config_name_input_dialog,
     render_config_path_input_dialog, render_config_selector,
+};
+pub use claude_settings::{
+    render_claude_settings_copy_dialog, render_claude_settings_migrate_dialog,
 };
 pub use confirm::{
     render_confirm_dialog, render_loading_indicator, render_quit_confirm_dialog,

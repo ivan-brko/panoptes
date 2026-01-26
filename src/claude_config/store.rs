@@ -345,7 +345,7 @@ mod tests {
             "Personal".to_string(),
             Some(PathBuf::from("/home/.claude-personal")),
         );
-        let id1 = config1.id;
+        let _id1 = config1.id;
         let id2 = config2.id;
 
         store.add(config1);

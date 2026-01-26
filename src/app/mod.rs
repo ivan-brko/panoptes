@@ -10,7 +10,10 @@ mod view;
 
 // Re-exports from submodules
 pub use input_mode::InputMode;
-pub use state::{AppState, HomepageFocus, WorktreeWizardState};
+pub use state::{
+    AppState, ClaudeSettingsCopyState, ClaudeSettingsMigrateState, HomepageFocus,
+    WorktreeWizardState,
+};
 pub use view::View;
 
 // Re-exports from wizards (for backwards compatibility)
@@ -35,7 +38,8 @@ use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionManager};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
-    render_branch_detail, render_claude_configs, render_config_delete_dialog,
+    render_branch_detail, render_claude_configs, render_claude_settings_copy_dialog,
+    render_claude_settings_migrate_dialog, render_config_delete_dialog,
     render_config_name_input_dialog, render_config_path_input_dialog, render_config_selector,
     render_focus_session_delete_dialog, render_focus_session_detail_dialog, render_focus_stats,
     render_loading_indicator, render_log_viewer, render_notifications, render_project_detail,
@@ -1393,6 +1397,20 @@ impl App {
                     state.claude_config_selector_index,
                     claude_config_store.get_default_id(),
                 );
+            }
+
+            // Render Claude settings copy dialog
+            if state.input_mode == InputMode::ConfirmingClaudeSettingsCopy {
+                if let Some(ref copy_state) = state.pending_claude_settings_copy {
+                    render_claude_settings_copy_dialog(frame, area, copy_state);
+                }
+            }
+
+            // Render Claude settings migrate dialog
+            if state.input_mode == InputMode::ConfirmingClaudeSettingsMigrate {
+                if let Some(ref migrate_state) = state.pending_claude_settings_migrate {
+                    render_claude_settings_migrate_dialog(frame, area, migrate_state);
+                }
             }
 
             // Render notifications overlay

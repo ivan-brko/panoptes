@@ -37,6 +37,9 @@ PTY Output → Session buffer → TUI render
 - **claude_config/**: Claude configuration management for multiple accounts
   - `mod.rs`: `ClaudeConfig` struct, `ClaudeConfigId` type alias
   - `store.rs`: `ClaudeConfigStore` for CRUD and persistence to `~/.panoptes/claude_configs.json`
+- **claude_json/**: Claude Code JSON config file management (`.claude.json`)
+  - Reads/writes project-specific settings from Claude's config file
+  - Used for copying permissions to worktrees and migrating before deletion
 - **input/**: Input handling organized by mode
   - `mod.rs`: Module exports
   - `dispatcher.rs`: Main input dispatch logic - routes key events to mode-specific handlers
@@ -104,6 +107,7 @@ PTY Output → Session buffer → TUI render
   - `views/logs.rs`: Log viewer for application logs
   - `views/focus_stats.rs`: Focus timing statistics view
   - `views/claude_configs.rs`: Claude configuration management view
+  - `views/claude_settings.rs`: Claude permissions copy/migrate dialogs
   - `views/confirm.rs`: Reusable confirmation dialog component
   - `views/notifications.rs`: Notification overlay rendering
 
@@ -125,6 +129,8 @@ PTY Output → Session buffer → TUI render
 - `BranchRef`, `BranchRefType`, `WorktreeCreationType`: Worktree wizard types (in `wizards/worktree/types.rs`)
 - `FocusTimer`, `FocusTracker`, `FocusSession`: Focus timing types
 - `ClaudeConfig`, `ClaudeConfigId`, `ClaudeConfigStore`: Claude configuration types for multi-account support
+- `ClaudeSettingsCopyState`, `ClaudeSettingsMigrateState`: Dialog state for permissions sync
+- `ClaudeJsonStore`, `ClaudeJsonConfig`, `ClaudeProjectSettings`: Types for reading `.claude.json`
 
 ## Development Skills
 

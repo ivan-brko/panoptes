@@ -6,6 +6,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, InputMode, View};
+use crate::claude_json::ClaudeJsonStore;
 use crate::focus_timing::store::FocusStore;
 
 /// Handle key when starting a focus timer (entering duration)
@@ -444,4 +445,189 @@ pub fn handle_confirming_claude_config_delete_key(app: &mut App, key: KeyEvent) 
         _ => {}
     }
     Ok(())
+}
+
+/// Handle key when confirming Claude settings copy after worktree creation
+pub fn handle_confirming_claude_settings_copy_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+            // Toggle selection
+            if let Some(ref mut state) = app.state.pending_claude_settings_copy {
+                state.selected_yes = !state.selected_yes;
+            }
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Force yes
+            if let Some(ref mut state) = app.state.pending_claude_settings_copy {
+                state.selected_yes = true;
+            }
+            confirm_claude_settings_copy(app);
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            // Force no
+            if let Some(ref mut state) = app.state.pending_claude_settings_copy {
+                state.selected_yes = false;
+            }
+            confirm_claude_settings_copy(app);
+        }
+        KeyCode::Enter => {
+            confirm_claude_settings_copy(app);
+        }
+        KeyCode::Esc => {
+            // Skip without copying, still navigate
+            let copy_state = app.state.pending_claude_settings_copy.take();
+            app.state.input_mode = InputMode::Normal;
+            if let Some(state) = copy_state {
+                app.state
+                    .navigate_to_branch(state.project_id, state.branch_id);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Confirm the Claude settings copy action
+fn confirm_claude_settings_copy(app: &mut App) {
+    let copy_state = app.state.pending_claude_settings_copy.take();
+    app.state.input_mode = InputMode::Normal;
+
+    if let Some(state) = copy_state {
+        if state.selected_yes {
+            // Perform the copy
+            let source = state.source_path.to_string_lossy().to_string();
+            let target = state.target_path.to_string_lossy().to_string();
+
+            let _ = app.show_loading("Copying Claude settings...");
+
+            // Use the stored config_dir from state
+            if let Some(store) = ClaudeJsonStore::for_config_dir(state.claude_config_dir.as_deref())
+            {
+                match store.copy_settings(&source, &target) {
+                    Ok(()) => {
+                        app.state
+                            .header_notifications
+                            .push("Claude settings copied to worktree");
+                        tracing::info!("Copied Claude settings from {} to {}", source, target);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to copy Claude settings: {}", e);
+                        app.state
+                            .header_notifications
+                            .push(format!("Failed to copy Claude settings: {}", e));
+                    }
+                }
+            }
+
+            app.clear_loading();
+        }
+
+        // Navigate to the new branch
+        app.state
+            .navigate_to_branch(state.project_id, state.branch_id);
+    }
+}
+
+/// Handle key when confirming Claude settings migration before worktree deletion
+pub fn handle_confirming_claude_settings_migrate_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+            // Toggle selection
+            if let Some(ref mut state) = app.state.pending_claude_settings_migrate {
+                state.selected_yes = !state.selected_yes;
+            }
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Force yes
+            if let Some(ref mut state) = app.state.pending_claude_settings_migrate {
+                state.selected_yes = true;
+            }
+            confirm_claude_settings_migrate(app);
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            // Force no
+            if let Some(ref mut state) = app.state.pending_claude_settings_migrate {
+                state.selected_yes = false;
+            }
+            confirm_claude_settings_migrate(app);
+        }
+        KeyCode::Enter => {
+            confirm_claude_settings_migrate(app);
+        }
+        KeyCode::Esc => {
+            // Cancel entire deletion
+            app.state.pending_claude_settings_migrate = None;
+            app.state.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Confirm the Claude settings migration action
+fn confirm_claude_settings_migrate(app: &mut App) {
+    let migrate_state = app.state.pending_claude_settings_migrate.take();
+
+    if let Some(state) = migrate_state {
+        let branch_id = state.branch_id;
+
+        if state.selected_yes && !state.unique_tools.is_empty() {
+            // Perform the migration
+            let worktree = state.worktree_path.to_string_lossy().to_string();
+            let main = state.main_path.to_string_lossy().to_string();
+
+            let _ = app.show_loading("Migrating permissions...");
+
+            // Use the stored config_dir from state
+            if let Some(store) = ClaudeJsonStore::for_config_dir(state.claude_config_dir.as_deref())
+            {
+                match store.merge_settings(&worktree, &main) {
+                    Ok(added) => {
+                        if !added.is_empty() {
+                            app.state.header_notifications.push(format!(
+                                "Migrated {} permission{} to main repo",
+                                added.len(),
+                                if added.len() == 1 { "" } else { "s" }
+                            ));
+                            tracing::info!(
+                                "Migrated {} permissions from {} to {}",
+                                added.len(),
+                                worktree,
+                                main
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to migrate permissions: {}", e);
+                        app.state
+                            .header_notifications
+                            .push(format!("Failed to migrate permissions: {}", e));
+                    }
+                }
+            }
+
+            app.clear_loading();
+        }
+
+        // Continue to branch delete confirmation
+        // Get branch info to set up delete state
+        if let Some(branch) = app.project_store.get_branch(branch_id) {
+            app.state.pending_delete_branch = Some(branch_id);
+            app.state.delete_worktree_on_disk = branch.is_worktree;
+            app.state.input_mode = InputMode::ConfirmingBranchDelete;
+        } else {
+            // Branch no longer exists, just go back to normal
+            app.state.input_mode = InputMode::Normal;
+        }
+    } else {
+        app.state.input_mode = InputMode::Normal;
+    }
 }

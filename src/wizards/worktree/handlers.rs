@@ -5,7 +5,8 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, InputMode, MAX_BRANCH_NAME_LEN};
+use crate::app::{App, ClaudeSettingsCopyState, InputMode, MAX_BRANCH_NAME_LEN};
+use crate::claude_json::ClaudeJsonStore;
 use crate::project::ProjectId;
 use crate::wizards::worktree::{
     filter_branch_refs, BranchRef, BranchRefType, WorktreeCreationType,
@@ -361,9 +362,16 @@ pub fn handle_worktree_confirm_key(
 
             cancel_worktree_wizard(app);
 
-            // Navigate to the newly created branch
+            // Navigate to the newly created branch, possibly showing permissions dialog
             if let Some(branch_id) = created_branch_id {
-                app.state.navigate_to_branch(project_id, branch_id);
+                // Check if we should offer to copy Claude settings
+                if let Some(copy_state) = check_claude_settings_for_copy(app, project_id, branch_id)
+                {
+                    app.state.pending_claude_settings_copy = Some(copy_state);
+                    app.state.input_mode = InputMode::ConfirmingClaudeSettingsCopy;
+                } else {
+                    app.state.navigate_to_branch(project_id, branch_id);
+                }
             }
         }
         _ => {}
@@ -738,6 +746,56 @@ pub fn update_worktree_filtered_branches(app: &mut App) {
     }
     // Clamp index to valid range after filtering
     app.state.worktree_wizard.clamp_list_index();
+}
+
+/// Check if Claude settings should be copied to a new worktree
+///
+/// Returns Some(ClaudeSettingsCopyState) if the main repo has Claude settings
+/// that should be offered for copying to the new worktree.
+fn check_claude_settings_for_copy(
+    app: &App,
+    project_id: ProjectId,
+    branch_id: crate::project::BranchId,
+) -> Option<ClaudeSettingsCopyState> {
+    // Get project and branch info
+    let project = app.project_store.get_project(project_id)?;
+    let branch = app.project_store.get_branch(branch_id)?;
+
+    // Get the Claude config to use (project default or global default)
+    let config_id = project
+        .default_claude_config
+        .or_else(|| app.claude_config_store.get_default_id());
+
+    let claude_config = config_id.and_then(|id| app.claude_config_store.get(id));
+    let config_dir = claude_config.and_then(|c| c.config_dir.clone());
+
+    // Create store for this config directory
+    let store = ClaudeJsonStore::for_config_dir(config_dir.as_deref())?;
+    let main_path = project.repo_path.to_string_lossy().to_string();
+
+    // Check if main repo has any settings configured
+    if !store.has_settings(&main_path).ok()? {
+        return None;
+    }
+
+    // Get the settings to show a preview
+    let settings = store.get_settings(&main_path).ok()??;
+
+    // Only show dialog if there are tools to copy
+    if settings.allowed_tools.is_empty() && settings.mcp_servers.is_empty() {
+        return None;
+    }
+
+    Some(ClaudeSettingsCopyState {
+        source_path: project.repo_path.clone(),
+        target_path: branch.working_dir.clone(),
+        project_id,
+        branch_id,
+        tools_preview: settings.allowed_tools.clone(),
+        has_mcp_servers: !settings.mcp_servers.is_empty(),
+        selected_yes: true,
+        claude_config_dir: config_dir,
+    })
 }
 
 /// Select the default base branch in the filtered list (legacy flow)
