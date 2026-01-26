@@ -98,5 +98,11 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::SelectingClaudeConfig => {
             super::text_input::handle_selecting_claude_config_key(app, key)
         }
+        InputMode::ConfirmingClaudeSettingsCopy => {
+            super::dialogs::handle_confirming_claude_settings_copy_key(app, key)
+        }
+        InputMode::ConfirmingClaudeSettingsMigrate => {
+            super::dialogs::handle_confirming_claude_settings_migrate_key(app, key)
+        }
     }
 }

@@ -14,6 +14,44 @@ use crate::session::{SessionId, SessionManager};
 use crate::tui::{HeaderNotificationManager, NotificationManager};
 use crate::wizards::worktree::{BranchRef, WorktreeCreationType};
 
+/// State for Claude settings copy dialog (copies ALL project settings)
+#[derive(Debug, Clone)]
+pub struct ClaudeSettingsCopyState {
+    /// Main repository path (source of settings)
+    pub source_path: PathBuf,
+    /// New worktree path (destination for settings)
+    pub target_path: PathBuf,
+    /// Project ID for navigation after dialog
+    pub project_id: ProjectId,
+    /// Branch ID for navigation after dialog
+    pub branch_id: BranchId,
+    /// Preview of tools to show user (subset of full settings)
+    pub tools_preview: Vec<String>,
+    /// Whether MCP servers will be copied (for display)
+    pub has_mcp_servers: bool,
+    /// Whether Yes is selected (default true)
+    pub selected_yes: bool,
+    /// Which Claude config directory to use (None = default ~/.claude)
+    pub claude_config_dir: Option<PathBuf>,
+}
+
+/// State for Claude settings migrate dialog
+#[derive(Debug, Clone)]
+pub struct ClaudeSettingsMigrateState {
+    /// Worktree path being deleted
+    pub worktree_path: PathBuf,
+    /// Main repository path (destination for migration)
+    pub main_path: PathBuf,
+    /// Branch ID being deleted
+    pub branch_id: BranchId,
+    /// Tools unique to worktree that will be migrated
+    pub unique_tools: Vec<String>,
+    /// Whether Yes is selected (default true)
+    pub selected_yes: bool,
+    /// Which Claude config directory to use (None = default ~/.claude)
+    pub claude_config_dir: Option<PathBuf>,
+}
+
 use super::input_mode::InputMode;
 use super::view::View;
 
@@ -223,6 +261,12 @@ pub struct AppState {
     pub show_claude_config_selector: bool,
     /// Project ID for setting project default config
     pub setting_project_default_config: Option<ProjectId>,
+
+    // --- Claude settings dialogs ---
+    /// Pending Claude settings copy (after worktree creation)
+    pub pending_claude_settings_copy: Option<ClaudeSettingsCopyState>,
+    /// Pending Claude settings migration (before worktree deletion)
+    pub pending_claude_settings_migrate: Option<ClaudeSettingsMigrateState>,
 }
 
 impl AppState {
