@@ -20,6 +20,7 @@ use crate::tui::views::render_project_delete_confirmation;
 use crate::tui::views::render_quit_confirm_dialog;
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
+use crate::tui::widgets::selection::{selection_prefix, selection_style, selection_style_with_accent};
 
 /// Render the projects overview
 #[allow(clippy::too_many_arguments)]
@@ -328,15 +329,11 @@ fn render_project_addition(frame: &mut Frame, area: Rect, state: &AppState) {
             .map(|(i, path)| {
                 let actual_idx = start + i;
                 let is_selected = actual_idx == selected_idx;
-                let prefix = if is_selected { "▶ " } else { "  " };
+                let prefix = selection_prefix(is_selected);
                 let display = crate::path_complete::path_to_display(path);
                 let content = format!("{}{}/", prefix, display);
 
-                let style = if is_selected {
-                    t.selected_style()
-                } else {
-                    Style::default().fg(t.text)
-                };
+                let style = selection_style_with_accent(is_selected, &t);
                 ListItem::new(content).style(style)
             })
             .collect();
@@ -474,7 +471,7 @@ fn render_project_list(
         .enumerate()
         .map(|(i, project)| {
             let selected = i == selected_index && focused;
-            let prefix = if selected { "▶ " } else { "  " };
+            let prefix = selection_prefix(selected);
 
             // Count branches and active sessions for this project
             let branch_count = project_store.branch_count_for_project(project.id);
@@ -496,11 +493,11 @@ fn render_project_list(
             // Color precedence: attention > active > selected > default
             let style = if selected {
                 if attention_count > 0 {
-                    Style::default().fg(t.attention_badge).bold()
+                    selection_style(true, t.attention_badge)
                 } else if active_count > 0 {
-                    Style::default().fg(t.active).bold()
+                    selection_style(true, t.active)
                 } else {
-                    t.selected_style()
+                    selection_style_with_accent(true, &t)
                 }
             } else if attention_count > 0 {
                 Style::default().fg(t.attention_badge)
@@ -545,7 +542,7 @@ fn render_quick_sessions(
         .enumerate()
         .map(|(i, session)| {
             let selected = i == selected_index && focused;
-            let prefix = if selected { "▶ " } else { "  " };
+            let prefix = selection_prefix(selected);
 
             // Check if session needs attention
             let needs_attention = sessions.session_needs_attention(session, idle_threshold_secs);
@@ -595,11 +592,7 @@ fn render_quick_sessions(
                 )),
             ]);
 
-            let style = if selected {
-                Style::default().fg(session.info.state.color()).bold()
-            } else {
-                Style::default().fg(session.info.state.color())
-            };
+            let style = selection_style(selected, session.info.state.color());
             ListItem::new(content).style(style)
         })
         .collect();

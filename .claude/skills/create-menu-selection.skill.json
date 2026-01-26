@@ -1,0 +1,8 @@
+{
+  "name": "create-menu-selection",
+  "description": "Guide for creating a new selectable list menu with consistent styling and behavior",
+  "category": "development",
+  "tags": ["ui", "tui", "menu", "selection", "list", "ratatui", "navigation"],
+  "version": "1.0.0",
+  "prompt": "Use this skill when you need to create a new selectable list menu in Panoptes. This guide provides step-by-step instructions for adding state management, view rendering, input handling, and consistent selection styling across all menus. It includes complete examples, common patterns, and a testing checklist to ensure your menu matches the existing UI patterns."
+}
