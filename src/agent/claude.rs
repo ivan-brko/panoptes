@@ -136,6 +136,9 @@ exit 0
     }
 
     /// Create the session-specific settings file
+    ///
+    /// This function MERGES hooks into existing settings rather than overwriting,
+    /// preserving Claude Code trust settings and other user configurations.
     fn create_session_settings(
         working_dir: &Path,
         event_scripts: &HashMap<String, PathBuf>,
@@ -145,6 +148,21 @@ exit 0
         std::fs::create_dir_all(&claude_dir).context("Failed to create .claude directory")?;
 
         let settings_path = claude_dir.join("settings.local.json");
+
+        // Load existing settings if present, otherwise start fresh
+        let mut settings: serde_json::Value = if settings_path.exists() {
+            let content = std::fs::read_to_string(&settings_path)
+                .context("Failed to read existing settings")?;
+            serde_json::from_str(&content).unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to parse existing settings.local.json: {}, starting fresh",
+                    e
+                );
+                serde_json::json!({})
+            })
+        } else {
+            serde_json::json!({})
+        };
 
         // Build hooks config using the event-specific script paths
         let mut hooks = serde_json::Map::new();
@@ -163,7 +181,16 @@ exit 0
             }
         }
 
-        let settings = serde_json::json!({ "hooks": hooks });
+        // Merge hooks into settings (only overwrite the hooks key, preserve everything else)
+        settings["hooks"] = serde_json::Value::Object(hooks);
+
+        // Create backup before writing if file exists (safeguard)
+        if settings_path.exists() {
+            let backup_path = settings_path.with_extension("json.bak");
+            if let Err(e) = std::fs::copy(&settings_path, &backup_path) {
+                tracing::warn!("Failed to create backup of settings.local.json: {}", e);
+            }
+        }
 
         std::fs::write(
             &settings_path,
@@ -532,5 +559,118 @@ mod tests {
         assert!(!cleanup_paths.is_empty());
         assert!(cleanup_paths[0].ends_with("settings.local.json"));
         assert!(cleanup_paths[0].exists());
+    }
+
+    #[test]
+    fn test_create_session_settings_preserves_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+
+        // Create existing settings with trust and other fields
+        let claude_dir = working_dir.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let existing_settings = r#"{
+            "enabledBetaFeatures": ["feature1", "feature2"],
+            "hasTrustDialogAccepted": true,
+            "customSetting": 42
+        }"#;
+        std::fs::write(claude_dir.join("settings.local.json"), existing_settings).unwrap();
+
+        // Create mock event scripts
+        let mut event_scripts = HashMap::new();
+        for event in HOOK_EVENTS {
+            event_scripts.insert(
+                event.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event)),
+            );
+        }
+
+        // Create session settings (should merge hooks, not overwrite)
+        let settings_path =
+            ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
+
+        // Read the resulting settings
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Verify existing settings are preserved
+        assert!(settings["hasTrustDialogAccepted"].as_bool().unwrap());
+        assert_eq!(settings["customSetting"].as_i64().unwrap(), 42);
+        let features = settings["enabledBetaFeatures"].as_array().unwrap();
+        assert_eq!(features.len(), 2);
+        assert!(features.iter().any(|v| v.as_str() == Some("feature1")));
+        assert!(features.iter().any(|v| v.as_str() == Some("feature2")));
+
+        // Verify hooks were added
+        assert!(settings.get("hooks").is_some());
+        let hooks = settings["hooks"].as_object().unwrap();
+        assert!(hooks.contains_key("PreToolUse"));
+        assert!(hooks.contains_key("PostToolUse"));
+        assert!(hooks.contains_key("Stop"));
+        assert!(hooks.contains_key("Notification"));
+    }
+
+    #[test]
+    fn test_create_session_settings_creates_backup() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+
+        // Create existing settings
+        let claude_dir = working_dir.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let original_content = r#"{"original": true}"#;
+        std::fs::write(claude_dir.join("settings.local.json"), original_content).unwrap();
+
+        // Create mock event scripts
+        let mut event_scripts = HashMap::new();
+        for event in HOOK_EVENTS {
+            event_scripts.insert(
+                event.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event)),
+            );
+        }
+
+        // Create session settings
+        ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
+
+        // Verify backup was created
+        let backup_path = claude_dir.join("settings.local.json.bak");
+        assert!(backup_path.exists());
+
+        // Verify backup has original content
+        let backup_content = std::fs::read_to_string(&backup_path).unwrap();
+        let backup_json: serde_json::Value = serde_json::from_str(&backup_content).unwrap();
+        assert!(backup_json["original"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_create_session_settings_handles_invalid_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+
+        // Create existing settings with invalid JSON
+        let claude_dir = working_dir.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join("settings.local.json"), "not valid json").unwrap();
+
+        // Create mock event scripts
+        let mut event_scripts = HashMap::new();
+        for event in HOOK_EVENTS {
+            event_scripts.insert(
+                event.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event)),
+            );
+        }
+
+        // Create session settings (should start fresh when JSON is invalid)
+        let settings_path =
+            ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
+
+        // Read the resulting settings
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Verify hooks were added (fresh settings object)
+        assert!(settings.get("hooks").is_some());
     }
 }
