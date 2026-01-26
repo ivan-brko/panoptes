@@ -881,6 +881,16 @@ impl App {
             return;
         };
 
+        // Get existing git worktrees to detect untracked worktrees
+        let git_worktree_branches: std::collections::HashSet<String> =
+            match crate::git::worktree::list_worktrees(git.repository()) {
+                Ok(worktrees) => worktrees.into_iter().filter_map(|wt| wt.branch).collect(),
+                Err(e) => {
+                    tracing::warn!("Failed to list git worktrees: {}", e);
+                    std::collections::HashSet::new()
+                }
+            };
+
         // Try to fetch from remotes (may fail if offline)
         let _ = self.show_loading("Fetching branches from remotes...");
         if let Err(e) = git.fetch_all_remotes() {
@@ -900,12 +910,17 @@ impl App {
                             crate::git::BranchRefInfoType::Local => BranchRefType::Local,
                             crate::git::BranchRefInfoType::Remote => BranchRefType::Remote,
                         };
+                        let is_tracked = tracked_branches.contains(&r.name);
+                        // Branch has untracked git worktree if git knows about it but Panoptes doesn't track it
+                        let has_git_worktree =
+                            !is_tracked && git_worktree_branches.contains(&r.name);
                         BranchRef {
                             ref_type,
                             name: r.name.clone(),
                             display_name: r.name.clone(),
                             is_default_base: r.is_default_base,
-                            is_already_tracked: tracked_branches.contains(&r.name),
+                            is_already_tracked: is_tracked,
+                            has_git_worktree,
                         }
                     })
                     .collect();
@@ -983,6 +998,7 @@ impl App {
                             display_name: r.name,
                             is_default_base: r.is_default_base,
                             is_already_tracked: false, // Deprecated code path
+                            has_git_worktree: false,   // Deprecated code path
                         }
                     })
                     .collect();
@@ -1057,6 +1073,62 @@ impl App {
         self.project_store.add_branch(branch);
         self.project_store.save()?;
         tracing::info!("Created worktree for branch: {}", branch_name);
+
+        Ok(branch_id)
+    }
+
+    /// Import an existing git worktree that is not tracked by Panoptes
+    ///
+    /// This finds the worktree path from git's worktree list and creates a Branch
+    /// entry pointing to it, without modifying the worktree on disk.
+    ///
+    /// Returns the BranchId of the imported branch on success.
+    pub(crate) fn import_existing_worktree(
+        &mut self,
+        project_id: ProjectId,
+        branch_name: &str,
+    ) -> Result<BranchId> {
+        // Get project info
+        let (repo_path, session_subdir) = {
+            let Some(project) = self.project_store.get_project(project_id) else {
+                anyhow::bail!("Project not found");
+            };
+            (project.repo_path.clone(), project.session_subdir.clone())
+        };
+
+        let git = crate::git::GitOps::open(&repo_path)?;
+
+        // Find the worktree path for this branch from git
+        let worktrees = crate::git::worktree::list_worktrees(git.repository())?;
+        let worktree = worktrees
+            .into_iter()
+            .find(|wt| wt.branch.as_deref() == Some(branch_name))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No git worktree found for branch '{}'. It may have been removed.",
+                    branch_name
+                )
+            })?;
+
+        let worktree_path = worktree.path;
+
+        // Apply project's session_subdir to get effective working dir for sessions
+        let effective_working_dir = match &session_subdir {
+            Some(subdir) => worktree_path.join(subdir),
+            None => worktree_path,
+        };
+
+        let branch = crate::project::Branch::new(
+            project_id,
+            branch_name.to_string(),
+            effective_working_dir,
+            false, // is_default
+            true,  // is_worktree
+        );
+        let branch_id = branch.id;
+        self.project_store.add_branch(branch);
+        self.project_store.save()?;
+        tracing::info!("Imported existing worktree for branch: {}", branch_name);
 
         Ok(branch_id)
     }

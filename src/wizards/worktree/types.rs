@@ -34,6 +34,8 @@ pub struct BranchRef {
     pub is_default_base: bool,
     /// Whether this branch already has a worktree tracked in Panoptes
     pub is_already_tracked: bool,
+    /// Whether this branch has a git worktree that is NOT tracked by Panoptes
+    pub has_git_worktree: bool,
 }
 
 impl BranchRef {
@@ -46,6 +48,7 @@ impl BranchRef {
             display_name,
             is_default_base: false,
             is_already_tracked: false,
+            has_git_worktree: false,
         }
     }
 
@@ -66,6 +69,8 @@ pub enum WorktreeCreationType {
     RemoteTracking,
     /// Create a new branch from a base and checkout into worktree
     NewBranch,
+    /// Import an existing git worktree that is not tracked by Panoptes
+    ImportExisting,
 }
 
 /// Filter branch refs by fuzzy substring match
