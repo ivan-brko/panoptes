@@ -674,7 +674,7 @@ fn worktree_navigate_branches(app: &mut App, direction: i32) {
 }
 
 /// Select the first non-tracked branch in the list
-fn worktree_select_first_selectable(app: &mut App) {
+pub fn worktree_select_first_selectable(app: &mut App) {
     let filtered_count = app.state.worktree_wizard.filtered_branches.len();
     let has_create_option = !app.state.worktree_wizard.search_text.is_empty();
 
@@ -708,7 +708,7 @@ fn cancel_worktree_wizard(app: &mut App) {
 }
 
 /// Update filtered branches based on search text
-fn update_worktree_filtered_branches(app: &mut App) {
+pub fn update_worktree_filtered_branches(app: &mut App) {
     if app.state.worktree_wizard.search_text.is_empty() {
         app.state.worktree_wizard.filtered_branches =
             app.state.worktree_wizard.all_branches.clone();
