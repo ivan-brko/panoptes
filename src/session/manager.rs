@@ -540,6 +540,48 @@ impl SessionManager {
 }
 
 #[cfg(test)]
+impl SessionManager {
+    /// Insert a stub session for testing
+    ///
+    /// Spawns a `sleep` process to create a valid Session with minimal overhead.
+    /// The session will have a real PTY but a short-lived process.
+    pub fn insert_test_session(
+        &mut self,
+        name: &str,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Result<SessionId> {
+        use super::pty::PtyHandle;
+        use super::{Session, SessionInfo};
+        use std::collections::HashMap;
+
+        let info = SessionInfo::new(
+            name.to_string(),
+            std::path::PathBuf::from("/tmp"),
+            project_id,
+            branch_id,
+        );
+        let session_id = info.id;
+
+        // Spawn a simple sleep process for the PTY
+        let pty = PtyHandle::spawn(
+            "sleep",
+            &["1"],
+            &std::path::PathBuf::from("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )?;
+        let session = Session::new(info, pty, 24, 80);
+
+        self.sessions.insert(session_id, session);
+        self.session_order.push(session_id);
+
+        Ok(session_id)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

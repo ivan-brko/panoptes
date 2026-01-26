@@ -9,7 +9,7 @@ use crate::focus_timing::stats::FocusSession;
 use crate::focus_timing::tracker::FocusTracker;
 use crate::focus_timing::FocusTimer;
 use crate::project::{BranchId, ProjectId};
-use crate::session::SessionId;
+use crate::session::{SessionId, SessionManager};
 use crate::tui::{HeaderNotificationManager, NotificationManager};
 use crate::wizards::worktree::{BranchRef, WorktreeCreationType};
 
@@ -346,14 +346,33 @@ impl AppState {
         self.selected_timeline_index = 0;
     }
 
-    /// Return from session view to the previous view
-    pub fn return_from_session(&mut self) {
-        if let Some(return_view) = self.session_return_view.take() {
-            self.view = return_view;
+    /// Return from session view based on the current session's context
+    ///
+    /// Navigates to the branch detail view for the current session's project/branch,
+    /// rather than returning to where the user originally came from. This ensures
+    /// consistent navigation when jumping between sessions with Space.
+    pub fn return_from_session(&mut self, sessions: &SessionManager) {
+        // Navigate based on the current session's context (not where we came from)
+        if let Some(session_id) = self.active_session {
+            if let Some(session) = sessions.get(session_id) {
+                // Go to the session's branch detail view
+                self.view = View::BranchDetail(session.info.project_id, session.info.branch_id);
+            } else {
+                // Session was deleted - fall back to stored return view or projects overview
+                self.view = self
+                    .session_return_view
+                    .take()
+                    .unwrap_or(View::ProjectsOverview);
+            }
         } else {
-            self.view = View::ProjectsOverview;
+            // No active session - fall back
+            self.view = self
+                .session_return_view
+                .take()
+                .unwrap_or(View::ProjectsOverview);
         }
         self.active_session = None;
         self.input_mode = InputMode::Normal;
+        self.session_return_view = None; // Clear it
     }
 }

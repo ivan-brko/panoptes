@@ -1451,6 +1451,9 @@ mod tests {
         let branch_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
 
+        // Create a SessionManager for testing (session won't exist, tests fallback path)
+        let sessions = SessionManager::new(Config::default());
+
         // Navigate to project
         state.navigate_to_project(project_id);
         assert_eq!(state.view, View::ProjectDetail(project_id));
@@ -1470,8 +1473,8 @@ mod tests {
             Some(View::BranchDetail(project_id, branch_id))
         );
 
-        // Return from session
-        state.return_from_session();
+        // Return from session (session not in manager, uses fallback to stored return view)
+        state.return_from_session(&sessions);
         assert_eq!(state.view, View::BranchDetail(project_id, branch_id));
         assert!(state.active_session.is_none());
 
@@ -1493,5 +1496,46 @@ mod tests {
 
         state.navigate_back();
         assert_eq!(state.view, View::ProjectsOverview);
+    }
+
+    #[test]
+    fn test_return_from_session_uses_session_context() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            worktrees_dir: temp_dir.path().join("worktrees"),
+            hooks_dir: temp_dir.path().join("hooks"),
+            ..Config::default()
+        };
+        let mut sessions = SessionManager::new(config);
+
+        let project_a = Uuid::new_v4();
+        let branch_a = Uuid::new_v4();
+        let project_b = Uuid::new_v4();
+        let branch_b = Uuid::new_v4();
+
+        // Create test sessions in different projects/branches
+        let _session_a = sessions
+            .insert_test_session("Session A", project_a, branch_a)
+            .unwrap();
+        let session_b = sessions
+            .insert_test_session("Session B", project_b, branch_b)
+            .unwrap();
+
+        let mut state = AppState::default();
+
+        // Start from timeline, navigate to session A
+        state.view = View::ActivityTimeline;
+        state.navigate_to_session(_session_a);
+        assert_eq!(state.session_return_view, Some(View::ActivityTimeline));
+
+        // Jump to session B (simulates Space key)
+        state.active_session = Some(session_b);
+        state.session_return_view = Some(View::SessionView); // This is what causes the bug
+
+        // Return from session - should go to session B's branch detail, NOT ActivityTimeline
+        state.return_from_session(&sessions);
+        assert_eq!(state.view, View::BranchDetail(project_b, branch_b));
+        assert!(state.active_session.is_none());
+        assert!(state.session_return_view.is_none());
     }
 }
