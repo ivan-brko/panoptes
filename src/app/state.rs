@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::claude_config::{ClaudeConfig, ClaudeConfigId};
 use crate::focus_timing::stats::FocusSession;
 use crate::focus_timing::tracker::FocusTracker;
 use crate::focus_timing::FocusTimer;
@@ -202,6 +203,26 @@ pub struct AppState {
     pub pending_delete_focus_session: Option<uuid::Uuid>,
     /// Focus session being viewed in detail dialog
     pub viewing_focus_session: Option<FocusSession>,
+
+    // --- Claude config state ---
+    /// Selected index in Claude configs view
+    pub claude_configs_selected_index: usize,
+    /// Claude config pending deletion (for confirmation dialog)
+    pub pending_delete_claude_config: Option<ClaudeConfigId>,
+    /// Buffer for new config name input
+    pub new_claude_config_name: String,
+    /// Buffer for new config path input
+    pub new_claude_config_path: String,
+    /// Claude config being selected for session creation
+    pub creating_session_claude_config: Option<ClaudeConfigId>,
+    /// Available Claude configs for selection during session creation
+    pub available_claude_configs: Vec<ClaudeConfig>,
+    /// Selected index in Claude config selector
+    pub claude_config_selector_index: usize,
+    /// Whether Claude config selector is showing (overlay during session creation)
+    pub show_claude_config_selector: bool,
+    /// Project ID for setting project default config
+    pub setting_project_default_config: Option<ProjectId>,
 }
 
 impl AppState {
@@ -215,6 +236,7 @@ impl AppState {
             View::SessionView => 0,
             View::LogViewer => self.log_viewer_scroll,
             View::FocusStats => self.focus_stats_selected_index,
+            View::ClaudeConfigs => self.claude_configs_selected_index,
         }
     }
 
@@ -228,6 +250,7 @@ impl AppState {
             View::SessionView => {}
             View::LogViewer => self.log_viewer_scroll = index,
             View::FocusStats => self.focus_stats_selected_index = index,
+            View::ClaudeConfigs => self.claude_configs_selected_index = index,
         }
     }
 
@@ -282,7 +305,8 @@ impl AppState {
                 View::ProjectsOverview
                 | View::ActivityTimeline
                 | View::LogViewer
-                | View::FocusStats => {
+                | View::FocusStats
+                | View::ClaudeConfigs => {
                     // Leaving project context - clear the context
                     self.focus_tracker.set_context(None, None);
                 }
@@ -344,6 +368,12 @@ impl AppState {
     pub fn navigate_to_timeline(&mut self) {
         self.view = View::ActivityTimeline;
         self.selected_timeline_index = 0;
+    }
+
+    /// Navigate to Claude configs view
+    pub fn navigate_to_claude_configs(&mut self) {
+        self.view = View::ClaudeConfigs;
+        self.claude_configs_selected_index = 0;
     }
 
     /// Return from session view based on the current session's context

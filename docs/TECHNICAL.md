@@ -162,9 +162,30 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration |
 | `~/.panoptes/projects.json` | Project and branch persistence |
+| `~/.panoptes/claude_configs.json` | Claude account configurations |
 | `~/.panoptes/hooks/` | Hook scripts for Claude Code |
 | `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
+
+## Multi-Account Support
+
+Panoptes supports multiple Claude Code accounts via the `CLAUDE_CONFIG_DIR` environment variable:
+
+### Configuration Flow
+
+1. **Define configurations** - Each configuration points to a Claude config directory (e.g., `~/.claude-work`, `~/.claude-personal`)
+2. **Set project defaults** - Each project can have a default configuration
+3. **Session selection** - When creating a session with multiple configs available, a selector appears
+
+### Environment Variable Injection
+
+When spawning a Claude Code session with a non-default configuration:
+- The `CLAUDE_CONFIG_DIR` environment variable is set to the configuration's directory path
+- Claude Code uses this directory instead of the default `~/.claude`
+
+### Session Display
+
+Sessions display their configuration name in the header (e.g., `[Work]`) when using a non-default configuration.
 
 ## Configuration
 

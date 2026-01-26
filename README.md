@@ -16,6 +16,7 @@ Named after the hundred-eyed giant of Greek mythology.
 ## Features
 
 - **Multi-Session Management** - Run multiple Claude Code sessions in parallel, each with its own conversation and context
+- **Multi-Account Support** - Manage multiple Claude Code accounts and switch between them per-project
 - **Project & Branch Organization** - Sessions organized by git repository and branch. Panoptes automatically creates isolated worktrees so each branch has its own working directory — no manual setup required
 - **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Idle
 - **Attention System** - Get notified when sessions need your input, with visual badges and terminal bell alerts
@@ -91,6 +92,7 @@ cargo build --release
 | `d` | Delete selected item |
 | `r` | Rename project |
 | `R` | Refresh branches |
+| `c` | Claude configs (from homepage) / Set project config |
 
 ### Views
 
@@ -132,6 +134,7 @@ See [Configuration Guide](docs/CONFIG_GUIDE.md) for all options.
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration |
 | `~/.panoptes/projects.json` | Projects and branches |
+| `~/.panoptes/claude_configs.json` | Claude account configurations |
 | `~/.panoptes/focus_sessions.json` | Focus timer history |
 | `~/.panoptes/worktrees/` | Git worktrees |
 | `~/.panoptes/hooks/` | Hook scripts |

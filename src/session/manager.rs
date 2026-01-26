@@ -12,6 +12,7 @@ use chrono::Utc;
 
 use crate::agent::adapter::SpawnConfig;
 use crate::agent::AgentType;
+use crate::claude_config::ClaudeConfigId;
 use crate::config::Config;
 use crate::hooks::{HookEvent, HookEventType};
 use crate::project::{BranchId, ProjectId};
@@ -50,7 +51,43 @@ impl SessionManager {
         rows: usize,
         cols: usize,
     ) -> Result<SessionId> {
-        let info = SessionInfo::new(name.clone(), working_dir.clone(), project_id, branch_id);
+        self.create_session_with_config(
+            name,
+            working_dir,
+            project_id,
+            branch_id,
+            initial_prompt,
+            rows,
+            cols,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Create a new session with a specific Claude configuration
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_session_with_config(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        initial_prompt: Option<String>,
+        rows: usize,
+        cols: usize,
+        claude_config_id: Option<ClaudeConfigId>,
+        claude_config_dir: Option<PathBuf>,
+        claude_config_name: Option<String>,
+    ) -> Result<SessionId> {
+        let info = SessionInfo::with_claude_config(
+            name.clone(),
+            working_dir.clone(),
+            project_id,
+            branch_id,
+            claude_config_id,
+            claude_config_name,
+        );
         let session_id = info.id;
 
         // Create spawn config
@@ -61,6 +98,7 @@ impl SessionManager {
             initial_prompt,
             rows: rows as u16,
             cols: cols as u16,
+            claude_config_dir,
         };
 
         // Get adapter and spawn the process

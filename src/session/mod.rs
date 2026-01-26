@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::claude_config::ClaudeConfigId;
 use crate::project::{BranchId, ProjectId};
 
 /// Unique identifier for a session
@@ -99,6 +100,12 @@ pub struct SessionInfo {
     /// Timestamp when session exited (for cleanup)
     #[serde(default)]
     pub exited_at: Option<DateTime<Utc>>,
+    /// Claude configuration ID used for this session
+    #[serde(default)]
+    pub claude_config_id: Option<ClaudeConfigId>,
+    /// Claude configuration name (cached for display)
+    #[serde(default)]
+    pub claude_config_name: Option<String>,
 }
 
 impl SessionInfo {
@@ -123,7 +130,24 @@ impl SessionInfo {
             needs_attention: false,
             exit_reason: None,
             exited_at: None,
+            claude_config_id: None,
+            claude_config_name: None,
         }
+    }
+
+    /// Create new session info with Claude configuration
+    pub fn with_claude_config(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        claude_config_id: Option<ClaudeConfigId>,
+        claude_config_name: Option<String>,
+    ) -> Self {
+        let mut info = Self::new(name, working_dir, project_id, branch_id);
+        info.claude_config_id = claude_config_id;
+        info.claude_config_name = claude_config_name;
+        info
     }
 }
 

@@ -102,6 +102,17 @@ You name each session when you create it, making it easy to remember what each o
 
 Create new git worktrees directly from Panoptes with a fuzzy branch selector. Type to filter existing branches or create a new one.
 
+### Multi-Account Support
+
+Manage multiple Claude Code accounts (configurations) and switch between them:
+
+- **Global Configurations** - Define named configurations pointing to different Claude config directories
+- **Project Defaults** - Set a default configuration for each project
+- **Session Selection** - Choose which configuration to use when creating a new session
+- **Visual Indicator** - See which configuration a session is using in the header
+
+Use the `c` key from the projects overview to manage configurations, or from project detail to set the project default.
+
 ### Session Lifecycle
 
 - Create sessions with a name and optional branch context
@@ -127,6 +138,7 @@ Panoptes is for developers who:
 
 The current version includes:
 - Managing multiple Claude Code sessions
+- Multi-account support for different Claude configurations
 - Git repository and branch organization with worktree support
 - Real-time session state tracking
 - Attention system with notifications and quick navigation

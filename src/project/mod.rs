@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+use crate::claude_config::ClaudeConfigId;
+
 /// Unique identifier for a project
 pub type ProjectId = Uuid;
 
@@ -38,6 +40,9 @@ pub struct Project {
     /// If None, sessions start at repo root.
     #[serde(default)]
     pub session_subdir: Option<PathBuf>,
+    /// Default Claude configuration for this project
+    #[serde(default)]
+    pub default_claude_config: Option<ClaudeConfigId>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp
@@ -56,6 +61,7 @@ impl Project {
             default_branch,
             default_base_branch: None,
             session_subdir: None,
+            default_claude_config: None,
             created_at: now,
             last_activity: now,
         }

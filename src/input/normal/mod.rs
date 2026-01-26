@@ -3,6 +3,7 @@
 //! Handlers for keyboard input when in normal (command) mode.
 
 pub mod branch_detail;
+pub mod claude_configs;
 pub mod focus_stats;
 pub mod log_viewer;
 pub mod project_detail;

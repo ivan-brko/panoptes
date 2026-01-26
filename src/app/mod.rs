@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
+use crate::claude_config::ClaudeConfigStore;
 use crate::config::Config;
 use crate::focus_timing::stats::{FocusContextBreakdown, FocusSession};
 use crate::focus_timing::store::FocusStore;
@@ -34,10 +35,11 @@ use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionManager};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
-    render_branch_detail, render_focus_session_delete_dialog, render_focus_session_detail_dialog,
-    render_focus_stats, render_loading_indicator, render_log_viewer, render_notifications,
-    render_project_detail, render_projects_overview, render_session_view, render_timeline,
-    render_timer_input_dialog,
+    render_branch_detail, render_claude_configs, render_config_delete_dialog,
+    render_config_name_input_dialog, render_config_path_input_dialog, render_config_selector,
+    render_focus_session_delete_dialog, render_focus_session_detail_dialog, render_focus_stats,
+    render_loading_indicator, render_log_viewer, render_notifications, render_project_detail,
+    render_projects_overview, render_session_view, render_timeline, render_timer_input_dialog,
 };
 use crate::tui::{NotificationType, Tui};
 use crate::wizards::worktree::{
@@ -64,6 +66,8 @@ pub struct App {
     pub(crate) state: AppState,
     /// Project store for project/branch persistence
     pub(crate) project_store: ProjectStore,
+    /// Claude config store for managing Claude configurations
+    pub(crate) claude_config_store: ClaudeConfigStore,
     /// Session manager
     pub(crate) sessions: SessionManager,
     /// Hook event receiver
@@ -94,6 +98,13 @@ impl App {
             project_store.branch_count()
         );
 
+        // Load Claude config store (or create empty if doesn't exist)
+        let claude_config_store = ClaudeConfigStore::load().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load claude config store: {}, starting fresh", e);
+            ClaudeConfigStore::new()
+        });
+        tracing::debug!("Loaded {} claude configs", claude_config_store.count());
+
         // Create hook event channel with large buffer to avoid dropping events
         let (hook_tx, hook_rx): (HookEventSender, HookEventReceiver) =
             hooks::server::create_channel(DEFAULT_CHANNEL_BUFFER);
@@ -112,6 +123,7 @@ impl App {
             config,
             state: AppState::default(),
             project_store,
+            claude_config_store,
             sessions,
             hook_rx,
             hook_server,
@@ -624,6 +636,7 @@ impl App {
             View::ActivityTimeline => normal::timeline::handle_timeline_key(self, key),
             View::LogViewer => normal::log_viewer::handle_log_viewer_key(self, key),
             View::FocusStats => normal::focus_stats::handle_focus_stats_key(self, key),
+            View::ClaudeConfigs => normal::claude_configs::handle_claude_configs_key(self, key),
         }
     }
 
@@ -1193,6 +1206,7 @@ impl App {
     fn render(&mut self) -> Result<()> {
         let state = &self.state;
         let project_store = &self.project_store;
+        let claude_config_store = &self.claude_config_store;
         let sessions = &self.sessions;
         let config = &self.config;
         let log_buffer = &self.log_buffer;
@@ -1294,6 +1308,19 @@ impl App {
                         attention_count,
                     );
                 }
+                View::ClaudeConfigs => {
+                    let attention_count =
+                        sessions.total_attention_count(config.idle_threshold_secs);
+                    render_claude_configs(
+                        frame,
+                        area,
+                        claude_config_store,
+                        state.claude_configs_selected_index,
+                        state.focus_timer.as_ref(),
+                        &state.header_notifications,
+                        attention_count,
+                    );
+                }
             }
 
             // Render timer input dialog if entering timer duration
@@ -1322,6 +1349,50 @@ impl App {
                 if let Some(ref session) = state.viewing_focus_session {
                     render_focus_session_detail_dialog(frame, area, session, project_store);
                 }
+            }
+
+            // Render Claude config name input dialog
+            if state.input_mode == InputMode::AddingClaudeConfigName {
+                render_config_name_input_dialog(frame, area, &state.new_claude_config_name);
+            }
+
+            // Render Claude config path input dialog
+            if state.input_mode == InputMode::AddingClaudeConfigPath {
+                render_config_path_input_dialog(
+                    frame,
+                    area,
+                    &state.new_claude_config_name,
+                    &state.new_claude_config_path,
+                    &state.path_completions,
+                    state.path_completion_index,
+                    state.show_path_completions,
+                );
+            }
+
+            // Render Claude config delete confirmation dialog
+            if state.input_mode == InputMode::ConfirmingClaudeConfigDelete {
+                if let Some(config_id) = state.pending_delete_claude_config {
+                    if let Some(config) = claude_config_store.get(config_id) {
+                        // Find projects using this config
+                        let affected_projects: Vec<String> = project_store
+                            .projects()
+                            .filter(|p| p.default_claude_config == Some(config_id))
+                            .map(|p| p.name.clone())
+                            .collect();
+                        render_config_delete_dialog(frame, area, config, &affected_projects);
+                    }
+                }
+            }
+
+            // Render Claude config selector overlay
+            if state.input_mode == InputMode::SelectingClaudeConfig {
+                render_config_selector(
+                    frame,
+                    area,
+                    &state.available_claude_configs,
+                    state.claude_config_selector_index,
+                    claude_config_store.get_default_id(),
+                );
             }
 
             // Render notifications overlay

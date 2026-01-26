@@ -167,17 +167,18 @@ pub fn render_projects_overview(
             let has_sessions = !sessions.is_empty();
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let base = if has_projects && has_sessions {
-                format!("n: new project | d: delete | Tab: switch focus | a: timeline | {} | ↑/↓: navigate | Enter: open | Esc/q: quit", timer_hint)
-            } else if has_projects {
-                format!("n: new project | d: delete | a: timeline | {} | ↑/↓: navigate | Enter: open | Esc/q: quit", timer_hint)
-            } else if has_sessions {
                 format!(
-                    "n: new project | a: timeline | {} | ↑/↓: navigate | Enter: open | Esc/q: quit",
+                    "n: new | d: delete | Tab: switch | a: timeline | c: configs | {} | q: quit",
+                    timer_hint
+                )
+            } else if has_projects {
+                format!(
+                    "n: new | d: delete | a: timeline | c: configs | {} | q: quit",
                     timer_hint
                 )
             } else {
                 format!(
-                    "n: new project | a: timeline | {} | Esc/q: quit",
+                    "n: new | a: timeline | c: configs | {} | q: quit",
                     timer_hint
                 )
             };
