@@ -113,6 +113,16 @@ Manage multiple Claude Code accounts (configurations) and switch between them:
 
 Use the `c` key from the projects overview to manage configurations, or from project detail to set the project default.
 
+### Claude Code Permissions Sync
+
+Panoptes helps manage Claude Code's per-project permissions (tool approvals, MCP servers) across worktrees:
+
+- **Copy to New Worktrees** - When creating a new worktree, if the main repository has Claude Code permissions configured, Panoptes offers to copy them to the new worktree. This saves you from re-approving the same tools.
+
+- **Migrate Before Deletion** - When deleting a worktree that has unique permissions not present in the main repository, Panoptes offers to migrate those permissions back. This prevents losing tool approvals you granted while working in the worktree.
+
+- **Multi-Account Aware** - Permissions are read from the correct Claude configuration directory based on the project's default account setting.
+
 ### Session Lifecycle
 
 - Create sessions with a name and optional branch context

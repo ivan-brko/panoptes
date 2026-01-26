@@ -17,6 +17,7 @@ Named after the hundred-eyed giant of Greek mythology.
 
 - **Multi-Session Management** - Run multiple Claude Code sessions in parallel, each with its own conversation and context
 - **Multi-Account Support** - Manage multiple Claude Code accounts and switch between them per-project
+- **Permissions Sync** - Automatically copy Claude Code permissions to new worktrees and migrate unique permissions back before deletion
 - **Project & Branch Organization** - Sessions organized by git repository and branch. Panoptes automatically creates isolated worktrees so each branch has its own working directory — no manual setup required
 - **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Idle
 - **Attention System** - Get notified when sessions need your input, with visual badges and terminal bell alerts
