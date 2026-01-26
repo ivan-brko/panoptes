@@ -12,6 +12,7 @@ use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
+use crate::tui::widgets::selection::{selection_name_style, selection_prefix};
 
 /// Render the Claude configurations view
 #[allow(clippy::too_many_arguments)]
@@ -121,21 +122,12 @@ fn render_config_list(
             let is_selected = i == selected_index;
             let is_default = default_id == Some(config.id);
 
-            let prefix = if is_selected { "▶ " } else { "  " };
+            let prefix = selection_prefix(is_selected);
             let default_marker = if is_default { " ★" } else { "" };
 
             let content = Line::from(vec![
                 Span::raw(prefix),
-                Span::styled(
-                    &config.name,
-                    Style::default()
-                        .fg(if is_selected { t.accent } else { t.text })
-                        .add_modifier(if is_selected {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
+                Span::styled(&config.name, selection_name_style(is_selected, &t)),
                 Span::styled(default_marker, Style::default().fg(Color::Yellow)),
                 Span::styled(
                     format!("  {}", config.config_dir_display()),
@@ -143,13 +135,7 @@ fn render_config_list(
                 ),
             ]);
 
-            let style = if is_selected {
-                Style::default().bg(t.selected)
-            } else {
-                Style::default()
-            };
-
-            ListItem::new(content).style(style)
+            ListItem::new(content)
         })
         .collect();
 

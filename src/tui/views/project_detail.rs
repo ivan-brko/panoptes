@@ -19,6 +19,7 @@ use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
+use crate::tui::widgets::selection::{selection_prefix, selection_style, selection_style_with_accent};
 
 /// Render the project detail view showing branches
 #[allow(clippy::too_many_arguments)]
@@ -131,7 +132,7 @@ pub fn render_project_detail(
                 );
 
                 let selected = item_index == selected_index;
-                let prefix = if selected { "▶ " } else { "  " };
+                let prefix = selection_prefix(selected);
 
                 // Count sessions for this branch
                 let active_count = sessions.active_session_count_for_branch(branch.id);
@@ -149,21 +150,22 @@ pub fn render_project_detail(
 
                 let content = format!("{}{}: {}{}", prefix, item_index + 1, display_name, status);
 
-                // Color precedence: Yellow (attention) > Green (active) > Cyan > White
+                // Color precedence: attention > active > accent
+                let t = theme();
                 let style = if selected {
                     if attention_count > 0 {
-                        Style::default().fg(Color::Yellow).bold()
+                        selection_style(true, t.attention_badge)
                     } else if active_count > 0 {
-                        Style::default().fg(Color::Green).bold()
+                        selection_style(true, t.active)
                     } else {
-                        Style::default().fg(Color::Cyan).bold()
+                        selection_style_with_accent(true, &t)
                     }
                 } else if attention_count > 0 {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(t.attention_badge)
                 } else if active_count > 0 {
-                    Style::default().fg(Color::Green)
+                    Style::default().fg(t.active)
                 } else {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(t.accent)
                 };
 
                 items.push(ListItem::new(content).style(style));
@@ -185,7 +187,7 @@ pub fn render_project_detail(
 
                 for branch in &worktrees {
                     let selected = item_index == selected_index;
-                    let prefix = if selected { "▶ " } else { "  " };
+                    let prefix = selection_prefix(selected);
 
                     // Count sessions for this branch
                     let active_count = sessions.active_session_count_for_branch(branch.id);
@@ -208,27 +210,24 @@ pub fn render_project_detail(
                     let content =
                         format!("{}{}: {}{}", prefix, item_index + 1, branch.name, status);
 
-                    // Color precedence: Red (stale) > Yellow (attention) > Green (active) > White
+                    // Color precedence: stale > attention > active > text
+                    let t = theme();
                     let style = if branch.stale {
-                        if selected {
-                            Style::default().fg(Color::Red).bold()
-                        } else {
-                            Style::default().fg(Color::Red)
-                        }
+                        selection_style(selected, Color::Red)
                     } else if selected {
                         if attention_count > 0 {
-                            Style::default().fg(Color::Yellow).bold()
+                            selection_style(true, t.attention_badge)
                         } else if active_count > 0 {
-                            Style::default().fg(Color::Green).bold()
+                            selection_style(true, t.active)
                         } else {
-                            Style::default().fg(Color::White).bold()
+                            selection_style_with_accent(true, &t)
                         }
                     } else if attention_count > 0 {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(t.attention_badge)
                     } else if active_count > 0 {
-                        Style::default().fg(Color::Green)
+                        Style::default().fg(t.active)
                     } else {
-                        Style::default().fg(Color::White)
+                        Style::default().fg(t.text)
                     };
 
                     items.push(ListItem::new(content).style(style));
@@ -342,7 +341,7 @@ fn render_worktree_creation(
         .enumerate()
         .map(|(i, branch_ref)| {
             let selected = i == state.base_branch_selector_index;
-            let prefix = if selected { "▶ " } else { "  " };
+            let prefix = selection_prefix(selected);
             let type_prefix = match branch_ref.ref_type {
                 BranchRefType::Local => "[L]",
                 BranchRefType::Remote => "[R]",
@@ -356,14 +355,12 @@ fn render_worktree_creation(
 
             let style = if selected {
                 if branch_ref.is_default_base {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                    selection_style(true, t.accent)
                 } else {
-                    t.selected_style()
+                    selection_style_with_accent(true, &t)
                 }
             } else if branch_ref.is_default_base {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(t.accent)
             } else if branch_ref.ref_type == BranchRefType::Local {
                 Style::default().fg(t.text)
             } else {
@@ -406,7 +403,7 @@ fn render_default_base_selection(frame: &mut Frame, area: Rect, state: &AppState
         .enumerate()
         .map(|(i, branch_ref)| {
             let selected = i == state.base_branch_selector_index;
-            let prefix = if selected { "▶ " } else { "  " };
+            let prefix = selection_prefix(selected);
             let type_prefix = match branch_ref.ref_type {
                 BranchRefType::Local => "[L]",
                 BranchRefType::Remote => "[R]",
@@ -424,14 +421,12 @@ fn render_default_base_selection(frame: &mut Frame, area: Rect, state: &AppState
 
             let style = if selected {
                 if branch_ref.is_default_base {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                    selection_style(true, t.accent)
                 } else {
-                    t.selected_style()
+                    selection_style_with_accent(true, &t)
                 }
             } else if branch_ref.is_default_base {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(t.accent)
             } else {
                 Style::default().fg(t.text)
             };

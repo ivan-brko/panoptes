@@ -18,6 +18,7 @@ use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
+use crate::tui::widgets::selection::{selection_prefix, selection_style};
 
 /// Render the branch detail view showing sessions
 #[allow(clippy::too_many_arguments)]
@@ -98,7 +99,7 @@ pub fn render_branch_detail(
                 .enumerate()
                 .map(|(i, session)| {
                     let selected = i == selected_index;
-                    let prefix = if selected { "▶ " } else { "  " };
+                    let prefix = selection_prefix(selected);
 
                     // Check if session needs attention
                     let needs_attention = sessions.session_needs_attention(session, idle_threshold);
@@ -135,11 +136,7 @@ pub fn render_branch_detail(
                         )),
                     ]);
 
-                    let style = if selected {
-                        Style::default().fg(session.info.state.color()).bold()
-                    } else {
-                        Style::default().fg(session.info.state.color())
-                    };
+                    let style = selection_style(selected, session.info.state.color());
 
                     ListItem::new(content).style(style)
                 })

@@ -16,6 +16,7 @@ use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::{format_focus_timer_hint, Breadcrumb};
+use crate::tui::widgets::selection::selection_prefix;
 
 /// Render the focus statistics view
 #[allow(clippy::too_many_arguments)]
@@ -204,7 +205,7 @@ fn render_session_list(
         .enumerate()
         .map(|(i, session)| {
             let selected = i == selected_index;
-            let prefix = if selected { "▶ " } else { "  " };
+            let prefix = selection_prefix(selected);
 
             // Get project/branch names
             let project_name = session
