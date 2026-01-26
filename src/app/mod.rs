@@ -1071,6 +1071,12 @@ impl App {
             base_ref,
         )?;
 
+        // Copy local Claude settings from main repo to new worktree
+        // This preserves trust settings and permissions so users don't see "trust this folder?" prompts
+        if let Err(e) = crate::claude_json::copy_local_settings(&repo_path, &worktree_path) {
+            tracing::warn!("Failed to copy local Claude settings to worktree: {}", e);
+        }
+
         self.clear_loading();
 
         // Apply project's session_subdir to get effective working dir for sessions

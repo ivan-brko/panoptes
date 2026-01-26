@@ -20,7 +20,9 @@ use crate::tui::views::render_project_delete_confirmation;
 use crate::tui::views::render_quit_confirm_dialog;
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
-use crate::tui::widgets::selection::{selection_prefix, selection_style, selection_style_with_accent};
+use crate::tui::widgets::selection::{
+    selection_prefix, selection_style, selection_style_with_accent,
+};
 
 /// Render the projects overview
 #[allow(clippy::too_many_arguments)]

@@ -19,7 +19,9 @@ use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
-use crate::tui::widgets::selection::{selection_prefix, selection_style, selection_style_with_accent};
+use crate::tui::widgets::selection::{
+    selection_prefix, selection_style, selection_style_with_accent,
+};
 
 /// Render the project detail view showing branches
 #[allow(clippy::too_many_arguments)]
