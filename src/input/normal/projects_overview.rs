@@ -229,6 +229,10 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
             app.state.log_viewer_scroll = 0;
             app.state.log_viewer_auto_scroll = true;
         }
+        KeyCode::Char('c') => {
+            // Open Claude configs management
+            app.state.navigate_to_claude_configs();
+        }
         _ => {}
     }
     Ok(())

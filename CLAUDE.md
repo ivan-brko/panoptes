@@ -31,9 +31,12 @@ PTY Output → Session buffer → TUI render
 
 - **app/**: Application orchestration and state management
   - `mod.rs`: Main `App` struct and event loop. Routes input and hook events, handles graceful shutdown with session cleanup, rendering
-  - `view.rs`: `View` enum (ProjectsOverview, ProjectDetail, BranchDetail, SessionView, ActivityTimeline, LogViewer, FocusStats) with navigation helpers
+  - `view.rs`: `View` enum (ProjectsOverview, ProjectDetail, BranchDetail, SessionView, ActivityTimeline, LogViewer, FocusStats, ClaudeConfigs) with navigation helpers
   - `input_mode.rs`: `InputMode` enum for input handling modes
   - `state.rs`: `AppState` struct containing all application state, `HomepageFocus` enum, and navigation helper methods
+- **claude_config/**: Claude configuration management for multiple accounts
+  - `mod.rs`: `ClaudeConfig` struct, `ClaudeConfigId` type alias
+  - `store.rs`: `ClaudeConfigStore` for CRUD and persistence to `~/.panoptes/claude_configs.json`
 - **input/**: Input handling organized by mode
   - `mod.rs`: Module exports
   - `dispatcher.rs`: Main input dispatch logic - routes key events to mode-specific handlers
@@ -48,6 +51,7 @@ PTY Output → Session buffer → TUI render
     - `timeline.rs`: Activity timeline navigation
     - `log_viewer.rs`: Log scrolling and navigation
     - `focus_stats.rs`: Focus stats navigation
+    - `claude_configs.rs`: Claude configuration management
 - **wizards/**: Multi-step wizard workflows
   - `worktree/`: Worktree creation wizard
     - `mod.rs`: Module exports
@@ -99,6 +103,7 @@ PTY Output → Session buffer → TUI render
   - `views/timeline.rs`: Activity timeline (all sessions sorted by activity)
   - `views/logs.rs`: Log viewer for application logs
   - `views/focus_stats.rs`: Focus timing statistics view
+  - `views/claude_configs.rs`: Claude configuration management view
   - `views/confirm.rs`: Reusable confirmation dialog component
   - `views/notifications.rs`: Notification overlay rendering
 
@@ -119,6 +124,7 @@ PTY Output → Session buffer → TUI render
 - `HomepageFocus`: Focus state for homepage (Projects or Sessions)
 - `BranchRef`, `BranchRefType`, `WorktreeCreationType`: Worktree wizard types (in `wizards/worktree/types.rs`)
 - `FocusTimer`, `FocusTracker`, `FocusSession`: Focus timing types
+- `ClaudeConfig`, `ClaudeConfigId`, `ClaudeConfigStore`: Claude configuration types for multi-account support
 
 ## Development Skills
 

@@ -25,6 +25,8 @@ pub struct SpawnConfig {
     pub rows: u16,
     /// Terminal columns
     pub cols: u16,
+    /// Claude config directory (CLAUDE_CONFIG_DIR). None = use default ~/.claude
+    pub claude_config_dir: Option<PathBuf>,
 }
 
 /// Result of spawning an agent
@@ -135,8 +137,26 @@ mod tests {
             initial_prompt: Some("hello".to_string()),
             rows: 24,
             cols: 80,
+            claude_config_dir: None,
         };
         assert_eq!(config.session_name, "test-session");
         assert_eq!(config.initial_prompt, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_spawn_config_with_claude_config_dir() {
+        let config = SpawnConfig {
+            session_id: uuid::Uuid::new_v4(),
+            session_name: "work-session".to_string(),
+            working_dir: PathBuf::from("/tmp"),
+            initial_prompt: None,
+            rows: 24,
+            cols: 80,
+            claude_config_dir: Some(PathBuf::from("/home/user/.claude-work")),
+        };
+        assert_eq!(
+            config.claude_config_dir,
+            Some(PathBuf::from("/home/user/.claude-work"))
+        );
     }
 }

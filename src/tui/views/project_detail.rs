@@ -267,10 +267,13 @@ pub fn render_project_detail(
             "Type: filter | ↑/↓: navigate | Enter: set default | Esc: cancel".to_string()
         }
         InputMode::RenamingProject => "Type: project name | Enter: save | Esc: cancel".to_string(),
+        InputMode::SelectingClaudeConfig => {
+            "↑/↓: navigate | Enter: select | Esc: cancel".to_string()
+        }
         _ => {
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let base = format!(
-                "n: new worktree | b: set default base | r: rename | R: refresh | d: delete | {} | ↑/↓: navigate | Enter: open | Esc: back | q: quit",
+                "n: new worktree | b: default base | c: config | r: rename | d: delete | {} | q: quit",
                 timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {

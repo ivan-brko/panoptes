@@ -34,6 +34,7 @@ The main view showing all projects and sessions.
 |-----|--------|
 | `n` | Add new project (opens path input) |
 | `a` | Open activity timeline |
+| `c` | Open Claude configs management |
 | `l` | Open log viewer |
 | `d` | Delete selected item (project or session) |
 | `q` / `Esc` | Quit (prompts for confirmation) |
@@ -58,6 +59,7 @@ Shows branches within a selected project.
 |-----|--------|
 | `n` | Create new worktree (opens wizard) |
 | `b` | Set default base branch |
+| `c` | Set default Claude config for project |
 | `r` | Rename project |
 | `R` | Refresh branches (check for stale worktrees) |
 | `d` | Delete selected branch/worktree |
@@ -149,6 +151,26 @@ Shows application logs for debugging.
 | `g` | Jump to top |
 | `G` | Jump to bottom (enables auto-scroll) |
 | `Esc` / `q` | Return to Projects Overview |
+
+## Claude Configurations
+
+Manage multiple Claude Code accounts.
+
+### Navigation
+
+| Key | Action |
+|-----|--------|
+| `Down` / `j` | Move selection down |
+| `Up` / `k` | Move selection up |
+| `Esc` / `q` | Return to Projects Overview |
+
+### Actions
+
+| Key | Action |
+|-----|--------|
+| `n` | Add new configuration |
+| `s` | Set selected as global default |
+| `d` | Delete selected configuration (prompts for confirmation) |
 
 ## Focus Statistics
 

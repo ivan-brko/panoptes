@@ -86,5 +86,17 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::ViewingFocusSessionDetail => {
             super::dialogs::handle_viewing_focus_session_detail_key(app, key)
         }
+        InputMode::AddingClaudeConfigName => {
+            super::text_input::handle_adding_claude_config_name_key(app, key)
+        }
+        InputMode::AddingClaudeConfigPath => {
+            super::text_input::handle_adding_claude_config_path_key(app, key)
+        }
+        InputMode::ConfirmingClaudeConfigDelete => {
+            super::dialogs::handle_confirming_claude_config_delete_key(app, key)
+        }
+        InputMode::SelectingClaudeConfig => {
+            super::text_input::handle_selecting_claude_config_key(app, key)
+        }
     }
 }

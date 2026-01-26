@@ -42,4 +42,12 @@ pub enum InputMode {
     ConfirmingFocusSessionDelete,
     /// Viewing focus session details
     ViewingFocusSessionDetail,
+    /// Adding a new Claude config - entering name
+    AddingClaudeConfigName,
+    /// Adding a new Claude config - entering path
+    AddingClaudeConfigPath,
+    /// Confirming Claude config deletion
+    ConfirmingClaudeConfigDelete,
+    /// Selecting Claude config for session creation or project default
+    SelectingClaudeConfig,
 }

@@ -7,6 +7,7 @@ use crate::focus_timing::FocusTimer;
 use crate::session::SessionManager;
 
 mod branch_detail;
+mod claude_configs;
 mod confirm;
 mod focus_stats;
 mod logs;
@@ -17,6 +18,10 @@ mod session;
 mod timeline;
 
 pub use branch_detail::render_branch_detail;
+pub use claude_configs::{
+    render_claude_configs, render_config_delete_dialog, render_config_name_input_dialog,
+    render_config_path_input_dialog, render_config_selector,
+};
 pub use confirm::{
     render_confirm_dialog, render_loading_indicator, render_quit_confirm_dialog,
     ConfirmDialogConfig,

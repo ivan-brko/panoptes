@@ -210,6 +210,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
         );
         // Force Claude Code to use consistent header mode (prevents flickering on resize)
         env.insert("CLAUDE_CODE_FORCE_FULL_LOGO".to_string(), "1".to_string());
+        // Set custom Claude config directory if specified
+        if let Some(ref config_dir) = spawn_config.claude_config_dir {
+            env.insert(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                config_dir.to_string_lossy().to_string(),
+            );
+        }
         env
     }
 
@@ -276,6 +283,7 @@ mod tests {
             initial_prompt: None,
             rows: 24,
             cols: 80,
+            claude_config_dir: None,
         }
     }
 
@@ -337,12 +345,52 @@ mod tests {
             initial_prompt: None,
             rows: 24,
             cols: 80,
+            claude_config_dir: None,
         };
 
         let env = adapter.generate_env(&config, &spawn_config);
         assert_eq!(
             env.get("PANOPTES_SESSION_ID"),
             Some(&session_id.to_string())
+        );
+        // No CLAUDE_CONFIG_DIR when not specified
+        assert!(env.get("CLAUDE_CONFIG_DIR").is_none());
+    }
+
+    #[test]
+    fn test_generate_env_with_claude_config_dir() {
+        let adapter = ClaudeCodeAdapter::new();
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config {
+            hook_port: 9999,
+            worktrees_dir: temp_dir.path().join("worktrees"),
+            hooks_dir: temp_dir.path().join("hooks"),
+            max_output_lines: 1000,
+            idle_threshold_secs: 300,
+            state_timeout_secs: 300,
+            exited_retention_secs: 300,
+            theme_preset: "dark".to_string(),
+            notification_method: "bell".to_string(),
+            esc_hold_threshold_ms: 400,
+            focus_timer_minutes: 25,
+            focus_stats_retention_days: 30,
+        };
+        let session_id = Uuid::new_v4();
+        let claude_config_path = PathBuf::from("/home/user/.claude-work");
+        let spawn_config = SpawnConfig {
+            session_id,
+            session_name: "test".to_string(),
+            working_dir: temp_dir.path().to_path_buf(),
+            initial_prompt: None,
+            rows: 24,
+            cols: 80,
+            claude_config_dir: Some(claude_config_path.clone()),
+        };
+
+        let env = adapter.generate_env(&config, &spawn_config);
+        assert_eq!(
+            env.get("CLAUDE_CONFIG_DIR"),
+            Some(&claude_config_path.to_string_lossy().to_string())
         );
     }
 

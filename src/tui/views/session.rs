@@ -134,6 +134,13 @@ fn build_header_breadcrumb(
         } else {
             String::new()
         };
+        // Show Claude config name if present
+        let config_display = session
+            .info
+            .claude_config_name
+            .as_ref()
+            .map(|n| format!(" [{}]", n))
+            .unwrap_or_default();
         let project_name = project_store
             .get_project(session.info.project_id)
             .map(|p| p.name.as_str())
@@ -147,9 +154,10 @@ fn build_header_breadcrumb(
             .push(branch_name)
             .push(&session.info.name);
         let suffix = format!(
-            "- {}{} {}",
+            "- {}{}{} {}",
             session.info.state.display_name(),
             exit_info,
+            config_display,
             mode_indicator
         );
         (breadcrumb, suffix)
