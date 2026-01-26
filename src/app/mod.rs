@@ -40,7 +40,9 @@ use crate::tui::views::{
     render_timer_input_dialog,
 };
 use crate::tui::{NotificationType, Tui};
-use crate::wizards::worktree::filter_branch_refs;
+use crate::wizards::worktree::{
+    filter_branch_refs, update_worktree_filtered_branches, worktree_select_first_selectable,
+};
 
 // === Input Length Limits ===
 // Maximum lengths for text input fields to prevent memory exhaustion from large pastes
@@ -479,6 +481,29 @@ impl App {
                     MAX_BRANCH_NAME_LEN,
                 );
                 self.state.worktree_wizard.search_text.push_str(&truncated);
+                // Update filtered branches and selection (same as character input)
+                update_worktree_filtered_branches(self);
+                worktree_select_first_selectable(self);
+                self.state.worktree_wizard.branch_validation_error = None;
+                if was_truncated {
+                    self.state.header_notifications.push(format!(
+                        "Pasted text truncated to {} characters",
+                        MAX_BRANCH_NAME_LEN
+                    ));
+                }
+            }
+            InputMode::WorktreeSelectBase => {
+                let (truncated, was_truncated) = Self::truncate_to_limit(
+                    cleaned,
+                    &self.state.worktree_wizard.base_search_text,
+                    MAX_BRANCH_NAME_LEN,
+                );
+                self.state
+                    .worktree_wizard
+                    .base_search_text
+                    .push_str(&truncated);
+                // Reset index when search changes (same as character input)
+                self.state.worktree_wizard.base_list_index = 0;
                 if was_truncated {
                     self.state.header_notifications.push(format!(
                         "Pasted text truncated to {} characters",
