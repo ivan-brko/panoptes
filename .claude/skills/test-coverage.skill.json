@@ -1,0 +1,8 @@
+{
+  "name": "test-coverage",
+  "description": "Analyze test coverage and identify gaps",
+  "category": "development",
+  "tags": ["testing", "coverage", "quality", "rust"],
+  "version": "1.0.0",
+  "prompt": "Analyze test coverage in the codebase. Run tests, identify modules without tests, and suggest specific functions that need test coverage."
+}

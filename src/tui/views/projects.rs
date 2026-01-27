@@ -335,7 +335,7 @@ fn render_project_addition(frame: &mut Frame, area: Rect, state: &AppState) {
                 let display = crate::path_complete::path_to_display(path);
                 let content = format!("{}{}/", prefix, display);
 
-                let style = selection_style_with_accent(is_selected, &t);
+                let style = selection_style_with_accent(is_selected, t);
                 ListItem::new(content).style(style)
             })
             .collect();
@@ -499,7 +499,7 @@ fn render_project_list(
                 } else if active_count > 0 {
                     selection_style(true, t.active)
                 } else {
-                    selection_style_with_accent(true, &t)
+                    selection_style_with_accent(true, t)
                 }
             } else if attention_count > 0 {
                 Style::default().fg(t.attention_badge)

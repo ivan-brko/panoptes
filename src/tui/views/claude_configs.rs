@@ -127,7 +127,7 @@ fn render_config_list(
 
             let content = Line::from(vec![
                 Span::raw(prefix),
-                Span::styled(&config.name, selection_name_style(is_selected, &t)),
+                Span::styled(&config.name, selection_name_style(is_selected, t)),
                 Span::styled(default_marker, Style::default().fg(Color::Yellow)),
                 Span::styled(
                     format!("  {}", config.config_dir_display()),

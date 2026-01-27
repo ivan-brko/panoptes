@@ -450,3 +450,258 @@ impl AppState {
         self.session_return_view = None; // Clear it
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // HomepageFocus tests
+    #[test]
+    fn test_homepage_focus_default() {
+        let focus = HomepageFocus::default();
+        assert_eq!(focus, HomepageFocus::Projects);
+    }
+
+    // WorktreeWizardState tests
+    #[test]
+    fn test_worktree_wizard_state_default() {
+        let state = WorktreeWizardState::default();
+        assert!(state.search_text.is_empty());
+        assert!(state.all_branches.is_empty());
+        assert!(state.filtered_branches.is_empty());
+        assert_eq!(state.list_index, 0);
+        assert_eq!(state.creation_type, WorktreeCreationType::ExistingLocal);
+    }
+
+    #[test]
+    fn test_worktree_wizard_clamp_list_index_empty() {
+        let mut state = WorktreeWizardState::default();
+        state.list_index = 10;
+        state.clamp_list_index();
+        assert_eq!(state.list_index, 0);
+    }
+
+    #[test]
+    fn test_worktree_wizard_clamp_list_index_with_branches() {
+        use crate::wizards::worktree::{BranchRef, BranchRefType};
+
+        let mut state = WorktreeWizardState::default();
+        state.filtered_branches = vec![
+            BranchRef::new(BranchRefType::Local, "main".to_string()),
+            BranchRef::new(BranchRefType::Local, "develop".to_string()),
+        ];
+        state.list_index = 10;
+        state.clamp_list_index();
+        // Without search text, max index is filtered_count - 1 = 1
+        assert_eq!(state.list_index, 1);
+    }
+
+    #[test]
+    fn test_worktree_wizard_clamp_list_index_with_create_option() {
+        use crate::wizards::worktree::{BranchRef, BranchRefType};
+
+        let mut state = WorktreeWizardState::default();
+        state.search_text = "new-branch".to_string(); // Non-empty enables "create new" option
+        state.filtered_branches = vec![BranchRef::new(BranchRefType::Local, "main".to_string())];
+        state.list_index = 10;
+        state.clamp_list_index();
+        // With search text, max index is filtered_count (1) to allow "create new" option
+        assert_eq!(state.list_index, 1);
+    }
+
+    #[test]
+    fn test_worktree_wizard_clamp_base_list_index() {
+        let mut state = WorktreeWizardState::default();
+        state.base_list_index = 10;
+        state.clamp_base_list_index(3);
+        assert_eq!(state.base_list_index, 2);
+
+        state.clamp_base_list_index(0);
+        assert_eq!(state.base_list_index, 0);
+    }
+
+    // AppState navigation tests
+    #[test]
+    fn test_app_state_default() {
+        let state = AppState::default();
+        assert_eq!(state.view, View::ProjectsOverview);
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.selected_project_index, 0);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn test_select_next() {
+        let mut state = AppState::default();
+        state.view = View::ProjectsOverview;
+        state.selected_project_index = 0;
+
+        state.select_next(3);
+        assert_eq!(state.selected_project_index, 1);
+
+        state.select_next(3);
+        assert_eq!(state.selected_project_index, 2);
+
+        // Wrap around
+        state.select_next(3);
+        assert_eq!(state.selected_project_index, 0);
+    }
+
+    #[test]
+    fn test_select_prev() {
+        let mut state = AppState::default();
+        state.view = View::ProjectsOverview;
+        state.selected_project_index = 2;
+
+        state.select_prev(3);
+        assert_eq!(state.selected_project_index, 1);
+
+        state.select_prev(3);
+        assert_eq!(state.selected_project_index, 0);
+
+        // Wrap around
+        state.select_prev(3);
+        assert_eq!(state.selected_project_index, 2);
+    }
+
+    #[test]
+    fn test_select_by_number() {
+        let mut state = AppState::default();
+        state.view = View::ProjectsOverview;
+
+        state.select_by_number(2, 5);
+        assert_eq!(state.selected_project_index, 1); // 1-indexed, so 2 -> index 1
+
+        // Out of range - no change
+        state.select_by_number(10, 5);
+        assert_eq!(state.selected_project_index, 1);
+
+        // Zero - no change
+        state.select_by_number(0, 5);
+        assert_eq!(state.selected_project_index, 1);
+    }
+
+    #[test]
+    fn test_select_with_empty_list() {
+        let mut state = AppState::default();
+        state.selected_project_index = 5;
+
+        state.select_next(0);
+        assert_eq!(state.selected_project_index, 0);
+
+        state.select_prev(0);
+        assert_eq!(state.selected_project_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_project() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+
+        state.navigate_to_project(project_id);
+        assert_eq!(state.view, View::ProjectDetail(project_id));
+        assert_eq!(state.selected_branch_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_branch() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        state.navigate_to_branch(project_id, branch_id);
+        assert_eq!(state.view, View::BranchDetail(project_id, branch_id));
+        assert_eq!(state.selected_session_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_session() {
+        let mut state = AppState::default();
+        let session_id = uuid::Uuid::new_v4();
+
+        state.view = View::ProjectsOverview;
+        state.navigate_to_session(session_id);
+
+        assert_eq!(state.view, View::SessionView);
+        assert_eq!(state.active_session, Some(session_id));
+        assert_eq!(state.input_mode, InputMode::Session);
+        assert_eq!(state.session_return_view, Some(View::ProjectsOverview));
+        assert_eq!(state.session_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_timeline() {
+        let mut state = AppState::default();
+        state.navigate_to_timeline();
+        assert_eq!(state.view, View::ActivityTimeline);
+        assert_eq!(state.selected_timeline_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_claude_configs() {
+        let mut state = AppState::default();
+        state.navigate_to_claude_configs();
+        assert_eq!(state.view, View::ClaudeConfigs);
+        assert_eq!(state.claude_configs_selected_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_back_from_project_detail() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+
+        state.view = View::ProjectDetail(project_id);
+        state.navigate_back();
+        assert_eq!(state.view, View::ProjectsOverview);
+    }
+
+    #[test]
+    fn test_navigate_back_from_branch_detail() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        state.view = View::BranchDetail(project_id, branch_id);
+        state.navigate_back();
+        assert_eq!(state.view, View::ProjectDetail(project_id));
+    }
+
+    #[test]
+    fn test_navigate_back_resets_input_mode() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+
+        state.view = View::ProjectDetail(project_id);
+        state.input_mode = InputMode::RenamingProject;
+        state.navigate_back();
+
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_current_selected_index_for_different_views() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        // ProjectsOverview
+        state.view = View::ProjectsOverview;
+        state.selected_project_index = 2;
+        assert_eq!(state.current_selected_index(), 2);
+
+        // ProjectDetail
+        state.view = View::ProjectDetail(project_id);
+        state.selected_branch_index = 3;
+        assert_eq!(state.current_selected_index(), 3);
+
+        // BranchDetail
+        state.view = View::BranchDetail(project_id, branch_id);
+        state.selected_session_index = 1;
+        assert_eq!(state.current_selected_index(), 1);
+
+        // ActivityTimeline
+        state.view = View::ActivityTimeline;
+        state.selected_timeline_index = 4;
+        assert_eq!(state.current_selected_index(), 4);
+    }
+}

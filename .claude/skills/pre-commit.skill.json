@@ -1,0 +1,8 @@
+{
+  "name": "pre-commit",
+  "description": "Run all pre-commit checks before committing",
+  "category": "development",
+  "tags": ["commit", "quality", "lint", "test", "format"],
+  "version": "1.0.0",
+  "prompt": "Run all quality checks before committing: format check, clippy, tests, and verify no secrets or TODOs are staged."
+}

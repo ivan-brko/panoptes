@@ -1,0 +1,8 @@
+{
+  "name": "clippy-fix",
+  "description": "Run clippy with auto-fix and report issues",
+  "category": "development",
+  "tags": ["lint", "clippy", "quality", "rust", "code-quality"],
+  "version": "1.0.0",
+  "prompt": "Run cargo clippy with auto-fix to improve code quality. Report fixed issues and any remaining warnings that need manual attention."
+}

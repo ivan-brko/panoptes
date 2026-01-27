@@ -88,8 +88,7 @@ cargo build --release
 
 | Key | Action |
 |-----|--------|
-| `a` | Add new project |
-| `n` | New session / New worktree |
+| `n` | Add new project / New worktree (context-dependent) |
 | `d` | Delete selected item |
 | `r` | Rename project |
 | `R` | Refresh branches |
@@ -99,7 +98,8 @@ cargo build --release
 
 | Key | Action |
 |-----|--------|
-| `t` | Start focus timer / Open activity timeline |
+| `a` | Open activity timeline |
+| `t` | Start focus timer |
 | `T` | Open focus statistics |
 | `l` | Open log viewer |
 
