@@ -88,8 +88,7 @@ cargo build --release
 
 | Key | Action |
 |-----|--------|
-| `a` | Add new project |
-| `n` | New session / New worktree |
+| `n` | Add new project / New worktree (context-dependent) |
 | `d` | Delete selected item |
 | `r` | Rename project |
 | `R` | Refresh branches |
@@ -99,11 +98,19 @@ cargo build --release
 
 | Key | Action |
 |-----|--------|
-| `t` | Start focus timer / Open activity timeline |
+| `a` | Open activity timeline |
+| `t` | Start focus timer |
 | `T` | Open focus statistics |
 | `l` | Open log viewer |
 
 See [Keyboard Reference](docs/KEYBOARD_REFERENCE.md) for the complete list.
+
+## Multiple Claude Accounts
+
+Need to manage multiple Claude accounts — say, one for work and one for personal projects? Panoptes has you covered. Press `c` from the homepage to manage configurations, then assign defaults per-project with `c` from the project view.
+
+- **New account**: Select any folder as your config directory. Claude will prompt you to log in the first time you use it.
+- **Existing account**: Select the Claude config directory you already have (e.g., `~/.claude-work`).
 
 ## Configuration
 

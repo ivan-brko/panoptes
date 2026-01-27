@@ -1,0 +1,8 @@
+{
+  "name": "add-tests",
+  "description": "Generate test scaffolding for untested modules",
+  "category": "development",
+  "tags": ["testing", "scaffolding", "rust", "unit-tests"],
+  "version": "1.0.0",
+  "prompt": "Generate test scaffolding for a given module. Analyze public functions, identify test cases, and create comprehensive test coverage."
+}

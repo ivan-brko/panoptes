@@ -15,6 +15,35 @@ cargo clippy             # Lint
 cargo fmt                # Format code
 ```
 
+## Linting
+
+Always run clippy before committing:
+```bash
+cargo clippy -- -D warnings
+```
+
+Common clippy patterns to be aware of:
+- Use `is_some_and()` instead of `map_or(false, ...)`
+- Use `!container.is_empty()` instead of `container.len() >= 1`
+- Use `std::slice::from_ref()` instead of creating single-element vec via clone
+- Remove needless borrows (e.g., `&foo.to_string()` → `foo.to_string()`)
+
+## Test Coverage
+
+### Running Tests
+```bash
+cargo test                    # Run all tests
+cargo test --test integration # Run integration tests only
+cargo test input::            # Run input module tests
+cargo test hooks::            # Run hooks module tests
+cargo test app::state::       # Run app state tests
+```
+
+### Test Organization
+- Unit tests are in `#[cfg(test)]` blocks within each module
+- Tests cover: state transitions, navigation, type conversions, filtering logic
+- PTY and TUI tests are integration-level (require real terminal context)
+
 ## Architecture
 
 Panoptes is a terminal dashboard for managing multiple Claude Code sessions. It spawns Claude Code in PTYs and tracks their state via HTTP hooks.
@@ -77,6 +106,7 @@ PTY Output → Session buffer → TUI render
   - `mod.rs`: GitOps struct for repository operations
   - `worktree.rs`: Git worktree creation and management
 - **hooks/**: HTTP server (Axum on port 9999) receiving Claude Code callbacks, HookEvent parsing
+  - `mod.rs`: `HookEvent` struct, `HookEventType` enum with type-safe event handling
 - **logging/**: Application logging system
   - `mod.rs`: Logging initialization and exports
   - `buffer.rs`: LogBuffer for real-time log display in TUI
@@ -116,6 +146,7 @@ PTY Output → Session buffer → TUI render
 - `SessionState`: Enum tracking Claude Code lifecycle, has `display_name()`, `color()`, `is_active()` helpers
 - `SessionInfo`: Session metadata (id, name, state, working_dir, agent_type, project_id, branch_id, needs_attention)
 - `HookEvent`: Parsed JSON from Claude Code hooks (session_id, event_type, tool, timestamp)
+- `HookEventType`: Type-safe enum for hook event types (PreToolUse, PostToolUse, Stop, Notification, etc.)
 - `AgentType`: Enum for supported agents (currently ClaudeCode, expandable)
 - `Config`: App configuration with serde TOML serialization
 - `ProjectId`, `BranchId`: UUID type aliases for type-safe identifiers
@@ -177,6 +208,16 @@ PTY Output → Session buffer → TUI render
 - Always run `cargo fmt` before committing
 - Types are extracted into submodules but re-exported from parent modules for ergonomic imports
 - When adding/changing/removing keyboard shortcuts, always update the corresponding footer help text in `src/tui/views/`. The implementation (in `src/input/`) and documentation (in `src/tui/views/`) must stay in sync.
+
+## Error Handling Conventions
+
+- Use `anyhow::Result<T>` for all fallible functions
+- Add context with `.context("description")` for all error propagation
+- For recoverable errors (e.g., corrupted config files):
+  - Log at appropriate level (`tracing::warn!` or `tracing::error!`)
+  - Provide a sensible fallback (e.g., empty config, fresh state)
+  - Create backups of corrupted files when possible
+- For unrecoverable errors, propagate with context so the caller can decide
 
 ## Documentation
 

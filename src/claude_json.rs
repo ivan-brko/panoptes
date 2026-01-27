@@ -347,7 +347,7 @@ pub fn merge_local_settings(worktree_dir: &Path, main_dir: &Path) -> Result<Vec<
         }
 
         // Only add if main doesn't already have this key
-        if !main_json.as_object().map_or(false, |o| o.contains_key(key)) {
+        if !main_json.as_object().is_some_and(|o| o.contains_key(key)) {
             main_json[key] = value.clone();
             added.push(key.clone());
         }
@@ -417,7 +417,7 @@ pub fn has_unique_local_settings(worktree_dir: &Path, main_dir: &Path) -> Result
             }
 
             // If main doesn't have this key, worktree has unique settings
-            if !main_json.as_object().map_or(false, |o| o.contains_key(key)) {
+            if !main_json.as_object().is_some_and(|o| o.contains_key(key)) {
                 return Ok(true);
             }
         }

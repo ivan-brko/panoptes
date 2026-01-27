@@ -160,7 +160,7 @@ pub fn render_project_detail(
                     } else if active_count > 0 {
                         selection_style(true, t.active)
                     } else {
-                        selection_style_with_accent(true, &t)
+                        selection_style_with_accent(true, t)
                     }
                 } else if attention_count > 0 {
                     Style::default().fg(t.attention_badge)
@@ -222,7 +222,7 @@ pub fn render_project_detail(
                         } else if active_count > 0 {
                             selection_style(true, t.active)
                         } else {
-                            selection_style_with_accent(true, &t)
+                            selection_style_with_accent(true, t)
                         }
                     } else if attention_count > 0 {
                         Style::default().fg(t.attention_badge)
@@ -359,7 +359,7 @@ fn render_worktree_creation(
                 if branch_ref.is_default_base {
                     selection_style(true, t.accent)
                 } else {
-                    selection_style_with_accent(true, &t)
+                    selection_style_with_accent(true, t)
                 }
             } else if branch_ref.is_default_base {
                 Style::default().fg(t.accent)
@@ -425,7 +425,7 @@ fn render_default_base_selection(frame: &mut Frame, area: Rect, state: &AppState
                 if branch_ref.is_default_base {
                     selection_style(true, t.accent)
                 } else {
-                    selection_style_with_accent(true, &t)
+                    selection_style_with_accent(true, t)
                 }
             } else if branch_ref.is_default_base {
                 Style::default().fg(t.accent)

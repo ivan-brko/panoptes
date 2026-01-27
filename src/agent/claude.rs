@@ -5,6 +5,7 @@
 //! and process spawning.
 
 use crate::config::Config;
+use crate::hooks::HookEventType;
 use crate::session::PtyHandle;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -16,8 +17,13 @@ use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
 /// Base hook script filename (shared across all sessions)
 const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
 
-/// Hook event types that Claude Code supports
-const HOOK_EVENTS: &[&str] = &["PreToolUse", "PostToolUse", "Stop", "Notification"];
+/// Hook event types that Claude Code supports (using the type-safe enum)
+const HOOK_EVENTS: &[HookEventType] = &[
+    HookEventType::PreToolUse,
+    HookEventType::PostToolUse,
+    HookEventType::Stop,
+    HookEventType::Notification,
+];
 
 /// Claude Code adapter for spawning and managing Claude Code sessions
 pub struct ClaudeCodeAdapter {
@@ -70,7 +76,8 @@ impl ClaudeCodeAdapter {
         // Create symlinks for each event type so basename $0 returns the event name
         let mut event_scripts = HashMap::new();
         for event in HOOK_EVENTS {
-            let symlink_path = config.hooks_dir.join(format!("{}.sh", event));
+            let event_name = event.as_str();
+            let symlink_path = config.hooks_dir.join(format!("{}.sh", event_name));
 
             // Remove existing symlink if present
             if symlink_path.exists() || symlink_path.is_symlink() {
@@ -81,10 +88,10 @@ impl ClaudeCodeAdapter {
             #[cfg(unix)]
             {
                 std::os::unix::fs::symlink(&script_path, &symlink_path)
-                    .with_context(|| format!("Failed to create symlink for {}", event))?;
+                    .with_context(|| format!("Failed to create symlink for {}", event_name))?;
             }
 
-            event_scripts.insert(event.to_string(), symlink_path);
+            event_scripts.insert(event_name.to_string(), symlink_path);
         }
 
         Ok(event_scripts)
@@ -167,10 +174,11 @@ exit 0
         // Build hooks config using the event-specific script paths
         let mut hooks = serde_json::Map::new();
         for event in HOOK_EVENTS {
-            if let Some(script_path) = event_scripts.get(*event) {
+            let event_name = event.as_str();
+            if let Some(script_path) = event_scripts.get(event_name) {
                 let script_path_str = script_path.to_string_lossy().to_string();
                 hooks.insert(
-                    event.to_string(),
+                    event_name.to_string(),
                     serde_json::json!([
                         {
                             "matcher": ".*",
@@ -456,9 +464,12 @@ mod tests {
 
         // Verify symlinks were created for each event type
         for event in HOOK_EVENTS {
-            let symlink = event_scripts.get(*event).expect("Should have event script");
+            let event_name = event.as_str();
+            let symlink = event_scripts
+                .get(event_name)
+                .expect("Should have event script");
             assert!(symlink.exists() || symlink.is_symlink());
-            assert!(symlink.ends_with(format!("{}.sh", event)));
+            assert!(symlink.ends_with(format!("{}.sh", event_name)));
         }
 
         // Verify base script is executable on Unix
@@ -481,9 +492,10 @@ mod tests {
         // Create mock event scripts HashMap
         let mut event_scripts = HashMap::new();
         for event in HOOK_EVENTS {
+            let event_name = event.as_str();
             event_scripts.insert(
-                event.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event)),
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
             );
         }
 
@@ -513,9 +525,10 @@ mod tests {
         // Create mock event scripts HashMap
         let mut event_scripts = HashMap::new();
         for event in HOOK_EVENTS {
+            let event_name = event.as_str();
             event_scripts.insert(
-                event.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event)),
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
             );
         }
 
@@ -579,9 +592,10 @@ mod tests {
         // Create mock event scripts
         let mut event_scripts = HashMap::new();
         for event in HOOK_EVENTS {
+            let event_name = event.as_str();
             event_scripts.insert(
-                event.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event)),
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
             );
         }
 
@@ -624,9 +638,10 @@ mod tests {
         // Create mock event scripts
         let mut event_scripts = HashMap::new();
         for event in HOOK_EVENTS {
+            let event_name = event.as_str();
             event_scripts.insert(
-                event.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event)),
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
             );
         }
 
@@ -656,9 +671,10 @@ mod tests {
         // Create mock event scripts
         let mut event_scripts = HashMap::new();
         for event in HOOK_EVENTS {
+            let event_name = event.as_str();
             event_scripts.insert(
-                event.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event)),
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
             );
         }
 

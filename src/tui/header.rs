@@ -228,8 +228,11 @@ mod tests {
 
     #[test]
     fn test_blink_cycle() {
-        // Just verify the function runs without panic
-        let result = Header::should_show_blink();
-        assert!(result || !result); // Always true, just checking it returns
+        // Verify should_show_blink returns a deterministic value based on time
+        // The function uses a 1-second cycle with 500ms on and 500ms off
+        let result1 = Header::should_show_blink();
+        let result2 = Header::should_show_blink();
+        // Two immediate calls should return the same value (time hasn't changed significantly)
+        assert_eq!(result1, result2);
     }
 }

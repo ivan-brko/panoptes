@@ -1,0 +1,8 @@
+{
+  "name": "doc-sync",
+  "description": "Verify documentation matches code implementation",
+  "category": "development",
+  "tags": ["documentation", "verification", "sync", "readme"],
+  "version": "1.0.0",
+  "prompt": "Compare documentation with code implementation. Check keyboard shortcuts, config options, and module descriptions for consistency."
+}
