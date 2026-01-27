@@ -13,3 +13,6 @@ Cargo.lock
 
 # Logs
 *.log
+
+# Backup files
+*.bak
