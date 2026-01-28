@@ -17,6 +17,9 @@ hook_port = 9999
 # Maximum lines to keep in output buffer per session
 max_output_lines = 10000
 
+# Maximum scrollback lines per session (for terminal history)
+scrollback_lines = 10000
+
 # Seconds before a waiting session shows the yellow "idle" badge
 idle_threshold_secs = 300
 
@@ -71,6 +74,21 @@ The port number for the HTTP server that receives Claude Code hook callbacks.
 Maximum number of lines to keep in the output buffer for each session. Older lines are discarded when this limit is reached.
 
 **When to change:** Increase if you need more scrollback history; decrease if you have memory constraints.
+
+---
+
+### scrollback_lines
+
+| Property | Value |
+|----------|-------|
+| Default | `10000` |
+| Type | Integer |
+
+Maximum number of scrollback lines to retain in the terminal emulator for each session. This controls how far back you can scroll in session history using PageUp/PageDown.
+
+Each 1000 lines uses approximately 10KB of memory per session.
+
+**When to change:** Increase if you need to scroll back further in session history; decrease if you have many concurrent sessions and want to reduce memory usage.
 
 ---
 
