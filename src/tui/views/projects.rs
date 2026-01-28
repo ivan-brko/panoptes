@@ -395,7 +395,7 @@ fn render_main_content(
         // Empty state
         let t = theme();
         let empty_text = "No projects yet.\n\n\
-            Press 'a' to add a git repository as a project,\n\
+            Press 'n' to add a git repository as a project,\n\
             or 'n' to create a quick session in the current directory.";
         let empty = Paragraph::new(empty_text)
             .style(t.muted_style())

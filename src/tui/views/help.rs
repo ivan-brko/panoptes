@@ -136,7 +136,7 @@ fn project_detail_shortcuts() -> Vec<Line<'static>> {
         shortcut_line("1-9", "Jump to item by number"),
         empty_line(),
         section_header("Actions"),
-        shortcut_line("w", "Create new worktree"),
+        shortcut_line("n", "Create new worktree"),
         shortcut_line("d", "Delete selected branch"),
         shortcut_line("b", "Set default base branch"),
         shortcut_line("r", "Rename project"),

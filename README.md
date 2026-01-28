@@ -57,7 +57,7 @@ cargo build --release
 
 ### First Steps
 
-1. Press `a` to add your first project (enter the path to a git repository)
+1. Press `n` to add your first project (enter the path to a git repository)
 2. Navigate to a project with `Enter`, then to a branch with `Enter`
 3. Press `n` to create a new session
 4. Enter a name for the session and press `Enter`
