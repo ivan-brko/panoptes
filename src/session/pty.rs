@@ -282,6 +282,56 @@ impl PtyHandle {
             .kill()
             .context("Failed to kill PTY child process")
     }
+
+    /// Get the process ID of the child process
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    /// Check if a foreground process is running in the PTY
+    ///
+    /// Returns true if a process other than the shell is in the foreground,
+    /// indicating a command is currently executing.
+    ///
+    /// This works by comparing the PTY's foreground process group (tcgetpgrp)
+    /// with the shell's process group (getpgid). If they differ, a child process
+    /// is running in the foreground.
+    #[cfg(unix)]
+    pub fn is_foreground_busy(&self) -> bool {
+        let shell_pid = match self.child.process_id() {
+            Some(pid) => pid as libc::pid_t,
+            None => return false, // Process not running
+        };
+
+        let fd = match self.master.as_raw_fd() {
+            Some(fd) => fd,
+            None => return false, // No valid fd
+        };
+
+        unsafe {
+            // Get the foreground process group of the PTY
+            let fg_pgid = libc::tcgetpgrp(fd);
+            if fg_pgid == -1 {
+                return false; // Error getting foreground pgid
+            }
+
+            // Get the shell's process group
+            let shell_pgid = libc::getpgid(shell_pid);
+            if shell_pgid == -1 {
+                return false; // Error getting shell pgid
+            }
+
+            // If they differ, a command is running in foreground
+            fg_pgid != shell_pgid
+        }
+    }
+
+    /// Check if a foreground process is running in the PTY (non-Unix stub)
+    #[cfg(not(unix))]
+    pub fn is_foreground_busy(&self) -> bool {
+        // On non-Unix platforms, we can't detect foreground state
+        false
+    }
 }
 
 /// Convert a crossterm KeyEvent to terminal escape sequence bytes
@@ -652,5 +702,47 @@ mod tests {
 
         // Clean up
         pty.kill().expect("Failed to kill");
+    }
+
+    #[test]
+    fn test_pty_process_id() {
+        let pty = PtyHandle::spawn(
+            "sleep",
+            &["1"],
+            std::path::Path::new("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .expect("Failed to spawn PTY");
+
+        // Process ID should be available
+        let pid = pty.process_id();
+        assert!(pid.is_some(), "Process ID should be available");
+        assert!(pid.unwrap() > 0, "Process ID should be positive");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_pty_is_foreground_busy_shell_idle() {
+        // Spawn a shell that's just sitting idle
+        let pty = PtyHandle::spawn(
+            "bash",
+            &["-c", "sleep 0.5"],
+            std::path::Path::new("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .expect("Failed to spawn PTY");
+
+        // Give the shell time to start
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Shell running sleep should show as busy
+        // Note: This test is somewhat timing-dependent
+        let busy = pty.is_foreground_busy();
+        // We just verify it doesn't crash - the actual result depends on timing
+        let _ = busy;
     }
 }

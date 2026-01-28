@@ -82,7 +82,8 @@ Shows sessions for a specific branch.
 
 | Key | Action |
 |-----|--------|
-| `n` | Create new session |
+| `n` | Create new Claude Code session |
+| `s` | Create new shell session |
 | `d` | Delete selected session (prompts for confirmation) |
 
 ## Session View (Normal Mode)

@@ -10,7 +10,7 @@ use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::focus_timing::FocusTimer;
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::{SessionManager, SessionState};
+use crate::session::{SessionManager, SessionState, SessionType};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
@@ -73,7 +73,9 @@ pub fn render_branch_detail(
 
     // Main content area - either session creation input, delete confirmation, or session list
     if state.input_mode == InputMode::CreatingSession {
-        render_session_creation(frame, areas.content, state);
+        render_session_creation(frame, areas.content, state, "Claude Code");
+    } else if state.input_mode == InputMode::CreatingShellSession {
+        render_session_creation(frame, areas.content, state, "Shell");
     } else if state.input_mode == InputMode::ConfirmingSessionDelete {
         render_delete_confirmation(frame, areas.content, state, sessions);
     } else if let Some(branch) = branch {
@@ -82,7 +84,8 @@ pub fn render_branch_detail(
         if branch_sessions.is_empty() {
             let empty_text = format!(
                 "No sessions on this branch yet.\n\n\
-                Press 'n' to create a new session.\n\n\
+                Press 'n' to create a Claude Code session.\n\
+                Press 's' to create a shell session.\n\n\
                 Working directory: {}",
                 branch.working_dir.display()
             );
@@ -105,13 +108,22 @@ pub fn render_branch_detail(
                     let needs_attention = sessions.session_needs_attention(session, idle_threshold);
 
                     // Build state display with idle duration if applicable
-                    let state_display = match &session.info.state {
-                        SessionState::Idle => {
+                    // Shell sessions show simpler state (Running/Ready instead of Thinking/Executing)
+                    let state_display = match (&session.info.session_type, &session.info.state) {
+                        (_, SessionState::Idle) => {
                             let duration = now.signed_duration_since(session.info.last_activity);
                             let mins = duration.num_minutes();
                             format!("Idle - {}m", mins)
                         }
-                        state => state.display_name().to_string(),
+                        (SessionType::Shell, SessionState::Executing(_)) => "Running".to_string(),
+                        (SessionType::Shell, SessionState::Waiting) => "Ready".to_string(),
+                        (_, state) => state.display_name().to_string(),
+                    };
+
+                    // Type badge for shell sessions (Claude Code sessions don't need a badge)
+                    let type_badge = match session.info.session_type {
+                        SessionType::Shell => "󰆍 ", // shell icon or "$ " for terminals without nerd fonts
+                        SessionType::ClaudeCode => "",
                     };
 
                     // Build attention badge
@@ -128,6 +140,7 @@ pub fn render_branch_detail(
                     let content = Line::from(vec![
                         Span::raw(prefix),
                         Span::styled(badge, Style::default().fg(badge_color)),
+                        Span::raw(type_badge),
                         Span::raw(format!(
                             "{}: {} [{}]",
                             i + 1,
@@ -155,12 +168,14 @@ pub fn render_branch_detail(
 
     // Footer
     let help_text = match state.input_mode {
-        InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
+        InputMode::CreatingSession | InputMode::CreatingShellSession => {
+            "Enter: create | Esc: cancel".to_string()
+        }
         InputMode::ConfirmingSessionDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         _ => {
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let base = format!(
-                "n: new session | d: delete | {} | ↑/↓: navigate | Enter: open | Esc/q: back",
+                "n: claude | s: shell | d: delete | {} | ↑/↓: navigate | Enter: open | Esc/q: back",
                 timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
@@ -177,15 +192,12 @@ pub fn render_branch_detail(
 }
 
 /// Render the session creation input
-fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState) {
+fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState, session_type: &str) {
     let t = theme();
+    let title = format!("Create {} Session", session_type);
     let input = Paragraph::new(format!("New session name: {}_", state.new_session_name))
         .style(t.input_style())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Create Session"),
-        );
+        .block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(input, area);
 }
 

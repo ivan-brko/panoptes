@@ -10,8 +10,10 @@ pub enum InputMode {
     Normal,
     /// Session mode - keys are sent to the active session's PTY
     Session,
-    /// Creating a new session - typing session name
+    /// Creating a new Claude Code session - typing session name
     CreatingSession,
+    /// Creating a new shell session - typing session name
+    CreatingShellSession,
     /// Adding a new project - typing path
     AddingProject,
     /// Adding a new project - typing optional name (after path validation)

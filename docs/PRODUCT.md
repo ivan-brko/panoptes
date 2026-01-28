@@ -53,6 +53,10 @@ Sessions display their current state in real-time:
 - **Idle** - No recent activity
 - **Exited** - Session has ended
 
+Shell sessions show simplified states:
+- **Running** - A command is executing in the foreground
+- **Ready** - Shell is idle and waiting for input
+
 ## Key Features
 
 ### Multi-Session Management
@@ -97,6 +101,15 @@ Everything is accessible via keyboard shortcuts. Number keys (1-9) for quick sel
 ### Session Naming
 
 You name each session when you create it, making it easy to remember what each one is working on ("frontend-auth", "api-refactor", "test-fixes").
+
+### Shell Sessions
+
+In addition to Claude Code sessions, Panoptes can manage regular shell sessions (bash/zsh). This is useful when you need a terminal alongside your AI sessions - for running servers, watching logs, or manual testing.
+
+- Press `s` from Branch Detail to create a shell session
+- Shell sessions show "Running" when a command is executing, "Ready" when idle
+- Same keyboard shortcuts work for both session types
+- State is detected automatically via foreground process detection
 
 ### Worktree Creation
 
@@ -148,6 +161,7 @@ Panoptes is for developers who:
 
 The current version includes:
 - Managing multiple Claude Code sessions
+- Shell sessions alongside Claude Code sessions
 - Multi-account support for different Claude configurations
 - Git repository and branch organization with worktree support
 - Real-time session state tracking
