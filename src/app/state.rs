@@ -267,6 +267,10 @@ pub struct AppState {
     pub pending_claude_settings_copy: Option<ClaudeSettingsCopyState>,
     /// Pending Claude settings migration (before worktree deletion)
     pub pending_claude_settings_migrate: Option<ClaudeSettingsMigrateState>,
+
+    // --- Help overlay ---
+    /// Whether to show the help overlay with keyboard shortcuts
+    pub show_help_overlay: bool,
 }
 
 impl AppState {
@@ -703,5 +707,25 @@ mod tests {
         state.view = View::ActivityTimeline;
         state.selected_timeline_index = 4;
         assert_eq!(state.current_selected_index(), 4);
+    }
+
+    #[test]
+    fn test_resize_debounce_state() {
+        let mut state = AppState::default();
+
+        // Initially no resize pending
+        assert!(state.last_resize.is_none());
+        assert!(!state.pending_resize);
+
+        // Simulate resize event
+        state.last_resize = Some(Instant::now());
+        state.pending_resize = true;
+
+        assert!(state.pending_resize);
+        assert!(state.last_resize.is_some());
+
+        // After processing, pending should be cleared
+        state.pending_resize = false;
+        assert!(!state.pending_resize);
     }
 }

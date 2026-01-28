@@ -633,4 +633,24 @@ mod tests {
         // Process should be dead
         assert!(!pty.is_alive(), "Process should be dead after kill");
     }
+
+    #[test]
+    fn test_pty_resize() {
+        let mut pty = PtyHandle::spawn(
+            "cat",
+            &[],
+            std::path::Path::new("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .expect("Failed to spawn PTY");
+
+        // Resize should succeed
+        let result = pty.resize(40, 100);
+        assert!(result.is_ok(), "Resize failed: {:?}", result);
+
+        // Clean up
+        pty.kill().expect("Failed to kill");
+    }
 }
