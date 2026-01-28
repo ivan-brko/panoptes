@@ -110,6 +110,7 @@ In addition to Claude Code sessions, Panoptes can manage regular shell sessions 
 - Shell sessions show "Running" when a command is executing, "Ready" when idle
 - Same keyboard shortcuts work for both session types
 - State is detected automatically via foreground process detection
+- Shell sessions participate in the attention system - you'll be notified when commands complete
 
 ### Worktree Creation
 
