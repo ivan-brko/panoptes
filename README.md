@@ -67,6 +67,7 @@ cargo build --release
 
 ## Documentation
 
+- **[FAQ](docs/FAQ.md)** - Quick answers to common questions
 - **[Installation Guide](docs/INSTALLATION.md)** - Detailed setup instructions
 - **[Keyboard Reference](docs/KEYBOARD_REFERENCE.md)** - Complete keyboard shortcut reference
 - **[Configuration Guide](docs/CONFIG_GUIDE.md)** - All configuration options explained
