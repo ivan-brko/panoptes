@@ -4,7 +4,7 @@
 
 ![Panoptes Overview](panoptes_screenshot.png)
 
-Running multiple Claude Code sessions across different projects? Panoptes shows them all in one terminal — who's thinking, who's executing, who's waiting for input. Get notified when sessions need attention. Switch instantly with a keystroke.
+Running multiple Claude Code sessions across different projects? Panoptes shows them all in one terminal — who's thinking, who's executing, who's waiting for input. Get notified when sessions need attention. Switch instantly with a keystroke. You can also run plain shell sessions for tasks like builds or tests, with the same attention tracking so you know when they're done.
 
 It's a minimal wrapper, not a new tool to learn. You still use Claude Code exactly as before — Panoptes just makes juggling multiple sessions painless.
 
@@ -12,6 +12,8 @@ Named after the hundred-eyed giant of Greek mythology.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+
+> **Note:** Panoptes is under active development. Expect breaking changes and rough edges.
 
 ## Features
 
@@ -24,6 +26,7 @@ Named after the hundred-eyed giant of Greek mythology.
 - **Activity Timeline** - View all sessions sorted by recent activity across all projects
 - **Focus Timer** - Built-in Pomodoro-style focus timer with per-project time tracking
 - **Keyboard-Driven Interface** - Fast navigation with vim-style keys and number shortcuts
+- **Shell Sessions** - Run normal shell sessions alongside Claude Code sessions and get notified when commands finish — useful for running tests, builds, or anything you'd rather not route through Claude, while still benefiting from Panoptes' automatic worktree handling
 - **Session Naming** - Name sessions for easy identification ("frontend-auth", "api-refactor")
 
 ## Quick Start
@@ -89,6 +92,7 @@ cargo build --release
 | Key | Action |
 |-----|--------|
 | `n` | Add new project / New worktree (context-dependent) |
+| `s` | New shell session (from branch view) |
 | `d` | Delete selected item |
 | `r` | Rename project |
 | `R` | Refresh branches |
