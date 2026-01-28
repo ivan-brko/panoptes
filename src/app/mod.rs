@@ -289,9 +289,25 @@ impl App {
             }
 
             // Check shell session states via foreground detection
-            let had_shell_changes = self.sessions.check_shell_states();
-            if had_shell_changes {
+            let shell_notifications = self.sessions.check_shell_states();
+            if !shell_notifications.is_empty() {
                 self.state.needs_render = true;
+
+                // Send notifications for shell sessions that finished commands
+                for session_id in shell_notifications {
+                    let is_active = self.state.active_session == Some(session_id);
+                    if !is_active {
+                        let session_name = self
+                            .sessions
+                            .get(session_id)
+                            .map(|s| s.info.name.as_str())
+                            .unwrap_or("Shell");
+                        SessionManager::send_notification(
+                            &self.config.notification_method,
+                            session_name,
+                        );
+                    }
+                }
             }
 
             // Clean up old exited sessions to prevent memory growth

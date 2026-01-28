@@ -331,11 +331,12 @@ impl SessionManager {
     /// - Foreground busy -> Executing("command")
     /// - Foreground idle -> Waiting
     ///
-    /// Returns true if any session state changed
-    pub fn check_shell_states(&mut self) -> bool {
+    /// Returns a list of session IDs that transitioned from Executing to Waiting
+    /// (these sessions need notifications)
+    pub fn check_shell_states(&mut self) -> Vec<SessionId> {
         use super::SessionType;
 
-        let mut changed = false;
+        let mut needs_notification = Vec::new();
 
         for session in self.sessions.values_mut() {
             // Only check shell sessions that haven't exited
@@ -352,15 +353,15 @@ impl SessionManager {
             if is_busy && !current_is_executing {
                 // Transition to Executing
                 session.set_state(SessionState::Executing("command".to_string()));
-                changed = true;
             } else if !is_busy && current_is_executing {
-                // Transition to Waiting
+                // Transition to Waiting - command finished
                 session.set_state(SessionState::Waiting);
-                changed = true;
+                session.info.needs_attention = true;
+                needs_notification.push(session.info.id);
             }
         }
 
-        changed
+        needs_notification
     }
 
     /// Clean up exited sessions that have been exited longer than retention_secs
@@ -815,5 +816,74 @@ mod tests {
         let fake_id = uuid::Uuid::new_v4();
         let result = manager.destroy_session(fake_id);
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_shell_states_sets_needs_attention() {
+        use crate::session::pty::PtyHandle;
+        use crate::session::{Session, SessionInfo, SessionType};
+        use std::collections::HashMap;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = SessionManager::new(config);
+
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        // Create a shell session info
+        let info = SessionInfo::shell(
+            "test-shell".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            project_id,
+            branch_id,
+        );
+        let session_id = info.id;
+
+        // Spawn a very short-lived process so it exits quickly
+        let pty = PtyHandle::spawn(
+            "true",
+            &[],
+            &std::path::PathBuf::from("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+
+        let mut session = Session::new(info, pty, 24, 80);
+
+        // Manually set the session to Executing state to simulate a command running
+        session.set_state(SessionState::Executing("test-command".to_string()));
+        assert_eq!(session.info.session_type, SessionType::Shell);
+        assert!(!session.info.needs_attention);
+
+        manager.sessions.insert(session_id, session);
+        manager.session_order.push(session_id);
+
+        // Wait for the process to exit so foreground becomes idle
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Call check_shell_states - should detect transition from Executing to Waiting
+        let notified = manager.check_shell_states();
+
+        // The session should have transitioned and be in the notification list
+        assert!(
+            notified.contains(&session_id),
+            "Session should be in notification list after transitioning to Waiting"
+        );
+
+        // Verify needs_attention is set
+        let session = manager.get(session_id).unwrap();
+        assert!(
+            session.info.needs_attention,
+            "needs_attention should be true after command completion"
+        );
+        assert_eq!(
+            session.info.state,
+            SessionState::Waiting,
+            "State should be Waiting after command completion"
+        );
     }
 }
