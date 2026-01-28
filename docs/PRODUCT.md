@@ -37,7 +37,7 @@ Projects Overview
             └── Branch Detail (sessions)
                     └── Session View (fullscreen)
 
-Activity Timeline (accessible from Overview with 't')
+Activity Timeline (accessible from Overview with 'a')
 ```
 
 Navigate forward with `Enter`, backward with `Esc`. This mental model makes it easy to manage many sessions across multiple codebases.
@@ -84,7 +84,7 @@ Panoptes actively helps you manage your attention across sessions:
 
 ### Activity Timeline
 
-Press `t` from the projects overview to see all sessions sorted by recent activity. This view cuts across project/branch boundaries, showing you what's been happening across your entire workspace.
+Press `a` from the projects overview to see all sessions sorted by recent activity. This view cuts across project/branch boundaries, showing you what's been happening across your entire workspace.
 
 ### Log Viewer
 

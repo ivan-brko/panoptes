@@ -27,7 +27,7 @@ Just [Claude Code CLI](https://claude.ai/code) installed and configured. Panopte
 
 ### How do I add my first project?
 
-1. Press `a` from the Projects Overview
+1. Press `n` from the Projects Overview
 2. Enter the path to a git repository (Tab for autocomplete)
 3. Press Enter
 
@@ -46,7 +46,7 @@ Just [Claude Code CLI](https://claude.ai/code) installed and configured. Panopte
 
 ### How do I add a new project?
 
-Press `a` from Projects Overview, enter the path, and press Enter.
+Press `n` from Projects Overview, enter the path, and press Enter.
 
 ### How do I set the default base branch for new worktrees?
 
