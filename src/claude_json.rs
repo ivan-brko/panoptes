@@ -182,6 +182,23 @@ impl ClaudeJsonStore {
         Ok((shared, only_a, only_b))
     }
 
+    /// Remove settings for a path (used when deleting worktrees)
+    ///
+    /// This removes the project entry from the configuration file to avoid
+    /// accumulating stale entries over time.
+    ///
+    /// Returns Ok(true) if an entry was removed, Ok(false) if no entry existed.
+    pub fn remove_settings(&self, path: &str) -> Result<bool> {
+        let mut config = self.load()?;
+
+        if config.projects.remove(path).is_some() {
+            self.save(&config)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Merge unique tools from worktree into main repository
     ///
     /// This adds any tools that exist in the worktree but not in the main repo
@@ -556,6 +573,35 @@ mod tests {
         assert!(main_settings
             .allowed_tools
             .contains(&"existing".to_string()));
+    }
+
+    #[test]
+    fn test_remove_settings() {
+        let json = r#"{
+            "projects": {
+                "/to-remove": {
+                    "allowedTools": ["tool1"]
+                },
+                "/to-keep": {
+                    "allowedTools": ["tool2"]
+                }
+            }
+        }"#;
+
+        let (store, _file) = create_test_store(json);
+
+        // Remove existing entry
+        let removed = store.remove_settings("/to-remove").unwrap();
+        assert!(removed);
+
+        // Verify entry is gone
+        let config = store.load().unwrap();
+        assert!(!config.projects.contains_key("/to-remove"));
+        assert!(config.projects.contains_key("/to-keep"));
+
+        // Remove non-existent entry
+        let removed = store.remove_settings("/nonexistent").unwrap();
+        assert!(!removed);
     }
 
     #[test]

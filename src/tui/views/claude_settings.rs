@@ -24,8 +24,8 @@ pub fn render_claude_settings_copy_dialog(
     let tools_to_show = state.tools_preview.len().min(max_tool_lines);
     let has_more_tools = state.tools_preview.len() > max_tool_lines;
 
-    // Base height: title (1) + spacing (1) + source/target (2) + spacing (1) + tools header (1) + tools + buttons (2) + footer (1)
-    let base_height = 10_u16;
+    // Base height: title (1) + spacing (1) + source/target (2) + spacing (1) + sources (1-2) + tools header (1) + tools + buttons (2) + footer (1)
+    let base_height = 11_u16;
     let tools_height = tools_to_show as u16 + if has_more_tools { 1 } else { 0 };
     let mcp_height = if state.has_mcp_servers { 1 } else { 0 };
     let dialog_height =
@@ -57,10 +57,26 @@ pub fn render_claude_settings_copy_dialog(
         Line::from(""),
     ];
 
+    // Show which settings sources will be copied
+    let sources: Vec<&str> = [
+        state.has_local_settings.then_some("Local settings"),
+        (!state.tools_preview.is_empty() || state.has_mcp_servers).then_some("Legacy config"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if !sources.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  Sources: ", Style::default().fg(t.text_muted)),
+            Span::styled(sources.join(", "), Style::default().fg(t.text)),
+        ]));
+    }
+
     // Add tools preview
     if !state.tools_preview.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  Tools to copy:",
+            "  Permissions to copy:",
             Style::default().fg(t.text).add_modifier(Modifier::BOLD),
         )));
 
@@ -155,9 +171,13 @@ pub fn render_claude_settings_migrate_dialog(
     let tools_to_show = state.unique_tools.len().min(max_tool_lines);
     let has_more_tools = state.unique_tools.len() > max_tool_lines;
 
-    // Base height: title (1) + spacing (1) + message (2) + spacing (1) + tools header (1) + tools + buttons (2) + footer (1)
-    let base_height = 11_u16;
-    let tools_height = tools_to_show as u16 + if has_more_tools { 1 } else { 0 };
+    // Base height: title (1) + spacing (1) + message (2) + spacing (1) + sources (1) + tools header (1) + tools + buttons (2) + footer (1)
+    let base_height = 12_u16;
+    let tools_height = if state.unique_tools.is_empty() {
+        0
+    } else {
+        tools_to_show as u16 + if has_more_tools { 1 } else { 0 } + 1 // +1 for header
+    };
     let dialog_height = (base_height + tools_height).min(area.height.saturating_sub(2));
     let dialog_width = 60_u16.min(area.width.saturating_sub(4));
 
@@ -172,7 +192,7 @@ pub fn render_claude_settings_migrate_dialog(
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  This worktree has unique Claude Code permissions",
+            "  This worktree has unique Claude Code settings",
             Style::default().fg(t.text),
         )),
         Line::from(Span::styled(
@@ -182,29 +202,47 @@ pub fn render_claude_settings_migrate_dialog(
         Line::from(""),
     ];
 
-    // Add unique tools
-    lines.push(Line::from(Span::styled(
-        "  Permissions to migrate:",
-        Style::default().fg(t.text).add_modifier(Modifier::BOLD),
-    )));
+    // Show which settings sources will be migrated
+    let sources: Vec<&str> = [
+        state.has_local_settings.then_some("Local settings"),
+        (!state.unique_tools.is_empty()).then_some("Legacy permissions"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
-    for tool in state.unique_tools.iter().take(max_tool_lines) {
-        let display_tool = truncate_string(tool, 50);
+    if !sources.is_empty() {
         lines.push(Line::from(vec![
-            Span::raw("    "),
-            Span::styled(display_tool, Style::default().fg(Color::Yellow)),
+            Span::styled("  Sources: ", Style::default().fg(t.text_muted)),
+            Span::styled(sources.join(", "), Style::default().fg(t.text)),
         ]));
     }
 
-    if has_more_tools {
-        let remaining = state.unique_tools.len() - max_tool_lines;
-        lines.push(Line::from(vec![
-            Span::raw("    "),
-            Span::styled(
-                format!("...and {} more", remaining),
-                Style::default().fg(t.text_muted),
-            ),
-        ]));
+    // Add unique tools (legacy format) if present
+    if !state.unique_tools.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  Permissions to migrate:",
+            Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+        )));
+
+        for tool in state.unique_tools.iter().take(max_tool_lines) {
+            let display_tool = truncate_string(tool, 50);
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(display_tool, Style::default().fg(Color::Yellow)),
+            ]));
+        }
+
+        if has_more_tools {
+            let remaining = state.unique_tools.len() - max_tool_lines;
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!("...and {} more", remaining),
+                    Style::default().fg(t.text_muted),
+                ),
+            ]));
+        }
     }
 
     lines.push(Line::from(""));

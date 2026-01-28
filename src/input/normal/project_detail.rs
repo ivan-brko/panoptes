@@ -189,11 +189,15 @@ fn check_claude_settings_for_migrate(
     let worktree_str = worktree_path.to_string_lossy().to_string();
     let main_str = main_path.to_string_lossy().to_string();
 
-    // Compare tools between worktree and main
+    // Compare tools between worktree and main (legacy format)
     let (_, unique_to_worktree, _) = store.compare_tools(&worktree_str, &main_str).ok()?;
 
-    // Only show dialog if there are unique tools to migrate
-    if unique_to_worktree.is_empty() {
+    // Check modern format (.claude/settings.local.json)
+    let has_local_settings =
+        crate::claude_json::has_unique_local_settings(worktree_path, main_path).unwrap_or(false);
+
+    // Only show dialog if EITHER format has unique settings
+    if unique_to_worktree.is_empty() && !has_local_settings {
         return None;
     }
 
@@ -204,5 +208,6 @@ fn check_claude_settings_for_migrate(
         unique_tools: unique_to_worktree,
         selected_yes: true,
         claude_config_dir: config_dir,
+        has_local_settings,
     })
 }

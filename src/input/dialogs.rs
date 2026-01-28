@@ -271,6 +271,50 @@ pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Resu
                     }
                 }
 
+                // Clean up Claude permissions for deleted worktree
+                if let Some(branch) = &branch_info {
+                    if branch.is_worktree {
+                        let worktree_path = branch.working_dir.to_string_lossy().to_string();
+
+                        // Get the Claude config to use (project default or global default)
+                        if let Some(project_id) = app.state.view.project_id() {
+                            let config_dir = app
+                                .project_store
+                                .get_project(project_id)
+                                .and_then(|p| p.default_claude_config)
+                                .or_else(|| app.claude_config_store.get_default_id())
+                                .and_then(|id| app.claude_config_store.get(id))
+                                .and_then(|c| c.config_dir.clone());
+
+                            if let Some(store) =
+                                ClaudeJsonStore::for_config_dir(config_dir.as_deref())
+                            {
+                                match store.remove_settings(&worktree_path) {
+                                    Ok(true) => {
+                                        tracing::info!(
+                                            "Removed Claude permissions for deleted worktree: {}",
+                                            worktree_path
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        tracing::debug!(
+                                            "No Claude permissions found for worktree: {}",
+                                            worktree_path
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to remove Claude permissions for {}: {}",
+                                            worktree_path,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Remove branch from the store
                 app.project_store.remove_branch(branch_id);
 
@@ -516,31 +560,55 @@ fn confirm_claude_settings_copy(app: &mut App) {
 
     if let Some(state) = copy_state {
         if state.selected_yes {
-            // Perform the copy
-            let source = state.source_path.to_string_lossy().to_string();
-            let target = state.target_path.to_string_lossy().to_string();
-
             let _ = app.show_loading("Copying Claude settings...");
 
-            // Use the stored config_dir from state
-            if let Some(store) = ClaudeJsonStore::for_config_dir(state.claude_config_dir.as_deref())
-            {
-                match store.copy_settings(&source, &target) {
-                    Ok(()) => {
-                        app.state
-                            .header_notifications
-                            .push("Claude settings copied to worktree");
-                        tracing::info!("Copied Claude settings from {} to {}", source, target);
+            // Copy modern local settings first (.claude/settings.local.json)
+            if state.has_local_settings {
+                match crate::claude_json::copy_local_settings(
+                    &state.source_path,
+                    &state.target_path,
+                ) {
+                    Ok(true) => {
+                        tracing::info!(
+                            "Copied local Claude settings from {} to {}",
+                            state.source_path.display(),
+                            state.target_path.display()
+                        );
+                    }
+                    Ok(false) => {
+                        tracing::debug!(
+                            "Local settings not copied (source missing or dest exists)"
+                        );
                     }
                     Err(e) => {
-                        tracing::error!("Failed to copy Claude settings: {}", e);
-                        app.state
-                            .header_notifications
-                            .push(format!("Failed to copy Claude settings: {}", e));
+                        tracing::warn!("Failed to copy local Claude settings: {}", e);
                     }
                 }
             }
 
+            // Copy legacy settings (.claude.json keyed by path)
+            let source = state.source_path.to_string_lossy().to_string();
+            let target = state.target_path.to_string_lossy().to_string();
+
+            if let Some(store) = ClaudeJsonStore::for_config_dir(state.claude_config_dir.as_deref())
+            {
+                match store.copy_settings(&source, &target) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Copied legacy Claude settings from {} to {}",
+                            source,
+                            target
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to copy legacy Claude settings: {}", e);
+                    }
+                }
+            }
+
+            app.state
+                .header_notifications
+                .push("Claude settings copied to worktree");
             app.clear_loading();
         }
 
@@ -597,39 +665,69 @@ fn confirm_claude_settings_migrate(app: &mut App) {
     if let Some(state) = migrate_state {
         let branch_id = state.branch_id;
 
-        if state.selected_yes && !state.unique_tools.is_empty() {
-            // Perform the migration
-            let worktree = state.worktree_path.to_string_lossy().to_string();
-            let main = state.main_path.to_string_lossy().to_string();
-
+        if state.selected_yes {
             let _ = app.show_loading("Migrating permissions...");
+            let mut total_migrated = 0;
 
-            // Use the stored config_dir from state
-            if let Some(store) = ClaudeJsonStore::for_config_dir(state.claude_config_dir.as_deref())
-            {
-                match store.merge_settings(&worktree, &main) {
+            // Merge modern local settings first (.claude/settings.local.json)
+            if state.has_local_settings {
+                match crate::claude_json::merge_local_settings(
+                    &state.worktree_path,
+                    &state.main_path,
+                ) {
                     Ok(added) => {
                         if !added.is_empty() {
-                            app.state.header_notifications.push(format!(
-                                "Migrated {} permission{} to main repo",
-                                added.len(),
-                                if added.len() == 1 { "" } else { "s" }
-                            ));
                             tracing::info!(
-                                "Migrated {} permissions from {} to {}",
+                                "Merged {} local settings from worktree to main: {:?}",
                                 added.len(),
-                                worktree,
-                                main
+                                added
                             );
+                            total_migrated += added.len();
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Failed to migrate permissions: {}", e);
-                        app.state
-                            .header_notifications
-                            .push(format!("Failed to migrate permissions: {}", e));
+                        tracing::warn!("Failed to merge local settings: {}", e);
                     }
                 }
+            }
+
+            // Merge legacy settings (tools from .claude.json)
+            if !state.unique_tools.is_empty() {
+                let worktree = state.worktree_path.to_string_lossy().to_string();
+                let main = state.main_path.to_string_lossy().to_string();
+
+                // Use the stored config_dir from state
+                if let Some(store) =
+                    ClaudeJsonStore::for_config_dir(state.claude_config_dir.as_deref())
+                {
+                    match store.merge_settings(&worktree, &main) {
+                        Ok(added) => {
+                            if !added.is_empty() {
+                                tracing::info!(
+                                    "Migrated {} legacy permissions from {} to {}",
+                                    added.len(),
+                                    worktree,
+                                    main
+                                );
+                                total_migrated += added.len();
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to migrate legacy permissions: {}", e);
+                            app.state
+                                .header_notifications
+                                .push(format!("Failed to migrate permissions: {}", e));
+                        }
+                    }
+                }
+            }
+
+            if total_migrated > 0 {
+                app.state.header_notifications.push(format!(
+                    "Migrated {} setting{} to main repo",
+                    total_migrated,
+                    if total_migrated == 1 { "" } else { "s" }
+                ));
             }
 
             app.clear_loading();
