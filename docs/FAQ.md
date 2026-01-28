@@ -107,6 +107,14 @@ Press `Shift+Esc`. Regular `Esc` exits session mode; `Shift+Esc` sends the Escap
 - **Ctrl+Home/Ctrl+End**: Jump to top/bottom
 - Typing any key (except scroll keys) automatically scrolls back to live view
 
+### I can't copy text from the session - what's wrong?
+
+You're in session mode. Press `Esc` to exit session mode first, then use your terminal's native text selection (mouse drag or shift+arrow keys). Session mode forwards all input to Claude Code, which prevents normal terminal selection.
+
+### I can't scroll through the session output - what's wrong?
+
+If you're in Normal mode (viewing but not interacting), press `Enter` to enter session mode first. Scrolling with PageUp/PageDown works in session mode. Alternatively, in Normal mode you can use PageUp/PageDown but only after entering the session view.
+
 ### What do the session states mean?
 
 | State | Meaning |
