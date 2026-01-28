@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "panoptes-cc"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Terminal-based dashboard for managing multiple Claude Code sessions"
 license = "MIT"
