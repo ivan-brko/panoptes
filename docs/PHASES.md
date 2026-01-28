@@ -54,6 +54,17 @@ A fully navigable application where you can:
 
 **Goal**: Production-quality user experience and error handling. Make Panoptes production-ready through improved error handling, edge case coverage, and performance optimization.
 
+**Status**: In Progress (10/21 tickets complete - Sprint 1 & 2 Critical Safety done)
+
+### What We've Built
+
+- ✅ Index bounds safety - All input handlers use `.get()` for checked access
+- ✅ Worktree wizard index clamping - `clamp_list_index()` and `clamp_base_list_index()` helpers
+- ✅ Hook server crash detection - Errors logged, status channel, dropped event tracking
+- ✅ Paste input length limits - `MAX_*_LEN` constants with truncation
+- ✅ File logging failure handling - Failure counters in `file_writer.rs`
+- ✅ TUI teardown error logging - Terminal restoration logged properly
+
 ### What We're Building
 
 - **Part 1: Critical Error Handling Fixes** - Hook server crash detection, file logging failures, TUI teardown errors, persistence feedback, git operation context, corruption handling

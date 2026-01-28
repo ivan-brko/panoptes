@@ -212,7 +212,7 @@ Sessions are cleaned up automatically when Panoptes exits:
 
 ## Testing
 
-The project has 134 unit tests covering:
+The project has 280+ unit tests covering:
 - Configuration loading/saving
 - Session state transitions
 - Output buffer management

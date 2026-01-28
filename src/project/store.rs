@@ -289,10 +289,7 @@ impl ProjectStore {
                     );
                     return (Self::with_path(path.to_path_buf()), Some(warning));
                 }
-                let warning = format!(
-                    "Projects file was unreadable ({}). Starting fresh.",
-                    e
-                );
+                let warning = format!("Projects file was unreadable ({}). Starting fresh.", e);
                 return (Self::with_path(path.to_path_buf()), Some(warning));
             }
         };
@@ -308,10 +305,7 @@ impl ProjectStore {
                     );
                     return (Self::with_path(path.to_path_buf()), Some(warning));
                 }
-                let warning = format!(
-                    "Projects file was corrupted ({}). Starting fresh.",
-                    e
-                );
+                let warning = format!("Projects file was corrupted ({}). Starting fresh.", e);
                 return (Self::with_path(path.to_path_buf()), Some(warning));
             }
         };

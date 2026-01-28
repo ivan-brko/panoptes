@@ -128,10 +128,28 @@ pub fn handle_confirming_delete_key(app: &mut App, key: KeyEvent) -> Result<()> 
 
                 // Get branch_id before destroying (for selection adjustment)
                 let branch_id = app.state.view.branch_id();
+                let project_id = app.state.view.project_id();
+                let was_active = app.state.active_session == Some(session_id);
+                let was_in_session_view = app.state.view == View::SessionView;
 
                 // Clear active_session if it was the destroyed session
-                if app.state.active_session == Some(session_id) {
+                if was_active {
                     app.state.active_session = None;
+                    app.state.session_return_view = None;
+                    // Navigate back from session view if we're there
+                    if was_in_session_view {
+                        // Navigate to branch detail or project detail or projects overview
+                        if let (Some(pid), Some(bid)) = (project_id, branch_id) {
+                            app.state.view = View::BranchDetail(pid, bid);
+                        } else if let Some(pid) = project_id {
+                            app.state.view = View::ProjectDetail(pid);
+                        } else {
+                            app.state.view = View::ProjectsOverview;
+                        }
+                        app.state
+                            .header_notifications
+                            .push("Session ended".to_string());
+                    }
                 }
 
                 if let Err(e) = app.sessions.destroy_session(session_id) {

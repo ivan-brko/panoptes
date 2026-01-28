@@ -359,18 +359,9 @@ mod tests {
         let adapter = ClaudeCodeAdapter::new();
         let temp_dir = TempDir::new().unwrap();
         let config = Config {
-            hook_port: 9999,
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
-            max_output_lines: 1000,
-            idle_threshold_secs: 300,
-            state_timeout_secs: 300,
-            exited_retention_secs: 300,
-            theme_preset: "dark".to_string(),
-            notification_method: "bell".to_string(),
-            esc_hold_threshold_ms: 400,
-            focus_timer_minutes: 25,
-            focus_stats_retention_days: 30,
+            ..Config::default()
         };
         let session_id = Uuid::new_v4();
         let spawn_config = SpawnConfig {
@@ -397,18 +388,9 @@ mod tests {
         let adapter = ClaudeCodeAdapter::new();
         let temp_dir = TempDir::new().unwrap();
         let config = Config {
-            hook_port: 9999,
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
-            max_output_lines: 1000,
-            idle_threshold_secs: 300,
-            state_timeout_secs: 300,
-            exited_retention_secs: 300,
-            theme_preset: "dark".to_string(),
-            notification_method: "bell".to_string(),
-            esc_hold_threshold_ms: 400,
-            focus_timer_minutes: 25,
-            focus_stats_retention_days: 30,
+            ..Config::default()
         };
         let session_id = Uuid::new_v4();
         let claude_config_path = PathBuf::from("/home/user/.claude-work");
@@ -442,18 +424,9 @@ mod tests {
     fn test_install_hook_script() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config {
-            hook_port: 9999,
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
-            max_output_lines: 1000,
-            idle_threshold_secs: 300,
-            state_timeout_secs: 300,
-            exited_retention_secs: 300,
-            theme_preset: "dark".to_string(),
-            notification_method: "bell".to_string(),
-            esc_hold_threshold_ms: 400,
-            focus_timer_minutes: 25,
-            focus_stats_retention_days: 30,
+            ..Config::default()
         };
 
         let event_scripts = ClaudeCodeAdapter::install_hook_script(&config).unwrap();
@@ -550,18 +523,9 @@ mod tests {
     fn test_setup_hooks_returns_cleanup_paths() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config {
-            hook_port: 9999,
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
-            max_output_lines: 1000,
-            idle_threshold_secs: 300,
-            state_timeout_secs: 300,
-            exited_retention_secs: 300,
-            theme_preset: "dark".to_string(),
-            notification_method: "bell".to_string(),
-            esc_hold_threshold_ms: 400,
-            focus_timer_minutes: 25,
-            focus_stats_retention_days: 30,
+            ..Config::default()
         };
         let spawn_config = test_spawn_config(temp_dir.path().to_path_buf());
 

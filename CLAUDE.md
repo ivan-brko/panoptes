@@ -107,6 +107,7 @@ PTY Output → Session buffer → TUI render
   - `worktree.rs`: Git worktree creation and management
 - **hooks/**: HTTP server (Axum on port 9999) receiving Claude Code callbacks, HookEvent parsing
   - `mod.rs`: `HookEvent` struct, `HookEventType` enum with type-safe event handling
+  - `server.rs`: HTTP server startup, graceful shutdown, event routing
 - **logging/**: Application logging system
   - `mod.rs`: Logging initialization and exports
   - `buffer.rs`: LogBuffer for real-time log display in TUI
@@ -128,6 +129,7 @@ PTY Output → Session buffer → TUI render
   - `layout.rs`: Screen layout calculations
   - `widgets/mod.rs`: Custom widget exports
   - `widgets/project_card.rs`: Project card widget for grid display
+  - `widgets/selection.rs`: Selection indicator and highlighting widget
   - `views/mod.rs`: View rendering exports
   - `views/projects.rs`: Projects overview (grid of projects, needs attention section)
   - `views/project_detail.rs`: Project detail (branches list, worktree creation UI)
@@ -140,6 +142,7 @@ PTY Output → Session buffer → TUI render
   - `views/claude_settings.rs`: Claude permissions copy/migrate dialogs
   - `views/confirm.rs`: Reusable confirmation dialog component
   - `views/notifications.rs`: Notification overlay rendering
+  - `views/help.rs`: Help overlay showing keyboard shortcuts for each view
 
 ### Key Types
 
@@ -207,7 +210,10 @@ PTY Output → Session buffer → TUI render
 - State enums with display/color helpers for TUI rendering
 - Always run `cargo fmt` before committing
 - Types are extracted into submodules but re-exported from parent modules for ergonomic imports
-- When adding/changing/removing keyboard shortcuts, always update the corresponding footer help text in `src/tui/views/`. The implementation (in `src/input/`) and documentation (in `src/tui/views/`) must stay in sync.
+- When adding/changing/removing keyboard shortcuts, update **both**:
+  1. Footer help text in `src/tui/views/<view>.rs`
+  2. Help overlay shortcuts in `src/tui/views/help.rs`
+  The implementation (in `src/input/`) and documentation must stay in sync.
 
 ## Error Handling Conventions
 

@@ -107,7 +107,13 @@ impl SessionManager {
         let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
 
         // Create session with PTY and virtual terminal
-        let session = Session::new(info, spawn_result.pty, rows, cols);
+        let session = Session::with_scrollback(
+            info,
+            spawn_result.pty,
+            rows,
+            cols,
+            self.config.scrollback_lines,
+        );
 
         // Store session
         self.sessions.insert(session_id, session);
@@ -209,14 +215,15 @@ impl SessionManager {
 
     /// Check all sessions for exited processes
     /// Updates state to Exited for any dead sessions
-    /// Returns true if any session state changed
-    pub fn check_alive(&mut self) -> bool {
-        let mut changed = false;
+    /// Returns a list of (session_id, session_name, exit_reason) for sessions that crashed
+    pub fn check_alive(&mut self) -> Vec<(SessionId, String, String)> {
+        let mut crashed_sessions = Vec::new();
         for session in self.sessions.values_mut() {
             if session.info.state != SessionState::Exited {
                 // Check exit status to detect crashes vs normal termination
-                if let Some((exit_code, success)) = session.exit_status() {
-                    if success {
+                if let Some(exit_info) = session.exit_status() {
+                    let reason = exit_info.format_reason();
+                    if exit_info.success {
                         tracing::debug!(
                             session_id = %session.info.id,
                             session_name = %session.info.name,
@@ -227,17 +234,20 @@ impl SessionManager {
                         tracing::warn!(
                             session_id = %session.info.id,
                             session_name = %session.info.name,
-                            exit_code = exit_code,
+                            exit_code = exit_info.code,
+                            signal = ?exit_info.signal,
+                            exit_reason = %reason,
                             "Session exited abnormally"
                         );
-                        session.info.exit_reason = Some(format!("Exit code: {}", exit_code));
+                        session.info.exit_reason = Some(reason.clone());
+                        // Collect crashed sessions for notification
+                        crashed_sessions.push((session.info.id, session.info.name.clone(), reason));
                     }
                     session.set_state(SessionState::Exited);
-                    changed = true;
                 }
             }
         }
-        changed
+        crashed_sessions
     }
 
     /// Check for sessions stuck in Executing state too long
@@ -626,18 +636,9 @@ mod tests {
 
     fn test_config(temp_dir: &TempDir) -> Config {
         Config {
-            hook_port: 9999,
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
-            max_output_lines: 1000,
-            idle_threshold_secs: 300,
-            state_timeout_secs: 300,
-            exited_retention_secs: 300,
-            theme_preset: "dark".to_string(),
-            notification_method: "bell".to_string(),
-            esc_hold_threshold_ms: 400,
-            focus_timer_minutes: 25,
-            focus_stats_retention_days: 30,
+            ..Config::default()
         }
     }
 

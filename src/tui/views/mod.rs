@@ -11,6 +11,7 @@ mod claude_configs;
 mod claude_settings;
 mod confirm;
 mod focus_stats;
+mod help;
 mod logs;
 mod notifications;
 mod project_detail;
@@ -34,6 +35,7 @@ pub use focus_stats::{
     render_focus_session_delete_dialog, render_focus_session_detail_dialog, render_focus_stats,
     render_timer_input_dialog,
 };
+pub use help::render_help_overlay;
 pub use logs::render_log_viewer;
 pub use notifications::{render_notification_badge, render_notifications};
 pub use project_detail::{render_project_delete_confirmation, render_project_detail};
