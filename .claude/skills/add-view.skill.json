@@ -1,0 +1,8 @@
+{
+  "name": "add-view",
+  "description": "Step-by-step checklist for adding a new view to Panoptes",
+  "category": "development",
+  "tags": ["view", "tui", "rust", "scaffolding"],
+  "version": "1.0.0",
+  "prompt": "Follow the checklist to add a new view to the Panoptes TUI application. This includes creating the view enum variant, render function, input handler, and updating all dispatch points."
+}

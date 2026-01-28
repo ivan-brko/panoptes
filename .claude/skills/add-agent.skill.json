@@ -1,0 +1,8 @@
+{
+  "name": "add-agent",
+  "description": "Step-by-step checklist for adding a new agent type to Panoptes",
+  "category": "development",
+  "tags": ["agent", "adapter", "rust", "scaffolding"],
+  "version": "1.0.0",
+  "prompt": "Follow the checklist to add a new agent type to Panoptes. This includes adding the enum variant, creating the adapter implementation, and updating the factory method."
+}

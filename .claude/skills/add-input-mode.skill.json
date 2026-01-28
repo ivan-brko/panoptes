@@ -1,0 +1,8 @@
+{
+  "name": "add-input-mode",
+  "description": "Step-by-step checklist for adding a new input mode to Panoptes",
+  "category": "development",
+  "tags": ["input", "mode", "rust", "scaffolding"],
+  "version": "1.0.0",
+  "prompt": "Follow the checklist to add a new input mode to Panoptes. This includes adding the enum variant, creating the handler in the appropriate module, and updating the dispatcher."
+}
