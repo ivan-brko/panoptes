@@ -8,6 +8,48 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 
+/// Information about a process exit
+#[derive(Debug, Clone)]
+pub struct ExitInfo {
+    /// Exit code (0 for success, non-zero for error)
+    pub code: i32,
+    /// Whether the process exited successfully
+    pub success: bool,
+    /// Signal number if the process was killed by a signal (Unix only)
+    pub signal: Option<i32>,
+}
+
+impl ExitInfo {
+    /// Format the exit reason as a human-readable string
+    pub fn format_reason(&self) -> String {
+        if self.success {
+            "Exited normally".to_string()
+        } else if let Some(sig) = self.signal {
+            format!("Killed by signal {} ({})", sig, signal_name(sig))
+        } else {
+            format!("Exit code: {}", self.code)
+        }
+    }
+}
+
+/// Get a human-readable name for a signal number
+fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => "unknown",
+    }
+}
+
 /// Bracketed paste start sequence
 const PASTE_START: &[u8] = b"\x1b[200~";
 /// Bracketed paste end sequence
@@ -190,26 +232,46 @@ impl PtyHandle {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Check if the child process has exited and return exit status
+    /// Check if the child process has exited and return exit info
     ///
     /// Returns:
     /// - `None` if the process is still running
-    /// - `Some((exit_code, success))` if the process has exited
-    ///   - exit_code: The exit code (or 255 for signal termination)
+    /// - `Some(ExitInfo)` if the process has exited, containing:
+    ///   - code: The exit code (or signal number + 128 for signal termination)
     ///   - success: Whether it was a successful exit (code 0)
-    pub fn exit_status(&mut self) -> Option<(i32, bool)> {
+    ///   - signal: The signal number if killed by a signal (Unix only)
+    pub fn exit_status(&mut self) -> Option<ExitInfo> {
         match self.child.try_wait() {
             Ok(None) => None, // Still running
             Ok(Some(status)) => {
-                // Process has exited - get exit code
-                // portable_pty ExitStatus wraps std::process::ExitStatus
                 let code = status.exit_code() as i32;
                 let success = status.success();
-                Some((code, success))
+
+                // On Unix, detect signal termination
+                // Signals typically result in exit code = 128 + signal_number
+                #[cfg(unix)]
+                let signal = if !success && code > 128 && code <= 128 + 64 {
+                    Some(code - 128)
+                } else {
+                    None
+                };
+
+                #[cfg(not(unix))]
+                let signal = None;
+
+                Some(ExitInfo {
+                    code,
+                    success,
+                    signal,
+                })
             }
             Err(_) => {
                 // Error checking status - treat as exited abnormally
-                Some((255, false))
+                Some(ExitInfo {
+                    code: 255,
+                    success: false,
+                    signal: None,
+                })
             }
         }
     }
@@ -459,6 +521,51 @@ mod tests {
         // Note: We don't strictly assert exit since timing can be flaky in CI
     }
 
+    // ExitInfo tests
+    #[test]
+    fn test_exit_info_format_reason_success() {
+        let info = ExitInfo {
+            code: 0,
+            success: true,
+            signal: None,
+        };
+        assert_eq!(info.format_reason(), "Exited normally");
+    }
+
+    #[test]
+    fn test_exit_info_format_reason_error_code() {
+        let info = ExitInfo {
+            code: 1,
+            success: false,
+            signal: None,
+        };
+        assert_eq!(info.format_reason(), "Exit code: 1");
+    }
+
+    #[test]
+    fn test_exit_info_format_reason_signal() {
+        let info = ExitInfo {
+            code: 137,
+            success: false,
+            signal: Some(9),
+        };
+        assert_eq!(info.format_reason(), "Killed by signal 9 (SIGKILL)");
+    }
+
+    #[test]
+    fn test_signal_name_known_signals() {
+        assert_eq!(signal_name(1), "SIGHUP");
+        assert_eq!(signal_name(2), "SIGINT");
+        assert_eq!(signal_name(9), "SIGKILL");
+        assert_eq!(signal_name(11), "SIGSEGV");
+        assert_eq!(signal_name(15), "SIGTERM");
+    }
+
+    #[test]
+    fn test_signal_name_unknown_signal() {
+        assert_eq!(signal_name(99), "unknown");
+    }
+
     #[test]
     fn test_pty_write_and_read() {
         // Spawn a simple cat process
@@ -525,5 +632,25 @@ mod tests {
 
         // Process should be dead
         assert!(!pty.is_alive(), "Process should be dead after kill");
+    }
+
+    #[test]
+    fn test_pty_resize() {
+        let mut pty = PtyHandle::spawn(
+            "cat",
+            &[],
+            std::path::Path::new("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .expect("Failed to spawn PTY");
+
+        // Resize should succeed
+        let result = pty.resize(40, 100);
+        assert!(result.is_ok(), "Resize failed: {:?}", result);
+
+        // Clean up
+        pty.kill().expect("Failed to kill");
     }
 }

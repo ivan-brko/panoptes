@@ -42,8 +42,9 @@ use crate::tui::views::{
     render_claude_settings_migrate_dialog, render_config_delete_dialog,
     render_config_name_input_dialog, render_config_path_input_dialog, render_config_selector,
     render_focus_session_delete_dialog, render_focus_session_detail_dialog, render_focus_stats,
-    render_loading_indicator, render_log_viewer, render_notifications, render_project_detail,
-    render_projects_overview, render_session_view, render_timeline, render_timer_input_dialog,
+    render_help_overlay, render_loading_indicator, render_log_viewer, render_notifications,
+    render_project_detail, render_projects_overview, render_session_view, render_timeline,
+    render_timer_input_dialog,
 };
 use crate::tui::{NotificationType, Tui};
 use crate::wizards::worktree::{
@@ -91,11 +92,14 @@ impl App {
     pub async fn new(log_buffer: Arc<LogBuffer>, log_file_info: LogFileInfo) -> Result<Self> {
         let config = Config::load()?;
 
+        // Track any startup warnings to show as notifications
+        let mut startup_warnings: Vec<String> = Vec::new();
+
         // Load project store (or create empty if doesn't exist)
-        let project_store = ProjectStore::load().unwrap_or_else(|e| {
-            tracing::warn!("Failed to load project store: {}, starting fresh", e);
-            ProjectStore::new()
-        });
+        let (project_store, corruption_warning) = ProjectStore::load_with_status();
+        if let Some(warning) = corruption_warning {
+            startup_warnings.push(warning);
+        }
         tracing::debug!(
             "Loaded {} projects, {} branches",
             project_store.project_count(),
@@ -123,9 +127,15 @@ impl App {
         // Create TUI
         let tui = Tui::new()?;
 
+        let mut state = AppState::default();
+        // Add any startup warnings as notifications
+        for warning in startup_warnings {
+            state.header_notifications.push(warning);
+        }
+
         Ok(Self {
             config,
-            state: AppState::default(),
+            state,
             project_store,
             claude_config_store,
             sessions,
@@ -257,9 +267,16 @@ impl App {
                 self.state.needs_render = true;
             }
 
-            // Check for dead sessions
-            let had_state_changes = self.sessions.check_alive();
-            if had_state_changes {
+            // Check for dead sessions and notify about crashes
+            let crashed_sessions = self.sessions.check_alive();
+            if !crashed_sessions.is_empty() {
+                // Notify about each crashed session
+                for (_session_id, session_name, exit_reason) in &crashed_sessions {
+                    self.state.header_notifications.push(format!(
+                        "Session '{}' crashed: {}",
+                        session_name, exit_reason
+                    ));
+                }
                 self.state.needs_render = true;
             }
 
@@ -391,6 +408,17 @@ impl App {
                 event_count,
                 coalesced_count
             );
+        }
+
+        // Warn if high event backlog (more than 100 events in one batch)
+        if event_count > 100 {
+            tracing::warn!("High hook event backlog: {} events in batch", event_count);
+            // Only notify once - don't spam the user
+            if self.state.dropped_events_count == 0 {
+                self.state
+                    .header_notifications
+                    .push("High event load - some state updates may be delayed".to_string());
+            }
         }
 
         // Process coalesced events
@@ -1182,19 +1210,44 @@ impl App {
     }
 
     /// Resize the active session's PTY to match the output viewport
+    ///
+    /// Uses FrameLayout to calculate the correct PTY dimensions, ensuring
+    /// consistency with how the session view is rendered.
     pub(crate) fn resize_active_session_pty(&mut self) -> Result<()> {
         if let Some(session_id) = self.state.active_session {
             let size = self.tui.size()?;
-            // Output area is: total height - header (3) - footer (3) - borders (2)
-            let output_rows = size.height.saturating_sub(8);
-            // Output width is: total width - borders (2)
-            let output_cols = size.width.saturating_sub(2);
+            let frame_config = FrameConfig::default();
+            let layout = FrameLayout::calculate(
+                ratatui::prelude::Rect::new(0, 0, size.width, size.height),
+                &frame_config,
+            );
+            let (rows, cols) = layout.pty_size();
 
             if let Some(session) = self.sessions.get_mut(session_id) {
-                session.resize(output_cols, output_rows)?;
+                session.resize(cols, rows)?;
             }
         }
         Ok(())
+    }
+
+    /// Refresh git state for all projects
+    ///
+    /// This checks if each worktree's working directory still exists and marks
+    /// branches as stale if their directories are missing.
+    pub(crate) fn refresh_all_git_state(&mut self) {
+        let mut total_stale = 0;
+        let project_ids: Vec<_> = self.project_store.projects().map(|p| p.id).collect();
+
+        for project_id in project_ids {
+            total_stale += self.project_store.refresh_branches(project_id);
+        }
+
+        if total_stale > 0 {
+            self.state.header_notifications.push(format!(
+                "{} worktree(s) marked stale - directories not found",
+                total_stale
+            ));
+        }
     }
 
     /// Show a loading indicator with the given message and force a render
@@ -1423,6 +1476,11 @@ impl App {
             let visible_notifications = state.notifications.visible();
             if !visible_notifications.is_empty() {
                 render_notifications(frame, area, &visible_notifications);
+            }
+
+            // Render help overlay if active
+            if state.show_help_overlay {
+                render_help_overlay(frame, area, &state.view);
             }
 
             // Render loading overlay if a blocking operation is in progress

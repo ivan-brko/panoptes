@@ -233,6 +233,13 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
             // Open Claude configs management
             app.state.navigate_to_claude_configs();
         }
+        KeyCode::Char('R') => {
+            // Refresh git state for all projects
+            app.refresh_all_git_state();
+            app.state
+                .header_notifications
+                .push("Git state refreshed".to_string());
+        }
         _ => {}
     }
     Ok(())

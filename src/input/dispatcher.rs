@@ -5,10 +5,24 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, InputMode, View};
+use crate::app::{App, AppState, InputMode, View};
 
 /// Handle a key event by routing to the appropriate mode handler
 pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
+    // Validate mode/view consistency before dispatch
+    validate_mode_view_consistency(&mut app.state);
+
+    // Handle help overlay first - it captures all keys when visible
+    if app.state.show_help_overlay {
+        match key.code {
+            KeyCode::Char('?') | KeyCode::Esc => {
+                app.state.show_help_overlay = false;
+            }
+            _ => {} // Ignore other keys while overlay is visible
+        }
+        return Ok(());
+    }
+
     // Handle Ctrl+C specially
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         // In Session mode, fall through to forward Ctrl+C to PTY
@@ -17,6 +31,12 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
             app.state.error_message = Some("Ctrl+C disabled. Press 'q' to quit.".to_string());
             return Ok(());
         }
+    }
+
+    // Toggle help overlay with ? key in Normal mode
+    if key.code == KeyCode::Char('?') && app.state.input_mode == InputMode::Normal {
+        app.state.show_help_overlay = true;
+        return Ok(());
     }
 
     // Global: Jump to next session needing attention (Space key)
@@ -103,6 +123,125 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         InputMode::ConfirmingClaudeSettingsMigrate => {
             super::dialogs::handle_confirming_claude_settings_migrate_key(app, key)
+        }
+    }
+}
+
+/// Validate that the current InputMode is valid for the current View.
+///
+/// If an invalid combination is detected, reset to Normal mode to prevent
+/// UI state corruption.
+fn validate_mode_view_consistency(state: &mut AppState) {
+    let is_valid = match (&state.input_mode, &state.view) {
+        // Session mode only valid in SessionView
+        (InputMode::Session, view) => *view == View::SessionView,
+
+        // Worktree wizard modes only valid in ProjectDetail
+        (
+            InputMode::WorktreeSelectBranch
+            | InputMode::WorktreeSelectBase
+            | InputMode::WorktreeConfirm
+            | InputMode::CreatingWorktree
+            | InputMode::SelectingDefaultBase,
+            View::ProjectDetail(_),
+        ) => true,
+        (
+            InputMode::WorktreeSelectBranch
+            | InputMode::WorktreeSelectBase
+            | InputMode::WorktreeConfirm
+            | InputMode::CreatingWorktree
+            | InputMode::SelectingDefaultBase,
+            _,
+        ) => false,
+
+        // Session delete confirmation only valid in SessionView or BranchDetail
+        (InputMode::ConfirmingSessionDelete, View::SessionView) => true,
+        (InputMode::ConfirmingSessionDelete, View::BranchDetail(_, _)) => true,
+        (InputMode::ConfirmingSessionDelete, _) => false,
+
+        // Branch delete confirmation only valid in ProjectDetail or BranchDetail
+        (InputMode::ConfirmingBranchDelete, View::ProjectDetail(_)) => true,
+        (InputMode::ConfirmingBranchDelete, View::BranchDetail(_, _)) => true,
+        (InputMode::ConfirmingBranchDelete, _) => false,
+
+        // All other combinations are assumed valid
+        _ => true,
+    };
+
+    if !is_valid {
+        tracing::warn!(
+            "Mode/view mismatch detected: {:?} in {:?}, resetting to Normal",
+            state.input_mode,
+            state.view
+        );
+        state.input_mode = InputMode::Normal;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn test_validate_session_mode_in_session_view_valid() {
+        let mut state = AppState::default();
+        state.input_mode = InputMode::Session;
+        state.view = View::SessionView;
+
+        validate_mode_view_consistency(&mut state);
+
+        assert_eq!(state.input_mode, InputMode::Session); // Should remain
+    }
+
+    #[test]
+    fn test_validate_session_mode_in_other_view_invalid() {
+        let mut state = AppState::default();
+        state.input_mode = InputMode::Session;
+        state.view = View::ProjectsOverview;
+
+        validate_mode_view_consistency(&mut state);
+
+        assert_eq!(state.input_mode, InputMode::Normal); // Should be reset
+    }
+
+    #[test]
+    fn test_validate_worktree_mode_in_project_detail_valid() {
+        let mut state = AppState::default();
+        let project_id = Uuid::new_v4();
+        state.input_mode = InputMode::WorktreeSelectBranch;
+        state.view = View::ProjectDetail(project_id);
+
+        validate_mode_view_consistency(&mut state);
+
+        assert_eq!(state.input_mode, InputMode::WorktreeSelectBranch); // Should remain
+    }
+
+    #[test]
+    fn test_validate_worktree_mode_in_other_view_invalid() {
+        let mut state = AppState::default();
+        state.input_mode = InputMode::WorktreeSelectBranch;
+        state.view = View::ProjectsOverview;
+
+        validate_mode_view_consistency(&mut state);
+
+        assert_eq!(state.input_mode, InputMode::Normal); // Should be reset
+    }
+
+    #[test]
+    fn test_validate_normal_mode_always_valid() {
+        let mut state = AppState::default();
+        state.input_mode = InputMode::Normal;
+
+        // Test in various views
+        for view in [
+            View::ProjectsOverview,
+            View::SessionView,
+            View::ActivityTimeline,
+        ] {
+            state.view = view;
+            validate_mode_view_consistency(&mut state);
+            assert_eq!(state.input_mode, InputMode::Normal);
         }
     }
 }

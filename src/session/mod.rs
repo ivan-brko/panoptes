@@ -8,8 +8,8 @@ pub mod pty;
 pub mod vterm;
 
 pub use manager::SessionManager;
-pub use pty::{mouse_event_to_bytes, PtyHandle};
-pub use vterm::VirtualTerminal;
+pub use pty::{mouse_event_to_bytes, ExitInfo, PtyHandle};
+pub use vterm::{VirtualTerminal, DEFAULT_SCROLLBACK_ROWS};
 
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -296,6 +296,21 @@ impl Session {
         }
     }
 
+    /// Create a new session with the given info, PTY, terminal dimensions, and scrollback
+    pub fn with_scrollback(
+        info: SessionInfo,
+        pty: PtyHandle,
+        rows: usize,
+        cols: usize,
+        scrollback_rows: usize,
+    ) -> Self {
+        Self {
+            info,
+            pty,
+            vterm: VirtualTerminal::with_scrollback(rows, cols, scrollback_rows),
+        }
+    }
+
     /// Poll PTY for new output and process through virtual terminal
     /// Returns true if any output was read
     pub fn poll_output(&mut self) -> bool {
@@ -380,8 +395,8 @@ impl Session {
     ///
     /// Returns:
     /// - `None` if the process is still running
-    /// - `Some((exit_code, success))` if the process has exited
-    pub fn exit_status(&mut self) -> Option<(i32, bool)> {
+    /// - `Some(ExitInfo)` if the process has exited
+    pub fn exit_status(&mut self) -> Option<ExitInfo> {
         self.pty.exit_status()
     }
 
@@ -587,5 +602,33 @@ mod tests {
         buf.clear();
         assert!(buf.is_empty());
         assert!(buf.is_at_bottom());
+    }
+
+    #[test]
+    fn test_session_resize_updates_vterm() {
+        // Create a session with spawn
+        let pty = crate::session::pty::PtyHandle::spawn(
+            "sleep",
+            &["1"],
+            std::path::Path::new("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let info = SessionInfo::new("test".to_string(), "/tmp".into(), project_id, branch_id);
+        let mut session = Session::new(info, pty, 24, 80);
+
+        // Initial size
+        assert_eq!(session.vterm.size(), (24, 80));
+
+        // Resize
+        session.resize(100, 40).unwrap();
+
+        // Verify vterm was resized (rows, cols)
+        assert_eq!(session.vterm.size(), (40, 100));
     }
 }

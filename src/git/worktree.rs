@@ -97,41 +97,62 @@ pub fn create_worktree(
 }
 
 /// Resolve a reference (branch name, remote branch, or commit) to a commit
+///
+/// Tries multiple resolution strategies and provides detailed error messages
+/// if none succeed.
 fn resolve_ref_to_commit<'repo>(
     repo: &'repo Repository,
     ref_name: &str,
 ) -> Result<git2::Commit<'repo>> {
-    // First try as a local branch
-    if let Ok(branch) = repo.find_branch(ref_name, BranchType::Local) {
-        let reference = branch.into_reference();
-        return reference
-            .peel_to_commit()
-            .context("Failed to resolve local branch to commit");
+    let mut attempts = Vec::new();
+
+    // Try as a local branch
+    match repo.find_branch(ref_name, BranchType::Local) {
+        Ok(branch) => {
+            let reference = branch.into_reference();
+            return reference
+                .peel_to_commit()
+                .context("Failed to peel local branch to commit");
+        }
+        Err(e) => attempts.push(format!("local branch: {}", e)),
     }
 
     // Try as a remote branch
-    if let Ok(branch) = repo.find_branch(ref_name, BranchType::Remote) {
-        let reference = branch.into_reference();
-        return reference
-            .peel_to_commit()
-            .context("Failed to resolve remote branch to commit");
+    match repo.find_branch(ref_name, BranchType::Remote) {
+        Ok(branch) => {
+            let reference = branch.into_reference();
+            return reference
+                .peel_to_commit()
+                .context("Failed to peel remote branch to commit");
+        }
+        Err(e) => attempts.push(format!("remote branch: {}", e)),
     }
 
     // Try as a direct reference
-    if let Ok(reference) = repo.find_reference(ref_name) {
-        return reference
-            .peel_to_commit()
-            .context("Failed to resolve reference to commit");
+    match repo.find_reference(ref_name) {
+        Ok(reference) => {
+            return reference
+                .peel_to_commit()
+                .context("Failed to peel reference to commit");
+        }
+        Err(e) => attempts.push(format!("direct reference: {}", e)),
     }
 
     // Try as a revspec (e.g., "refs/remotes/origin/main")
-    if let Ok(obj) = repo.revparse_single(ref_name) {
-        return obj
-            .peel_to_commit()
-            .with_context(|| format!("Failed to resolve '{}' to commit", ref_name));
+    match repo.revparse_single(ref_name) {
+        Ok(obj) => {
+            return obj
+                .peel_to_commit()
+                .with_context(|| format!("Failed to peel revspec '{}' to commit", ref_name));
+        }
+        Err(e) => attempts.push(format!("revspec: {}", e)),
     }
 
-    anyhow::bail!("Could not resolve '{}' to a commit", ref_name)
+    anyhow::bail!(
+        "Could not resolve '{}' to a commit. Tried:\n  - {}",
+        ref_name,
+        attempts.join("\n  - ")
+    )
 }
 
 /// Remove a worktree

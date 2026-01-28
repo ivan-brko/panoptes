@@ -13,8 +13,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use vt100::Parser;
 
-/// Number of scrollback rows to retain
-const SCROLLBACK_ROWS: usize = 10000;
+/// Default number of scrollback rows to retain
+pub const DEFAULT_SCROLLBACK_ROWS: usize = 10000;
 
 /// Cached styled lines for rendering optimization
 struct StyledLinesCache {
@@ -40,15 +40,25 @@ pub struct VirtualTerminal {
     styled_cache: RefCell<Option<StyledLinesCache>>,
     /// Scroll offset from bottom (0 = live view, >0 = scrolled back into history)
     scroll_offset: usize,
+    /// Maximum scrollback rows this terminal was configured with
+    scrollback_rows: usize,
 }
 
 impl VirtualTerminal {
-    /// Create a new virtual terminal with the given dimensions and scrollback buffer
+    /// Create a new virtual terminal with the given dimensions
+    ///
+    /// Uses the default scrollback rows (10000 lines).
     pub fn new(rows: usize, cols: usize) -> Self {
+        Self::with_scrollback(rows, cols, DEFAULT_SCROLLBACK_ROWS)
+    }
+
+    /// Create a new virtual terminal with the given dimensions and scrollback buffer
+    pub fn with_scrollback(rows: usize, cols: usize, scrollback_rows: usize) -> Self {
         Self {
-            parser: Parser::new(rows as u16, cols as u16, SCROLLBACK_ROWS),
+            parser: Parser::new(rows as u16, cols as u16, scrollback_rows),
             styled_cache: RefCell::new(None),
             scroll_offset: 0,
+            scrollback_rows,
         }
     }
 
@@ -256,7 +266,7 @@ impl VirtualTerminal {
 
     /// Get maximum scrollback available (number of lines in history)
     pub fn max_scrollback(&self) -> usize {
-        SCROLLBACK_ROWS
+        self.scrollback_rows
     }
 
     /// Check if at the bottom (live view)
@@ -358,5 +368,25 @@ mod tests {
         vt.process(b"\x1b[?2004h");
         vt.process(b"\x1b[?2004l");
         assert!(!vt.bracketed_paste_enabled());
+    }
+
+    // VirtualTerminal scrollback tests
+    #[test]
+    fn test_vterm_with_scrollback() {
+        let vt = VirtualTerminal::with_scrollback(24, 80, 5000);
+        assert_eq!(vt.size(), (24, 80));
+        assert_eq!(vt.max_scrollback(), 5000);
+    }
+
+    #[test]
+    fn test_vterm_default_scrollback() {
+        let vt = VirtualTerminal::new(24, 80);
+        assert_eq!(vt.max_scrollback(), DEFAULT_SCROLLBACK_ROWS);
+    }
+
+    #[test]
+    fn test_vterm_custom_scrollback_zero() {
+        let vt = VirtualTerminal::with_scrollback(24, 80, 0);
+        assert_eq!(vt.max_scrollback(), 0);
     }
 }
