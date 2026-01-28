@@ -752,6 +752,10 @@ pub fn update_worktree_filtered_branches(app: &mut App) {
 ///
 /// Returns Some(ClaudeSettingsCopyState) if the main repo has Claude settings
 /// that should be offered for copying to the new worktree.
+///
+/// This checks both:
+/// - Modern format: `.claude/settings.local.json` in the project directory
+/// - Legacy format: `.claude.json` in the Claude config directory (keyed by path)
 fn check_claude_settings_for_copy(
     app: &App,
     project_id: ProjectId,
@@ -761,6 +765,13 @@ fn check_claude_settings_for_copy(
     let project = app.project_store.get_project(project_id)?;
     let branch = app.project_store.get_branch(branch_id)?;
 
+    // Check modern format (.claude/settings.local.json)
+    let source_local_settings = project
+        .repo_path
+        .join(".claude")
+        .join("settings.local.json");
+    let has_local_settings = source_local_settings.exists();
+
     // Get the Claude config to use (project default or global default)
     let config_id = project
         .default_claude_config
@@ -769,21 +780,53 @@ fn check_claude_settings_for_copy(
     let claude_config = config_id.and_then(|id| app.claude_config_store.get(id));
     let config_dir = claude_config.and_then(|c| c.config_dir.clone());
 
-    // Create store for this config directory
+    // Create store for legacy config directory
     let store = ClaudeJsonStore::for_config_dir(config_dir.as_deref())?;
     let main_path = project.repo_path.to_string_lossy().to_string();
 
-    // Check if main repo has any settings configured
-    if !store.has_settings(&main_path).ok()? {
+    // Check if main repo has any legacy settings configured
+    let has_legacy_settings = store.has_settings(&main_path).ok().unwrap_or(false);
+
+    // Get legacy settings to show a preview (if they exist)
+    let legacy_settings = if has_legacy_settings {
+        store.get_settings(&main_path).ok().flatten()
+    } else {
+        None
+    };
+
+    // Read local settings preview (permissions from modern format)
+    let local_permissions = if has_local_settings {
+        read_local_settings_permissions(&source_local_settings)
+    } else {
+        vec![]
+    };
+
+    // Get legacy tools preview
+    let legacy_tools = legacy_settings
+        .as_ref()
+        .map(|s| s.allowed_tools.clone())
+        .unwrap_or_default();
+    let has_mcp_servers = legacy_settings
+        .as_ref()
+        .map(|s| !s.mcp_servers.is_empty())
+        .unwrap_or(false);
+
+    // Show dialog if EITHER format has settings
+    if !has_local_settings && legacy_tools.is_empty() && !has_mcp_servers {
         return None;
     }
 
-    // Get the settings to show a preview
-    let settings = store.get_settings(&main_path).ok()??;
-
-    // Only show dialog if there are tools to copy
-    if settings.allowed_tools.is_empty() && settings.mcp_servers.is_empty() {
-        return None;
+    // Combine previews from both sources (deduplicated)
+    let mut combined_preview: Vec<String> = Vec::new();
+    for tool in legacy_tools {
+        if !combined_preview.contains(&tool) {
+            combined_preview.push(tool);
+        }
+    }
+    for perm in local_permissions {
+        if !combined_preview.contains(&perm) {
+            combined_preview.push(perm);
+        }
     }
 
     Some(ClaudeSettingsCopyState {
@@ -791,11 +834,42 @@ fn check_claude_settings_for_copy(
         target_path: branch.working_dir.clone(),
         project_id,
         branch_id,
-        tools_preview: settings.allowed_tools.clone(),
-        has_mcp_servers: !settings.mcp_servers.is_empty(),
+        tools_preview: combined_preview,
+        has_mcp_servers,
         selected_yes: true,
         claude_config_dir: config_dir,
+        has_local_settings,
     })
+}
+
+/// Read permission strings from a local settings.local.json file for preview
+fn read_local_settings_permissions(path: &std::path::Path) -> Vec<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let mut permissions = Vec::new();
+
+    // Extract permissions.allow array
+    if let Some(perms) = json.get("permissions") {
+        if let Some(allow) = perms.get("allow") {
+            if let Some(arr) = allow.as_array() {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        permissions.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    permissions
 }
 
 /// Select the default base branch in the filtered list (legacy flow)

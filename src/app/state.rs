@@ -33,6 +33,8 @@ pub struct ClaudeSettingsCopyState {
     pub selected_yes: bool,
     /// Which Claude config directory to use (None = default ~/.claude)
     pub claude_config_dir: Option<PathBuf>,
+    /// Whether local settings.local.json exists and will be copied
+    pub has_local_settings: bool,
 }
 
 /// State for Claude settings migrate dialog
@@ -44,12 +46,14 @@ pub struct ClaudeSettingsMigrateState {
     pub main_path: PathBuf,
     /// Branch ID being deleted
     pub branch_id: BranchId,
-    /// Tools unique to worktree that will be migrated
+    /// Tools unique to worktree that will be migrated (legacy format)
     pub unique_tools: Vec<String>,
     /// Whether Yes is selected (default true)
     pub selected_yes: bool,
     /// Which Claude config directory to use (None = default ~/.claude)
     pub claude_config_dir: Option<PathBuf>,
+    /// Whether worktree has unique local settings to migrate (modern format)
+    pub has_local_settings: bool,
 }
 
 use super::input_mode::InputMode;
