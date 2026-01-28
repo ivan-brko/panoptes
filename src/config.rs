@@ -123,6 +123,11 @@ pub struct Config {
     /// Focus stats retention in days (default: 30)
     #[serde(default = "default_focus_stats_retention_days")]
     pub focus_stats_retention_days: u64,
+
+    /// Maximum scrollback lines per session (default: 10000)
+    /// Each 1000 lines uses approximately 10KB of memory
+    #[serde(default = "default_scrollback_lines")]
+    pub scrollback_lines: usize,
 }
 
 fn default_idle_threshold() -> u64 {
@@ -157,6 +162,10 @@ fn default_focus_stats_retention_days() -> u64 {
     30
 }
 
+fn default_scrollback_lines() -> usize {
+    10_000
+}
+
 impl Default for Config {
     fn default() -> Self {
         let base = config_dir();
@@ -173,6 +182,7 @@ impl Default for Config {
             esc_hold_threshold_ms: default_esc_hold_threshold_ms(),
             focus_timer_minutes: default_focus_timer_minutes(),
             focus_stats_retention_days: default_focus_stats_retention_days(),
+            scrollback_lines: default_scrollback_lines(),
         }
     }
 }
@@ -275,5 +285,23 @@ mod tests {
         if let Some(path) = result {
             assert!(path.ends_with(".panoptes"));
         }
+    }
+
+    // Config scrollback_lines tests
+    #[test]
+    fn test_default_config_scrollback() {
+        let config = Config::default();
+        assert_eq!(config.scrollback_lines, 10_000);
+    }
+
+    #[test]
+    fn test_config_serialization_with_scrollback() {
+        let mut config = Config::default();
+        config.scrollback_lines = 5000;
+
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(parsed.scrollback_lines, 5000);
     }
 }
