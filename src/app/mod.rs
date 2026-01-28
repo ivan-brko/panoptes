@@ -288,6 +288,12 @@ impl App {
                 self.state.needs_render = true;
             }
 
+            // Check shell session states via foreground detection
+            let had_shell_changes = self.sessions.check_shell_states();
+            if had_shell_changes {
+                self.state.needs_render = true;
+            }
+
             // Clean up old exited sessions to prevent memory growth
             let cleaned_up = self
                 .sessions

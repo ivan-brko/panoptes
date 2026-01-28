@@ -86,6 +86,112 @@ pub fn handle_creating_session_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+/// Handle key while creating a new shell session
+pub fn handle_creating_shell_session_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    // Only process key press events (not release/repeat)
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Esc => {
+            // Cancel session creation
+            app.state.input_mode = InputMode::Normal;
+            app.state.new_session_name.clear();
+            app.state.creating_session_project_id = None;
+            app.state.creating_session_branch_id = None;
+            app.state.creating_session_working_dir = None;
+        }
+        KeyCode::Enter => {
+            // Create the shell session
+            create_shell_session(app)?;
+        }
+        KeyCode::Backspace => {
+            app.state.new_session_name.pop();
+        }
+        KeyCode::Char(c) => {
+            // Enforce length limit for session names
+            if app.state.new_session_name.len() < MAX_SESSION_NAME_LEN {
+                app.state.new_session_name.push(c);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Create a shell session
+fn create_shell_session(app: &mut App) -> Result<()> {
+    let name = if app.state.new_session_name.is_empty() {
+        format!("Shell {}", app.sessions.len() + 1)
+    } else {
+        std::mem::take(&mut app.state.new_session_name)
+    };
+
+    let working_dir = app
+        .state
+        .creating_session_working_dir
+        .take()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let project_id = app
+        .state
+        .creating_session_project_id
+        .take()
+        .unwrap_or(Uuid::nil());
+    let branch_id = app
+        .state
+        .creating_session_branch_id
+        .take()
+        .unwrap_or(Uuid::nil());
+
+    let (rows, cols) = if let Ok(size) = app.tui.size() {
+        (
+            size.height.saturating_sub(8) as usize,
+            size.width.saturating_sub(2) as usize,
+        )
+    } else {
+        (24, 80)
+    };
+
+    match app.sessions.create_shell_session(
+        name.clone(),
+        working_dir,
+        project_id,
+        branch_id,
+        rows,
+        cols,
+    ) {
+        Ok(session_id) => {
+            tracing::info!("Created shell session: {} ({})", name, session_id);
+
+            if !project_id.is_nil() {
+                if let Some(project) = app.project_store.get_project_mut(project_id) {
+                    project.touch();
+                }
+            }
+            if !branch_id.is_nil() {
+                if let Some(branch) = app.project_store.get_branch_mut(branch_id) {
+                    branch.touch();
+                }
+            }
+
+            app.state.navigate_to_session(session_id);
+            app.tui.enable_mouse_capture();
+            app.sessions.acknowledge_attention(session_id);
+            if app.config.notification_method == "title" {
+                SessionManager::reset_terminal_title();
+            }
+            app.resize_active_session_pty()?;
+        }
+        Err(e) => {
+            tracing::error!("Failed to create shell session: {}", e);
+            app.state.input_mode = InputMode::Normal;
+        }
+    }
+
+    Ok(())
+}
+
 /// Create a session without Claude config
 fn create_session_without_config(app: &mut App) -> Result<()> {
     let name = if app.state.new_session_name.is_empty() {

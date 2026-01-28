@@ -122,6 +122,53 @@ impl SessionManager {
         Ok(session_id)
     }
 
+    /// Create a new shell session (bash/zsh)
+    ///
+    /// Shell sessions don't use hooks - state tracking is done via foreground detection.
+    pub fn create_shell_session(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        rows: usize,
+        cols: usize,
+    ) -> Result<SessionId> {
+        let info = SessionInfo::shell(name.clone(), working_dir.clone(), project_id, branch_id);
+        let session_id = info.id;
+
+        // Create spawn config
+        let spawn_config = SpawnConfig {
+            session_id,
+            session_name: name,
+            working_dir,
+            initial_prompt: None, // Shell doesn't use initial prompts
+            rows: rows as u16,
+            cols: cols as u16,
+            claude_config_dir: None,
+        };
+
+        // Get adapter and spawn the process
+        let agent_type = AgentType::Shell;
+        let adapter = agent_type.create_adapter();
+        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
+
+        // Create session with PTY and virtual terminal
+        let session = Session::with_scrollback(
+            info,
+            spawn_result.pty,
+            rows,
+            cols,
+            self.config.scrollback_lines,
+        );
+
+        // Store session
+        self.sessions.insert(session_id, session);
+        self.session_order.push(session_id);
+
+        Ok(session_id)
+    }
+
     /// Destroy a session by ID
     pub fn destroy_session(&mut self, session_id: SessionId) -> Result<()> {
         if let Some(mut session) = self.sessions.remove(&session_id) {
@@ -274,6 +321,45 @@ impl SessionManager {
                 }
             }
         }
+        changed
+    }
+
+    /// Check shell session states by polling foreground process detection
+    ///
+    /// For shell sessions (SessionType::Shell), this checks whether a command
+    /// is currently running in the foreground and updates state accordingly:
+    /// - Foreground busy -> Executing("command")
+    /// - Foreground idle -> Waiting
+    ///
+    /// Returns true if any session state changed
+    pub fn check_shell_states(&mut self) -> bool {
+        use super::SessionType;
+
+        let mut changed = false;
+
+        for session in self.sessions.values_mut() {
+            // Only check shell sessions that haven't exited
+            if session.info.session_type != SessionType::Shell {
+                continue;
+            }
+            if session.info.state == SessionState::Exited {
+                continue;
+            }
+
+            let is_busy = session.pty.is_foreground_busy();
+            let current_is_executing = matches!(session.info.state, SessionState::Executing(_));
+
+            if is_busy && !current_is_executing {
+                // Transition to Executing
+                session.set_state(SessionState::Executing("command".to_string()));
+                changed = true;
+            } else if !is_busy && current_is_executing {
+                // Transition to Waiting
+                session.set_state(SessionState::Waiting);
+                changed = true;
+            }
+        }
+
         changed
     }
 

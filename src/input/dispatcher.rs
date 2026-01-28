@@ -49,6 +49,9 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::Normal => app.handle_normal_mode_key(key),
         InputMode::Session => super::session_mode::handle_session_mode_key(app, key),
         InputMode::CreatingSession => super::text_input::handle_creating_session_key(app, key),
+        InputMode::CreatingShellSession => {
+            super::text_input::handle_creating_shell_session_key(app, key)
+        }
         InputMode::AddingProject => super::text_input::handle_adding_project_key(app, key),
         InputMode::AddingProjectName => super::text_input::handle_adding_project_name_key(app, key),
         InputMode::CreatingWorktree => {

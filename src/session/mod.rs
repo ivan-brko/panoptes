@@ -24,6 +24,31 @@ use crate::project::{BranchId, ProjectId};
 /// Unique identifier for a session
 pub type SessionId = Uuid;
 
+/// Type of session (determines state tracking behavior)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SessionType {
+    /// Claude Code CLI session - uses hooks for state tracking
+    #[default]
+    ClaudeCode,
+    /// Generic shell session (bash/zsh/etc) - uses foreground detection
+    Shell,
+}
+
+impl SessionType {
+    /// Get the display name for this session type
+    pub fn display_name(&self) -> &str {
+        match self {
+            SessionType::ClaudeCode => "Claude Code",
+            SessionType::Shell => "Shell",
+        }
+    }
+
+    /// Check if this session type uses hooks for state tracking
+    pub fn uses_hooks(&self) -> bool {
+        matches!(self, SessionType::ClaudeCode)
+    }
+}
+
 /// State of a session
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SessionState {
@@ -78,6 +103,9 @@ pub struct SessionInfo {
     pub name: String,
     /// Current state
     pub state: SessionState,
+    /// Type of session (ClaudeCode or Shell)
+    #[serde(default)]
+    pub session_type: SessionType,
     /// Working directory
     pub working_dir: std::path::PathBuf,
     /// Parent project identifier
@@ -121,6 +149,7 @@ impl SessionInfo {
             id: Uuid::new_v4(),
             name,
             state: SessionState::default(),
+            session_type: SessionType::default(),
             working_dir,
             project_id,
             branch_id,
@@ -147,6 +176,20 @@ impl SessionInfo {
         let mut info = Self::new(name, working_dir, project_id, branch_id);
         info.claude_config_id = claude_config_id;
         info.claude_config_name = claude_config_name;
+        info
+    }
+
+    /// Create new session info for a shell session
+    pub fn shell(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Self {
+        let mut info = Self::new(name, working_dir, project_id, branch_id);
+        info.session_type = SessionType::Shell;
+        // Shell sessions start in Waiting state (ready for input)
+        info.state = SessionState::Waiting;
         info
     }
 }
@@ -482,6 +525,34 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let parsed: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(state, parsed);
+    }
+
+    #[test]
+    fn test_session_type_default() {
+        let session_type = SessionType::default();
+        assert_eq!(session_type, SessionType::ClaudeCode);
+    }
+
+    #[test]
+    fn test_session_type_display() {
+        assert_eq!(SessionType::ClaudeCode.display_name(), "Claude Code");
+        assert_eq!(SessionType::Shell.display_name(), "Shell");
+    }
+
+    #[test]
+    fn test_session_type_uses_hooks() {
+        assert!(SessionType::ClaudeCode.uses_hooks());
+        assert!(!SessionType::Shell.uses_hooks());
+    }
+
+    #[test]
+    fn test_session_info_shell() {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let info = SessionInfo::shell("shell".to_string(), "/tmp".into(), project_id, branch_id);
+        assert_eq!(info.name, "shell");
+        assert_eq!(info.session_type, SessionType::Shell);
+        assert_eq!(info.state, SessionState::Waiting); // Shell starts in Waiting
     }
 
     #[test]
