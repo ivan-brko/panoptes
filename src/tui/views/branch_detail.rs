@@ -208,17 +208,25 @@ fn render_delete_confirmation(
     state: &AppState,
     sessions: &SessionManager,
 ) {
-    let session_name = state
-        .pending_delete_session
-        .and_then(|id| sessions.get(id))
+    let session = state.pending_delete_session.and_then(|id| sessions.get(id));
+
+    let session_name = session
         .map(|s| s.info.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
+
+    let warning = session
+        .map(|s| match s.info.session_type {
+            SessionType::ClaudeCode => "This will kill the Claude Code process.",
+            SessionType::Shell => "This will kill the shell process.",
+        })
+        .unwrap_or("This will kill the process.")
+        .to_string();
 
     let config = ConfirmDialogConfig {
         title: "Confirm Delete",
         item_label: "session",
         item_name: &session_name,
-        warnings: vec!["This will kill the Claude Code process.".to_string()],
+        warnings: vec![warning],
         notes: vec![],
     };
     render_confirm_dialog(frame, area, config);
