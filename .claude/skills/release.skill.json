@@ -1,0 +1,8 @@
+{
+  "name": "release",
+  "description": "Prepare a new release with version bump and changelog",
+  "category": "release",
+  "tags": ["release", "version", "changelog", "semver"],
+  "version": "1.0.0",
+  "prompt": "Analyze changes since the last release, suggest semantic version (major/minor/patch), and update Cargo.toml and CHANGELOG.md."
+}

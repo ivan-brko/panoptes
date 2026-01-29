@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2025-01-29
+
+### Added
+- Custom shell session shortcuts feature - define custom keyboard shortcuts that execute shell commands
+- Custom shortcuts support in branch detail view
+- Custom shortcuts documentation in UI footers
+- Shell session attention/notification support
+- Comprehensive FAQ documentation
+- Session mode troubleshooting questions to FAQ
+
+### Changed
+- Skip notifications and attention flag for active session (no notifications while you're viewing that session)
+
+### Fixed
+- Deletion dialog now shows correct warning for session type
+- Keyboard shortcut documentation discrepancies
+
+## [0.2.1] - 2025-01-27
+
 ### Added
 - Hook event coalescing to prevent UI lag during rapid state changes
 - Branch refresh feature (`R` key) to check for stale worktrees
@@ -84,5 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Focus timer countdown accuracy with Alt+Tab detection
 - Escape key behavior (Shift+Escape forwards to PTY)
 
-[Unreleased]: https://github.com/ivan-brko/panoptes/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ivan-brko/panoptes/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/ivan-brko/panoptes/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/ivan-brko/panoptes/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/ivan-brko/panoptes/releases/tag/v0.1.0
