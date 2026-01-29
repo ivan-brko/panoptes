@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use crate::app::{App, InputMode};
 use crate::project::{BranchId, ProjectId};
 use crate::session::SessionManager;
+use crate::tui::frame::{FrameConfig, FrameLayout};
 
 /// Handle key in branch detail view (normal mode)
 pub fn handle_branch_detail_key(
@@ -78,6 +79,44 @@ pub fn handle_branch_detail_key(
                 let session_id = session.info.id;
                 app.state.pending_delete_session = Some(session_id);
                 app.state.input_mode = InputMode::ConfirmingSessionDelete;
+            }
+        }
+        KeyCode::Char(c) => {
+            // Check for custom shortcut trigger
+            if let Some(shortcut) = app.config.get_shortcut(c).cloned() {
+                if let Some(branch) = app.project_store.get_branch(branch_id) {
+                    let working_dir = branch.working_dir.clone();
+                    let session_name = shortcut.short_display_name();
+
+                    // Get terminal size
+                    let terminal_size = app.tui.size().unwrap_or_default();
+                    let frame_config = FrameConfig::default();
+                    let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                    let rows = layout.content.height as usize;
+                    let cols = layout.content.width as usize;
+
+                    // Create shell session with command
+                    match app.sessions.create_shell_session_with_command(
+                        session_name,
+                        working_dir,
+                        project_id,
+                        branch_id,
+                        shortcut.command.clone(),
+                        rows,
+                        cols,
+                    ) {
+                        Ok(new_session_id) => {
+                            app.state.navigate_to_session(new_session_id);
+                            app.tui.enable_mouse_capture();
+                            app.state.input_mode = InputMode::Session;
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to create shell session: {}", e);
+                            app.state.error_message =
+                                Some(format!("Failed to create session: {}", e));
+                        }
+                    }
+                }
             }
         }
         _ => {}

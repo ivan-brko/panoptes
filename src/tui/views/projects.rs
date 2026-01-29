@@ -171,17 +171,17 @@ pub fn render_projects_overview(
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let base = if has_projects && has_sessions {
                 format!(
-                    "n: new | d: delete | Tab: switch | a: timeline | c: configs | {} | q: quit",
+                    "n: new | d: delete | Tab: switch | a: timeline | c: configs | k: shortcuts | {} | q: quit",
                     timer_hint
                 )
             } else if has_projects {
                 format!(
-                    "n: new | d: delete | a: timeline | c: configs | {} | q: quit",
+                    "n: new | d: delete | a: timeline | c: configs | k: shortcuts | {} | q: quit",
                     timer_hint
                 )
             } else {
                 format!(
-                    "n: new | a: timeline | c: configs | {} | q: quit",
+                    "n: new | a: timeline | c: configs | k: shortcuts | {} | q: quit",
                     timer_hint
                 )
             };

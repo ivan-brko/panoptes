@@ -7,7 +7,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{AppState, InputMode};
-use crate::config::{Config, CustomShortcut};
+use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
@@ -15,7 +15,7 @@ use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
+use crate::tui::views::{format_attention_hint, format_custom_shortcuts_hint, format_focus_timer_hint};
 
 /// Render the session view
 pub fn render_session_view(
@@ -205,19 +205,3 @@ fn build_footer_text(
     }
 }
 
-/// Format custom shortcuts for footer display (e.g., "v:VSCode e:vim | ")
-fn format_custom_shortcuts_hint(shortcuts: &[CustomShortcut]) -> String {
-    if shortcuts.is_empty() {
-        return String::new();
-    }
-
-    // Show up to 3 shortcuts to avoid cluttering the footer
-    let display: Vec<String> = shortcuts
-        .iter()
-        .take(3)
-        .map(|s| format!("{}:{}", s.key, s.short_display_name()))
-        .collect();
-
-    let suffix = if shortcuts.len() > 3 { "..." } else { "" };
-    format!("{}{} | ", display.join(" "), suffix)
-}
