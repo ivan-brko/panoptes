@@ -17,7 +17,10 @@ use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
+use crate::tui::views::{
+    format_attention_hint, format_custom_shortcuts_hint, format_custom_shortcuts_list,
+    format_focus_timer_hint,
+};
 use crate::tui::widgets::selection::{selection_prefix, selection_style};
 
 /// Render the branch detail view showing sessions
@@ -82,11 +85,22 @@ pub fn render_branch_detail(
         let branch_sessions = sessions.sessions_for_branch(branch_id);
 
         if branch_sessions.is_empty() {
+            // Build custom shortcuts text if any exist
+            let custom_shortcuts_text = if config.custom_shortcuts.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n{}",
+                    format_custom_shortcuts_list(&config.custom_shortcuts)
+                )
+            };
+
             let empty_text = format!(
                 "No sessions on this branch yet.\n\n\
                 Press 'n' to create a Claude Code session.\n\
-                Press 's' to create a shell session.\n\n\
+                Press 's' to create a shell session.{}\n\n\
                 Working directory: {}",
+                custom_shortcuts_text,
                 branch.working_dir.display()
             );
             let empty = Paragraph::new(empty_text)
@@ -174,9 +188,10 @@ pub fn render_branch_detail(
         InputMode::ConfirmingSessionDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         _ => {
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
+            let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
             let base = format!(
-                "n: claude | s: shell | d: delete | {} | ↑/↓: navigate | Enter: open | Esc/q: back",
-                timer_hint
+                "n: claude | s: shell | d: delete | {}k: shortcuts | {} | ↑/↓: navigate | Enter: open | Esc/q: back",
+                shortcuts_hint, timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)

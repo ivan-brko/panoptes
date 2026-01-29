@@ -2,7 +2,7 @@
 //!
 //! Each view in the application has its own module for rendering logic.
 
-use crate::config::Config;
+use crate::config::{Config, CustomShortcut};
 use crate::focus_timing::FocusTimer;
 use crate::session::SessionManager;
 
@@ -61,6 +61,32 @@ pub fn format_focus_timer_hint(timer_running: bool) -> &'static str {
     } else {
         "t: timer | T: stats"
     }
+}
+
+/// Format custom shortcuts for footer display (e.g., "v:VSCode e:vim | ")
+pub fn format_custom_shortcuts_hint(shortcuts: &[CustomShortcut]) -> String {
+    if shortcuts.is_empty() {
+        return String::new();
+    }
+
+    // Show up to 3 shortcuts to avoid cluttering the footer
+    let display: Vec<String> = shortcuts
+        .iter()
+        .take(3)
+        .map(|s| format!("{}:{}", s.key, s.short_display_name()))
+        .collect();
+
+    let suffix = if shortcuts.len() > 3 { "..." } else { "" };
+    format!("{}{} | ", display.join(" "), suffix)
+}
+
+/// Format custom shortcuts for empty state display (multiline, one per line)
+pub fn format_custom_shortcuts_list(shortcuts: &[CustomShortcut]) -> String {
+    shortcuts
+        .iter()
+        .map(|s| format!("Press '{}' to run {}.", s.key, s.display_name()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Breadcrumb navigation path segments

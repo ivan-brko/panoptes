@@ -274,7 +274,7 @@ pub fn render_project_detail(
         _ => {
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let base = format!(
-                "n: new worktree | b: default base | c: config | r: rename | d: delete | {} | q: quit",
+                "n: new worktree | b: default base | c: config | r: rename | d: delete | k: shortcuts | {} | q: quit",
                 timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
