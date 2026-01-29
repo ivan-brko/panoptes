@@ -15,7 +15,9 @@ use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_custom_shortcuts_hint, format_focus_timer_hint};
+use crate::tui::views::{
+    format_attention_hint, format_custom_shortcuts_hint, format_focus_timer_hint,
+};
 
 /// Render the session view
 pub fn render_session_view(
@@ -204,4 +206,3 @@ fn build_footer_text(
         }
     }
 }
-

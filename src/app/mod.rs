@@ -289,7 +289,7 @@ impl App {
             }
 
             // Check shell session states via foreground detection
-            let shell_notifications = self.sessions.check_shell_states();
+            let shell_notifications = self.sessions.check_shell_states(self.state.active_session);
             if !shell_notifications.is_empty() {
                 self.state.needs_render = true;
 
@@ -452,7 +452,10 @@ impl App {
                 event.tool
             );
             // handle_hook_event returns Some(session_id) if notification should be sent
-            if let Some(session_id) = self.sessions.handle_hook_event(&event) {
+            if let Some(session_id) = self
+                .sessions
+                .handle_hook_event(&event, self.state.active_session)
+            {
                 // Only notify if this session is NOT the one we're currently viewing
                 let is_active_session = self.state.active_session == Some(session_id);
                 if !is_active_session {

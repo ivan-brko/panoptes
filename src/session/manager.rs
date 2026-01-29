@@ -370,8 +370,12 @@ impl SessionManager {
     /// - Foreground idle -> Waiting
     ///
     /// Returns a list of session IDs that transitioned from Executing to Waiting
-    /// (these sessions need notifications)
-    pub fn check_shell_states(&mut self) -> Vec<SessionId> {
+    /// (these sessions need notifications).
+    ///
+    /// The `active_session` parameter indicates which session the user is currently viewing.
+    /// Sessions that are active will not have `needs_attention` set or be included in the
+    /// notification list, since the user is already looking at them.
+    pub fn check_shell_states(&mut self, active_session: Option<SessionId>) -> Vec<SessionId> {
         use super::SessionType;
 
         let mut needs_notification = Vec::new();
@@ -394,8 +398,12 @@ impl SessionManager {
             } else if !is_busy && current_is_executing {
                 // Transition to Waiting - command finished
                 session.set_state(SessionState::Waiting);
-                session.info.needs_attention = true;
-                needs_notification.push(session.info.id);
+                // Only set needs_attention and add to notification list if not the active session
+                let is_active = active_session == Some(session.info.id);
+                if !is_active {
+                    session.info.needs_attention = true;
+                    needs_notification.push(session.info.id);
+                }
             }
         }
 
@@ -433,8 +441,16 @@ impl SessionManager {
     }
 
     /// Handle a hook event and update session state accordingly
-    /// Returns the session ID if terminal bell should be rung (session entered Waiting state)
-    pub fn handle_hook_event(&mut self, event: &HookEvent) -> Option<SessionId> {
+    /// Returns the session ID if notification should be sent (session entered Waiting state)
+    ///
+    /// The `active_session` parameter indicates which session the user is currently viewing.
+    /// If the session entering Waiting state is the active session, `needs_attention` will
+    /// not be set and `None` will be returned (no notification needed).
+    pub fn handle_hook_event(
+        &mut self,
+        event: &HookEvent,
+        active_session: Option<SessionId>,
+    ) -> Option<SessionId> {
         // Try to parse session_id as UUID
         let session_id = match event.session_id.parse::<SessionId>() {
             Ok(id) => id,
@@ -482,10 +498,15 @@ impl SessionManager {
 
         session.set_state(new_state.clone());
 
-        // Return session ID if bell should ring (entered Waiting from non-Waiting)
+        // Return session ID if notification should be sent (entered Waiting from non-Waiting)
+        // Only set needs_attention and return session ID if not the active session
         if new_state == SessionState::Waiting && old_state != SessionState::Waiting {
-            session.info.needs_attention = true;
-            Some(session_id)
+            let is_active = active_session == Some(session_id);
+            if !is_active {
+                session.info.needs_attention = true;
+                return Some(session_id);
+            }
+            None
         } else {
             None
         }
@@ -793,7 +814,7 @@ mod tests {
         };
 
         // Should not panic with invalid session ID
-        manager.handle_hook_event(&event);
+        manager.handle_hook_event(&event, None);
     }
 
     #[test]
@@ -904,7 +925,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Call check_shell_states - should detect transition from Executing to Waiting
-        let notified = manager.check_shell_states();
+        // Pass None for active_session so the session gets flagged for attention
+        let notified = manager.check_shell_states(None);
 
         // The session should have transitioned and be in the notification list
         assert!(
