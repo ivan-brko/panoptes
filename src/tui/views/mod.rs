@@ -10,6 +10,7 @@ mod branch_detail;
 mod claude_configs;
 mod claude_settings;
 mod confirm;
+mod custom_shortcuts;
 mod focus_stats;
 mod help;
 mod logs;
@@ -31,6 +32,7 @@ pub use confirm::{
     render_confirm_dialog, render_loading_indicator, render_quit_confirm_dialog,
     ConfirmDialogConfig,
 };
+pub use custom_shortcuts::render_custom_shortcut_dialogs;
 pub use focus_stats::{
     render_focus_session_delete_dialog, render_focus_session_detail_dialog, render_focus_stats,
     render_timer_input_dialog,

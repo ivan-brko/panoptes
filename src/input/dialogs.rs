@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, InputMode, View};
 use crate::claude_json::ClaudeJsonStore;
+use crate::config::{is_reserved_key, CustomShortcut};
 use crate::focus_timing::store::FocusStore;
 
 /// Handle key when starting a focus timer (entering duration)
@@ -746,4 +747,201 @@ fn confirm_claude_settings_migrate(app: &mut App) {
     } else {
         app.state.input_mode = InputMode::Normal;
     }
+}
+
+// ============================================================================
+// Custom Shortcuts Dialog Handlers
+// ============================================================================
+
+/// Handle key when managing custom shortcuts (list view)
+pub fn handle_managing_custom_shortcuts_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    let shortcut_count = app.config.custom_shortcuts.len();
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            // Close the dialog
+            app.state.input_mode = InputMode::Normal;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            // Navigate down
+            if shortcut_count > 0 {
+                app.state.custom_shortcuts_selected =
+                    (app.state.custom_shortcuts_selected + 1) % shortcut_count;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            // Navigate up
+            if shortcut_count > 0 {
+                app.state.custom_shortcuts_selected = app
+                    .state
+                    .custom_shortcuts_selected
+                    .checked_sub(1)
+                    .unwrap_or(shortcut_count - 1);
+            }
+        }
+        KeyCode::Char('n') => {
+            // Start adding a new shortcut
+            app.state.new_shortcut_key = None;
+            app.state.new_shortcut_name.clear();
+            app.state.new_shortcut_command.clear();
+            app.state.shortcut_error = None;
+            app.state.input_mode = InputMode::AddingCustomShortcutKey;
+        }
+        KeyCode::Char('d') => {
+            // Delete selected shortcut (if any)
+            if shortcut_count > 0 {
+                app.state.pending_delete_shortcut_index = Some(app.state.custom_shortcuts_selected);
+                app.state.input_mode = InputMode::ConfirmingCustomShortcutDelete;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when adding a custom shortcut - capturing the key
+pub fn handle_adding_custom_shortcut_key_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            // Cancel and go back to management dialog
+            app.state.shortcut_error = None;
+            app.state.input_mode = InputMode::ManagingCustomShortcuts;
+        }
+        KeyCode::Char(c) => {
+            // Validate the key
+            if is_reserved_key(c) {
+                app.state.shortcut_error = Some(format!("Key '{}' is reserved", c));
+            } else if app.config.custom_shortcuts.iter().any(|s| s.key == c) {
+                app.state.shortcut_error = Some(format!("Key '{}' is already in use", c));
+            } else {
+                // Valid key, proceed to name input
+                app.state.new_shortcut_key = Some(c);
+                app.state.shortcut_error = None;
+                app.state.input_mode = InputMode::AddingCustomShortcutName;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when adding a custom shortcut - entering the name
+pub fn handle_adding_custom_shortcut_name_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            // Cancel and go back to key input
+            app.state.input_mode = InputMode::AddingCustomShortcutKey;
+        }
+        KeyCode::Enter => {
+            // Proceed to command input (name can be empty)
+            app.state.input_mode = InputMode::AddingCustomShortcutCommand;
+        }
+        KeyCode::Char(c) => {
+            app.state.new_shortcut_name.push(c);
+        }
+        KeyCode::Backspace => {
+            app.state.new_shortcut_name.pop();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when adding a custom shortcut - entering the command
+pub fn handle_adding_custom_shortcut_command_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            // Cancel and go back to name input
+            app.state.input_mode = InputMode::AddingCustomShortcutName;
+        }
+        KeyCode::Enter => {
+            // Save the shortcut if command is not empty
+            if app.state.new_shortcut_command.is_empty() {
+                app.state.shortcut_error = Some("Command cannot be empty".to_string());
+            } else if let Some(key) = app.state.new_shortcut_key {
+                let shortcut = CustomShortcut::new(
+                    key,
+                    app.state.new_shortcut_name.clone(),
+                    app.state.new_shortcut_command.clone(),
+                );
+                app.config.custom_shortcuts.push(shortcut);
+
+                // Save config to disk
+                if let Err(e) = app.config.save() {
+                    tracing::error!("Failed to save config: {}", e);
+                    app.state.error_message = Some(format!("Failed to save config: {}", e));
+                }
+
+                // Clear state and go back to management dialog
+                app.state.new_shortcut_key = None;
+                app.state.new_shortcut_name.clear();
+                app.state.new_shortcut_command.clear();
+                app.state.shortcut_error = None;
+                app.state.input_mode = InputMode::ManagingCustomShortcuts;
+            }
+        }
+        KeyCode::Char(c) => {
+            app.state.new_shortcut_command.push(c);
+            app.state.shortcut_error = None;
+        }
+        KeyCode::Backspace => {
+            app.state.new_shortcut_command.pop();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when confirming custom shortcut deletion
+pub fn handle_confirming_custom_shortcut_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Confirm deletion
+            if let Some(index) = app.state.pending_delete_shortcut_index.take() {
+                if index < app.config.custom_shortcuts.len() {
+                    app.config.custom_shortcuts.remove(index);
+
+                    // Save config to disk
+                    if let Err(e) = app.config.save() {
+                        tracing::error!("Failed to save config: {}", e);
+                        app.state.error_message = Some(format!("Failed to save config: {}", e));
+                    }
+
+                    // Adjust selection if needed
+                    let new_count = app.config.custom_shortcuts.len();
+                    if app.state.custom_shortcuts_selected >= new_count && new_count > 0 {
+                        app.state.custom_shortcuts_selected = new_count - 1;
+                    }
+                }
+            }
+            app.state.input_mode = InputMode::ManagingCustomShortcuts;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            // Cancel deletion
+            app.state.pending_delete_shortcut_index = None;
+            app.state.input_mode = InputMode::ManagingCustomShortcuts;
+        }
+        _ => {}
+    }
+    Ok(())
 }

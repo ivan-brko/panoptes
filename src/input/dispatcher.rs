@@ -45,6 +45,14 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         return app.jump_to_next_attention();
     }
 
+    // Global: Open custom shortcuts management dialog (k key)
+    // Works in Normal mode across all views except Session mode
+    if key.code == KeyCode::Char('k') && app.state.input_mode == InputMode::Normal {
+        app.state.custom_shortcuts_selected = 0;
+        app.state.input_mode = InputMode::ManagingCustomShortcuts;
+        return Ok(());
+    }
+
     match app.state.input_mode {
         InputMode::Normal => app.handle_normal_mode_key(key),
         InputMode::Session => super::session_mode::handle_session_mode_key(app, key),
@@ -126,6 +134,21 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         InputMode::ConfirmingClaudeSettingsMigrate => {
             super::dialogs::handle_confirming_claude_settings_migrate_key(app, key)
+        }
+        InputMode::ManagingCustomShortcuts => {
+            super::dialogs::handle_managing_custom_shortcuts_key(app, key)
+        }
+        InputMode::AddingCustomShortcutKey => {
+            super::dialogs::handle_adding_custom_shortcut_key_key(app, key)
+        }
+        InputMode::AddingCustomShortcutName => {
+            super::dialogs::handle_adding_custom_shortcut_name_key(app, key)
+        }
+        InputMode::AddingCustomShortcutCommand => {
+            super::dialogs::handle_adding_custom_shortcut_command_key(app, key)
+        }
+        InputMode::ConfirmingCustomShortcutDelete => {
+            super::dialogs::handle_confirming_custom_shortcut_delete_key(app, key)
         }
     }
 }

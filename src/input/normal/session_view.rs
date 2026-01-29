@@ -5,7 +5,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, InputMode};
+use crate::app::{App, InputMode, View};
 use crate::session::SessionManager;
 use crate::tui::frame::{FrameConfig, FrameLayout};
 
@@ -143,6 +143,53 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                         SessionManager::reset_terminal_title();
                     }
                     app.resize_active_session_pty()?;
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            // Check for custom shortcut trigger
+            if let Some(shortcut) = app.config.get_shortcut(c).cloned() {
+                // Get the current session's project/branch context
+                if let Some(session_id) = app.state.active_session {
+                    if let Some(session) = app.sessions.get(session_id) {
+                        let project_id = session.info.project_id;
+                        let branch_id = session.info.branch_id;
+                        let working_dir = session.info.working_dir.clone();
+
+                        // Generate a session name from the shortcut
+                        let session_name = shortcut.short_display_name();
+
+                        // Get terminal size
+                        let terminal_size = app.tui.size().unwrap_or_default();
+                        let frame_config = FrameConfig::default();
+                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+                        let rows = layout.content.height as usize;
+                        let cols = layout.content.width as usize;
+
+                        // Create shell session with command
+                        match app.sessions.create_shell_session_with_command(
+                            session_name,
+                            working_dir,
+                            project_id,
+                            branch_id,
+                            shortcut.command.clone(),
+                            rows,
+                            cols,
+                        ) {
+                            Ok(new_session_id) => {
+                                // Navigate to the new session
+                                app.state.active_session = Some(new_session_id);
+                                app.state.session_scroll_offset = 0;
+                                app.state.input_mode = InputMode::Session;
+                                app.state.view = View::SessionView;
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to create shell session: {}", e);
+                                app.state.error_message =
+                                    Some(format!("Failed to create session: {}", e));
+                            }
+                        }
+                    }
                 }
             }
         }

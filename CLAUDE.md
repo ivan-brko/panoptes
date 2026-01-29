@@ -51,9 +51,10 @@ PTY Output → Session buffer → TUI render
 - Tests in `#[cfg(test)]` blocks within each module
 - State enums with display/color helpers for TUI rendering
 - Always run `cargo fmt` and `cargo clippy` before committing
-- When adding keyboard shortcuts, update **both**:
+- When adding keyboard shortcuts, update **all three**:
   1. Footer help in `src/tui/views/<view>.rs`
   2. Help overlay in `src/tui/views/help.rs`
+  3. Reserved keys in `src/config.rs` (`RESERVED_KEYS` constant) - prevents users from binding custom shortcuts to built-in keys
 
 ## Error Handling
 

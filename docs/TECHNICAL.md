@@ -196,6 +196,36 @@ Sessions display their configuration name in the header (e.g., `[Work]`) when us
 | `hook_port` | 9999 | Port for the HTTP hook server |
 | `max_output_lines` | 10,000 | Lines kept in output buffer per session |
 | `idle_threshold_secs` | 300 | Seconds before waiting session shows yellow attention badge |
+| `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
+
+### Custom Shortcuts
+
+Custom shortcuts provide quick access to shell sessions with predefined commands:
+
+```toml
+[[custom_shortcuts]]
+key = "v"
+name = "VSCode"
+command = "code . &"
+```
+
+**Architecture:**
+- Stored in `~/.panoptes/config.toml` as a TOML array
+- Managed via dialog UI (press `k` in any view)
+- Triggered in session view (normal mode) by pressing the shortcut key
+- Creates shell session using `SessionManager::create_shell_session_with_command()`
+
+**Key validation:**
+- Reserved keys are rejected (q, i, g, G, t, T, k, 0-9)
+- Duplicate keys are rejected
+- Validation occurs in `config::is_reserved_key()` and `Config::add_shortcut()`
+
+**Session creation flow:**
+1. User presses shortcut key in session view (normal mode)
+2. `session_view.rs` looks up shortcut in config
+3. Creates shell session with current project/branch context
+4. Writes command to PTY immediately after spawn
+5. Switches to session mode in the new session
 
 ## Platform Support
 
