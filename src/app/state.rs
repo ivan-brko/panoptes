@@ -275,6 +275,20 @@ pub struct AppState {
     // --- Help overlay ---
     /// Whether to show the help overlay with keyboard shortcuts
     pub show_help_overlay: bool,
+
+    // --- Custom shortcuts dialog state ---
+    /// Selected index in the custom shortcuts list
+    pub custom_shortcuts_selected: usize,
+    /// Key being added for new shortcut
+    pub new_shortcut_key: Option<char>,
+    /// Name being entered for new shortcut
+    pub new_shortcut_name: String,
+    /// Command being entered for new shortcut
+    pub new_shortcut_command: String,
+    /// Index of shortcut pending deletion
+    pub pending_delete_shortcut_index: Option<usize>,
+    /// Validation error message for shortcut creation
+    pub shortcut_error: Option<String>,
 }
 
 impl AppState {

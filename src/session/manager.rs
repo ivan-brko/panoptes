@@ -169,6 +169,44 @@ impl SessionManager {
         Ok(session_id)
     }
 
+    /// Create a new shell session with an initial command to execute
+    ///
+    /// Shell sessions don't use hooks - state tracking is done via foreground detection.
+    /// The command is written to the PTY after the shell starts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_shell_session_with_command(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        initial_command: String,
+        rows: usize,
+        cols: usize,
+    ) -> Result<SessionId> {
+        // Create the shell session first
+        let session_id =
+            self.create_shell_session(name, working_dir, project_id, branch_id, rows, cols)?;
+
+        // Write the command to the PTY
+        // The shell should be ready immediately, but we can write right away since
+        // the PTY will buffer the input until the shell reads it
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            // Write the command followed by newline to execute it
+            let command_with_newline = format!("{}\n", initial_command);
+            if let Err(e) = session.pty.write(command_with_newline.as_bytes()) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    command = %initial_command,
+                    error = %e,
+                    "Failed to write initial command to shell session"
+                );
+            }
+        }
+
+        Ok(session_id)
+    }
+
     /// Destroy a session by ID
     pub fn destroy_session(&mut self, session_id: SessionId) -> Result<()> {
         if let Some(mut session) = self.sessions.remove(&session_id) {

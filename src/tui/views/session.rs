@@ -7,7 +7,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{AppState, InputMode};
-use crate::config::Config;
+use crate::config::{Config, CustomShortcut};
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
@@ -188,9 +188,13 @@ fn build_footer_text(
         _ => {
             let scroll_hint = if is_scrolled { "End: live view | " } else { "" };
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
+
+            // Build custom shortcuts hint
+            let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
+
             let base = format!(
-                "{}Enter: activate | Tab: next | {} | PgUp/Dn: scroll",
-                scroll_hint, timer_hint
+                "{}{}Enter: activate | Tab: next | {} | k:shortcuts | PgUp/Dn: scroll",
+                scroll_hint, shortcuts_hint, timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
@@ -199,4 +203,21 @@ fn build_footer_text(
             }
         }
     }
+}
+
+/// Format custom shortcuts for footer display (e.g., "v:VSCode e:vim | ")
+fn format_custom_shortcuts_hint(shortcuts: &[CustomShortcut]) -> String {
+    if shortcuts.is_empty() {
+        return String::new();
+    }
+
+    // Show up to 3 shortcuts to avoid cluttering the footer
+    let display: Vec<String> = shortcuts
+        .iter()
+        .take(3)
+        .map(|s| format!("{}:{}", s.key, s.short_display_name()))
+        .collect();
+
+    let suffix = if shortcuts.len() > 3 { "..." } else { "" };
+    format!("{}{} | ", display.join(" "), suffix)
 }

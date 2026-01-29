@@ -4,6 +4,79 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Custom shell session shortcut
+///
+/// Defines a keyboard shortcut that spawns a shell session with a predefined command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomShortcut {
+    /// Single character trigger key (e.g., 'v')
+    pub key: char,
+    /// Display name (optional - if empty, uses first 6 chars of command)
+    #[serde(default)]
+    pub name: String,
+    /// Command to run in the shell (e.g., "code . &")
+    pub command: String,
+}
+
+impl CustomShortcut {
+    /// Create a new custom shortcut
+    pub fn new(key: char, name: String, command: String) -> Self {
+        Self { key, name, command }
+    }
+
+    /// Get the display name for this shortcut
+    ///
+    /// Returns the name if set, otherwise returns the command (caller should truncate if needed)
+    pub fn display_name(&self) -> &str {
+        if self.name.is_empty() {
+            &self.command
+        } else {
+            &self.name
+        }
+    }
+
+    /// Get a truncated display name (max 6 chars) for footer display
+    pub fn short_display_name(&self) -> String {
+        let name = self.display_name();
+        if name.chars().count() <= 6 {
+            name.to_string()
+        } else {
+            name.chars().take(6).collect()
+        }
+    }
+}
+
+/// Reserved keys that cannot be used for custom shortcuts in session view
+///
+/// These keys are already bound to functionality in session view normal mode:
+/// - q: quit/back
+/// - i: enter session mode (if used)
+/// - g, G: scroll to top/bottom
+/// - t, T: focus timer
+/// - k: manage shortcuts (this feature)
+/// - 0-9: jump to session by number
+/// - Space: jump to attention
+/// - Esc, Enter, Tab: navigation
+const RESERVED_KEYS: &[char] = &['q', 'i', 'g', 'G', 't', 'T', 'k'];
+const RESERVED_DIGITS: bool = true;
+
+/// Check if a key is reserved and cannot be used for custom shortcuts
+pub fn is_reserved_key(key: char) -> bool {
+    if RESERVED_DIGITS && key.is_ascii_digit() {
+        return true;
+    }
+    RESERVED_KEYS.contains(&key)
+}
+
+/// Get a human-readable list of reserved keys
+pub fn reserved_keys_display() -> String {
+    let mut keys: Vec<String> = RESERVED_KEYS.iter().map(|c| c.to_string()).collect();
+    if RESERVED_DIGITS {
+        keys.push("0-9".to_string());
+    }
+    keys.join(", ")
+}
+
 /// Categories of disk errors for user-friendly messages
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiskErrorKind {
@@ -128,6 +201,12 @@ pub struct Config {
     /// Each 1000 lines uses approximately 10KB of memory
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: usize,
+
+    /// Custom shell session shortcuts
+    ///
+    /// Each shortcut defines a key that spawns a shell session with a predefined command.
+    #[serde(default)]
+    pub custom_shortcuts: Vec<CustomShortcut>,
 }
 
 fn default_idle_threshold() -> u64 {
@@ -183,6 +262,7 @@ impl Default for Config {
             focus_timer_minutes: default_focus_timer_minutes(),
             focus_stats_retention_days: default_focus_stats_retention_days(),
             scrollback_lines: default_scrollback_lines(),
+            custom_shortcuts: Vec::new(),
         }
     }
 }
@@ -205,6 +285,37 @@ impl Config {
         let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
         std::fs::write(&path, content).context("Failed to write config file")?;
         Ok(())
+    }
+
+    /// Get a custom shortcut by key
+    pub fn get_shortcut(&self, key: char) -> Option<&CustomShortcut> {
+        self.custom_shortcuts.iter().find(|s| s.key == key)
+    }
+
+    /// Add a custom shortcut, returning error if key is reserved or duplicate
+    pub fn add_shortcut(&mut self, shortcut: CustomShortcut) -> Result<()> {
+        if is_reserved_key(shortcut.key) {
+            anyhow::bail!("Key '{}' is reserved", shortcut.key);
+        }
+        if self.custom_shortcuts.iter().any(|s| s.key == shortcut.key) {
+            anyhow::bail!("Key '{}' is already in use", shortcut.key);
+        }
+        self.custom_shortcuts.push(shortcut);
+        Ok(())
+    }
+
+    /// Remove a custom shortcut by index
+    pub fn remove_shortcut(&mut self, index: usize) -> Option<CustomShortcut> {
+        if index < self.custom_shortcuts.len() {
+            Some(self.custom_shortcuts.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Check if a key is available for a custom shortcut
+    pub fn is_shortcut_key_available(&self, key: char) -> bool {
+        !is_reserved_key(key) && !self.custom_shortcuts.iter().any(|s| s.key == key)
     }
 }
 
@@ -303,5 +414,114 @@ mod tests {
         let parsed: Config = toml::from_str(&toml_str).unwrap();
 
         assert_eq!(parsed.scrollback_lines, 5000);
+    }
+
+    // Custom shortcut tests
+    #[test]
+    fn test_custom_shortcut_display_name_with_name() {
+        let shortcut = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
+        assert_eq!(shortcut.display_name(), "VSCode");
+    }
+
+    #[test]
+    fn test_custom_shortcut_display_name_without_name() {
+        let shortcut = CustomShortcut::new('v', String::new(), "code . &".to_string());
+        assert_eq!(shortcut.display_name(), "code . &");
+    }
+
+    #[test]
+    fn test_custom_shortcut_short_display_name() {
+        let shortcut = CustomShortcut::new('v', "VSCodeEditor".to_string(), "code . &".to_string());
+        assert_eq!(shortcut.short_display_name(), "VSCode");
+    }
+
+    #[test]
+    fn test_is_reserved_key() {
+        // Reserved alphabetic keys
+        assert!(is_reserved_key('q'));
+        assert!(is_reserved_key('g'));
+        assert!(is_reserved_key('G'));
+        assert!(is_reserved_key('t'));
+        assert!(is_reserved_key('T'));
+        assert!(is_reserved_key('k'));
+
+        // Reserved digits
+        assert!(is_reserved_key('0'));
+        assert!(is_reserved_key('5'));
+        assert!(is_reserved_key('9'));
+
+        // Non-reserved keys
+        assert!(!is_reserved_key('v'));
+        assert!(!is_reserved_key('e'));
+        assert!(!is_reserved_key('x'));
+    }
+
+    #[test]
+    fn test_config_add_shortcut() {
+        let mut config = Config::default();
+        let shortcut = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
+
+        assert!(config.add_shortcut(shortcut).is_ok());
+        assert_eq!(config.custom_shortcuts.len(), 1);
+    }
+
+    #[test]
+    fn test_config_add_shortcut_reserved_key() {
+        let mut config = Config::default();
+        let shortcut = CustomShortcut::new('q', "Quit".to_string(), "exit".to_string());
+
+        assert!(config.add_shortcut(shortcut).is_err());
+    }
+
+    #[test]
+    fn test_config_add_shortcut_duplicate_key() {
+        let mut config = Config::default();
+        let shortcut1 = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
+        let shortcut2 = CustomShortcut::new('v', "Vim".to_string(), "vim .".to_string());
+
+        assert!(config.add_shortcut(shortcut1).is_ok());
+        assert!(config.add_shortcut(shortcut2).is_err());
+    }
+
+    #[test]
+    fn test_config_get_shortcut() {
+        let mut config = Config::default();
+        let shortcut = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
+        config.add_shortcut(shortcut).unwrap();
+
+        assert!(config.get_shortcut('v').is_some());
+        assert!(config.get_shortcut('x').is_none());
+    }
+
+    #[test]
+    fn test_config_remove_shortcut() {
+        let mut config = Config::default();
+        let shortcut = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
+        config.add_shortcut(shortcut).unwrap();
+
+        let removed = config.remove_shortcut(0);
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().key, 'v');
+        assert!(config.custom_shortcuts.is_empty());
+    }
+
+    #[test]
+    fn test_config_serialization_with_custom_shortcuts() {
+        let mut config = Config::default();
+        config
+            .add_shortcut(CustomShortcut::new(
+                'v',
+                "VSCode".to_string(),
+                "code . &".to_string(),
+            ))
+            .unwrap();
+
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(parsed.custom_shortcuts.len(), 1);
+        assert_eq!(parsed.custom_shortcuts[0].key, 'v');
+        assert_eq!(parsed.custom_shortcuts[0].name, "VSCode");
+        assert_eq!(parsed.custom_shortcuts[0].command, "code . &");
     }
 }

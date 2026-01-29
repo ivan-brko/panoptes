@@ -56,4 +56,14 @@ pub enum InputMode {
     ConfirmingClaudeSettingsCopy,
     /// Confirming Claude settings migration before worktree deletion
     ConfirmingClaudeSettingsMigrate,
+    /// Managing custom shell shortcuts - list view with add/delete
+    ManagingCustomShortcuts,
+    /// Adding a custom shortcut - capturing the key
+    AddingCustomShortcutKey,
+    /// Adding a custom shortcut - entering the name
+    AddingCustomShortcutName,
+    /// Adding a custom shortcut - entering the command
+    AddingCustomShortcutCommand,
+    /// Confirming custom shortcut deletion
+    ConfirmingCustomShortcutDelete,
 }

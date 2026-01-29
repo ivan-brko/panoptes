@@ -41,10 +41,10 @@ use crate::tui::views::{
     render_branch_detail, render_claude_configs, render_claude_settings_copy_dialog,
     render_claude_settings_migrate_dialog, render_config_delete_dialog,
     render_config_name_input_dialog, render_config_path_input_dialog, render_config_selector,
-    render_focus_session_delete_dialog, render_focus_session_detail_dialog, render_focus_stats,
-    render_help_overlay, render_loading_indicator, render_log_viewer, render_notifications,
-    render_project_detail, render_projects_overview, render_session_view, render_timeline,
-    render_timer_input_dialog,
+    render_custom_shortcut_dialogs, render_focus_session_delete_dialog,
+    render_focus_session_detail_dialog, render_focus_stats, render_help_overlay,
+    render_loading_indicator, render_log_viewer, render_notifications, render_project_detail,
+    render_projects_overview, render_session_view, render_timeline, render_timer_input_dialog,
 };
 use crate::tui::{NotificationType, Tui};
 use crate::wizards::worktree::{
@@ -1486,6 +1486,18 @@ impl App {
                 if let Some(ref migrate_state) = state.pending_claude_settings_migrate {
                     render_claude_settings_migrate_dialog(frame, area, migrate_state);
                 }
+            }
+
+            // Render custom shortcut dialogs
+            if matches!(
+                state.input_mode,
+                InputMode::ManagingCustomShortcuts
+                    | InputMode::AddingCustomShortcutKey
+                    | InputMode::AddingCustomShortcutName
+                    | InputMode::AddingCustomShortcutCommand
+                    | InputMode::ConfirmingCustomShortcutDelete
+            ) {
+                render_custom_shortcut_dialogs(frame, area, state, config);
             }
 
             // Render notifications overlay

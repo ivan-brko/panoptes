@@ -112,6 +112,20 @@ In addition to Claude Code sessions, Panoptes can manage regular shell sessions 
 - State is detected automatically via foreground process detection
 - Shell sessions participate in the attention system - you'll be notified when commands complete
 
+### Custom Shell Shortcuts
+
+Define keyboard shortcuts that quickly spawn shell sessions with predefined commands. Perfect for frequently-used tasks like opening editors, starting dev servers, or running builds.
+
+- Press `k` from any view to manage shortcuts
+- In session view (normal mode), press your shortcut key to spawn a shell with that command
+- Shortcuts are stored in `~/.panoptes/config.toml` and persist between sessions
+- The footer shows your configured shortcuts (e.g., `v:VSCode e:vim`)
+
+Example shortcuts:
+- `v` → Open VS Code: `code . &`
+- `e` → Open vim: `vim .`
+- `w` → Start dev server: `npm run dev`
+
 ### Worktree Creation
 
 Create new git worktrees directly from Panoptes with a fuzzy branch selector. Type to filter existing branches or create a new one.
@@ -163,6 +177,7 @@ Panoptes is for developers who:
 The current version includes:
 - Managing multiple Claude Code sessions
 - Shell sessions alongside Claude Code sessions
+- Custom shell shortcuts for quick command execution
 - Multi-account support for different Claude configurations
 - Git repository and branch organization with worktree support
 - Real-time session state tracking
