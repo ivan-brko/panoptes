@@ -79,6 +79,8 @@ pub fn render_branch_detail(
         render_session_creation(frame, areas.content, state, "Claude Code");
     } else if state.input_mode == InputMode::CreatingShellSession {
         render_session_creation(frame, areas.content, state, "Shell");
+    } else if state.input_mode == InputMode::CreatingCodexSession {
+        render_session_creation(frame, areas.content, state, "Codex");
     } else if state.input_mode == InputMode::ConfirmingSessionDelete {
         render_delete_confirmation(frame, areas.content, state, sessions);
     } else if let Some(branch) = branch {
@@ -97,7 +99,7 @@ pub fn render_branch_detail(
 
             let empty_text = format!(
                 "No sessions on this branch yet.\n\n\
-                Press 'n' to create a Claude Code session.\n\
+                Press 'n' to create a new agent session.\n\
                 Press 's' to create a shell session.{}\n\n\
                 Working directory: {}",
                 custom_shortcuts_text,
