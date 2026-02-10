@@ -215,7 +215,7 @@ fn session_view_shortcuts() -> Vec<Line<'static>> {
         shortcut_line("<key>", "Run shortcut (e.g., 'v' for VSCode)"),
         empty_line(),
         section_header("Session Mode"),
-        shortcut_line("All keys", "Sent to Claude Code"),
+        shortcut_line("All keys", "Forwarded to session"),
         shortcut_line("Mouse scroll", "Scroll when PTY supports it"),
         empty_line(),
         footer_hint(),

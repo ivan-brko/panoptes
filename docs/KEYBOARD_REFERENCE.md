@@ -108,21 +108,21 @@ Viewing a session without interacting with it.
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Enter Session mode (interact with Claude) |
+| `Enter` | Enter Session mode (interact with session) |
 
 ## Session View (Session Mode)
 
-Interacting directly with Claude Code. Most keys are forwarded to the PTY.
+Interacting directly with the session (Claude Code, Codex, or shell). Most keys are forwarded to the PTY.
 
 | Key | Action |
 |-----|--------|
 | `Esc` | Exit to Normal mode |
-| `Shift+Esc` | Send Escape to Claude Code |
+| `Shift+Esc` | Send Escape to the session |
 | `PageUp` | Scroll up through history |
 | `PageDown` | Scroll down through history |
 | `Ctrl+Home` | Scroll to top |
 | `Ctrl+End` | Scroll to bottom |
-| All other keys | Sent to Claude Code |
+| All other keys | Forwarded to the session |
 
 **Note:** When scrolled up in history, typing any key (except scroll keys) will automatically scroll back to the live view.
 
@@ -264,4 +264,4 @@ Panoptes supports mouse scrolling in Session View:
 | Scroll Up | Scroll up through session history |
 | Scroll Down | Scroll down through session history |
 
-When Claude Code has mouse mode enabled (e.g., in vim), mouse events are forwarded to the PTY instead.
+When the session has mouse mode enabled (e.g., in vim), mouse events are forwarded to the PTY instead.

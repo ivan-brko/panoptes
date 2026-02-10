@@ -95,9 +95,9 @@ From Branch Detail, press `s`, enter a session name, and press Enter. Shell sess
 - **Enter**: Press Enter on a session, or when viewing a session in Normal mode
 - **Exit**: Press `Esc` or `Shift+Esc`
 
-### How do I send Escape to Claude Code (not exit session mode)?
+### How do I send Escape to the session (not exit session mode)?
 
-Press `Shift+Esc`. Regular `Esc` exits session mode; `Shift+Esc` sends the Escape key to Claude Code.
+Press `Shift+Esc`. Regular `Esc` exits session mode; `Shift+Esc` sends the Escape key to the active session (Claude Code, Codex, or shell).
 
 ### How do I switch between sessions quickly?
 
@@ -113,7 +113,7 @@ Press `Shift+Esc`. Regular `Esc` exits session mode; `Shift+Esc` sends the Escap
 
 ### I can't copy text from the session - what's wrong?
 
-You're in session mode. Press `Esc` to exit session mode first, then use your terminal's native text selection (mouse drag or shift+arrow keys). Session mode forwards all input to Claude Code, which prevents normal terminal selection.
+You're in session mode. Press `Esc` to exit session mode first, then use your terminal's native text selection (mouse drag or shift+arrow keys). Session mode forwards all input to the active session, which prevents normal terminal selection.
 
 ### I can't scroll through the session output - what's wrong?
 
@@ -265,7 +265,7 @@ The prompts are optional—you can decline each time. There's no global setting 
 |-----|--------|
 | `Enter` | Open/Enter session mode |
 | `Esc` | Go back/Exit session mode |
-| `Shift+Esc` | Send Escape to Claude Code |
+| `Shift+Esc` | Send Escape to active session |
 | `Space` | Jump to next session needing attention |
 | `Tab` | Switch to next session |
 | `n` | New (project/worktree/session depending on context) |
