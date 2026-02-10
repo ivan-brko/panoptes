@@ -202,6 +202,8 @@ impl AgentAdapter for CodexAdapter {
             "PANOPTES_SESSION_ID".to_string(),
             spawn_config.session_id.to_string(),
         );
+        // Set TERM for proper terminal emulation
+        env.insert("TERM".to_string(), "xterm-256color".to_string());
         // Set custom CODEX_HOME if specified
         if let Some(ref codex_home) = spawn_config.codex_home {
             env.insert(

@@ -366,6 +366,8 @@ pub struct Session {
     pub pty: PtyHandle,
     /// Virtual terminal emulator
     pub vterm: VirtualTerminal,
+    /// Rolling buffer for detecting DSR sequences across reads
+    dsr_buffer: Vec<u8>,
 }
 
 impl Session {
@@ -375,6 +377,7 @@ impl Session {
             info,
             pty,
             vterm: VirtualTerminal::new(rows, cols),
+            dsr_buffer: Vec::new(),
         }
     }
 
@@ -390,6 +393,7 @@ impl Session {
             info,
             pty,
             vterm: VirtualTerminal::with_scrollback(rows, cols, scrollback_rows),
+            dsr_buffer: Vec::new(),
         }
     }
 
@@ -399,6 +403,30 @@ impl Session {
         match self.pty.try_read() {
             Ok(Some(bytes)) => {
                 self.vterm.process(&bytes);
+
+                // Respond to DSR (Device Status Report) queries from the child process.
+                // Some programs (e.g. Codex CLI) send \x1b[6n at startup to query cursor
+                // position and crash if no CPR response arrives in time.
+                let mut combined = Vec::with_capacity(self.dsr_buffer.len() + bytes.len());
+                combined.extend_from_slice(&self.dsr_buffer);
+                combined.extend_from_slice(&bytes);
+                let dsr_count = combined
+                    .windows(4)
+                    .filter(|w| *w == b"\x1b[6n")
+                    .count();
+                if dsr_count > 0 {
+                    let (row, col) = self.vterm.cursor_position();
+                    let response = format!("\x1b[{};{}R", row + 1, col + 1);
+                    for _ in 0..dsr_count {
+                        if let Err(e) = self.pty.write(response.as_bytes()) {
+                            tracing::debug!(error = %e, "Failed to write DSR response");
+                            break;
+                        }
+                    }
+                }
+                let keep_from = combined.len().saturating_sub(3);
+                self.dsr_buffer = combined[keep_from..].to_vec();
+
                 self.info.last_activity = Utc::now();
 
                 // If we're in Starting state and receiving output, Claude is running
