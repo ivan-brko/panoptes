@@ -128,6 +128,8 @@ Press `x` from the homepage to manage Codex configurations, then assign defaults
 - **New account**: Select any folder as the `CODEX_HOME` directory. Codex will use it for config, auth, and sessions.
 - **Existing account**: Select your existing Codex home directory (default `~/.codex`).
 
+> **Note:** Panoptes modifies `CODEX_HOME/config.toml` to install its notify hook. Any existing `notify` configuration will be backed up to `config.toml.panoptes.bak` before overwriting.
+
 ## Configuration
 
 Configuration is stored in `~/.panoptes/config.toml`:

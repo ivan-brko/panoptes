@@ -1046,10 +1046,13 @@ pub fn handle_selecting_codex_config_key(app: &mut App, key: KeyEvent) -> Result
             app.state.input_mode = InputMode::Normal;
             app.state.available_codex_configs.clear();
             app.state.codex_config_selector_index = 0;
+            app.state.show_codex_config_selector = false;
+            // Also clear session creation state
             app.state.new_session_name.clear();
             app.state.creating_session_project_id = None;
             app.state.creating_session_branch_id = None;
             app.state.creating_session_working_dir = None;
+            app.state.setting_project_default_config = None;
         }
         KeyCode::Down | KeyCode::Char('j') => {
             if config_count > 0 {
@@ -1067,16 +1070,35 @@ pub fn handle_selecting_codex_config_key(app: &mut App, key: KeyEvent) -> Result
             }
         }
         KeyCode::Enter => {
+            // Get selected config
             if let Some(config) = app
                 .state
                 .available_codex_configs
                 .get(app.state.codex_config_selector_index)
                 .cloned()
             {
-                create_codex_session_with_config(app, config)?;
+                // Store the selection
+                app.state.creating_session_codex_config = Some(config.id);
+
+                // Check if we're setting project default or creating a session
+                if let Some(project_id) = app.state.setting_project_default_config.take() {
+                    // Setting project default
+                    if let Some(project) = app.project_store.get_project_mut(project_id) {
+                        project.default_codex_config = Some(config.id);
+                    }
+                    if let Err(e) = app.project_store.save() {
+                        app.state.error_message = Some(format!("Failed to save: {}", e));
+                    }
+                    app.state.input_mode = InputMode::Normal;
+                } else {
+                    // Creating a session - proceed with session creation
+                    create_codex_session_with_config(app, config)?;
+                }
             }
+
             app.state.available_codex_configs.clear();
             app.state.codex_config_selector_index = 0;
+            app.state.show_codex_config_selector = false;
         }
         _ => {}
     }

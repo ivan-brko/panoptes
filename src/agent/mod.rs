@@ -1,11 +1,8 @@
 //! Agent adapter module
 //!
 //! This module defines the abstraction layer for different AI coding agents.
-//! Version 1.0 supports Claude Code only, but the architecture allows for
-//! adding other agents (Aider, OpenAI Codex, etc.) in the future.
-//!
-//! Also supports generic shell sessions for running bash/zsh alongside
-//! Claude Code sessions.
+//! Currently supports Claude Code and OpenAI Codex CLI, as well as generic
+//! shell sessions for running bash/zsh alongside agent sessions.
 
 pub mod adapter;
 pub mod claude;
