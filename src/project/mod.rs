@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::claude_config::ClaudeConfigId;
+use crate::codex_config::CodexConfigId;
 
 /// Unique identifier for a project
 pub type ProjectId = Uuid;
@@ -43,6 +44,9 @@ pub struct Project {
     /// Default Claude configuration for this project
     #[serde(default)]
     pub default_claude_config: Option<ClaudeConfigId>,
+    /// Default Codex configuration for this project
+    #[serde(default)]
+    pub default_codex_config: Option<CodexConfigId>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp
@@ -62,6 +66,7 @@ impl Project {
             default_base_branch: None,
             session_subdir: None,
             default_claude_config: None,
+            default_codex_config: None,
             created_at: now,
             last_activity: now,
         }

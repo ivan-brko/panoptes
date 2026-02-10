@@ -94,6 +94,7 @@
 │  │ VTerm        │    │ Agent           │                       │
 │  │ (ANSI/color) │    │ Adapter         │                       │
 │  │              │    │ - ClaudeAdapter │                       │
+│  │              │    │ - CodexAdapter  │                       │
 │  │              │    │ - ShellAdapter  │                       │
 │  └──────┬───────┘    └────────┬────────┘                       │
 │         │                     │                                │
@@ -106,10 +107,10 @@
           │
           ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ Claude Code Instances (Child Processes)                         │
+│ Agent Instances (Child Processes)                                │
 │                                                                 │
-│  Each instance runs in its own PTY and sends hook events        │
-│  to the HTTP server when state changes occur                    │
+│  Claude Code / Codex / Shell instances run in PTYs and send     │
+│  hook events to the HTTP server when state changes occur        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -144,12 +145,16 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 3. TUI renders visible portion with ANSI color support
 
 ### State Updates (Hooks)
-1. Claude Code executes hook scripts on events
-2. Hook script extracts session_id from JSON stdin
+1. Agent (Claude Code or Codex) executes hook scripts on events
+2. Hook script extracts session_id from environment/JSON stdin
 3. Hook script POSTs event to localhost:9999
 4. Axum server updates session state
 5. SessionManager tracks attention flags
 6. TUI reflects new state on next render
+
+**Claude Code hooks:** Full event types (PreToolUse, PostToolUse, Stop, etc.) providing granular state tracking including Executing(tool) state.
+
+**Codex hooks:** Limited to `notify` config firing `agent-turn-complete` events. Maps to Waiting state. No granular tool-use tracking (no Executing state for Codex sessions).
 
 ### Attention Flow
 1. Session transitions to "Waiting" state
@@ -165,25 +170,32 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 | `~/.panoptes/config.toml` | User configuration |
 | `~/.panoptes/projects.json` | Project and branch persistence |
 | `~/.panoptes/claude_configs.json` | Claude account configurations |
-| `~/.panoptes/hooks/` | Hook scripts for Claude Code |
+| `~/.panoptes/codex_configs.json` | Codex account configurations |
+| `~/.panoptes/hooks/` | Hook scripts for Claude Code and Codex |
 | `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
 
 ## Multi-Account Support
 
-Panoptes supports multiple Claude Code accounts via the `CLAUDE_CONFIG_DIR` environment variable:
+Panoptes supports multiple accounts for both Claude Code and Codex CLI:
 
-### Configuration Flow
+### Claude Code Accounts
+
+Via the `CLAUDE_CONFIG_DIR` environment variable:
 
 1. **Define configurations** - Each configuration points to a Claude config directory (e.g., `~/.claude-work`, `~/.claude-personal`)
-2. **Set project defaults** - Each project can have a default configuration
-3. **Session selection** - When creating a session with multiple configs available, a selector appears
+2. **Set project defaults** - Each project can have a default Claude configuration
+3. **Session selection** - When creating a Claude session with multiple configs available, a selector appears
+4. **Environment injection** - `CLAUDE_CONFIG_DIR` is set when spawning with a non-default configuration
 
-### Environment Variable Injection
+### Codex Accounts
 
-When spawning a Claude Code session with a non-default configuration:
-- The `CLAUDE_CONFIG_DIR` environment variable is set to the configuration's directory path
-- Claude Code uses this directory instead of the default `~/.claude`
+Via the `CODEX_HOME` environment variable:
+
+1. **Define configurations** - Each configuration points to a Codex home directory (e.g., `~/.codex-work`, `~/.codex-personal`)
+2. **Set project defaults** - Each project can have a default Codex configuration (independent of Claude config)
+3. **Session selection** - When creating a Codex session with multiple configs available, a selector appears
+4. **Environment injection** - `CODEX_HOME` is set when spawning with a non-default configuration (defaults to `~/.codex/`)
 
 ### Session Display
 
@@ -216,7 +228,7 @@ command = "code . &"
 - Creates shell session using `SessionManager::create_shell_session_with_command()`
 
 **Key validation:**
-- Reserved keys are rejected (q, i, g, G, t, T, k, 0-9)
+- Reserved keys are rejected (q, i, g, G, t, T, k, x, 0-9)
 - Duplicate keys are rejected
 - Validation occurs in `config::is_reserved_key()` and `Config::add_shortcut()`
 
@@ -244,7 +256,7 @@ Sessions are cleaned up automatically when Panoptes exits:
 
 ## Testing
 
-The project has 280+ unit tests covering:
+The project has 335+ unit tests covering:
 - Configuration loading/saving
 - Session state transitions
 - Output buffer management

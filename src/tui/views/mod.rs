@@ -9,6 +9,7 @@ use crate::session::SessionManager;
 mod branch_detail;
 mod claude_configs;
 mod claude_settings;
+mod codex_configs;
 mod confirm;
 mod custom_shortcuts;
 mod focus_stats;
@@ -27,6 +28,11 @@ pub use claude_configs::{
 };
 pub use claude_settings::{
     render_claude_settings_copy_dialog, render_claude_settings_migrate_dialog,
+};
+pub use codex_configs::{
+    render_agent_type_selector, render_codex_config_delete_dialog,
+    render_codex_config_name_input_dialog, render_codex_config_path_input_dialog,
+    render_codex_config_selector, render_codex_configs,
 };
 pub use confirm::{
     render_confirm_dialog, render_loading_indicator, render_quit_confirm_dialog,

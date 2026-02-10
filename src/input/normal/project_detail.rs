@@ -151,6 +151,42 @@ pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
                     .push("No Claude configs defined. Press 'c' from homepage.");
             }
         }
+        KeyCode::Char('x') => {
+            // Set default Codex config for this project
+            let config_count = app.codex_config_store.count();
+            if config_count > 0 {
+                app.state.available_codex_configs = app
+                    .codex_config_store
+                    .configs_sorted()
+                    .iter()
+                    .cloned()
+                    .cloned()
+                    .collect();
+
+                // Pre-select current project default or global default
+                let project_default = app
+                    .project_store
+                    .get_project(project_id)
+                    .and_then(|p| p.default_codex_config);
+                let global_default = app.codex_config_store.get_default_id();
+                let preferred_id = project_default.or(global_default);
+
+                app.state.codex_config_selector_index = app
+                    .state
+                    .available_codex_configs
+                    .iter()
+                    .position(|c| Some(c.id) == preferred_id)
+                    .unwrap_or(0);
+
+                app.state.setting_project_default_config = Some(project_id);
+                app.state.show_codex_config_selector = true;
+                app.state.input_mode = InputMode::SelectingCodexConfig;
+            } else {
+                app.state
+                    .header_notifications
+                    .push("No Codex configs defined. Press 'x' from homepage.");
+            }
+        }
         KeyCode::Char(c) if c.is_ascii_digit() => {
             if let Some(num) = c.to_digit(10) {
                 if num > 0 && (num as usize) <= branch_count {

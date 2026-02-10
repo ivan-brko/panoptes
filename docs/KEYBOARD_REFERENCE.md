@@ -35,6 +35,7 @@ The main view showing all projects and sessions.
 | `n` | Add new project (opens path input) |
 | `a` | Open activity timeline |
 | `c` | Open Claude configs management |
+| `x` | Open Codex configs management |
 | `l` | Open log viewer |
 | `d` | Delete selected item (project or session) |
 | `q` / `Esc` | Quit (prompts for confirmation) |
@@ -60,6 +61,7 @@ Shows branches within a selected project.
 | `n` | Create new worktree (opens wizard) |
 | `b` | Set default base branch |
 | `c` | Set default Claude config for project |
+| `x` | Set default Codex config for project |
 | `r` | Rename project |
 | `R` | Refresh branches (check for stale worktrees) |
 | `d` | Delete selected branch/worktree |
@@ -82,7 +84,7 @@ Shows sessions for a specific branch.
 
 | Key | Action |
 |-----|--------|
-| `n` | Create new Claude Code session |
+| `n` | Create new AI session (Claude Code or Codex) |
 | `s` | Create new shell session |
 | `d` | Delete selected session (prompts for confirmation) |
 
@@ -153,9 +155,9 @@ Shows application logs for debugging.
 | `G` | Jump to bottom (enables auto-scroll) |
 | `Esc` / `q` | Return to Projects Overview |
 
-## Claude Configurations
+## Claude Configurations / Codex Configurations
 
-Manage multiple Claude Code accounts.
+Manage multiple Claude Code accounts (`c` from Projects Overview) or Codex accounts (`x` from Projects Overview). Both views use the same keyboard shortcuts.
 
 ### Navigation
 

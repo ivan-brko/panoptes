@@ -17,6 +17,8 @@ use crate::config::Config;
 use crate::hooks::{HookEvent, HookEventType};
 use crate::project::{BranchId, ProjectId};
 
+use crate::codex_config::CodexConfigId;
+
 use super::{Session, SessionId, SessionInfo, SessionState};
 
 /// Manages multiple Claude Code sessions
@@ -99,6 +101,7 @@ impl SessionManager {
             rows: rows as u16,
             cols: cols as u16,
             claude_config_dir,
+            codex_home: None,
         };
 
         // Get adapter and spawn the process
@@ -146,6 +149,7 @@ impl SessionManager {
             rows: rows as u16,
             cols: cols as u16,
             claude_config_dir: None,
+            codex_home: None,
         };
 
         // Get adapter and spawn the process
@@ -203,6 +207,90 @@ impl SessionManager {
                 );
             }
         }
+
+        Ok(session_id)
+    }
+
+    /// Create a new Codex session
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_codex_session(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        initial_prompt: Option<String>,
+        rows: usize,
+        cols: usize,
+    ) -> Result<SessionId> {
+        self.create_codex_session_with_config(
+            name,
+            working_dir,
+            project_id,
+            branch_id,
+            initial_prompt,
+            rows,
+            cols,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Create a new Codex session with a specific Codex configuration
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_codex_session_with_config(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        initial_prompt: Option<String>,
+        rows: usize,
+        cols: usize,
+        codex_config_id: Option<CodexConfigId>,
+        codex_home: Option<PathBuf>,
+        codex_config_name: Option<String>,
+    ) -> Result<SessionId> {
+        let info = SessionInfo::with_codex_config(
+            name.clone(),
+            working_dir.clone(),
+            project_id,
+            branch_id,
+            codex_config_id,
+            codex_config_name,
+        );
+        let session_id = info.id;
+
+        // Create spawn config
+        let spawn_config = SpawnConfig {
+            session_id,
+            session_name: name,
+            working_dir,
+            initial_prompt,
+            rows: rows as u16,
+            cols: cols as u16,
+            claude_config_dir: None,
+            codex_home,
+        };
+
+        // Get adapter and spawn the process
+        let agent_type = AgentType::OpenAICodex;
+        let adapter = agent_type.create_adapter();
+        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
+
+        // Create session with PTY and virtual terminal
+        let session = Session::with_scrollback(
+            info,
+            spawn_result.pty,
+            rows,
+            cols,
+            self.config.scrollback_lines,
+        );
+
+        // Store session
+        self.sessions.insert(session_id, session);
+        self.session_order.push(session_id);
 
         Ok(session_id)
     }
@@ -487,6 +575,10 @@ impl SessionManager {
             HookEventType::Stop => SessionState::Waiting,
             HookEventType::Notification => {
                 // Notification usually means waiting for user (e.g., permission prompt)
+                SessionState::Waiting
+            }
+            HookEventType::AgentTurnComplete => {
+                // Codex CLI agent turn complete - agent is waiting for user input
                 SessionState::Waiting
             }
             HookEventType::Unknown => {

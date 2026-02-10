@@ -96,6 +96,7 @@ mod tests {
             default_base_branch: None,
             session_subdir: None,
             default_claude_config: None,
+            default_codex_config: None,
             created_at: Utc::now(),
             last_activity: Utc::now(),
         }

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::claude_config::ClaudeConfigId;
+use crate::codex_config::CodexConfigId;
 use crate::project::{BranchId, ProjectId};
 
 /// Unique identifier for a session
@@ -32,6 +33,8 @@ pub enum SessionType {
     ClaudeCode,
     /// Generic shell session (bash/zsh/etc) - uses foreground detection
     Shell,
+    /// OpenAI Codex CLI session - uses notify hook for state tracking
+    OpenAICodex,
 }
 
 impl SessionType {
@@ -40,12 +43,13 @@ impl SessionType {
         match self {
             SessionType::ClaudeCode => "Claude Code",
             SessionType::Shell => "Shell",
+            SessionType::OpenAICodex => "Codex",
         }
     }
 
     /// Check if this session type uses hooks for state tracking
     pub fn uses_hooks(&self) -> bool {
-        matches!(self, SessionType::ClaudeCode)
+        matches!(self, SessionType::ClaudeCode | SessionType::OpenAICodex)
     }
 }
 
@@ -134,6 +138,12 @@ pub struct SessionInfo {
     /// Claude configuration name (cached for display)
     #[serde(default)]
     pub claude_config_name: Option<String>,
+    /// Codex configuration ID used for this session
+    #[serde(default)]
+    pub codex_config_id: Option<CodexConfigId>,
+    /// Codex configuration name (cached for display)
+    #[serde(default)]
+    pub codex_config_name: Option<String>,
 }
 
 impl SessionInfo {
@@ -161,6 +171,8 @@ impl SessionInfo {
             exited_at: None,
             claude_config_id: None,
             claude_config_name: None,
+            codex_config_id: None,
+            codex_config_name: None,
         }
     }
 
@@ -176,6 +188,33 @@ impl SessionInfo {
         let mut info = Self::new(name, working_dir, project_id, branch_id);
         info.claude_config_id = claude_config_id;
         info.claude_config_name = claude_config_name;
+        info
+    }
+
+    /// Create new session info for a Codex session
+    pub fn codex(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Self {
+        let mut info = Self::new(name, working_dir, project_id, branch_id);
+        info.session_type = SessionType::OpenAICodex;
+        info
+    }
+
+    /// Create new session info for a Codex session with configuration
+    pub fn with_codex_config(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        codex_config_id: Option<CodexConfigId>,
+        codex_config_name: Option<String>,
+    ) -> Self {
+        let mut info = Self::codex(name, working_dir, project_id, branch_id);
+        info.codex_config_id = codex_config_id;
+        info.codex_config_name = codex_config_name;
         info
     }
 

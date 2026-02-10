@@ -26,6 +26,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::claude_config::ClaudeConfigStore;
+use crate::codex_config::CodexConfigStore;
 use crate::config::Config;
 use crate::focus_timing::stats::{FocusContextBreakdown, FocusSession};
 use crate::focus_timing::store::FocusStore;
@@ -38,10 +39,12 @@ use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionManager};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
-    render_branch_detail, render_claude_configs, render_claude_settings_copy_dialog,
-    render_claude_settings_migrate_dialog, render_config_delete_dialog,
-    render_config_name_input_dialog, render_config_path_input_dialog, render_config_selector,
-    render_custom_shortcut_dialogs, render_focus_session_delete_dialog,
+    render_agent_type_selector, render_branch_detail, render_claude_configs,
+    render_claude_settings_copy_dialog, render_claude_settings_migrate_dialog,
+    render_codex_config_delete_dialog, render_codex_config_name_input_dialog,
+    render_codex_config_path_input_dialog, render_codex_config_selector, render_codex_configs,
+    render_config_delete_dialog, render_config_name_input_dialog, render_config_path_input_dialog,
+    render_config_selector, render_custom_shortcut_dialogs, render_focus_session_delete_dialog,
     render_focus_session_detail_dialog, render_focus_stats, render_help_overlay,
     render_loading_indicator, render_log_viewer, render_notifications, render_project_detail,
     render_projects_overview, render_session_view, render_timeline, render_timer_input_dialog,
@@ -73,6 +76,8 @@ pub struct App {
     pub(crate) project_store: ProjectStore,
     /// Claude config store for managing Claude configurations
     pub(crate) claude_config_store: ClaudeConfigStore,
+    /// Codex config store for managing Codex configurations
+    pub(crate) codex_config_store: CodexConfigStore,
     /// Session manager
     pub(crate) sessions: SessionManager,
     /// Hook event receiver
@@ -113,6 +118,13 @@ impl App {
         });
         tracing::debug!("Loaded {} claude configs", claude_config_store.count());
 
+        // Load Codex config store (or create empty if doesn't exist)
+        let codex_config_store = CodexConfigStore::load().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load codex config store: {}, starting fresh", e);
+            CodexConfigStore::new()
+        });
+        tracing::debug!("Loaded {} codex configs", codex_config_store.count());
+
         // Create hook event channel with large buffer to avoid dropping events
         let (hook_tx, hook_rx): (HookEventSender, HookEventReceiver) =
             hooks::server::create_channel(DEFAULT_CHANNEL_BUFFER);
@@ -138,6 +150,7 @@ impl App {
             state,
             project_store,
             claude_config_store,
+            codex_config_store,
             sessions,
             hook_rx,
             hook_server,
@@ -509,7 +522,7 @@ impl App {
                     ));
                 }
             }
-            InputMode::CreatingSession => {
+            InputMode::CreatingSession | InputMode::CreatingCodexSession => {
                 let (truncated, was_truncated) = Self::truncate_to_limit(
                     cleaned,
                     &self.state.new_session_name,
@@ -694,6 +707,7 @@ impl App {
             View::LogViewer => normal::log_viewer::handle_log_viewer_key(self, key),
             View::FocusStats => normal::focus_stats::handle_focus_stats_key(self, key),
             View::ClaudeConfigs => normal::claude_configs::handle_claude_configs_key(self, key),
+            View::CodexConfigs => normal::codex_configs::handle_codex_configs_key(self, key),
         }
     }
 
@@ -1289,6 +1303,7 @@ impl App {
         let state = &self.state;
         let project_store = &self.project_store;
         let claude_config_store = &self.claude_config_store;
+        let codex_config_store = &self.codex_config_store;
         let sessions = &self.sessions;
         let config = &self.config;
         let log_buffer = &self.log_buffer;
@@ -1403,6 +1418,19 @@ impl App {
                         attention_count,
                     );
                 }
+                View::CodexConfigs => {
+                    let attention_count =
+                        sessions.total_attention_count(config.idle_threshold_secs);
+                    render_codex_configs(
+                        frame,
+                        area,
+                        codex_config_store,
+                        state.codex_configs_selected_index,
+                        state.focus_timer.as_ref(),
+                        &state.header_notifications,
+                        attention_count,
+                    );
+                }
             }
 
             // Render timer input dialog if entering timer duration
@@ -1489,6 +1517,55 @@ impl App {
                 if let Some(ref migrate_state) = state.pending_claude_settings_migrate {
                     render_claude_settings_migrate_dialog(frame, area, migrate_state);
                 }
+            }
+
+            // Render agent type selector dialog
+            if state.input_mode == InputMode::SelectingAgentType {
+                render_agent_type_selector(frame, area, state.agent_type_selector_index);
+            }
+
+            // Render Codex config name input dialog
+            if state.input_mode == InputMode::AddingCodexConfigName {
+                render_codex_config_name_input_dialog(frame, area, &state.new_codex_config_name);
+            }
+
+            // Render Codex config path input dialog
+            if state.input_mode == InputMode::AddingCodexConfigPath {
+                render_codex_config_path_input_dialog(
+                    frame,
+                    area,
+                    &state.new_codex_config_name,
+                    &state.new_codex_config_path,
+                    &state.path_completions,
+                    state.path_completion_index,
+                    state.show_path_completions,
+                );
+            }
+
+            // Render Codex config delete confirmation dialog
+            if state.input_mode == InputMode::ConfirmingCodexConfigDelete {
+                if let Some(config_id) = state.pending_delete_codex_config {
+                    if let Some(config) = codex_config_store.get(config_id) {
+                        // Find projects using this config
+                        let affected_projects: Vec<String> = project_store
+                            .projects()
+                            .filter(|p| p.default_codex_config == Some(config_id))
+                            .map(|p| p.name.clone())
+                            .collect();
+                        render_codex_config_delete_dialog(frame, area, config, &affected_projects);
+                    }
+                }
+            }
+
+            // Render Codex config selector overlay
+            if state.input_mode == InputMode::SelectingCodexConfig {
+                render_codex_config_selector(
+                    frame,
+                    area,
+                    &state.available_codex_configs,
+                    state.codex_config_selector_index,
+                    codex_config_store.get_default_id(),
+                );
             }
 
             // Render custom shortcut dialogs

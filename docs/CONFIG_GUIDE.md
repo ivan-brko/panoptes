@@ -231,7 +231,7 @@ Defines custom keyboard shortcuts that spawn shell sessions with predefined comm
 | `command` | string | Yes | Command to run in the shell session |
 
 **Reserved keys** (cannot be used for custom shortcuts):
-- `q`, `i`, `g`, `G`, `t`, `T`, `k` - Already bound in session view
+- `q`, `i`, `g`, `G`, `t`, `T`, `k`, `x` - Already bound in session view
 - `0-9` - Used for session number jumping
 
 **Example:**
@@ -271,7 +271,8 @@ Panoptes stores data in the `~/.panoptes/` directory:
 | `~/.panoptes/projects.json` | Project and branch data |
 | `~/.panoptes/focus_sessions.json` | Focus timer history |
 | `~/.panoptes/worktrees/` | Git worktrees created by Panoptes |
-| `~/.panoptes/hooks/` | Hook scripts for Claude Code integration |
+| `~/.panoptes/codex_configs.json` | Codex account configurations |
+| `~/.panoptes/hooks/` | Hook scripts for agent integration |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
 
 ## Creating Configuration

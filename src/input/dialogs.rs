@@ -750,6 +750,79 @@ fn confirm_claude_settings_migrate(app: &mut App) {
 }
 
 // ============================================================================
+// Codex Config Delete Confirmation Handler
+// ============================================================================
+
+/// Handle key when confirming Codex config deletion
+pub fn handle_confirming_codex_config_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Confirm deletion
+            if let Some(config_id) = app.state.pending_delete_codex_config.take() {
+                // Validate config still exists
+                if app.codex_config_store.get(config_id).is_none() {
+                    tracing::warn!(
+                        config_id = %config_id,
+                        "Codex config no longer exists when confirming delete"
+                    );
+                    app.state.input_mode = InputMode::Normal;
+                    return Ok(());
+                }
+
+                // Clear default_codex_config from any projects using this config
+                let affected_projects: Vec<_> = app
+                    .project_store
+                    .projects()
+                    .filter(|p| p.default_codex_config == Some(config_id))
+                    .map(|p| p.id)
+                    .collect();
+
+                for project_id in affected_projects {
+                    if let Some(project) = app.project_store.get_project_mut(project_id) {
+                        project.default_codex_config = None;
+                    }
+                }
+
+                // Save project store if any projects were affected
+                if let Err(e) = app.project_store.save() {
+                    tracing::error!("Failed to save project store: {}", e);
+                }
+
+                // Remove the config
+                app.codex_config_store.remove(config_id);
+
+                // Save config store
+                if let Err(e) = app.codex_config_store.save() {
+                    tracing::error!("Failed to save codex config store: {}", e);
+                    app.state.error_message = Some(format!("Failed to save: {}", e));
+                }
+
+                tracing::info!("Deleted Codex config: {}", config_id);
+
+                // Adjust selection if needed
+                let new_count = app.codex_config_store.count();
+                if app.state.codex_configs_selected_index >= new_count && new_count > 0 {
+                    app.state.codex_configs_selected_index = new_count - 1;
+                } else if new_count == 0 {
+                    app.state.codex_configs_selected_index = 0;
+                }
+            }
+            app.state.input_mode = InputMode::Normal;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            // Cancel deletion
+            app.state.pending_delete_codex_config = None;
+            app.state.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Custom Shortcuts Dialog Handlers
 // ============================================================================
 

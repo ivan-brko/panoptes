@@ -196,6 +196,38 @@ The worktree directory was deleted outside of Panoptes.
      -d '{"session_id":"test","event":"Stop","timestamp":0}'
    ```
 
+## Codex CLI Integration
+
+### Codex Session Stuck in Starting
+
+**Symptoms:**
+- Codex session starts but state never changes from "Starting"
+
+**Solutions:**
+
+1. Check if the Codex notify hook is installed:
+   ```bash
+   ls -la ~/.panoptes/hooks/codex-notify.sh
+   ```
+
+2. Check if Codex config.toml has the notify setting:
+   ```bash
+   cat ~/.codex/config.toml  # or your CODEX_HOME path
+   ```
+   Look for a `notify` entry pointing to the Panoptes hook script.
+
+3. Verify the hook script is executable:
+   ```bash
+   chmod +x ~/.panoptes/hooks/codex-notify.sh
+   ```
+
+4. Check Panoptes logs for hook event errors (press `l`)
+
+### Codex Session Shows No Executing State
+
+**Explanation:**
+This is expected behavior. Codex CLI only sends `agent-turn-complete` events, so Codex sessions show Thinking and Waiting states but not the Executing(tool) state that Claude Code sessions show. This does not affect the attention system — you'll still be notified when Codex is waiting for input.
+
 ### Session Stuck in Executing
 
 **Symptoms:**

@@ -272,6 +272,26 @@ pub struct AppState {
     /// Pending Claude settings migration (before worktree deletion)
     pub pending_claude_settings_migrate: Option<ClaudeSettingsMigrateState>,
 
+    // --- Codex config state ---
+    /// Selected index in Codex configs view
+    pub codex_configs_selected_index: usize,
+    /// Codex config pending deletion (for confirmation dialog)
+    pub pending_delete_codex_config: Option<crate::codex_config::CodexConfigId>,
+    /// Buffer for new Codex config name input
+    pub new_codex_config_name: String,
+    /// Buffer for new Codex config path input
+    pub new_codex_config_path: String,
+    /// Codex config being selected for session creation
+    pub creating_session_codex_config: Option<crate::codex_config::CodexConfigId>,
+    /// Available Codex configs for selection during session creation
+    pub available_codex_configs: Vec<crate::codex_config::CodexConfig>,
+    /// Selected index in Codex config selector
+    pub codex_config_selector_index: usize,
+    /// Whether Codex config selector is showing (overlay during session creation)
+    pub show_codex_config_selector: bool,
+    /// Agent type selector index (0 = Claude Code, 1 = Codex)
+    pub agent_type_selector_index: usize,
+
     // --- Help overlay ---
     /// Whether to show the help overlay with keyboard shortcuts
     pub show_help_overlay: bool,
@@ -303,6 +323,7 @@ impl AppState {
             View::LogViewer => self.log_viewer_scroll,
             View::FocusStats => self.focus_stats_selected_index,
             View::ClaudeConfigs => self.claude_configs_selected_index,
+            View::CodexConfigs => self.codex_configs_selected_index,
         }
     }
 
@@ -317,6 +338,7 @@ impl AppState {
             View::LogViewer => self.log_viewer_scroll = index,
             View::FocusStats => self.focus_stats_selected_index = index,
             View::ClaudeConfigs => self.claude_configs_selected_index = index,
+            View::CodexConfigs => self.codex_configs_selected_index = index,
         }
     }
 
@@ -372,7 +394,8 @@ impl AppState {
                 | View::ActivityTimeline
                 | View::LogViewer
                 | View::FocusStats
-                | View::ClaudeConfigs => {
+                | View::ClaudeConfigs
+                | View::CodexConfigs => {
                     // Leaving project context - clear the context
                     self.focus_tracker.set_context(None, None);
                 }
@@ -440,6 +463,12 @@ impl AppState {
     pub fn navigate_to_claude_configs(&mut self) {
         self.view = View::ClaudeConfigs;
         self.claude_configs_selected_index = 0;
+    }
+
+    /// Navigate to Codex configs view
+    pub fn navigate_to_codex_configs(&mut self) {
+        self.view = View::CodexConfigs;
+        self.codex_configs_selected_index = 0;
     }
 
     /// Return from session view based on the current session's context

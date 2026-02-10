@@ -19,11 +19,11 @@ Quick answers to common questions. For detailed information, see the linked docu
 
 ### What is Panoptes in one sentence?
 
-A terminal dashboard for managing multiple Claude Code sessions across different projects and branches, with real-time state tracking and attention notifications.
+A terminal dashboard for managing multiple AI coding agent sessions (Claude Code and Codex CLI) across different projects and branches, with real-time state tracking and attention notifications.
 
 ### What are the prerequisites?
 
-Just [Claude Code CLI](https://claude.ai/code) installed and configured. Panoptes handles everything else.
+At minimum, [Claude Code CLI](https://claude.ai/code) installed and configured. Optionally, [OpenAI Codex CLI](https://github.com/openai/codex) for Codex session support. Panoptes handles everything else.
 
 ### How do I add my first project?
 
@@ -78,9 +78,13 @@ No. The worktree location is managed by Panoptes and git. Moving worktrees manua
 
 ## Sessions
 
-### How do I create a Claude Code session?
+### Does Panoptes support Codex CLI?
 
-From Branch Detail, press `n`, enter a session name, and press Enter.
+Yes! Press `n` from Branch Detail and select "Codex" from the agent type selector. Codex sessions work the same way as Claude Code sessions, with the same attention tracking and notification system.
+
+### How do I create a Claude Code or Codex session?
+
+From Branch Detail, press `n`, select Claude Code or Codex from the agent type selector, enter a session name, and press Enter.
 
 ### How do I create a shell session?
 
@@ -139,7 +143,7 @@ Press `Space` from any view. This is the fastest way to context-switch between w
 
 ---
 
-## Multiple Claude Accounts
+## Multiple Accounts
 
 ### How do I set up multiple Claude accounts?
 
@@ -149,9 +153,17 @@ Press `Space` from any view. This is the fastest way to context-switch between w
    - For a **new account**: Choose any folder; Claude will prompt for login on first use
    - For an **existing account**: Point to your existing Claude config directory (e.g., `~/.claude-work`)
 
+### How do I set up multiple Codex accounts?
+
+1. Press `x` from Projects Overview to open Codex Configs
+2. Press `n` to add a new configuration
+3. Enter a name and the path to the `CODEX_HOME` directory
+   - For a **new account**: Choose any folder; Codex will use it for config and auth
+   - For an **existing account**: Point to your existing Codex home directory (default `~/.codex`)
+
 ### How do I set a default account for a project?
 
-From Project Detail, press `c` and select the configuration.
+From Project Detail, press `c` for Claude config or `x` for Codex config and select the configuration.
 
 ### How do I switch accounts for a single session?
 
@@ -276,6 +288,7 @@ The prompts are optional—you can decline each time. There's no global setting 
 |-----|--------|
 | `a` | Activity timeline |
 | `c` | Claude configs |
+| `x` | Codex configs |
 | `l` | Log viewer |
 | `t` | Start focus timer |
 | `T` | Focus statistics |

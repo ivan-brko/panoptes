@@ -319,6 +319,7 @@ mod tests {
             rows: 24,
             cols: 80,
             claude_config_dir: None,
+            codex_home: None,
         }
     }
 
@@ -372,6 +373,7 @@ mod tests {
             rows: 24,
             cols: 80,
             claude_config_dir: None,
+            codex_home: None,
         };
 
         let env = adapter.generate_env(&config, &spawn_config);
@@ -402,6 +404,7 @@ mod tests {
             rows: 24,
             cols: 80,
             claude_config_dir: Some(claude_config_path.clone()),
+            codex_home: None,
         };
 
         let env = adapter.generate_env(&config, &spawn_config);

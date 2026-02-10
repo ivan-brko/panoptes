@@ -9,10 +9,12 @@
 
 pub mod adapter;
 pub mod claude;
+pub mod codex;
 pub mod shell;
 
 pub use adapter::{AgentAdapter, SpawnConfig, SpawnResult};
 pub use claude::ClaudeCodeAdapter;
+pub use codex::CodexAdapter;
 pub use shell::ShellAdapter;
 
 use serde::{Deserialize, Serialize};
@@ -25,10 +27,8 @@ pub enum AgentType {
     ClaudeCode,
     /// Generic shell (bash/zsh/etc)
     Shell,
-    // Future agents:
-    // Aider,
-    // OpenAICodex,
-    // Cursor,
+    /// OpenAI Codex CLI
+    OpenAICodex,
 }
 
 impl AgentType {
@@ -37,6 +37,7 @@ impl AgentType {
         match self {
             AgentType::ClaudeCode => "Claude Code",
             AgentType::Shell => "Shell",
+            AgentType::OpenAICodex => "Codex",
         }
     }
 
@@ -47,6 +48,7 @@ impl AgentType {
             AgentType::Shell => std::env::var("SHELL")
                 .map(|_| "shell")
                 .unwrap_or("/bin/bash"),
+            AgentType::OpenAICodex => "codex",
         }
     }
 
@@ -55,6 +57,7 @@ impl AgentType {
         match self {
             AgentType::ClaudeCode => true,
             AgentType::Shell => false,
+            AgentType::OpenAICodex => true,
         }
     }
 
@@ -63,6 +66,7 @@ impl AgentType {
         match self {
             AgentType::ClaudeCode => Box::new(ClaudeCodeAdapter::new()),
             AgentType::Shell => Box::new(ShellAdapter::new()),
+            AgentType::OpenAICodex => Box::new(CodexAdapter::new()),
         }
     }
 }
@@ -81,11 +85,13 @@ mod tests {
     fn test_agent_type_display() {
         assert_eq!(AgentType::ClaudeCode.display_name(), "Claude Code");
         assert_eq!(AgentType::Shell.display_name(), "Shell");
+        assert_eq!(AgentType::OpenAICodex.display_name(), "Codex");
     }
 
     #[test]
     fn test_agent_type_command() {
         assert_eq!(AgentType::ClaudeCode.command(), "claude");
+        assert_eq!(AgentType::OpenAICodex.command(), "codex");
         // Shell command depends on $SHELL env var
     }
 
@@ -93,6 +99,7 @@ mod tests {
     fn test_agent_type_supports_hooks() {
         assert!(AgentType::ClaudeCode.supports_hooks());
         assert!(!AgentType::Shell.supports_hooks());
+        assert!(AgentType::OpenAICodex.supports_hooks());
     }
 
     #[test]
@@ -106,6 +113,11 @@ mod tests {
         let json = serde_json::to_string(&shell).unwrap();
         let parsed: AgentType = serde_json::from_str(&json).unwrap();
         assert_eq!(shell, parsed);
+
+        let codex = AgentType::OpenAICodex;
+        let json = serde_json::to_string(&codex).unwrap();
+        let parsed: AgentType = serde_json::from_str(&json).unwrap();
+        assert_eq!(codex, parsed);
     }
 
     #[test]
@@ -118,5 +130,10 @@ mod tests {
         let shell_adapter = AgentType::Shell.create_adapter();
         assert_eq!(shell_adapter.name(), "Shell");
         assert!(!shell_adapter.supports_hooks());
+
+        let codex_adapter = AgentType::OpenAICodex.create_adapter();
+        assert_eq!(codex_adapter.name(), "Codex");
+        assert_eq!(codex_adapter.command(), "codex");
+        assert!(codex_adapter.supports_hooks());
     }
 }

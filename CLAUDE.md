@@ -23,24 +23,27 @@ Common clippy patterns to be aware of:
 
 ## Architecture
 
-Panoptes is a terminal dashboard for managing multiple Claude Code sessions. It spawns Claude Code in PTYs and tracks their state via HTTP hooks.
+Panoptes is a terminal dashboard for managing multiple AI coding agent sessions (Claude Code and OpenAI Codex CLI). It spawns agents in PTYs and tracks their state via HTTP hooks.
 
 ### Data Flow
 
 ```
-User Input → App → PTY write → Claude Code
-Claude Code → Hook (port 9999) → HookEvent → SessionState update → TUI render
+User Input → App → PTY write → Agent (Claude Code / Codex)
+Agent → Hook (port 9999) → HookEvent → SessionState update → TUI render
 PTY Output → Session buffer → TUI render
 ```
 
 ### Key Modules
 
 - `app/` - Application orchestration, state, views, input modes
+- `agent/` - Agent adapters (Claude Code, Codex, Shell) with hook setup
 - `session/` - Session lifecycle, PTY management, terminal emulation
-- `hooks/` - HTTP server for Claude Code callbacks
+- `hooks/` - HTTP server for agent callbacks
 - `input/` - Input handling by mode (normal, session, dialogs)
 - `tui/` - Terminal UI rendering with ratatui
 - `project/` - Project/branch management and persistence
+- `claude_config/` - Claude Code multi-account configuration
+- `codex_config/` - Codex CLI multi-account configuration (CODEX_HOME)
 - `config.rs` - Configuration (~/.panoptes/)
 
 ## Conventions
