@@ -54,6 +54,10 @@ fn get_shortcuts_for_view(view: &View) -> (&'static str, Vec<Line<'static>>) {
             "Keyboard Shortcuts - Claude Configs",
             claude_configs_shortcuts(),
         ),
+        View::CodexConfigs => (
+            "Keyboard Shortcuts - Codex Configs",
+            codex_configs_shortcuts(),
+        ),
     }
 }
 
@@ -110,6 +114,7 @@ fn projects_overview_shortcuts() -> Vec<Line<'static>> {
         shortcut_line("d", "Delete selected"),
         shortcut_line("a", "Activity timeline"),
         shortcut_line("c", "Claude configurations"),
+        shortcut_line("x", "Codex configurations"),
         shortcut_line("k", "Custom shortcuts"),
         shortcut_line("l", "View logs"),
         shortcut_line("R", "Refresh git state"),
@@ -140,6 +145,8 @@ fn project_detail_shortcuts() -> Vec<Line<'static>> {
         shortcut_line("n", "Create new worktree"),
         shortcut_line("d", "Delete selected branch"),
         shortcut_line("b", "Set default base branch"),
+        shortcut_line("c", "Set Claude config"),
+        shortcut_line("x", "Set Codex config"),
         shortcut_line("r", "Rename project"),
         shortcut_line("k", "Custom shortcuts"),
         shortcut_line("a", "Activity timeline"),
@@ -167,7 +174,7 @@ fn branch_detail_shortcuts() -> Vec<Line<'static>> {
         shortcut_line("1-9", "Jump to item by number"),
         empty_line(),
         section_header("Actions"),
-        shortcut_line("n", "New Claude Code session"),
+        shortcut_line("n", "New AI session (Claude/Codex)"),
         shortcut_line("s", "New shell session"),
         shortcut_line("d", "Delete selected session"),
         shortcut_line("k", "Custom shortcuts"),
@@ -208,7 +215,7 @@ fn session_view_shortcuts() -> Vec<Line<'static>> {
         shortcut_line("<key>", "Run shortcut (e.g., 'v' for VSCode)"),
         empty_line(),
         section_header("Session Mode"),
-        shortcut_line("All keys", "Sent to Claude Code"),
+        shortcut_line("All keys", "Forwarded to session"),
         shortcut_line("Mouse scroll", "Scroll when PTY supports it"),
         empty_line(),
         footer_hint(),
@@ -280,6 +287,31 @@ fn focus_stats_shortcuts() -> Vec<Line<'static>> {
         empty_line(),
         section_header("Focus Timer"),
         shortcut_line("t", "Start focus timer"),
+        shortcut_line("Ctrl+t", "Stop timer (when running)"),
+        empty_line(),
+        shortcut_line("q", "Quit"),
+        empty_line(),
+        footer_hint(),
+    ]
+}
+
+fn codex_configs_shortcuts() -> Vec<Line<'static>> {
+    vec![
+        empty_line(),
+        section_header("Navigation"),
+        shortcut_line("j / Down", "Move down"),
+        shortcut_line("k / Up", "Move up"),
+        shortcut_line("Esc", "Back to projects"),
+        shortcut_line("1-9", "Jump to item by number"),
+        empty_line(),
+        section_header("Actions"),
+        shortcut_line("n", "Add new configuration"),
+        shortcut_line("d", "Delete selected"),
+        shortcut_line("s", "Set as default"),
+        empty_line(),
+        section_header("Focus Timer"),
+        shortcut_line("t", "Start focus timer"),
+        shortcut_line("T", "View focus stats"),
         shortcut_line("Ctrl+t", "Stop timer (when running)"),
         empty_line(),
         shortcut_line("q", "Quit"),

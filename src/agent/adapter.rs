@@ -27,6 +27,8 @@ pub struct SpawnConfig {
     pub cols: u16,
     /// Claude config directory (CLAUDE_CONFIG_DIR). None = use default ~/.claude
     pub claude_config_dir: Option<PathBuf>,
+    /// Codex home directory (CODEX_HOME). None = use default ~/.codex
+    pub codex_home: Option<PathBuf>,
 }
 
 /// Result of spawning an agent
@@ -138,6 +140,7 @@ mod tests {
             rows: 24,
             cols: 80,
             claude_config_dir: None,
+            codex_home: None,
         };
         assert_eq!(config.session_name, "test-session");
         assert_eq!(config.initial_prompt, Some("hello".to_string()));
@@ -153,6 +156,7 @@ mod tests {
             rows: 24,
             cols: 80,
             claude_config_dir: Some(PathBuf::from("/home/user/.claude-work")),
+            codex_home: None,
         };
         assert_eq!(
             config.claude_config_dir,

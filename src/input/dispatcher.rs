@@ -150,6 +150,24 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::ConfirmingCustomShortcutDelete => {
             super::dialogs::handle_confirming_custom_shortcut_delete_key(app, key)
         }
+        InputMode::SelectingAgentType => {
+            super::text_input::handle_selecting_agent_type_key(app, key)
+        }
+        InputMode::CreatingCodexSession => {
+            super::text_input::handle_creating_codex_session_key(app, key)
+        }
+        InputMode::AddingCodexConfigName => {
+            super::text_input::handle_adding_codex_config_name_key(app, key)
+        }
+        InputMode::AddingCodexConfigPath => {
+            super::text_input::handle_adding_codex_config_path_key(app, key)
+        }
+        InputMode::ConfirmingCodexConfigDelete => {
+            super::dialogs::handle_confirming_codex_config_delete_key(app, key)
+        }
+        InputMode::SelectingCodexConfig => {
+            super::text_input::handle_selecting_codex_config_key(app, key)
+        }
     }
 }
 

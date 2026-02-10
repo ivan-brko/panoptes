@@ -50,6 +50,8 @@ pub enum HookEventType {
     PostToolUse,
     /// Notification from Claude (e.g., waiting for input)
     Notification,
+    /// Agent turn complete (from Codex CLI notify hook)
+    AgentTurnComplete,
     /// Unknown event type
     Unknown,
 }
@@ -63,6 +65,7 @@ impl HookEventType {
             HookEventType::PreToolUse => "PreToolUse",
             HookEventType::PostToolUse => "PostToolUse",
             HookEventType::Notification => "Notification",
+            HookEventType::AgentTurnComplete => "AgentTurnComplete",
             HookEventType::Unknown => "Unknown",
         }
     }
@@ -82,6 +85,7 @@ impl From<&str> for HookEventType {
             "PreToolUse" => HookEventType::PreToolUse,
             "PostToolUse" => HookEventType::PostToolUse,
             "Notification" => HookEventType::Notification,
+            "AgentTurnComplete" => HookEventType::AgentTurnComplete,
             _ => HookEventType::Unknown,
         }
     }
@@ -180,6 +184,7 @@ mod tests {
             HookEventType::PreToolUse,
             HookEventType::PostToolUse,
             HookEventType::Notification,
+            HookEventType::AgentTurnComplete,
         ] {
             let str_repr = event_type.as_str();
             let parsed: HookEventType = str_repr.into();

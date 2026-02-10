@@ -136,8 +136,9 @@ pub fn render_branch_detail(
 
                     // Type badge for shell sessions (Claude Code sessions don't need a badge)
                     let type_badge = match session.info.session_type {
-                        SessionType::Shell => "󰆍 ", // shell icon or "$ " for terminals without nerd fonts
+                        SessionType::Shell => "󰆍 ",
                         SessionType::ClaudeCode => "",
+                        SessionType::OpenAICodex => "🔮 ",
                     };
 
                     // Build attention badge
@@ -182,15 +183,16 @@ pub fn render_branch_detail(
 
     // Footer
     let help_text = match state.input_mode {
-        InputMode::CreatingSession | InputMode::CreatingShellSession => {
-            "Enter: create | Esc: cancel".to_string()
-        }
+        InputMode::CreatingSession
+        | InputMode::CreatingShellSession
+        | InputMode::CreatingCodexSession => "Enter: create | Esc: cancel".to_string(),
+        InputMode::SelectingAgentType => "↑/↓: navigate | Enter: select | Esc: cancel".to_string(),
         InputMode::ConfirmingSessionDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         _ => {
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
             let base = format!(
-                "n: claude | s: shell | d: delete | {}k: shortcuts | {} | ↑/↓: navigate | Enter: open | Esc/q: back",
+                "n: new AI | s: shell | d: delete | {}k: shortcuts | {} | ↑/↓: navigate | Enter: open | Esc/q: back",
                 shortcuts_hint, timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
@@ -232,6 +234,7 @@ fn render_delete_confirmation(
     let warning = session
         .map(|s| match s.info.session_type {
             SessionType::ClaudeCode => "This will kill the Claude Code process.",
+            SessionType::OpenAICodex => "This will kill the Codex process.",
             SessionType::Shell => "This will kill the shell process.",
         })
         .unwrap_or("This will kill the process.")

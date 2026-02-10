@@ -4,9 +4,9 @@
 
 ![Panoptes Overview](panoptes_screenshot.png)
 
-Running multiple Claude Code sessions across different projects? Panoptes shows them all in one terminal — who's thinking, who's executing, who's waiting for input. Get notified when sessions need attention. Switch instantly with a keystroke. You can also run plain shell sessions for tasks like builds or tests, with the same attention tracking so you know when they're done.
+Running multiple AI coding agents across different projects? Panoptes shows them all in one terminal — who's thinking, who's executing, who's waiting for input. Supports both Claude Code and OpenAI Codex CLI. Get notified when sessions need attention. Switch instantly with a keystroke. You can also run plain shell sessions for tasks like builds or tests, with the same attention tracking so you know when they're done.
 
-It's a minimal wrapper, not a new tool to learn. You still use Claude Code exactly as before — Panoptes just makes juggling multiple sessions painless.
+It's a minimal wrapper, not a new tool to learn. You still use your AI coding agents exactly as before — Panoptes just makes juggling multiple sessions painless.
 
 Named after the hundred-eyed giant of Greek mythology.
 
@@ -17,9 +17,9 @@ Named after the hundred-eyed giant of Greek mythology.
 
 ## Features
 
-- **Multi-Session Management** - Run multiple Claude Code sessions in parallel, each with its own conversation and context
-- **Multi-Account Support** - Manage multiple Claude Code accounts and switch between them per-project
-- **Permissions Sync** - Automatically copy Claude Code permissions to new worktrees and migrate unique permissions back before deletion
+- **Multi-Session Management** - Run multiple Claude Code and Codex sessions in parallel, each with its own conversation and context
+- **Multi-Account Support** - Manage multiple accounts for both Claude Code and Codex CLI, switch between them per-project
+- **Permissions Sync** - Automatically copy Claude Code permissions to new worktrees and migrate unique permissions back before deletion (Codex planned)
 - **Project & Branch Organization** - Sessions organized by git repository and branch. Panoptes automatically creates isolated worktrees so each branch has its own working directory — no manual setup required
 - **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Idle
 - **Attention System** - Get notified when sessions need your input, with visual badges and terminal bell alerts
@@ -34,6 +34,7 @@ Named after the hundred-eyed giant of Greek mythology.
 ### Prerequisites
 
 - [Claude Code CLI](https://claude.ai/code) installed and configured
+- (Optional) [OpenAI Codex CLI](https://github.com/openai/codex) installed for Codex session support
 
 ### Install
 
@@ -59,9 +60,9 @@ cargo build --release
 
 1. Press `n` to add your first project (enter the path to a git repository)
 2. Navigate to a project with `Enter`, then to a branch with `Enter`
-3. Press `n` to create a new session
+3. Press `n` to create a new session — select Claude Code or Codex
 4. Enter a name for the session and press `Enter`
-5. You're now in Session mode - type to interact with Claude Code
+5. You're now in Session mode - type to interact with your AI agent
 6. Press `Shift+Escape` to exit Session mode
 7. Press `Esc` to navigate back through the hierarchy
 
@@ -92,12 +93,13 @@ cargo build --release
 
 | Key | Action |
 |-----|--------|
-| `n` | Add new project / New worktree (context-dependent) |
+| `n` | Add new project / New worktree / New session (context-dependent) |
 | `s` | New shell session (from branch view) |
 | `d` | Delete selected item |
 | `r` | Rename project |
 | `R` | Refresh branches |
-| `c` | Claude configs (from homepage) / Set project config |
+| `c` | Claude configs (from homepage) / Set project Claude config |
+| `x` | Codex configs (from homepage) / Set project Codex config |
 
 ### Views
 
@@ -110,12 +112,23 @@ cargo build --release
 
 See [Keyboard Reference](docs/KEYBOARD_REFERENCE.md) for the complete list.
 
-## Multiple Claude Accounts
+## Multiple Accounts
 
-Need to manage multiple Claude accounts — say, one for work and one for personal projects? Panoptes has you covered. Press `c` from the homepage to manage configurations, then assign defaults per-project with `c` from the project view.
+Need to manage multiple accounts — say, one for work and one for personal projects? Panoptes has you covered.
+
+### Claude Code Accounts
+Press `c` from the homepage to manage Claude configurations, then assign defaults per-project with `c` from the project view.
 
 - **New account**: Select any folder as your config directory. Claude will prompt you to log in the first time you use it.
 - **Existing account**: Select the Claude config directory you already have (e.g., `~/.claude-work`).
+
+### Codex Accounts
+Press `x` from the homepage to manage Codex configurations, then assign defaults per-project with `x` from the project view.
+
+- **New account**: Select any folder as the `CODEX_HOME` directory. Codex will use it for config, auth, and sessions.
+- **Existing account**: Select your existing Codex home directory (default `~/.codex`).
+
+> **Note:** Panoptes modifies `CODEX_HOME/config.toml` to install its notify hook. Any existing `notify` configuration will be backed up to `config.toml.panoptes.bak` before overwriting.
 
 ## Configuration
 
@@ -136,8 +149,8 @@ See [Configuration Guide](docs/CONFIG_GUIDE.md) for all options.
 |-------|-------------|
 | **Starting** | Session is initializing |
 | **Thinking** | Claude is processing your request |
-| **Executing** | Claude is running a tool (editing files, running commands) |
-| **Waiting** | Claude is waiting for your input |
+| **Executing** | Claude is running a tool (editing files, running commands). Note: Codex sessions skip this state |
+| **Waiting** | Agent is waiting for your input |
 | **Idle** | No recent activity |
 | **Exited** | Session has ended |
 
@@ -148,6 +161,7 @@ See [Configuration Guide](docs/CONFIG_GUIDE.md) for all options.
 | `~/.panoptes/config.toml` | User configuration |
 | `~/.panoptes/projects.json` | Projects and branches |
 | `~/.panoptes/claude_configs.json` | Claude account configurations |
+| `~/.panoptes/codex_configs.json` | Codex account configurations |
 | `~/.panoptes/focus_sessions.json` | Focus timer history |
 | `~/.panoptes/worktrees/` | Git worktrees |
 | `~/.panoptes/hooks/` | Hook scripts |

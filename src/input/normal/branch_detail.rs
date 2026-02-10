@@ -54,13 +54,14 @@ pub fn handle_branch_detail_key(
             }
         }
         KeyCode::Char('n') => {
-            // Prompt for session name before creating Claude Code session
+            // Show agent type selector (Claude Code / Codex)
             if let Some(branch) = app.project_store.get_branch(branch_id) {
                 app.state.creating_session_project_id = Some(project_id);
                 app.state.creating_session_branch_id = Some(branch_id);
                 app.state.creating_session_working_dir = Some(branch.working_dir.clone());
                 app.state.new_session_name.clear();
-                app.state.input_mode = InputMode::CreatingSession;
+                app.state.agent_type_selector_index = 0;
+                app.state.input_mode = InputMode::SelectingAgentType;
             }
         }
         KeyCode::Char('s') => {

@@ -24,6 +24,8 @@ pub enum View {
     FocusStats,
     /// Claude configurations management
     ClaudeConfigs,
+    /// Codex configurations management
+    CodexConfigs,
 }
 
 impl View {
@@ -62,6 +64,11 @@ impl View {
         matches!(self, View::ClaudeConfigs)
     }
 
+    /// Check if this view is the Codex configs view
+    pub fn is_codex_configs(&self) -> bool {
+        matches!(self, View::CodexConfigs)
+    }
+
     /// Get the parent view for navigation (Esc key)
     pub fn parent(&self) -> Option<View> {
         match self {
@@ -73,6 +80,7 @@ impl View {
             View::LogViewer => Some(View::ProjectsOverview),
             View::FocusStats => Some(View::ProjectsOverview),
             View::ClaudeConfigs => Some(View::ProjectsOverview),
+            View::CodexConfigs => Some(View::ProjectsOverview),
         }
     }
 

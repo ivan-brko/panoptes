@@ -35,6 +35,7 @@ The main view showing all projects and sessions.
 | `n` | Add new project (opens path input) |
 | `a` | Open activity timeline |
 | `c` | Open Claude configs management |
+| `x` | Open Codex configs management |
 | `l` | Open log viewer |
 | `d` | Delete selected item (project or session) |
 | `q` / `Esc` | Quit (prompts for confirmation) |
@@ -60,6 +61,7 @@ Shows branches within a selected project.
 | `n` | Create new worktree (opens wizard) |
 | `b` | Set default base branch |
 | `c` | Set default Claude config for project |
+| `x` | Set default Codex config for project |
 | `r` | Rename project |
 | `R` | Refresh branches (check for stale worktrees) |
 | `d` | Delete selected branch/worktree |
@@ -82,7 +84,7 @@ Shows sessions for a specific branch.
 
 | Key | Action |
 |-----|--------|
-| `n` | Create new Claude Code session |
+| `n` | Create new AI session (Claude Code or Codex) |
 | `s` | Create new shell session |
 | `d` | Delete selected session (prompts for confirmation) |
 
@@ -106,21 +108,21 @@ Viewing a session without interacting with it.
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Enter Session mode (interact with Claude) |
+| `Enter` | Enter Session mode (interact with session) |
 
 ## Session View (Session Mode)
 
-Interacting directly with Claude Code. Most keys are forwarded to the PTY.
+Interacting directly with the session (Claude Code, Codex, or shell). Most keys are forwarded to the PTY.
 
 | Key | Action |
 |-----|--------|
 | `Esc` | Exit to Normal mode |
-| `Shift+Esc` | Send Escape to Claude Code |
+| `Shift+Esc` | Send Escape to the session |
 | `PageUp` | Scroll up through history |
 | `PageDown` | Scroll down through history |
 | `Ctrl+Home` | Scroll to top |
 | `Ctrl+End` | Scroll to bottom |
-| All other keys | Sent to Claude Code |
+| All other keys | Forwarded to the session |
 
 **Note:** When scrolled up in history, typing any key (except scroll keys) will automatically scroll back to the live view.
 
@@ -153,9 +155,9 @@ Shows application logs for debugging.
 | `G` | Jump to bottom (enables auto-scroll) |
 | `Esc` / `q` | Return to Projects Overview |
 
-## Claude Configurations
+## Claude Configurations / Codex Configurations
 
-Manage multiple Claude Code accounts.
+Manage multiple Claude Code accounts (`c` from Projects Overview) or Codex accounts (`x` from Projects Overview). Both views use the same keyboard shortcuts.
 
 ### Navigation
 
@@ -262,4 +264,4 @@ Panoptes supports mouse scrolling in Session View:
 | Scroll Up | Scroll up through session history |
 | Scroll Down | Scroll down through session history |
 
-When Claude Code has mouse mode enabled (e.g., in vim), mouse events are forwarded to the PTY instead.
+When the session has mouse mode enabled (e.g., in vim), mouse events are forwarded to the PTY instead.

@@ -22,7 +22,7 @@ source $HOME/.cargo/env
 
 ### Claude Code
 
-Panoptes is designed to manage Claude Code sessions. You'll need Claude Code installed and configured.
+Panoptes is designed to manage AI coding agent sessions. You'll need at least Claude Code installed and configured.
 
 **Install Claude Code:**
 Visit [claude.ai/code](https://claude.ai/code) for installation instructions.
@@ -30,6 +30,18 @@ Visit [claude.ai/code](https://claude.ai/code) for installation instructions.
 **Verify installation:**
 ```bash
 claude --version
+```
+
+### Codex CLI (Optional)
+
+For Codex session support, install the OpenAI Codex CLI.
+
+**Install Codex:**
+Visit [github.com/openai/codex](https://github.com/openai/codex) for installation instructions.
+
+**Verify installation:**
+```bash
+codex --version
 ```
 
 ### Git

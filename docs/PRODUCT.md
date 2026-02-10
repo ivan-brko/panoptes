@@ -2,7 +2,7 @@
 
 ## What is Panoptes?
 
-Panoptes is a terminal-based dashboard for managing multiple Claude Code sessions simultaneously. Named after the many-eyed giant of Greek mythology, it gives developers a bird's-eye view of all their AI coding assistant sessions across different projects and branches.
+Panoptes is a terminal-based dashboard for managing multiple AI coding agent sessions simultaneously. It supports both Claude Code and OpenAI Codex CLI. Named after the many-eyed giant of Greek mythology, it gives developers a bird's-eye view of all their AI coding assistant sessions across different projects and branches.
 
 ## The Problem
 
@@ -61,7 +61,7 @@ Shell sessions show simplified states:
 
 ### Multi-Session Management
 
-Run as many Claude Code sessions as you need. Each session is independent and maintains its own conversation history.
+Run as many Claude Code and Codex sessions as you need. Each session is independent and maintains its own conversation history. When creating a new session, an agent type selector lets you choose between Claude Code and Codex.
 
 ### Git-Aware Organization
 
@@ -69,7 +69,7 @@ Panoptes understands git. It organizes sessions by repository and branch, and us
 
 ### Real-Time State Tracking
 
-Through Claude Code's hook system, Panoptes knows exactly what each session is doing at any moment. No more guessing if a session is still working or waiting for you.
+Through agent hook systems, Panoptes knows exactly what each session is doing at any moment. Claude Code provides granular tool-use tracking (Thinking, Executing, Waiting), while Codex provides turn-complete notifications (Thinking, Waiting). No more guessing if a session is still working or waiting for you.
 
 ### Attention System
 
@@ -132,16 +132,24 @@ Create new git worktrees directly from Panoptes with a fuzzy branch selector. Ty
 
 ### Multi-Account Support
 
-Manage multiple Claude Code accounts (configurations) and switch between them:
+Manage multiple accounts for both Claude Code and Codex CLI:
 
-- **Global Configurations** - Define named configurations pointing to different Claude config directories
-- **Project Defaults** - Set a default configuration for each project
+**Claude Code Accounts:**
+- Define named configurations pointing to different Claude config directories (`CLAUDE_CONFIG_DIR`)
+- Use the `c` key from the projects overview to manage configurations
+
+**Codex Accounts:**
+- Define named configurations pointing to different Codex home directories (`CODEX_HOME`)
+- Use the `x` key from the projects overview to manage configurations
+
+**Shared features:**
+- **Project Defaults** - Set a default configuration for each project (independent for Claude and Codex)
 - **Session Selection** - Choose which configuration to use when creating a new session
 - **Visual Indicator** - See which configuration a session is using in the header
 
-Use the `c` key from the projects overview to manage configurations, or from project detail to set the project default.
-
 ### Claude Code Permissions Sync
+
+> **Note:** Permissions sync is currently supported for Claude Code only. Codex permissions sync will be added when Codex CLI supports per-project permissions.
 
 Panoptes helps manage Claude Code's per-project permissions (tool approvals, MCP servers) across worktrees:
 
@@ -167,7 +175,7 @@ Panoptes helps manage Claude Code's per-project permissions (tool approvals, MCP
 ## Who Is This For?
 
 Panoptes is for developers who:
-- Use Claude Code regularly
+- Use Claude Code or Codex CLI regularly
 - Work on multiple tasks or features simultaneously
 - Want better visibility into their AI assistant sessions
 - Prefer terminal-based tools over GUI applications
@@ -175,10 +183,10 @@ Panoptes is for developers who:
 ## Current Scope
 
 The current version includes:
-- Managing multiple Claude Code sessions
-- Shell sessions alongside Claude Code sessions
+- Managing multiple Claude Code and Codex CLI sessions
+- Shell sessions alongside AI agent sessions
 - Custom shell shortcuts for quick command execution
-- Multi-account support for different Claude configurations
+- Multi-account support for both Claude and Codex configurations
 - Git repository and branch organization with worktree support
 - Real-time session state tracking
 - Attention system with notifications and quick navigation

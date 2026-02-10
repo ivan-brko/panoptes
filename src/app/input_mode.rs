@@ -66,4 +66,16 @@ pub enum InputMode {
     AddingCustomShortcutCommand,
     /// Confirming custom shortcut deletion
     ConfirmingCustomShortcutDelete,
+    /// Selecting agent type (Claude Code vs Codex) for new session
+    SelectingAgentType,
+    /// Creating a new Codex session - typing session name
+    CreatingCodexSession,
+    /// Adding a new Codex config - entering name
+    AddingCodexConfigName,
+    /// Adding a new Codex config - entering path
+    AddingCodexConfigPath,
+    /// Confirming Codex config deletion
+    ConfirmingCodexConfigDelete,
+    /// Selecting Codex config for session creation or project default
+    SelectingCodexConfig,
 }

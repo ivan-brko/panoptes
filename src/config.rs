@@ -57,7 +57,7 @@ impl CustomShortcut {
 /// - 0-9: jump to session by number
 /// - Space: jump to attention
 /// - Esc, Enter, Tab: navigation
-const RESERVED_KEYS: &[char] = &['q', 'i', 'g', 'G', 't', 'T', 'k'];
+const RESERVED_KEYS: &[char] = &['q', 'i', 'g', 'G', 't', 'T', 'k', 'x'];
 const RESERVED_DIGITS: bool = true;
 
 /// Check if a key is reserved and cannot be used for custom shortcuts
@@ -450,10 +450,12 @@ mod tests {
         assert!(is_reserved_key('5'));
         assert!(is_reserved_key('9'));
 
+        // Codex configs key
+        assert!(is_reserved_key('x'));
+
         // Non-reserved keys
         assert!(!is_reserved_key('v'));
         assert!(!is_reserved_key('e'));
-        assert!(!is_reserved_key('x'));
     }
 
     #[test]

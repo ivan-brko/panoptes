@@ -872,6 +872,17 @@ fn read_local_settings_permissions(path: &std::path::Path) -> Vec<String> {
     permissions
 }
 
+// TODO: Codex permissions sharing
+// When Codex CLI supports per-project permissions (similar to Claude's
+// .claude/settings.local.json or .claude.json), implement detection and
+// copy dialog here. The pattern should mirror check_claude_settings_for_copy().
+// See also: CodexAdapter::setup_hooks() for where Codex config is modified.
+//
+// Similarly, when Codex CLI supports per-project permissions, implement
+// migration of unique worktree permissions back to main repo on deletion.
+// Pattern should mirror check_claude_settings_for_migrate() in
+// src/input/normal/project_detail.rs.
+
 /// Select the default base branch in the filtered list (legacy flow)
 fn select_default_base_branch(app: &mut App) {
     // Find default base branch in the available (unfiltered) list first
