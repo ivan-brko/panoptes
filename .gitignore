@@ -16,3 +16,10 @@ Cargo.lock
 
 # Backup files
 *.bak
+
+# AI agent local config (not shared)
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Git worktrees for parallel AI agents
+.trees/

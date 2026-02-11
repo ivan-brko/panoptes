@@ -1,3 +1,12 @@
+---
+name: create-menu-selection
+description: >
+  Guide for creating a new selectable list menu with consistent styling
+  and behavior. Provides step-by-step instructions for adding state
+  management, view rendering, input handling, and consistent selection
+  styling across all menus.
+---
+
 # Create Menu Selection - Developer Guide
 
 This guide walks you through creating a selectable list menu in Panoptes with consistent styling and behavior.
@@ -272,7 +281,7 @@ ListItem::new(content)
 
 ### Important: NO Background Highlighting
 
-❌ **DO NOT** use background colors for selection:
+**DO NOT** use background colors for selection:
 
 ```rust
 // WRONG - creates invisible white-on-white text
@@ -283,7 +292,7 @@ let style = if is_selected {
 };
 ```
 
-✅ **DO** use arrow prefix + bold + color:
+**DO** use arrow prefix + bold + color:
 
 ```rust
 // CORRECT - visible and consistent

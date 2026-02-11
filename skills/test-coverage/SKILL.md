@@ -1,3 +1,11 @@
+---
+name: test-coverage
+description: >
+  Analyze test coverage and identify gaps.
+  Run tests, identify modules without tests, and suggest specific
+  functions that need test coverage.
+---
+
 # Test Coverage Skill
 
 Analyze test coverage and identify modules needing tests.

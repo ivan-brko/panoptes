@@ -1,11 +1,20 @@
-<!-- NOTE: Core project instructions are duplicated in AGENTS.md for Codex compatibility. -->
-<!-- When updating shared rules (stack, commands, architecture, conventions), update BOTH files. -->
+# Panoptes
 
-# CLAUDE.md
+<!-- SHARED INSTRUCTIONS — keep in sync with CLAUDE.md -->
+<!-- Both Claude Code and OpenAI Codex read this file. -->
+<!-- Claude-specific config (hooks, subagents) stays in .claude/ -->
+<!-- Codex-specific config stays in .codex/ -->
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Tech Stack
 
-## Build & Test
+- **Language**: Rust
+- **UI Framework**: ratatui (terminal UI)
+- **Async Runtime**: tokio
+- **Error Handling**: anyhow
+- **Serialization**: serde + serde_json
+- **Terminal**: crossterm
+
+## Commands
 
 ```bash
 cargo build              # Build debug
@@ -49,7 +58,7 @@ PTY Output → Session buffer → TUI render
 - `codex_config/` - Codex CLI multi-account configuration (CODEX_HOME)
 - `config.rs` - Configuration (~/.panoptes/)
 
-## Conventions
+## Coding Conventions
 
 - Return `anyhow::Result<T>` for fallible functions
 - Add context with `.context("description")` for error propagation
@@ -71,6 +80,20 @@ PTY Output → Session buffer → TUI render
   - Provide a sensible fallback (e.g., empty config, fresh state)
   - Create backups of corrupted files when possible
 - For unrecoverable errors, propagate with context so the caller can decide
+
+## Git Conventions
+
+- Commit messages start with a verb: Add, Fix, Update, Remove, Refactor
+- Keep first line under 72 characters
+- Add body for complex changes
+- Reference issues if applicable
+
+## Testing Requirements
+
+- Tests in `#[cfg(test)]` blocks within each module
+- Use Arrange/Act/Assert pattern
+- Cover happy path, edge cases, and error conditions
+- Common test dependencies: `tempfile`, `uuid`
 
 ## Documentation
 

@@ -1,3 +1,11 @@
+---
+name: release
+description: >
+  Prepare a new release with version bump and changelog.
+  Analyze changes since the last release, suggest semantic version
+  (major/minor/patch), and update Cargo.toml and CHANGELOG.md.
+---
+
 # Release Skill
 
 Prepare a new release by analyzing changes, suggesting a semantic version bump, and updating version files.

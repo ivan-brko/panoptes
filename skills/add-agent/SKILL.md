@@ -1,3 +1,11 @@
+---
+name: add-agent
+description: >
+  Step-by-step checklist for adding a new agent type to Panoptes.
+  Follow the checklist to add the enum variant, create the adapter
+  implementation, and update the factory method.
+---
+
 # Add Agent Skill
 
 Step-by-step checklist for adding a new agent type to Panoptes.

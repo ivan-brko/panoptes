@@ -1,3 +1,11 @@
+---
+name: clippy-fix
+description: >
+  Run clippy with auto-fix and report issues.
+  Automatically fix issues that clippy knows how to fix safely,
+  then report remaining warnings that need manual attention.
+---
+
 # Clippy Fix Skill
 
 Run clippy with automatic fixes and report code quality improvements.

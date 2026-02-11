@@ -1,3 +1,11 @@
+---
+name: doc-sync
+description: >
+  Verify documentation matches code implementation.
+  Compare documentation with code to check keyboard shortcuts,
+  config options, and module descriptions for consistency.
+---
+
 # Doc Sync Skill
 
 Verify that documentation matches the actual code implementation.
