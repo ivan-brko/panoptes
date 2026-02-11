@@ -1784,10 +1784,12 @@ mod tests {
             .insert_test_session("Session B", project_b, branch_b)
             .unwrap();
 
-        let mut state = AppState::default();
+        let mut state = AppState {
+            view: View::ActivityTimeline,
+            ..Default::default()
+        };
 
         // Start from timeline, navigate to session A
-        state.view = View::ActivityTimeline;
         state.navigate_to_session(_session_a);
         assert_eq!(state.session_return_view, Some(View::ActivityTimeline));
 

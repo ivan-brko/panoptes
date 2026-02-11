@@ -195,7 +195,7 @@ mod tests {
             vec![],
         );
 
-        store.save(&[session.clone()]).unwrap();
+        store.save(std::slice::from_ref(&session)).unwrap();
 
         let loaded = store.load().unwrap();
         assert_eq!(loaded.len(), 1);

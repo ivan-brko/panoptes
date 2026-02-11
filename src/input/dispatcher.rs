@@ -230,9 +230,11 @@ mod tests {
 
     #[test]
     fn test_validate_session_mode_in_session_view_valid() {
-        let mut state = AppState::default();
-        state.input_mode = InputMode::Session;
-        state.view = View::SessionView;
+        let mut state = AppState {
+            input_mode: InputMode::Session,
+            view: View::SessionView,
+            ..Default::default()
+        };
 
         validate_mode_view_consistency(&mut state);
 
@@ -241,9 +243,11 @@ mod tests {
 
     #[test]
     fn test_validate_session_mode_in_other_view_invalid() {
-        let mut state = AppState::default();
-        state.input_mode = InputMode::Session;
-        state.view = View::ProjectsOverview;
+        let mut state = AppState {
+            input_mode: InputMode::Session,
+            view: View::ProjectsOverview,
+            ..Default::default()
+        };
 
         validate_mode_view_consistency(&mut state);
 
@@ -264,9 +268,11 @@ mod tests {
 
     #[test]
     fn test_validate_worktree_mode_in_other_view_invalid() {
-        let mut state = AppState::default();
-        state.input_mode = InputMode::WorktreeSelectBranch;
-        state.view = View::ProjectsOverview;
+        let mut state = AppState {
+            input_mode: InputMode::WorktreeSelectBranch,
+            view: View::ProjectsOverview,
+            ..Default::default()
+        };
 
         validate_mode_view_consistency(&mut state);
 
@@ -275,8 +281,10 @@ mod tests {
 
     #[test]
     fn test_validate_normal_mode_always_valid() {
-        let mut state = AppState::default();
-        state.input_mode = InputMode::Normal;
+        let mut state = AppState {
+            input_mode: InputMode::Normal,
+            ..Default::default()
+        };
 
         // Test in various views
         for view in [

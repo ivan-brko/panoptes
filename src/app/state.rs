@@ -526,8 +526,10 @@ mod tests {
 
     #[test]
     fn test_worktree_wizard_clamp_list_index_empty() {
-        let mut state = WorktreeWizardState::default();
-        state.list_index = 10;
+        let mut state = WorktreeWizardState {
+            list_index: 10,
+            ..Default::default()
+        };
         state.clamp_list_index();
         assert_eq!(state.list_index, 0);
     }
@@ -536,12 +538,14 @@ mod tests {
     fn test_worktree_wizard_clamp_list_index_with_branches() {
         use crate::wizards::worktree::{BranchRef, BranchRefType};
 
-        let mut state = WorktreeWizardState::default();
-        state.filtered_branches = vec![
-            BranchRef::new(BranchRefType::Local, "main".to_string()),
-            BranchRef::new(BranchRefType::Local, "develop".to_string()),
-        ];
-        state.list_index = 10;
+        let mut state = WorktreeWizardState {
+            filtered_branches: vec![
+                BranchRef::new(BranchRefType::Local, "main".to_string()),
+                BranchRef::new(BranchRefType::Local, "develop".to_string()),
+            ],
+            list_index: 10,
+            ..Default::default()
+        };
         state.clamp_list_index();
         // Without search text, max index is filtered_count - 1 = 1
         assert_eq!(state.list_index, 1);
@@ -551,10 +555,12 @@ mod tests {
     fn test_worktree_wizard_clamp_list_index_with_create_option() {
         use crate::wizards::worktree::{BranchRef, BranchRefType};
 
-        let mut state = WorktreeWizardState::default();
-        state.search_text = "new-branch".to_string(); // Non-empty enables "create new" option
-        state.filtered_branches = vec![BranchRef::new(BranchRefType::Local, "main".to_string())];
-        state.list_index = 10;
+        let mut state = WorktreeWizardState {
+            search_text: "new-branch".to_string(), // Non-empty enables "create new" option
+            filtered_branches: vec![BranchRef::new(BranchRefType::Local, "main".to_string())],
+            list_index: 10,
+            ..Default::default()
+        };
         state.clamp_list_index();
         // With search text, max index is filtered_count (1) to allow "create new" option
         assert_eq!(state.list_index, 1);
@@ -562,8 +568,10 @@ mod tests {
 
     #[test]
     fn test_worktree_wizard_clamp_base_list_index() {
-        let mut state = WorktreeWizardState::default();
-        state.base_list_index = 10;
+        let mut state = WorktreeWizardState {
+            base_list_index: 10,
+            ..Default::default()
+        };
         state.clamp_base_list_index(3);
         assert_eq!(state.base_list_index, 2);
 
@@ -583,9 +591,11 @@ mod tests {
 
     #[test]
     fn test_select_next() {
-        let mut state = AppState::default();
-        state.view = View::ProjectsOverview;
-        state.selected_project_index = 0;
+        let mut state = AppState {
+            view: View::ProjectsOverview,
+            selected_project_index: 0,
+            ..Default::default()
+        };
 
         state.select_next(3);
         assert_eq!(state.selected_project_index, 1);
@@ -600,9 +610,11 @@ mod tests {
 
     #[test]
     fn test_select_prev() {
-        let mut state = AppState::default();
-        state.view = View::ProjectsOverview;
-        state.selected_project_index = 2;
+        let mut state = AppState {
+            view: View::ProjectsOverview,
+            selected_project_index: 2,
+            ..Default::default()
+        };
 
         state.select_prev(3);
         assert_eq!(state.selected_project_index, 1);
@@ -617,8 +629,10 @@ mod tests {
 
     #[test]
     fn test_select_by_number() {
-        let mut state = AppState::default();
-        state.view = View::ProjectsOverview;
+        let mut state = AppState {
+            view: View::ProjectsOverview,
+            ..Default::default()
+        };
 
         state.select_by_number(2, 5);
         assert_eq!(state.selected_project_index, 1); // 1-indexed, so 2 -> index 1
@@ -634,8 +648,10 @@ mod tests {
 
     #[test]
     fn test_select_with_empty_list() {
-        let mut state = AppState::default();
-        state.selected_project_index = 5;
+        let mut state = AppState {
+            selected_project_index: 5,
+            ..Default::default()
+        };
 
         state.select_next(0);
         assert_eq!(state.selected_project_index, 0);

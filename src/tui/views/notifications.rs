@@ -108,9 +108,12 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert!(NOTIFICATION_WIDTH > 0);
-        assert!(NOTIFICATION_HEIGHT > 0);
-        // NOTIFICATION_MARGIN is u16, always >= 0
-        assert!(NOTIFICATION_MARGIN <= 10); // sanity check
+        let width = std::hint::black_box(NOTIFICATION_WIDTH);
+        let height = std::hint::black_box(NOTIFICATION_HEIGHT);
+        let margin = std::hint::black_box(NOTIFICATION_MARGIN);
+
+        assert!(width > 0);
+        assert!(height > 0);
+        assert!(margin <= 10); // sanity check
     }
 }

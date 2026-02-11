@@ -20,7 +20,7 @@ Run clippy with automatic fixes and report code quality improvements.
 
 2. **Check remaining warnings**
    ```bash
-   cargo clippy 2>&1
+   cargo lint 2>&1
    ```
    Report any warnings that couldn't be auto-fixed.
 

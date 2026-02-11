@@ -279,6 +279,6 @@ mod tests {
     #[test]
     fn test_module_compiles() {
         // Basic compilation check
-        assert!(true);
+        let _ = std::mem::size_of::<super::Tui>();
     }
 }
