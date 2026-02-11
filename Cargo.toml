@@ -23,6 +23,7 @@ path = "src/lib.rs"
 name = "panoptes"
 path = "src/main.rs"
 
+
 [dependencies]
 # TUI
 ratatui = "0.26"
