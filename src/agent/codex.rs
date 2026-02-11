@@ -18,6 +18,8 @@ use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
 
 /// Notify hook script filename
 const CODEX_NOTIFY_SCRIPT_NAME: &str = "codex-notify.sh";
+/// Disable Codex alternate screen so Panoptes scrollback behaves like Claude sessions.
+const NO_ALT_SCREEN_FLAG: &str = "--no-alt-screen";
 
 /// OpenAI Codex CLI adapter for spawning and managing Codex sessions
 pub struct CodexAdapter {
@@ -31,6 +33,11 @@ impl CodexAdapter {
         Self {
             extra_args: Vec::new(),
         }
+    }
+
+    /// Create a new Codex adapter with additional arguments
+    pub fn with_args(args: Vec<String>) -> Self {
+        Self { extra_args: args }
     }
 
     /// Get the path to the notify hook script
@@ -330,6 +337,25 @@ exit 0
 
         Ok(merge_script_path)
     }
+
+    /// Build Codex CLI args with Panoptes defaults.
+    ///
+    /// Panoptes runs Codex in inline mode (no alternate screen) so PTY scrollback
+    /// remains usable from the session view, matching Claude behavior.
+    fn build_args(&self, spawn_config: &SpawnConfig) -> Vec<String> {
+        let mut args = self.default_args();
+
+        if !args.iter().any(|arg| arg == NO_ALT_SCREEN_FLAG) {
+            args.push(NO_ALT_SCREEN_FLAG.to_string());
+        }
+
+        if let Some(ref prompt) = spawn_config.initial_prompt {
+            // Codex CLI takes initial prompt as a positional argument
+            args.push(prompt.clone());
+        }
+
+        args
+    }
 }
 
 impl Default for CodexAdapter {
@@ -403,11 +429,7 @@ impl AgentAdapter for CodexAdapter {
         let env = self.generate_env(config, spawn_config);
 
         // Build arguments
-        let mut args = self.default_args();
-        if let Some(ref prompt) = spawn_config.initial_prompt {
-            // Codex CLI takes initial prompt as a positional argument
-            args.push(prompt.clone());
-        }
+        let args = self.build_args(spawn_config);
 
         // Convert args to &str for PtyHandle
         let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -536,6 +558,63 @@ mod tests {
         assert!(script.contains("curl"));
         // Should silently exit for non-Panoptes instances
         assert!(script.contains("if [ -z \"$SESSION_ID\" ]; then exit 0; fi"));
+    }
+
+    #[test]
+    fn test_build_args_includes_no_alt_screen_by_default() {
+        let adapter = CodexAdapter::new();
+        let spawn_config = SpawnConfig {
+            session_id: Uuid::new_v4(),
+            session_name: "test".to_string(),
+            working_dir: PathBuf::from("/tmp"),
+            initial_prompt: None,
+            rows: 24,
+            cols: 80,
+            claude_config_dir: None,
+            codex_home: None,
+        };
+
+        let args = adapter.build_args(&spawn_config);
+        assert!(args.iter().any(|arg| arg == NO_ALT_SCREEN_FLAG));
+    }
+
+    #[test]
+    fn test_build_args_appends_prompt_after_flags() {
+        let adapter = CodexAdapter::new();
+        let prompt = "hello codex".to_string();
+        let spawn_config = SpawnConfig {
+            session_id: Uuid::new_v4(),
+            session_name: "test".to_string(),
+            working_dir: PathBuf::from("/tmp"),
+            initial_prompt: Some(prompt.clone()),
+            rows: 24,
+            cols: 80,
+            claude_config_dir: None,
+            codex_home: None,
+        };
+
+        let args = adapter.build_args(&spawn_config);
+        assert!(args.iter().any(|arg| arg == NO_ALT_SCREEN_FLAG));
+        assert_eq!(args.last(), Some(&prompt));
+    }
+
+    #[test]
+    fn test_build_args_preserves_existing_no_alt_screen_flag() {
+        let adapter = CodexAdapter::with_args(vec![NO_ALT_SCREEN_FLAG.to_string()]);
+        let spawn_config = SpawnConfig {
+            session_id: Uuid::new_v4(),
+            session_name: "test".to_string(),
+            working_dir: PathBuf::from("/tmp"),
+            initial_prompt: None,
+            rows: 24,
+            cols: 80,
+            claude_config_dir: None,
+            codex_home: None,
+        };
+
+        let args = adapter.build_args(&spawn_config);
+        let count = args.iter().filter(|arg| *arg == NO_ALT_SCREEN_FLAG).count();
+        assert_eq!(count, 1);
     }
 
     #[test]

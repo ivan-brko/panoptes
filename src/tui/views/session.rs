@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::project::ProjectStore;
-use crate::session::{Session, SessionManager, SessionState};
+use crate::session::{Session, SessionManager, SessionState, SessionType};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
@@ -69,7 +69,11 @@ pub fn render_session_view(
 
     // Build title with scroll indicator
     let title = if let Some(session) = session {
-        let scroll_offset = session.vterm.scrollback_offset();
+        let scroll_offset = if session.info.session_type == SessionType::OpenAICodex {
+            state.session_scroll_offset
+        } else {
+            session.vterm.scrollback_offset()
+        };
         if scroll_offset > 0 {
             format!("Output [{}{}]", '\u{2191}', scroll_offset)
         } else {
@@ -83,21 +87,35 @@ pub fn render_session_view(
 
     // === CONTENT ===
     if let Some(session) = session {
-        let styled_lines = session.visible_styled_lines(layout.content.height as usize);
-
-        // Get cursor info
-        let cursor_pos = session.vterm.cursor_position();
-        let cursor_visible = state.input_mode == InputMode::Session
-            && session.vterm.cursor_visible()
+        let use_fallback_history = session.info.session_type == SessionType::OpenAICodex
+            && state.session_scroll_offset > 0
             && session.vterm.scrollback_offset() == 0;
 
-        render_pty_content(
-            frame,
-            layout.content,
-            &styled_lines,
-            Some(cursor_pos),
-            cursor_visible,
-        );
+        if use_fallback_history {
+            let lines = session
+                .fallback_visible_lines(layout.content.height as usize)
+                .into_iter()
+                .map(Line::raw)
+                .collect::<Vec<_>>();
+            let content = Paragraph::new(lines);
+            frame.render_widget(content, layout.content);
+        } else {
+            let styled_lines = session.visible_styled_lines(layout.content.height as usize);
+
+            // Get cursor info
+            let cursor_pos = session.vterm.cursor_position();
+            let cursor_visible = state.input_mode == InputMode::Session
+                && session.vterm.cursor_visible()
+                && session.vterm.scrollback_offset() == 0;
+
+            render_pty_content(
+                frame,
+                layout.content,
+                &styled_lines,
+                Some(cursor_pos),
+                cursor_visible,
+            );
+        }
     } else {
         let empty = Paragraph::new("Session not found").style(Style::default().fg(t.error_bg));
         frame.render_widget(empty, layout.content);
@@ -105,7 +123,13 @@ pub fn render_session_view(
 
     // === FOOTER ===
     let is_scrolled = session
-        .map(|s| s.vterm.scrollback_offset() > 0)
+        .map(|s| {
+            if s.info.session_type == SessionType::OpenAICodex {
+                state.session_scroll_offset > 0
+            } else {
+                s.vterm.scrollback_offset() > 0
+            }
+        })
         .unwrap_or(false);
     let help_text = build_footer_text(state, is_scrolled, sessions, config);
 

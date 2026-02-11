@@ -216,6 +216,11 @@ impl Tui {
         }
     }
 
+    /// Check whether mouse capture is currently enabled.
+    pub fn is_mouse_capture_enabled(&self) -> bool {
+        self.mouse_capture_enabled
+    }
+
     /// Get terminal size
     pub fn size(&self) -> Result<Rect> {
         Ok(self.terminal.size()?)

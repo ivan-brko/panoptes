@@ -6,7 +6,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app::{App, InputMode};
-use crate::tui::frame::{FrameConfig, FrameLayout};
+use crate::input::session_scroll;
 
 /// Handle key in session mode (keys go to PTY)
 pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -20,45 +20,13 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::PageUp if key.kind == KeyEventKind::Press => {
             if let Some(session_id) = app.state.active_session {
-                if let Some(session) = app.sessions.get_mut(session_id) {
-                    // Calculate viewport height for scroll amount
-                    let terminal_size = app.tui.size().unwrap_or_default();
-                    let frame_config = FrameConfig::default();
-                    let layout = FrameLayout::calculate(terminal_size, &frame_config);
-                    let viewport_height = layout.content.height as usize;
-                    let max_scroll = session.vterm.max_scrollback();
-
-                    // Update app-level scroll offset with constraints
-                    app.state.session_scroll_offset = app
-                        .state
-                        .session_scroll_offset
-                        .saturating_add(viewport_height)
-                        .min(max_scroll);
-                    session
-                        .vterm
-                        .set_scrollback(app.state.session_scroll_offset);
-                }
+                session_scroll::scroll_page_up(app, session_id);
             }
             return Ok(());
         }
         KeyCode::PageDown if key.kind == KeyEventKind::Press => {
             if let Some(session_id) = app.state.active_session {
-                if let Some(session) = app.sessions.get_mut(session_id) {
-                    // Calculate viewport height for scroll amount
-                    let terminal_size = app.tui.size().unwrap_or_default();
-                    let frame_config = FrameConfig::default();
-                    let layout = FrameLayout::calculate(terminal_size, &frame_config);
-                    let viewport_height = layout.content.height as usize;
-
-                    // Update app-level scroll offset
-                    app.state.session_scroll_offset = app
-                        .state
-                        .session_scroll_offset
-                        .saturating_sub(viewport_height);
-                    session
-                        .vterm
-                        .set_scrollback(app.state.session_scroll_offset);
-                }
+                session_scroll::scroll_page_down(app, session_id);
             }
             return Ok(());
         }
@@ -67,13 +35,7 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             // Ctrl+Home: scroll to top
             if let Some(session_id) = app.state.active_session {
-                if let Some(session) = app.sessions.get_mut(session_id) {
-                    let max_scroll = session.vterm.max_scrollback();
-                    app.state.session_scroll_offset = max_scroll;
-                    session
-                        .vterm
-                        .set_scrollback(app.state.session_scroll_offset);
-                }
+                session_scroll::scroll_to_top(app, session_id);
             }
             return Ok(());
         }
@@ -82,10 +44,7 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         {
             // Ctrl+End: scroll to bottom (live view)
             if let Some(session_id) = app.state.active_session {
-                if let Some(session) = app.sessions.get_mut(session_id) {
-                    app.state.session_scroll_offset = 0;
-                    session.vterm.scroll_to_bottom();
-                }
+                session_scroll::scroll_to_bottom(app, session_id);
             }
             return Ok(());
         }
@@ -97,11 +56,8 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
     if app.state.session_scroll_offset > 0 {
-        app.state.session_scroll_offset = 0;
         if let Some(session_id) = app.state.active_session {
-            if let Some(session) = app.sessions.get_mut(session_id) {
-                session.vterm.scroll_to_bottom();
-            }
+            session_scroll::scroll_to_bottom(app, session_id);
         }
     }
 

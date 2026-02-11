@@ -6,6 +6,7 @@ pub mod dialogs;
 pub mod dispatcher;
 pub mod normal;
 pub mod session_mode;
+pub mod session_scroll;
 pub mod text_input;
 
 // Re-export commonly used items

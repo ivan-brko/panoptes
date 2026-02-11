@@ -6,6 +6,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, InputMode, View};
+use crate::input::session_scroll;
 use crate::session::SessionManager;
 use crate::tui::frame::{FrameConfig, FrameLayout};
 
@@ -37,66 +38,25 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
         KeyCode::PageUp => {
             // Scroll up in session output (toward older content)
             if let Some(session_id) = app.state.active_session {
-                if let Some(session) = app.sessions.get_mut(session_id) {
-                    // Calculate viewport height for scroll amount
-                    let terminal_size = app.tui.size().unwrap_or_default();
-                    let frame_config = FrameConfig::default();
-                    let layout = FrameLayout::calculate(terminal_size, &frame_config);
-                    let viewport_height = layout.content.height as usize;
-                    let max_scroll = session.vterm.max_scrollback();
-
-                    // Update app-level scroll offset with constraints
-                    app.state.session_scroll_offset = app
-                        .state
-                        .session_scroll_offset
-                        .saturating_add(viewport_height)
-                        .min(max_scroll);
-                    session
-                        .vterm
-                        .set_scrollback(app.state.session_scroll_offset);
-                }
+                session_scroll::scroll_page_up(app, session_id);
             }
         }
         KeyCode::PageDown => {
             // Scroll down in session output (toward newer content)
             if let Some(session_id) = app.state.active_session {
-                if let Some(session) = app.sessions.get_mut(session_id) {
-                    // Calculate viewport height for scroll amount
-                    let terminal_size = app.tui.size().unwrap_or_default();
-                    let frame_config = FrameConfig::default();
-                    let layout = FrameLayout::calculate(terminal_size, &frame_config);
-                    let viewport_height = layout.content.height as usize;
-
-                    // Update app-level scroll offset
-                    app.state.session_scroll_offset = app
-                        .state
-                        .session_scroll_offset
-                        .saturating_sub(viewport_height);
-                    session
-                        .vterm
-                        .set_scrollback(app.state.session_scroll_offset);
-                }
+                session_scroll::scroll_page_down(app, session_id);
             }
         }
         KeyCode::Home => {
             // Scroll to top (oldest content)
             if let Some(session_id) = app.state.active_session {
-                if let Some(session) = app.sessions.get_mut(session_id) {
-                    let max_scroll = session.vterm.max_scrollback();
-                    app.state.session_scroll_offset = max_scroll;
-                    session
-                        .vterm
-                        .set_scrollback(app.state.session_scroll_offset);
-                }
+                session_scroll::scroll_to_top(app, session_id);
             }
         }
         KeyCode::End => {
             // Scroll to bottom (live view)
             if let Some(session_id) = app.state.active_session {
-                if let Some(session) = app.sessions.get_mut(session_id) {
-                    app.state.session_scroll_offset = 0;
-                    session.vterm.scroll_to_bottom();
-                }
+                session_scroll::scroll_to_bottom(app, session_id);
             }
         }
         KeyCode::Tab => {
@@ -115,7 +75,7 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                     let session_id = session.info.id;
                     app.state.active_session = Some(session_id);
                     // Reset scroll offset when switching sessions
-                    app.state.session_scroll_offset = 0;
+                    session_scroll::reset_for_session_switch(app, session_id);
                     app.sessions.acknowledge_attention(session_id);
                     if app.config.notification_method == "title" {
                         SessionManager::reset_terminal_title();
@@ -137,7 +97,7 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                     app.state.selected_timeline_index = target_index;
                     app.state.active_session = Some(session_id);
                     // Reset scroll offset when switching sessions
-                    app.state.session_scroll_offset = 0;
+                    session_scroll::reset_for_session_switch(app, session_id);
                     app.sessions.acknowledge_attention(session_id);
                     if app.config.notification_method == "title" {
                         SessionManager::reset_terminal_title();
@@ -179,7 +139,7 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                             Ok(new_session_id) => {
                                 // Navigate to the new session
                                 app.state.active_session = Some(new_session_id);
-                                app.state.session_scroll_offset = 0;
+                                session_scroll::reset_for_session_switch(app, new_session_id);
                                 app.state.input_mode = InputMode::Session;
                                 app.state.view = View::SessionView;
                             }

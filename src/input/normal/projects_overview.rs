@@ -6,7 +6,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, HomepageFocus, InputMode, View};
-use crate::session::SessionManager;
+use crate::session::{SessionManager, SessionType};
 
 /// Handle key in projects overview (normal mode)
 pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -116,6 +116,9 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
                         {
                             let session_id = session.info.id;
                             app.state.navigate_to_session(session_id);
+                            if session.info.session_type == SessionType::OpenAICodex {
+                                app.tui.enable_mouse_capture();
+                            }
                             app.sessions.acknowledge_attention(session_id);
                             if app.config.notification_method == "title" {
                                 SessionManager::reset_terminal_title();
@@ -133,7 +136,9 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
                 if let Some(session) = app.sessions.get_by_index(app.state.selected_session_index) {
                     let session_id = session.info.id;
                     app.state.navigate_to_session(session_id);
-                    app.tui.enable_mouse_capture();
+                    if session.info.session_type == SessionType::OpenAICodex {
+                        app.tui.enable_mouse_capture();
+                    }
                     app.sessions.acknowledge_attention(session_id);
                     if app.config.notification_method == "title" {
                         SessionManager::reset_terminal_title();

@@ -36,7 +36,7 @@ use crate::hooks::{
 };
 use crate::logging::{LogBuffer, LogFileInfo};
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::{mouse_event_to_bytes, SessionManager};
+use crate::session::{mouse_event_to_bytes, SessionId, SessionManager, SessionType};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
     render_agent_type_selector, render_branch_detail, render_claude_configs,
@@ -65,6 +65,8 @@ pub const MAX_SESSION_NAME_LEN: usize = 256;
 pub const MAX_BRANCH_NAME_LEN: usize = 256;
 /// Maximum length for project names
 pub const MAX_PROJECT_NAME_LEN: usize = 256;
+/// Mouse-wheel line step used by local scroll handlers
+const MOUSE_SCROLL_STEP: usize = 3;
 
 /// Main application struct
 pub struct App {
@@ -90,12 +92,15 @@ pub struct App {
     pub(crate) log_buffer: Arc<LogBuffer>,
     /// Information about the current log file
     pub(crate) log_file_info: LogFileInfo,
+    /// Whether verbose mouse diagnostics are enabled
+    mouse_debug_enabled: bool,
 }
 
 impl App {
     /// Create a new application instance
     pub async fn new(log_buffer: Arc<LogBuffer>, log_file_info: LogFileInfo) -> Result<Self> {
         let config = Config::load()?;
+        let mouse_debug_enabled = mouse_debug_enabled_from_env();
 
         // Track any startup warnings to show as notifications
         let mut startup_warnings: Vec<String> = Vec::new();
@@ -145,6 +150,14 @@ impl App {
             state.header_notifications.push(warning);
         }
 
+        if mouse_debug_enabled {
+            tracing::info!(
+                target: "panoptes::mouse",
+                log_file = %log_file_info.path.display(),
+                "Mouse debug logging enabled (PANOPTES_MOUSE_DEBUG)"
+            );
+        }
+
         Ok(Self {
             config,
             state,
@@ -157,6 +170,7 @@ impl App {
             tui,
             log_buffer,
             log_file_info,
+            mouse_debug_enabled,
         })
     }
 
@@ -187,6 +201,18 @@ impl App {
         self.state.needs_render = true;
 
         loop {
+            // Safety net: Codex session mode requires mouse capture for wheel events.
+            if self.state.view == View::SessionView
+                && self.state.input_mode == InputMode::Session
+                && self
+                    .state
+                    .active_session
+                    .and_then(|session_id| self.sessions.get(session_id))
+                    .is_some_and(|session| session.info.session_type == SessionType::OpenAICodex)
+            {
+                self.tui.enable_mouse_capture();
+            }
+
             // Only render when something has changed
             if self.state.needs_render {
                 self.render()?;
@@ -218,7 +244,40 @@ impl App {
                         self.state.needs_render = true;
                     }
                     Event::Mouse(mouse) => {
-                        if self.handle_mouse_event(mouse)? {
+                        let is_scroll_event = matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp
+                                | MouseEventKind::ScrollDown
+                                | MouseEventKind::ScrollLeft
+                                | MouseEventKind::ScrollRight
+                        );
+
+                        if self.mouse_debug_enabled && is_scroll_event {
+                            tracing::info!(
+                                target: "panoptes::mouse",
+                                kind = ?mouse.kind,
+                                column = mouse.column,
+                                row = mouse.row,
+                                modifiers = ?mouse.modifiers,
+                                view = ?self.state.view,
+                                input_mode = ?self.state.input_mode,
+                                mouse_capture_enabled = self.tui.is_mouse_capture_enabled(),
+                                active_session = ?self.state.active_session,
+                                "Received mouse scroll event"
+                            );
+                        }
+
+                        let handled = self.handle_mouse_event(mouse)?;
+                        if self.mouse_debug_enabled && is_scroll_event {
+                            tracing::info!(
+                                target: "panoptes::mouse",
+                                handled,
+                                session_scroll_offset = self.state.session_scroll_offset,
+                                "Processed mouse scroll event"
+                            );
+                        }
+
+                        if handled {
                             self.state.needs_render = true;
                         }
                     }
@@ -275,8 +334,20 @@ impl App {
                 self.state.needs_render = true;
             }
 
-            // Poll session outputs - mark dirty if any session has new output
-            if !self.sessions.poll_outputs().is_empty() {
+            // Poll session outputs - mark dirty if any session has new output.
+            // Freeze active session PTY reads while user is scrolled up so the
+            // visible history doesn't shift under the cursor.
+            let frozen_session = if self.state.session_scroll_offset > 0 {
+                self.state.active_session.and_then(|session_id| {
+                    self.sessions.get(session_id).and_then(|session| {
+                        (session.info.session_type == SessionType::OpenAICodex)
+                            .then_some(session_id)
+                    })
+                })
+            } else {
+                None
+            };
+            if !self.sessions.poll_outputs_except(frozen_session).is_empty() {
                 self.state.needs_render = true;
             }
 
@@ -635,60 +706,230 @@ impl App {
             return Ok(false);
         };
 
-        let Some(session) = self.sessions.get_mut(session_id) else {
+        let is_codex_session = self
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.info.session_type == SessionType::OpenAICodex);
+        if self.sessions.get(session_id).is_none() {
             return Ok(false);
-        };
-
-        let mouse_enabled = session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
-        let should_forward_to_pty =
-            should_forward_mouse_to_pty(self.state.input_mode, mouse_enabled);
-
-        // In active session mode, forward mouse input (including wheel) to the PTY
-        // when the foreground app has enabled mouse reporting.
-        if should_forward_to_pty {
-            // Ensure forwarded input interacts with live view, not local scrollback.
-            if self.state.session_scroll_offset > 0 {
-                self.state.session_scroll_offset = 0;
-                session.vterm.scroll_to_bottom();
-            }
-            let terminal_size = self.tui.size()?;
-            let frame_config = FrameConfig::default();
-            let layout = FrameLayout::calculate(
-                ratatui::prelude::Rect::new(0, 0, terminal_size.width, terminal_size.height),
-                &frame_config,
-            );
-            if let Some(bytes) = mouse_event_to_bytes(mouse, layout.content) {
-                session.write(&bytes)?;
-                return Ok(true);
-            }
         }
 
-        // Fallback: use Panoptes-local scrollback (inactive session mode or PTY mouse disabled).
-        match mouse.kind {
+        if is_codex_session && self.handle_codex_mouse_wheel(session_id, mouse.kind)? {
+            return Ok(true);
+        }
+
+        if self.forward_mouse_event_to_pty_if_enabled(session_id, mouse, is_codex_session)? {
+            return Ok(true);
+        }
+
+        if !is_codex_session && self.handle_non_codex_mouse_wheel(session_id, mouse.kind) {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    fn handle_codex_mouse_wheel(
+        &mut self,
+        session_id: SessionId,
+        kind: MouseEventKind,
+    ) -> Result<bool> {
+        match kind {
+            MouseEventKind::ScrollUp => {
+                let viewport_height = self.session_viewport_height();
+                let (requested, new_vterm, fallback_offset) = {
+                    let Some(session) = self.sessions.get_mut(session_id) else {
+                        return Ok(false);
+                    };
+
+                    let current_vterm = session.vterm.scrollback_offset();
+                    let requested = current_vterm.saturating_add(MOUSE_SCROLL_STEP);
+                    session.vterm.set_scrollback(requested);
+                    let new_vterm = session.vterm.scrollback_offset();
+                    let vterm_advanced = new_vterm > current_vterm;
+
+                    if new_vterm > 0 && vterm_advanced {
+                        session.fallback_scroll_to_bottom();
+                        self.state.session_scroll_offset = new_vterm;
+                    } else {
+                        // vterm scrollback may get "stuck" at a shallow offset (e.g. 1).
+                        // Force fallback rendering path for deeper history scrolling.
+                        session.vterm.scroll_to_bottom();
+                        session
+                            .fallback_scroll_up_with_viewport(MOUSE_SCROLL_STEP, viewport_height);
+                        self.state.session_scroll_offset = session.fallback_scroll_offset();
+                    }
+                    (requested, new_vterm, session.fallback_scroll_offset())
+                };
+                self.log_codex_mouse_scroll(
+                    session_id,
+                    requested,
+                    new_vterm,
+                    fallback_offset,
+                    "Handled mouse scroll up as Codex local scrollback",
+                );
+                Ok(true)
+            }
+            MouseEventKind::ScrollDown => {
+                let Some(current_vterm) = self
+                    .sessions
+                    .get(session_id)
+                    .map(|session| session.vterm.scrollback_offset())
+                else {
+                    return Ok(false);
+                };
+
+                if current_vterm > 0 {
+                    let (requested, new_vterm, fallback_offset) = {
+                        let Some(session) = self.sessions.get_mut(session_id) else {
+                            return Ok(false);
+                        };
+                        let requested = current_vterm.saturating_sub(MOUSE_SCROLL_STEP);
+                        session.vterm.set_scrollback(requested);
+                        let new_vterm = session.vterm.scrollback_offset();
+                        if new_vterm == 0 {
+                            session.fallback_scroll_to_bottom();
+                        }
+                        self.state.session_scroll_offset = new_vterm;
+                        (requested, new_vterm, session.fallback_scroll_offset())
+                    };
+                    self.log_codex_mouse_scroll(
+                        session_id,
+                        requested,
+                        new_vterm,
+                        fallback_offset,
+                        "Handled mouse scroll down as Codex local scrollback",
+                    );
+                    return Ok(true);
+                }
+
+                let fallback_offset = {
+                    let Some(session) = self.sessions.get_mut(session_id) else {
+                        return Ok(false);
+                    };
+                    session.fallback_scroll_down(MOUSE_SCROLL_STEP);
+                    self.state.session_scroll_offset = session.fallback_scroll_offset();
+                    session.fallback_scroll_offset()
+                };
+                self.log_codex_mouse_scroll(
+                    session_id,
+                    0,
+                    current_vterm,
+                    fallback_offset,
+                    "Handled mouse scroll down as Codex local scrollback",
+                );
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn handle_non_codex_mouse_wheel(
+        &mut self,
+        session_id: SessionId,
+        kind: MouseEventKind,
+    ) -> bool {
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return false;
+        };
+
+        match kind {
             MouseEventKind::ScrollUp => {
                 let max_scroll = session.vterm.max_scrollback();
                 self.state.session_scroll_offset = self
                     .state
                     .session_scroll_offset
-                    .saturating_add(3)
+                    .saturating_add(MOUSE_SCROLL_STEP)
                     .min(max_scroll);
                 session
                     .vterm
                     .set_scrollback(self.state.session_scroll_offset);
-                return Ok(true);
+                true
             }
             MouseEventKind::ScrollDown => {
-                self.state.session_scroll_offset =
-                    self.state.session_scroll_offset.saturating_sub(3);
+                self.state.session_scroll_offset = self
+                    .state
+                    .session_scroll_offset
+                    .saturating_sub(MOUSE_SCROLL_STEP);
                 session
                     .vterm
                     .set_scrollback(self.state.session_scroll_offset);
-                return Ok(true);
+                true
             }
-            _ => {}
+            _ => false,
+        }
+    }
+
+    fn forward_mouse_event_to_pty_if_enabled(
+        &mut self,
+        session_id: SessionId,
+        mouse: MouseEvent,
+        is_codex_session: bool,
+    ) -> Result<bool> {
+        let mouse_enabled = self.sessions.get(session_id).is_some_and(|session| {
+            session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+        });
+        if !should_forward_mouse_to_pty(self.state.input_mode, mouse_enabled) {
+            return Ok(false);
         }
 
+        if self.state.session_scroll_offset > 0 {
+            self.state.session_scroll_offset = 0;
+            if let Some(session) = self.sessions.get_mut(session_id) {
+                session.vterm.scroll_to_bottom();
+                if is_codex_session {
+                    session.fallback_scroll_to_bottom();
+                }
+            }
+        }
+
+        let content_area = self.session_content_area()?;
+        if let Some(bytes) = mouse_event_to_bytes(mouse, content_area) {
+            if let Some(session) = self.sessions.get_mut(session_id) {
+                session.write(&bytes)?;
+                return Ok(true);
+            }
+        }
         Ok(false)
+    }
+
+    fn session_viewport_height(&self) -> usize {
+        let terminal_size = self.tui.size().unwrap_or_default();
+        let frame_config = FrameConfig::default();
+        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+        layout.content.height as usize
+    }
+
+    fn session_content_area(&self) -> Result<ratatui::prelude::Rect> {
+        let terminal_size = self.tui.size()?;
+        let frame_config = FrameConfig::default();
+        let layout = FrameLayout::calculate(
+            ratatui::prelude::Rect::new(0, 0, terminal_size.width, terminal_size.height),
+            &frame_config,
+        );
+        Ok(layout.content)
+    }
+
+    fn log_codex_mouse_scroll(
+        &self,
+        session_id: SessionId,
+        requested_offset: usize,
+        vterm_offset: usize,
+        fallback_offset: usize,
+        message: &'static str,
+    ) {
+        if self.mouse_debug_enabled {
+            tracing::info!(
+                target: "panoptes::mouse",
+                session_id = %session_id,
+                is_codex_session = true,
+                requested_offset,
+                vterm_offset,
+                fallback_offset,
+                scroll_offset = self.state.session_scroll_offset,
+                message
+            );
+        }
     }
 
     // ========================================================================
@@ -1617,6 +1858,15 @@ impl App {
 
 fn should_forward_mouse_to_pty(input_mode: InputMode, mouse_enabled: bool) -> bool {
     input_mode == InputMode::Session && mouse_enabled
+}
+
+fn mouse_debug_enabled_from_env() -> bool {
+    std::env::var("PANOPTES_MOUSE_DEBUG").ok().is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 #[cfg(test)]

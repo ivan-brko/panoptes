@@ -370,9 +370,20 @@ impl SessionManager {
     /// Returns list of session IDs that had new output
     /// Drains ALL available PTY data before returning to prevent rendering lag
     pub fn poll_outputs(&mut self) -> Vec<SessionId> {
+        self.poll_outputs_except(None)
+    }
+
+    /// Poll all sessions for new output, optionally excluding one session.
+    ///
+    /// This is useful when the active session is scrolled up in history and the
+    /// UI should "freeze" that view while still polling other sessions.
+    pub fn poll_outputs_except(&mut self, excluded: Option<SessionId>) -> Vec<SessionId> {
         let mut sessions_with_output = Vec::new();
 
         for (&session_id, session) in &mut self.sessions {
+            if excluded == Some(session_id) {
+                continue;
+            }
             let mut had_output = false;
             // Drain ALL available PTY data before returning
             while session.poll_output() {

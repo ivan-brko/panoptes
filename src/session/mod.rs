@@ -341,6 +341,17 @@ impl OutputBuffer {
         self.scroll_offset = (self.scroll_offset + n).min(max_scroll);
     }
 
+    /// Scroll up by n lines, clamped for the current viewport height.
+    ///
+    /// Unlike `scroll_up`, this stops at the highest full-page position
+    /// (`total_lines - viewport_height`) so the visible page height stays stable
+    /// at the top of history.
+    pub fn scroll_up_with_viewport(&mut self, n: usize, viewport_height: usize) {
+        let effective_height = viewport_height.max(1);
+        let max_scroll = self.lines.len().saturating_sub(effective_height);
+        self.scroll_offset = (self.scroll_offset + n).min(max_scroll);
+    }
+
     /// Scroll down by n lines (toward newer content)
     pub fn scroll_down(&mut self, n: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
@@ -356,6 +367,14 @@ impl OutputBuffer {
         self.scroll_offset = self.lines.len().saturating_sub(1);
     }
 
+    /// Scroll to top for a given viewport height.
+    ///
+    /// This pins to the oldest full page rather than a single first line.
+    pub fn scroll_to_top_with_viewport(&mut self, viewport_height: usize) {
+        let effective_height = viewport_height.max(1);
+        self.scroll_offset = self.lines.len().saturating_sub(effective_height);
+    }
+
     /// Check if scrolled to bottom
     pub fn is_at_bottom(&self) -> bool {
         self.scroll_offset == 0
@@ -367,6 +386,27 @@ impl OutputBuffer {
     }
 }
 
+/// Codex-specific fallback scrollback state.
+#[derive(Debug)]
+struct CodexFallback {
+    /// Plain-text fallback history extracted from PTY output.
+    output_buffer: OutputBuffer,
+    /// Partial plain-text line carried between PTY reads.
+    partial_output_line: String,
+    /// Remainder bytes for incomplete ANSI escape sequences between reads.
+    ansi_remainder: Vec<u8>,
+}
+
+impl CodexFallback {
+    fn new(scrollback_rows: usize) -> Self {
+        Self {
+            output_buffer: OutputBuffer::new(scrollback_rows),
+            partial_output_line: String::new(),
+            ansi_remainder: Vec::new(),
+        }
+    }
+}
+
 /// A full session with PTY and virtual terminal
 pub struct Session {
     /// Session metadata
@@ -375,6 +415,9 @@ pub struct Session {
     pub pty: PtyHandle,
     /// Virtual terminal emulator
     pub vterm: VirtualTerminal,
+    /// Codex-only fallback state for cases where terminal-emulator scrollback
+    /// is unavailable.
+    codex_fallback: Option<CodexFallback>,
     /// Rolling buffer for detecting DSR sequences across reads
     dsr_buffer: Vec<u8>,
 }
@@ -382,10 +425,13 @@ pub struct Session {
 impl Session {
     /// Create a new session with the given info, PTY, and terminal dimensions
     pub fn new(info: SessionInfo, pty: PtyHandle, rows: usize, cols: usize) -> Self {
+        let codex_fallback = (info.session_type == SessionType::OpenAICodex)
+            .then(|| CodexFallback::new(DEFAULT_SCROLLBACK_ROWS));
         Self {
             info,
             pty,
             vterm: VirtualTerminal::new(rows, cols),
+            codex_fallback,
             dsr_buffer: Vec::new(),
         }
     }
@@ -398,10 +444,13 @@ impl Session {
         cols: usize,
         scrollback_rows: usize,
     ) -> Self {
+        let codex_fallback = (info.session_type == SessionType::OpenAICodex)
+            .then(|| CodexFallback::new(scrollback_rows));
         Self {
             info,
             pty,
             vterm: VirtualTerminal::with_scrollback(rows, cols, scrollback_rows),
+            codex_fallback,
             dsr_buffer: Vec::new(),
         }
     }
@@ -412,6 +461,13 @@ impl Session {
         match self.pty.try_read() {
             Ok(Some(bytes)) => {
                 self.vterm.process(&bytes);
+                if let Some(fallback) = self.codex_fallback.as_mut() {
+                    let plain =
+                        Self::extract_plain_text_bytes(&mut fallback.ansi_remainder, &bytes);
+                    fallback
+                        .output_buffer
+                        .push_bytes(&plain, &mut fallback.partial_output_line);
+                }
 
                 // Respond to DSR (Device Status Report) queries from the child process.
                 // Some programs (e.g. Codex CLI) send \x1b[6n at startup to query cursor
@@ -472,6 +528,67 @@ impl Session {
         viewport_height: usize,
     ) -> Rc<Vec<ratatui::text::Line<'static>>> {
         self.vterm.visible_styled_lines(viewport_height)
+    }
+
+    /// Get visible lines from the plain-text fallback history buffer.
+    pub fn fallback_visible_lines(&self, viewport_height: usize) -> Vec<String> {
+        self.codex_fallback
+            .as_ref()
+            .map(|fallback| {
+                fallback
+                    .output_buffer
+                    .visible_lines(viewport_height)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Scroll the plain-text fallback history up.
+    pub fn fallback_scroll_up(&mut self, n: usize) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback.output_buffer.scroll_up(n);
+        }
+    }
+
+    /// Scroll the plain-text fallback history up, clamped for viewport height.
+    pub fn fallback_scroll_up_with_viewport(&mut self, n: usize, viewport_height: usize) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback
+                .output_buffer
+                .scroll_up_with_viewport(n, viewport_height);
+        }
+    }
+
+    /// Scroll the plain-text fallback history down.
+    pub fn fallback_scroll_down(&mut self, n: usize) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback.output_buffer.scroll_down(n);
+        }
+    }
+
+    /// Scroll plain-text fallback history to bottom.
+    pub fn fallback_scroll_to_bottom(&mut self) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback.output_buffer.scroll_to_bottom();
+        }
+    }
+
+    /// Scroll plain-text fallback history to top for a viewport.
+    pub fn fallback_scroll_to_top_with_viewport(&mut self, viewport_height: usize) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback
+                .output_buffer
+                .scroll_to_top_with_viewport(viewport_height);
+        }
+    }
+
+    /// Current fallback history scroll offset.
+    pub fn fallback_scroll_offset(&self) -> usize {
+        self.codex_fallback
+            .as_ref()
+            .map_or(0, |fallback| fallback.output_buffer.scroll_offset())
     }
 
     /// Write bytes to the PTY
@@ -538,6 +655,104 @@ impl Session {
         self.info.state = state;
         self.info.last_activity = now;
         self.info.state_entered_at = now;
+    }
+
+    /// Strip ANSI escape/control sequences from PTY bytes while preserving
+    /// printable UTF-8-compatible bytes and newlines for fallback history.
+    fn extract_plain_text_bytes(ansi_remainder: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(ansi_remainder.len() + bytes.len());
+        data.extend_from_slice(ansi_remainder);
+        data.extend_from_slice(bytes);
+        ansi_remainder.clear();
+
+        let mut out = Vec::with_capacity(data.len());
+        let mut i = 0;
+        while i < data.len() {
+            if data[i] == 0x1b {
+                let esc_start = i;
+                i += 1;
+                if i >= data.len() {
+                    ansi_remainder.extend_from_slice(&data[esc_start..]);
+                    break;
+                }
+
+                match data[i] {
+                    b'[' => {
+                        i += 1;
+                        let mut complete = false;
+                        while i < data.len() {
+                            let b = data[i];
+                            i += 1;
+                            if (0x40..=0x7e).contains(&b) {
+                                complete = true;
+                                break;
+                            }
+                        }
+                        if !complete {
+                            ansi_remainder.extend_from_slice(&data[esc_start..]);
+                            break;
+                        }
+                    }
+                    b']' => {
+                        i += 1;
+                        let mut complete = false;
+                        while i < data.len() {
+                            if data[i] == 0x07 {
+                                i += 1;
+                                complete = true;
+                                break;
+                            }
+                            if data[i] == 0x1b {
+                                if i + 1 < data.len() && data[i + 1] == b'\\' {
+                                    i += 2;
+                                    complete = true;
+                                    break;
+                                }
+                                ansi_remainder.extend_from_slice(&data[esc_start..]);
+                                return out;
+                            }
+                            i += 1;
+                        }
+                        if !complete {
+                            ansi_remainder.extend_from_slice(&data[esc_start..]);
+                            break;
+                        }
+                    }
+                    b'P' | b'X' | b'^' | b'_' => {
+                        i += 1;
+                        let mut complete = false;
+                        while i < data.len() {
+                            if data[i] == 0x1b {
+                                if i + 1 < data.len() && data[i + 1] == b'\\' {
+                                    i += 2;
+                                    complete = true;
+                                    break;
+                                }
+                                ansi_remainder.extend_from_slice(&data[esc_start..]);
+                                return out;
+                            }
+                            i += 1;
+                        }
+                        if !complete {
+                            ansi_remainder.extend_from_slice(&data[esc_start..]);
+                            break;
+                        }
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+
+            let b = data[i];
+            if b == b'\n' || b == b'\r' || b == b'\t' || b >= 0x20 {
+                out.push(b);
+            }
+            i += 1;
+        }
+
+        out
     }
 }
 
@@ -744,6 +959,40 @@ mod tests {
     }
 
     #[test]
+    fn test_output_buffer_scroll_up_with_viewport_clamps_at_full_page_top() {
+        let mut buf = OutputBuffer::new(100);
+        for i in 0..10 {
+            buf.push(format!("line {}", i));
+        }
+
+        // Viewport is 5 lines, so max useful offset is 10 - 5 = 5.
+        buf.scroll_up_with_viewport(100, 5);
+        assert_eq!(buf.scroll_offset(), 5);
+
+        // Keep a full page visible at the top.
+        let visible = buf.visible_lines(5);
+        assert_eq!(visible.len(), 5);
+        assert_eq!(visible[0], "line 0");
+        assert_eq!(visible[4], "line 4");
+    }
+
+    #[test]
+    fn test_output_buffer_scroll_to_top_with_viewport() {
+        let mut buf = OutputBuffer::new(100);
+        for i in 0..3 {
+            buf.push(format!("line {}", i));
+        }
+
+        // When viewport is taller than content, top offset is 0.
+        buf.scroll_to_top_with_viewport(10);
+        assert_eq!(buf.scroll_offset(), 0);
+
+        // With a 2-line viewport over 3 lines, top offset is 1.
+        buf.scroll_to_top_with_viewport(2);
+        assert_eq!(buf.scroll_offset(), 1);
+    }
+
+    #[test]
     fn test_output_buffer_clear() {
         let mut buf = OutputBuffer::new(100);
         buf.push("line 1".to_string());
@@ -781,5 +1030,22 @@ mod tests {
 
         // Verify vterm was resized (rows, cols)
         assert_eq!(session.vterm.size(), (40, 100));
+    }
+
+    #[test]
+    fn test_extract_plain_text_bytes_strips_csi_sequences() {
+        let mut ansi_remainder = Vec::new();
+        let plain =
+            Session::extract_plain_text_bytes(&mut ansi_remainder, b"hello\x1b[31m red\x1b[0m\r\n");
+        assert_eq!(String::from_utf8_lossy(&plain), "hello red\r\n");
+    }
+
+    #[test]
+    fn test_extract_plain_text_bytes_handles_split_escape_sequence() {
+        let mut ansi_remainder = Vec::new();
+        let first = Session::extract_plain_text_bytes(&mut ansi_remainder, b"abc\x1b[3");
+        let second = Session::extract_plain_text_bytes(&mut ansi_remainder, b"1mdef\x1b[0m");
+        assert_eq!(String::from_utf8_lossy(&first), "abc");
+        assert_eq!(String::from_utf8_lossy(&second), "def");
     }
 }
