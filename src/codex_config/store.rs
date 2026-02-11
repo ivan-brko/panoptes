@@ -57,6 +57,15 @@ impl Default for CodexConfigStore {
 }
 
 impl CodexConfigStore {
+    fn deterministic_default_id(
+        configs: &HashMap<CodexConfigId, CodexConfig>,
+    ) -> Option<CodexConfigId> {
+        configs
+            .values()
+            .min_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .map(|c| c.id)
+    }
+
     /// Create a new empty store
     pub fn new() -> Self {
         Self::default()
@@ -210,11 +219,22 @@ impl CodexConfigStore {
             }
         };
 
-        let configs = data.configs.into_iter().map(|c| (c.id, c)).collect();
+        let configs: HashMap<_, _> = data.configs.into_iter().map(|c| (c.id, c)).collect();
+        let mut default_config_id = data.default_config_id.filter(|id| configs.contains_key(id));
+
+        if data.default_config_id.is_some() && default_config_id.is_none() {
+            tracing::warn!(
+                "Codex config store default_config_id points to a missing config; selecting a fallback default"
+            );
+        }
+
+        if default_config_id.is_none() && !configs.is_empty() {
+            default_config_id = Self::deterministic_default_id(&configs);
+        }
 
         Ok(Self {
             configs,
-            default_config_id: data.default_config_id,
+            default_config_id,
             store_path: path.to_path_buf(),
         })
     }
@@ -427,5 +447,48 @@ mod tests {
 
         let store = CodexConfigStore::load_from(&path).unwrap();
         assert_eq!(store.count(), 0);
+    }
+
+    #[test]
+    fn test_store_load_with_stale_default_recovers_deterministically() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("codex_configs.json");
+
+        let id_a = uuid::Uuid::new_v4();
+        let id_b = uuid::Uuid::new_v4();
+        let stale_default = uuid::Uuid::new_v4();
+
+        let file = serde_json::json!({
+            "configs": [
+                { "id": id_b, "name": "Zulu", "codex_home": "/tmp/zulu" },
+                { "id": id_a, "name": "Alpha", "codex_home": "/tmp/alpha" }
+            ],
+            "default_config_id": stale_default
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap()).unwrap();
+
+        let store = CodexConfigStore::load_from(&path).unwrap();
+        assert_eq!(store.count(), 2);
+        // Deterministic fallback picks alphabetically first config.
+        assert_eq!(store.get_default_id(), Some(id_a));
+    }
+
+    #[test]
+    fn test_store_load_without_default_sets_fallback_when_configs_exist() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("codex_configs.json");
+
+        let id_a = uuid::Uuid::new_v4();
+        let id_b = uuid::Uuid::new_v4();
+        let file = serde_json::json!({
+            "configs": [
+                { "id": id_b, "name": "Zulu", "codex_home": "/tmp/zulu" },
+                { "id": id_a, "name": "Alpha", "codex_home": "/tmp/alpha" }
+            ]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap()).unwrap();
+
+        let store = CodexConfigStore::load_from(&path).unwrap();
+        assert_eq!(store.get_default_id(), Some(id_a));
     }
 }

@@ -105,8 +105,9 @@ exit 0
 
     /// Configure Codex's config.toml to use the notify hook
     ///
-    /// Reads existing config.toml, merges the `notify` key, and writes back.
-    /// Creates a backup before modifying.
+    /// Reads existing config.toml and configures the `notify` key.
+    /// If user already has a notify hook, Panoptes chains to it instead of
+    /// overwriting it.
     fn configure_codex_notify(codex_home: &Path, notify_script_path: &Path) -> Result<()> {
         // Ensure codex home directory exists
         std::fs::create_dir_all(codex_home).context("Failed to create CODEX_HOME directory")?;
@@ -128,6 +129,59 @@ exit 0
             toml::Value::Table(toml::map::Map::new())
         };
 
+        // Get or create the table
+        let table = config
+            .as_table_mut()
+            .context("Codex config.toml root is not a table")?;
+
+        let panoptes_notify_cmd = vec![
+            "bash".to_string(),
+            notify_script_path.to_string_lossy().to_string(),
+        ];
+        let panoptes_notify_value = Self::notify_array_value(&panoptes_notify_cmd);
+
+        let mut did_modify = false;
+        match table.get("notify") {
+            None => {
+                table.insert("notify".to_string(), panoptes_notify_value);
+                did_modify = true;
+            }
+            Some(existing_notify) if *existing_notify == panoptes_notify_value => {
+                // Already configured exactly as expected.
+            }
+            Some(existing_notify) => {
+                if let Some(existing_cmd) = Self::parse_notify_command(existing_notify) {
+                    if Self::notify_command_mentions_script(&existing_cmd, notify_script_path) {
+                        // Already chained through Panoptes (or equivalent), avoid duplicate wrapping.
+                    } else {
+                        tracing::warn!(
+                            "Codex config.toml already has 'notify' set. Chaining existing hook through Panoptes."
+                        );
+                        let chained_cmd =
+                            Self::build_chained_notify_command(notify_script_path, &existing_cmd);
+                        table.insert("notify".to_string(), Self::notify_array_value(&chained_cmd));
+                        did_modify = true;
+                    }
+                } else {
+                    let merge_script = Self::write_manual_merge_script(
+                        codex_home,
+                        existing_notify,
+                        notify_script_path,
+                    )?;
+                    anyhow::bail!(
+                        "Codex config.toml has an unsupported 'notify' value. \
+                         Panoptes cannot install its hook safely. \
+                         Merge Panoptes hook call into your existing notify hook using: {}",
+                        merge_script.display()
+                    );
+                }
+            }
+        }
+
+        if !did_modify {
+            return Ok(());
+        }
+
         // Create backup before modifying if file exists
         if config_path.exists() {
             let backup_path = config_path.with_extension("toml.panoptes.bak");
@@ -135,25 +189,6 @@ exit 0
                 tracing::warn!("Failed to create backup of codex config.toml: {}", e);
             }
         }
-
-        // Get or create the table
-        let table = config
-            .as_table_mut()
-            .context("Codex config.toml root is not a table")?;
-
-        // Check if notify is already set by user
-        if table.contains_key("notify") {
-            tracing::warn!(
-                "Codex config.toml already has 'notify' set. Overwriting with Panoptes hook."
-            );
-        }
-
-        // Set notify = ["bash", "/path/to/codex-notify.sh"]
-        let notify_value = toml::Value::Array(vec![
-            toml::Value::String("bash".to_string()),
-            toml::Value::String(notify_script_path.to_string_lossy().to_string()),
-        ]);
-        table.insert("notify".to_string(), notify_value);
 
         // Write back
         let content =
@@ -170,6 +205,119 @@ exit 0
                 .unwrap_or_else(|| PathBuf::from("/tmp"))
                 .join(".codex")
         })
+    }
+
+    fn notify_array_value(cmd: &[String]) -> toml::Value {
+        toml::Value::Array(cmd.iter().cloned().map(toml::Value::String).collect())
+    }
+
+    fn parse_notify_command(value: &toml::Value) -> Option<Vec<String>> {
+        match value {
+            toml::Value::Array(parts) => {
+                let mut cmd = Vec::with_capacity(parts.len());
+                for part in parts {
+                    cmd.push(part.as_str()?.to_string());
+                }
+                if cmd.is_empty() {
+                    None
+                } else {
+                    Some(cmd)
+                }
+            }
+            // Codex supports command strings in addition to argv arrays.
+            toml::Value::String(shell_cmd) => Some(vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                shell_cmd.clone(),
+            ]),
+            _ => None,
+        }
+    }
+
+    fn notify_command_mentions_script(cmd: &[String], script_path: &Path) -> bool {
+        let script = script_path.to_string_lossy();
+        cmd.iter().any(|part| part.contains(script.as_ref()))
+    }
+
+    fn shell_quote(arg: &str) -> String {
+        format!("'{}'", arg.replace('\'', r#"'\"'\"'"#))
+    }
+
+    fn build_chained_notify_command(
+        notify_script_path: &Path,
+        existing_notify_cmd: &[String],
+    ) -> Vec<String> {
+        let panoptes_hook = Self::shell_quote(&notify_script_path.to_string_lossy());
+        let existing = existing_notify_cmd
+            .iter()
+            .map(|part| Self::shell_quote(part))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let script = format!("{panoptes_hook} \"$@\"; {existing}");
+        vec!["bash".to_string(), "-lc".to_string(), script]
+    }
+
+    fn detect_existing_notify_hook_path(codex_home: &Path, notify_value: &toml::Value) -> Option<PathBuf> {
+        let arr = notify_value.as_array()?;
+        let strings: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+        if strings.len() < 2 {
+            return None;
+        }
+
+        // Common form: ["bash", "/path/to/hook.sh", ...]
+        let second = PathBuf::from(strings[1]);
+        if second.is_absolute() {
+            return Some(second);
+        }
+
+        // Treat relative paths as CODEX_HOME-relative for guidance output.
+        Some(codex_home.join(second))
+    }
+
+    fn write_manual_merge_script(
+        codex_home: &Path,
+        notify_value: &toml::Value,
+        notify_script_path: &Path,
+    ) -> Result<PathBuf> {
+        let existing_hook_path = Self::detect_existing_notify_hook_path(codex_home, notify_value);
+        let target_dir = existing_hook_path
+            .as_ref()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| codex_home.to_path_buf());
+        std::fs::create_dir_all(&target_dir)
+            .with_context(|| format!("Failed to create merge script directory {}", target_dir.display()))?;
+
+        let merge_script_path = target_dir.join("panoptes-notify-merge.sh");
+        let existing_display = existing_hook_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<your existing notify hook>".to_string());
+        let panoptes_hook = notify_script_path.to_string_lossy();
+        let content = format!(
+            r#"#!/bin/bash
+# Panoptes merge helper for Codex notify hooks.
+# Merge the line below into your existing notify hook ({existing_display}):
+#   "{panoptes_hook}" "$@"
+#
+# This helper is informational only and is not executed automatically.
+"{panoptes_hook}" "$@" >/dev/null 2>&1 || true
+"#
+        );
+        std::fs::write(&merge_script_path, content)
+            .with_context(|| format!("Failed to write merge helper {}", merge_script_path.display()))?;
+
+        #[cfg(unix)]
+        {
+            let mut perms = std::fs::metadata(&merge_script_path)
+                .context("Failed to read merge helper metadata")?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&merge_script_path, perms)
+                .context("Failed to set merge helper permissions")?;
+        }
+
+        Ok(merge_script_path)
     }
 }
 
@@ -208,13 +356,12 @@ impl AgentAdapter for CodexAdapter {
         );
         // Set TERM for proper terminal emulation
         env.insert("TERM".to_string(), "xterm-256color".to_string());
-        // Set custom CODEX_HOME if specified
-        if let Some(ref codex_home) = spawn_config.codex_home {
-            env.insert(
-                "CODEX_HOME".to_string(),
-                codex_home.to_string_lossy().to_string(),
-            );
-        }
+        // Always set CODEX_HOME explicitly to keep runtime home and hook configuration aligned.
+        let codex_home = Self::resolve_codex_home(spawn_config);
+        env.insert(
+            "CODEX_HOME".to_string(),
+            codex_home.to_string_lossy().to_string(),
+        );
         env
     }
 
@@ -328,8 +475,15 @@ mod tests {
             env.get("PANOPTES_SESSION_ID"),
             Some(&session_id.to_string())
         );
-        // No CODEX_HOME when not specified
-        assert!(env.get("CODEX_HOME").is_none());
+        // CODEX_HOME should always be set, even when no custom config is provided.
+        assert_eq!(
+            env.get("CODEX_HOME"),
+            Some(
+                &CodexAdapter::resolve_codex_home(&spawn_config)
+                    .display()
+                    .to_string()
+            )
+        );
     }
 
     #[test]
@@ -450,6 +604,75 @@ approval_policy = "suggest"
 
         // Verify backup was created
         assert!(codex_home.join("config.toml.panoptes.bak").exists());
+    }
+
+    #[test]
+    fn test_configure_codex_notify_chains_existing_notify() {
+        let temp_dir = TempDir::new().unwrap();
+        let codex_home = temp_dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).unwrap();
+
+        let existing_config = r#"
+model = "o3-mini"
+notify = ["echo", "legacy-hook"]
+"#;
+        std::fs::write(codex_home.join("config.toml"), existing_config).unwrap();
+
+        let notify_script = PathBuf::from("/test/codex-notify.sh");
+        CodexAdapter::configure_codex_notify(&codex_home, &notify_script).unwrap();
+
+        let content = std::fs::read_to_string(codex_home.join("config.toml")).unwrap();
+        let config: toml::Value = toml::from_str(&content).unwrap();
+
+        let notify = config.get("notify").unwrap().as_array().unwrap();
+        assert_eq!(notify[0].as_str().unwrap(), "bash");
+        assert_eq!(notify[1].as_str().unwrap(), "-lc");
+        let script = notify[2].as_str().unwrap();
+        assert!(script.contains("/test/codex-notify.sh"));
+        assert!(script.contains("'echo' 'legacy-hook'"));
+
+        // Existing settings should still be present.
+        assert_eq!(config.get("model").unwrap().as_str().unwrap(), "o3-mini");
+    }
+
+    #[test]
+    fn test_configure_codex_notify_rejects_unsupported_notify_shape() {
+        let temp_dir = TempDir::new().unwrap();
+        let codex_home = temp_dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        let legacy_hook_dir = temp_dir.path().join("legacy-hooks");
+        std::fs::create_dir_all(&legacy_hook_dir).unwrap();
+        let legacy_hook = legacy_hook_dir.join("notify.sh");
+        std::fs::write(&legacy_hook, "#!/bin/bash\n").unwrap();
+
+        let existing_config = r#"
+model = "o3-mini"
+notify = ["bash", "__LEGACY__", 42]
+"#;
+        let existing_config =
+            existing_config.replace("__LEGACY__", legacy_hook.to_string_lossy().as_ref());
+        std::fs::write(codex_home.join("config.toml"), existing_config).unwrap();
+
+        let notify_script = PathBuf::from("/test/codex-notify.sh");
+        let err = CodexAdapter::configure_codex_notify(&codex_home, &notify_script)
+            .expect_err("unsupported notify shape should fail");
+        assert!(err
+            .to_string()
+            .contains("unsupported 'notify' value"));
+        assert!(err.to_string().contains("panoptes-notify-merge.sh"));
+
+        let content = std::fs::read_to_string(codex_home.join("config.toml")).unwrap();
+        let config: toml::Value = toml::from_str(&content).unwrap();
+        let notify = config.get("notify").unwrap().as_array().unwrap();
+        assert_eq!(notify[0].as_str(), Some("bash"));
+        assert_eq!(notify[1].as_str(), Some(legacy_hook.to_string_lossy().as_ref()));
+        assert!(!codex_home.join("config.toml.panoptes.bak").exists());
+
+        let merge_helper = legacy_hook_dir.join("panoptes-notify-merge.sh");
+        assert!(merge_helper.exists());
+        let helper_content = std::fs::read_to_string(merge_helper).unwrap();
+        assert!(helper_content.contains("/test/codex-notify.sh"));
+        assert!(helper_content.contains("notify.sh"));
     }
 
     #[test]

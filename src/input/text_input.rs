@@ -1172,6 +1172,7 @@ fn create_codex_session_without_config(app: &mut App) -> Result<()> {
         }
         Err(e) => {
             tracing::error!("Failed to create Codex session: {}", e);
+            app.state.error_message = Some(format!("Failed to create Codex session: {}", e));
             app.state.input_mode = InputMode::Normal;
         }
     }
@@ -1256,6 +1257,7 @@ fn create_codex_session_with_config(
         }
         Err(e) => {
             tracing::error!("Failed to create Codex session: {}", e);
+            app.state.error_message = Some(format!("Failed to create Codex session: {}", e));
             app.state.input_mode = InputMode::Normal;
         }
     }
