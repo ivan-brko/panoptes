@@ -21,7 +21,7 @@ cargo build              # Build debug
 cargo build --release    # Build release
 cargo test               # Run all tests
 cargo run                # Run the application
-cargo clippy -- -D warnings  # Lint (run before committing)
+cargo lint               # Lint (clippy --all-targets -- -D warnings)
 cargo fmt                # Format code
 ```
 
@@ -65,7 +65,7 @@ PTY Output → Session buffer → TUI render
 - Module-level doc comments (`//!`) describing purpose
 - Tests in `#[cfg(test)]` blocks within each module
 - State enums with display/color helpers for TUI rendering
-- Always run `cargo fmt` and `cargo clippy` before committing
+- Always run `cargo fmt` and `cargo lint` before committing
 - When adding keyboard shortcuts, update **all three**:
   1. Footer help in `src/tui/views/<view>.rs`
   2. Help overlay in `src/tui/views/help.rs`

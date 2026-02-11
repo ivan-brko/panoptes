@@ -407,8 +407,10 @@ mod tests {
 
     #[test]
     fn test_config_serialization_with_scrollback() {
-        let mut config = Config::default();
-        config.scrollback_lines = 5000;
+        let config = Config {
+            scrollback_lines: 5000,
+            ..Default::default()
+        };
 
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_str).unwrap();

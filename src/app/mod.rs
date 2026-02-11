@@ -639,15 +639,34 @@ impl App {
             return Ok(false);
         };
 
-        // Always handle scroll wheel for our own scrollback, regardless of whether
-        // the PTY application has mouse mode enabled. This ensures scrollback works
-        // for all session types (Claude Code, Codex, shell, etc.).
-        // Some agents (e.g., Codex) enable terminal mouse reporting, which would
-        // otherwise swallow scroll events by forwarding them to the PTY.
+        let mouse_enabled = session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+        let should_forward_to_pty =
+            should_forward_mouse_to_pty(self.state.input_mode, mouse_enabled);
+
+        // In active session mode, forward mouse input (including wheel) to the PTY
+        // when the foreground app has enabled mouse reporting.
+        if should_forward_to_pty {
+            // Ensure forwarded input interacts with live view, not local scrollback.
+            if self.state.session_scroll_offset > 0 {
+                self.state.session_scroll_offset = 0;
+                session.vterm.scroll_to_bottom();
+            }
+            let terminal_size = self.tui.size()?;
+            let frame_config = FrameConfig::default();
+            let layout = FrameLayout::calculate(
+                ratatui::prelude::Rect::new(0, 0, terminal_size.width, terminal_size.height),
+                &frame_config,
+            );
+            if let Some(bytes) = mouse_event_to_bytes(mouse, layout.content) {
+                session.write(&bytes)?;
+                return Ok(true);
+            }
+        }
+
+        // Fallback: use Panoptes-local scrollback (inactive session mode or PTY mouse disabled).
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 let max_scroll = session.vterm.max_scrollback();
-                // Scroll up by 3 lines (same as claude-wrapper)
                 self.state.session_scroll_offset = self
                     .state
                     .session_scroll_offset
@@ -659,7 +678,6 @@ impl App {
                 return Ok(true);
             }
             MouseEventKind::ScrollDown => {
-                // Scroll down by 3 lines (same as claude-wrapper)
                 self.state.session_scroll_offset =
                     self.state.session_scroll_offset.saturating_sub(3);
                 session
@@ -668,22 +686,6 @@ impl App {
                 return Ok(true);
             }
             _ => {}
-        }
-
-        // For non-scroll mouse events (clicks, drag, etc.), forward to PTY
-        // when the application has mouse mode enabled (e.g., vim with mouse support)
-        let mouse_enabled = session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
-        if mouse_enabled {
-            let terminal_size = self.tui.size()?;
-            let frame_config = FrameConfig::default();
-            let layout = FrameLayout::calculate(
-                ratatui::prelude::Rect::new(0, 0, terminal_size.width, terminal_size.height),
-                &frame_config,
-            );
-            if let Some(bytes) = mouse_event_to_bytes(mouse, layout.content) {
-                session.write(&bytes)?;
-                return Ok(true);
-            }
         }
 
         Ok(false)
@@ -1613,6 +1615,10 @@ impl App {
     }
 }
 
+fn should_forward_mouse_to_pty(input_mode: InputMode, mouse_enabled: bool) -> bool {
+    input_mode == InputMode::Session && mouse_enabled
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1784,10 +1790,12 @@ mod tests {
             .insert_test_session("Session B", project_b, branch_b)
             .unwrap();
 
-        let mut state = AppState::default();
+        let mut state = AppState {
+            view: View::ActivityTimeline,
+            ..Default::default()
+        };
 
         // Start from timeline, navigate to session A
-        state.view = View::ActivityTimeline;
         state.navigate_to_session(_session_a);
         assert_eq!(state.session_return_view, Some(View::ActivityTimeline));
 
@@ -1800,5 +1808,12 @@ mod tests {
         assert_eq!(state.view, View::BranchDetail(project_b, branch_b));
         assert!(state.active_session.is_none());
         assert!(state.session_return_view.is_none());
+    }
+
+    #[test]
+    fn test_should_forward_mouse_to_pty() {
+        assert!(should_forward_mouse_to_pty(InputMode::Session, true));
+        assert!(!should_forward_mouse_to_pty(InputMode::Session, false));
+        assert!(!should_forward_mouse_to_pty(InputMode::Normal, true));
     }
 }

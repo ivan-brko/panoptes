@@ -171,7 +171,7 @@ mod tests {
         let env = adapter.generate_env(&config, &spawn_config);
 
         assert_eq!(env.get("TERM"), Some(&"xterm-256color".to_string()));
-        assert!(env.get("PANOPTES_SESSION_ID").is_some());
+        assert!(env.contains_key("PANOPTES_SESSION_ID"));
         assert_eq!(env.get("PANOPTES_SESSION"), Some(&"1".to_string()));
     }
 

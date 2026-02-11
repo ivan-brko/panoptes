@@ -382,7 +382,7 @@ mod tests {
             Some(&session_id.to_string())
         );
         // No CLAUDE_CONFIG_DIR when not specified
-        assert!(env.get("CLAUDE_CONFIG_DIR").is_none());
+        assert!(!env.contains_key("CLAUDE_CONFIG_DIR"));
     }
 
     #[test]

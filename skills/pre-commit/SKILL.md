@@ -20,7 +20,7 @@ Verify code is properly formatted. If this fails, run `cargo fmt` to fix.
 
 ### 2. Clippy Lint
 ```bash
-cargo clippy -- -D warnings
+cargo lint
 ```
 Ensure no clippy warnings. Fix any issues before committing.
 
@@ -61,7 +61,7 @@ Review what's being committed. Avoid committing:
 Run all checks in sequence:
 ```bash
 cargo fmt --check && \
-cargo clippy -- -D warnings && \
+cargo lint && \
 cargo test && \
 echo "All checks passed!"
 ```
