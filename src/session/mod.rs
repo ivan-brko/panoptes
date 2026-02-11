@@ -47,6 +47,15 @@ impl SessionType {
         }
     }
 
+    /// Get a short tag for display in session lists (e.g. [CC], [CX], [SH])
+    pub fn short_tag(&self) -> &str {
+        match self {
+            SessionType::ClaudeCode => "[CC]",
+            SessionType::Shell => "[SH]",
+            SessionType::OpenAICodex => "[CX]",
+        }
+    }
+
     /// Check if this session type uses hooks for state tracking
     pub fn uses_hooks(&self) -> bool {
         matches!(self, SessionType::ClaudeCode | SessionType::OpenAICodex)
@@ -410,10 +419,7 @@ impl Session {
                 let mut combined = Vec::with_capacity(self.dsr_buffer.len() + bytes.len());
                 combined.extend_from_slice(&self.dsr_buffer);
                 combined.extend_from_slice(&bytes);
-                let dsr_count = combined
-                    .windows(4)
-                    .filter(|w| *w == b"\x1b[6n")
-                    .count();
+                let dsr_count = combined.windows(4).filter(|w| *w == b"\x1b[6n").count();
                 if dsr_count > 0 {
                     let (row, col) = self.vterm.cursor_position();
                     let response = format!("\x1b[{};{}R", row + 1, col + 1);
@@ -604,6 +610,13 @@ mod tests {
     fn test_session_type_display() {
         assert_eq!(SessionType::ClaudeCode.display_name(), "Claude Code");
         assert_eq!(SessionType::Shell.display_name(), "Shell");
+    }
+
+    #[test]
+    fn test_session_type_short_tag() {
+        assert_eq!(SessionType::ClaudeCode.short_tag(), "[CC]");
+        assert_eq!(SessionType::Shell.short_tag(), "[SH]");
+        assert_eq!(SessionType::OpenAICodex.short_tag(), "[CX]");
     }
 
     #[test]

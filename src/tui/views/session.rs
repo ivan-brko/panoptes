@@ -156,7 +156,8 @@ fn build_header_breadcrumb(
             .push(branch_name)
             .push(&session.info.name);
         let suffix = format!(
-            "- {}{}{} {}",
+            "{} - {}{}{} {}",
+            session.info.session_type.short_tag(),
             session.info.state.display_name(),
             exit_info,
             config_display,

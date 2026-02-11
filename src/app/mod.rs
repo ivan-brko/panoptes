@@ -639,12 +639,41 @@ impl App {
             return Ok(false);
         };
 
-        // Check if Claude Code has mouse mode enabled
-        let mouse_enabled = session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+        // Always handle scroll wheel for our own scrollback, regardless of whether
+        // the PTY application has mouse mode enabled. This ensures scrollback works
+        // for all session types (Claude Code, Codex, shell, etc.).
+        // Some agents (e.g., Codex) enable terminal mouse reporting, which would
+        // otherwise swallow scroll events by forwarding them to the PTY.
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                let max_scroll = session.vterm.max_scrollback();
+                // Scroll up by 3 lines (same as claude-wrapper)
+                self.state.session_scroll_offset = self
+                    .state
+                    .session_scroll_offset
+                    .saturating_add(3)
+                    .min(max_scroll);
+                session
+                    .vterm
+                    .set_scrollback(self.state.session_scroll_offset);
+                return Ok(true);
+            }
+            MouseEventKind::ScrollDown => {
+                // Scroll down by 3 lines (same as claude-wrapper)
+                self.state.session_scroll_offset =
+                    self.state.session_scroll_offset.saturating_sub(3);
+                session
+                    .vterm
+                    .set_scrollback(self.state.session_scroll_offset);
+                return Ok(true);
+            }
+            _ => {}
+        }
 
+        // For non-scroll mouse events (clicks, drag, etc.), forward to PTY
+        // when the application has mouse mode enabled (e.g., vim with mouse support)
+        let mouse_enabled = session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
         if mouse_enabled {
-            // Forward mouse events to PTY when Claude Code wants them
-            // (for vim, etc. with mouse support)
             let terminal_size = self.tui.size()?;
             let frame_config = FrameConfig::default();
             let layout = FrameLayout::calculate(
@@ -654,33 +683,6 @@ impl App {
             if let Some(bytes) = mouse_event_to_bytes(mouse, layout.content) {
                 session.write(&bytes)?;
                 return Ok(true);
-            }
-        } else {
-            // Handle scroll wheel for our own scrollback when mouse mode is disabled
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    let max_scroll = session.vterm.max_scrollback();
-                    // Scroll up by 3 lines (same as claude-wrapper)
-                    self.state.session_scroll_offset = self
-                        .state
-                        .session_scroll_offset
-                        .saturating_add(3)
-                        .min(max_scroll);
-                    session
-                        .vterm
-                        .set_scrollback(self.state.session_scroll_offset);
-                    return Ok(true);
-                }
-                MouseEventKind::ScrollDown => {
-                    // Scroll down by 3 lines (same as claude-wrapper)
-                    self.state.session_scroll_offset =
-                        self.state.session_scroll_offset.saturating_sub(3);
-                    session
-                        .vterm
-                        .set_scrollback(self.state.session_scroll_offset);
-                    return Ok(true);
-                }
-                _ => {}
             }
         }
 

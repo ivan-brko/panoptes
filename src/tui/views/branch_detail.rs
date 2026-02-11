@@ -136,12 +136,8 @@ pub fn render_branch_detail(
                         (_, state) => state.display_name().to_string(),
                     };
 
-                    // Type badge for shell sessions (Claude Code sessions don't need a badge)
-                    let type_badge = match session.info.session_type {
-                        SessionType::Shell => "󰆍 ",
-                        SessionType::ClaudeCode => "",
-                        SessionType::OpenAICodex => "🔮 ",
-                    };
+                    let t = theme();
+                    let short_tag = session.info.session_type.short_tag();
 
                     // Build attention badge
                     let (badge, badge_color) = if needs_attention {
@@ -157,7 +153,7 @@ pub fn render_branch_detail(
                     let content = Line::from(vec![
                         Span::raw(prefix),
                         Span::styled(badge, Style::default().fg(badge_color)),
-                        Span::raw(type_badge),
+                        Span::styled(format!("{} ", short_tag), t.muted_style()),
                         Span::raw(format!(
                             "{}: {} [{}]",
                             i + 1,
