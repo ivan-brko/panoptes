@@ -72,12 +72,16 @@ impl CodexAdapter {
             r#"#!/bin/bash
 # Panoptes notify hook for OpenAI Codex CLI
 # Silently exits for non-Panoptes Codex instances
+#
+# CRITICAL: Do NOT use blocking stdin reads (e.g. `read -r`) in this script.
+# Codex executes notify hooks synchronously and pipes event JSON to stdin.
+# A blocking read stalls Codex's output pipeline, causing typed characters
+# to be dropped during streaming. If stdin data is needed in the future,
+# it MUST be consumed non-blockingly (e.g. `cat > /dev/null &` to drain,
+# or read in a backgrounded subshell).
 
 SESSION_ID="${{PANOPTES_SESSION_ID:-}}"
 if [ -z "$SESSION_ID" ]; then exit 0; fi
-
-# Read JSON from stdin (Codex sends event data)
-read -r json_input
 
 timestamp=$(date +%s)
 
