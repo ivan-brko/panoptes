@@ -1,3 +1,11 @@
+---
+name: add-view
+description: >
+  Step-by-step checklist for adding a new view to Panoptes.
+  Follow the checklist to create the view enum variant, render function,
+  input handler, and update all dispatch points.
+---
+
 # Add View Skill
 
 Step-by-step checklist for adding a new view to Panoptes.

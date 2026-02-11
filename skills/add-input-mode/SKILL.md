@@ -1,3 +1,11 @@
+---
+name: add-input-mode
+description: >
+  Step-by-step checklist for adding a new input mode to Panoptes.
+  Follow the checklist to add the enum variant, create the handler
+  in the appropriate module, and update the dispatcher.
+---
+
 # Add Input Mode Skill
 
 Step-by-step checklist for adding a new input mode to Panoptes.

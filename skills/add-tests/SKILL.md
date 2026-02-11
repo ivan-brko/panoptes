@@ -1,3 +1,11 @@
+---
+name: add-tests
+description: >
+  Generate test scaffolding for untested modules.
+  Analyze public functions, identify test cases, and create
+  comprehensive test coverage.
+---
+
 # Add Tests Skill
 
 Generate test scaffolding for untested modules in Panoptes.

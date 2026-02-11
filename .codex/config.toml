@@ -1,0 +1,4 @@
+# Codex project configuration
+# Falls back to CLAUDE.md if AGENTS.md is missing in a subdirectory
+project_doc_fallback_filenames = ["CLAUDE.md"]
+project_doc_max_bytes = 65536

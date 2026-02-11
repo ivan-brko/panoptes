@@ -1,3 +1,11 @@
+---
+name: pre-commit
+description: >
+  Run all pre-commit checks before committing.
+  Run all quality checks including format check, clippy, tests,
+  and verify no secrets or TODOs are staged.
+---
+
 # Pre-Commit Skill
 
 Run all quality checks before committing code changes.
