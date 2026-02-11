@@ -28,7 +28,8 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         // In Session mode, fall through to forward Ctrl+C to PTY
         if app.state.input_mode != InputMode::Session {
             // Show warning in all other modes
-            app.state.error_message = Some("Ctrl+C disabled. Press 'q' or Esc to quit.".to_string());
+            app.state.error_message =
+                Some("Ctrl+C disabled. Press 'q' or Esc to quit.".to_string());
             return Ok(());
         }
     }
