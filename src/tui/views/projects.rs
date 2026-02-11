@@ -239,6 +239,10 @@ fn render_attention_section(
 
             let content = Line::from(vec![
                 Span::styled("● ", Style::default().fg(badge_color)),
+                Span::styled(
+                    format!("{} ", session.info.session_type.short_tag()),
+                    t.muted_style(),
+                ),
                 Span::raw(format!(
                     "{} / {} / {} {}",
                     project_name, branch_name, session.info.name, state_text
@@ -584,6 +588,10 @@ fn render_quick_sessions(
             let content = Line::from(vec![
                 Span::raw(prefix),
                 Span::styled(badge, Style::default().fg(badge_color)),
+                Span::styled(
+                    format!("{} ", session.info.session_type.short_tag()),
+                    t.muted_style(),
+                ),
                 Span::raw(format!(
                     "{}: {} / {} / {} [{}]",
                     i + 1,

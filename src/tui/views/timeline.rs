@@ -14,6 +14,7 @@ use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
+use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
 use crate::tui::widgets::selection::{selection_prefix, selection_style};
@@ -140,9 +141,14 @@ pub fn render_timeline(
                 };
 
                 // Format: project / branch / session [state] - time
+                let t = theme();
                 let content = Line::from(vec![
                     Span::raw(prefix),
                     Span::styled(badge, Style::default().fg(badge_color)),
+                    Span::styled(
+                        format!("{} ", session.info.session_type.short_tag()),
+                        t.muted_style(),
+                    ),
                     Span::raw(format!(
                         "{}: {} / {} / {} [{}] - {}",
                         i + 1,
@@ -218,8 +224,13 @@ fn render_attention_section(
                 ),
             };
 
+            let t = theme();
             let content = Line::from(vec![
                 Span::styled("● ", Style::default().fg(badge_color)),
+                Span::styled(
+                    format!("{} ", session.info.session_type.short_tag()),
+                    t.muted_style(),
+                ),
                 Span::raw(format!(
                     "{} / {} / {} {}",
                     project_name, branch_name, session.info.name, state_text
