@@ -258,7 +258,10 @@ exit 0
         vec!["bash".to_string(), "-lc".to_string(), script]
     }
 
-    fn detect_existing_notify_hook_path(codex_home: &Path, notify_value: &toml::Value) -> Option<PathBuf> {
+    fn detect_existing_notify_hook_path(
+        codex_home: &Path,
+        notify_value: &toml::Value,
+    ) -> Option<PathBuf> {
         let arr = notify_value.as_array()?;
         let strings: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
         if strings.len() < 2 {
@@ -285,8 +288,12 @@ exit 0
             .as_ref()
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| codex_home.to_path_buf());
-        std::fs::create_dir_all(&target_dir)
-            .with_context(|| format!("Failed to create merge script directory {}", target_dir.display()))?;
+        std::fs::create_dir_all(&target_dir).with_context(|| {
+            format!(
+                "Failed to create merge script directory {}",
+                target_dir.display()
+            )
+        })?;
 
         let merge_script_path = target_dir.join("panoptes-notify-merge.sh");
         let existing_display = existing_hook_path
@@ -304,8 +311,12 @@ exit 0
 "{panoptes_hook}" "$@" >/dev/null 2>&1 || true
 "#
         );
-        std::fs::write(&merge_script_path, content)
-            .with_context(|| format!("Failed to write merge helper {}", merge_script_path.display()))?;
+        std::fs::write(&merge_script_path, content).with_context(|| {
+            format!(
+                "Failed to write merge helper {}",
+                merge_script_path.display()
+            )
+        })?;
 
         #[cfg(unix)]
         {
@@ -656,16 +667,17 @@ notify = ["bash", "__LEGACY__", 42]
         let notify_script = PathBuf::from("/test/codex-notify.sh");
         let err = CodexAdapter::configure_codex_notify(&codex_home, &notify_script)
             .expect_err("unsupported notify shape should fail");
-        assert!(err
-            .to_string()
-            .contains("unsupported 'notify' value"));
+        assert!(err.to_string().contains("unsupported 'notify' value"));
         assert!(err.to_string().contains("panoptes-notify-merge.sh"));
 
         let content = std::fs::read_to_string(codex_home.join("config.toml")).unwrap();
         let config: toml::Value = toml::from_str(&content).unwrap();
         let notify = config.get("notify").unwrap().as_array().unwrap();
         assert_eq!(notify[0].as_str(), Some("bash"));
-        assert_eq!(notify[1].as_str(), Some(legacy_hook.to_string_lossy().as_ref()));
+        assert_eq!(
+            notify[1].as_str(),
+            Some(legacy_hook.to_string_lossy().as_ref())
+        );
         assert!(!codex_home.join("config.toml.panoptes.bak").exists());
 
         let merge_helper = legacy_hook_dir.join("panoptes-notify-merge.sh");

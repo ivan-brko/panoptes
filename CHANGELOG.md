@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-11
+
+### Added
+- OpenAI Codex CLI support — run Codex sessions alongside Claude Code with the same attention tracking and session management
+- Multi-account support for Codex CLI (CODEX_HOME-based configuration)
+- Session type indicators ([CC], [CX], [SH]) in all session lists
+- DSR (Device Status Report) query handling for PTY sessions
+
+### Changed
+- Updated shortcut documentation to be agent-agnostic
+- Updated Ctrl+C warning to mention Esc as an alternative quit key
+
+### Fixed
+- Scroll not working in Codex sessions
+- Codex session creation dialog not rendering
+- Codex character dropping caused by blocking stdin read in notify hook
+- Codex hook setup hardened to surface configuration failures
+- Codex config selector bugs
+
+### Removed
+- codex-harness diagnostic binary
+
 ## [0.2.2] - 2025-01-29
 
 ### Added
@@ -103,7 +125,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Focus timer countdown accuracy with Alt+Tab detection
 - Escape key behavior (Shift+Escape forwards to PTY)
 
-[Unreleased]: https://github.com/ivan-brko/panoptes/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/ivan-brko/panoptes/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ivan-brko/panoptes/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/ivan-brko/panoptes/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/ivan-brko/panoptes/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/ivan-brko/panoptes/releases/tag/v0.1.0
