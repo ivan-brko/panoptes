@@ -6,6 +6,8 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, InputMode, View};
+use crate::claude_json::ClaudeJsonStore;
+use crate::config::{is_reserved_key, CustomShortcut};
 use crate::focus_timing::store::FocusStore;
 
 /// Handle key when starting a focus timer (entering duration)
@@ -127,10 +129,28 @@ pub fn handle_confirming_delete_key(app: &mut App, key: KeyEvent) -> Result<()> 
 
                 // Get branch_id before destroying (for selection adjustment)
                 let branch_id = app.state.view.branch_id();
+                let project_id = app.state.view.project_id();
+                let was_active = app.state.active_session == Some(session_id);
+                let was_in_session_view = app.state.view == View::SessionView;
 
                 // Clear active_session if it was the destroyed session
-                if app.state.active_session == Some(session_id) {
+                if was_active {
                     app.state.active_session = None;
+                    app.state.session_return_view = None;
+                    // Navigate back from session view if we're there
+                    if was_in_session_view {
+                        // Navigate to branch detail or project detail or projects overview
+                        if let (Some(pid), Some(bid)) = (project_id, branch_id) {
+                            app.state.view = View::BranchDetail(pid, bid);
+                        } else if let Some(pid) = project_id {
+                            app.state.view = View::ProjectDetail(pid);
+                        } else {
+                            app.state.view = View::ProjectsOverview;
+                        }
+                        app.state
+                            .header_notifications
+                            .push("Session ended".to_string());
+                    }
                 }
 
                 if let Err(e) = app.sessions.destroy_session(session_id) {
@@ -246,6 +266,50 @@ pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Resu
                                     }
 
                                     app.clear_loading();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Clean up Claude permissions for deleted worktree
+                if let Some(branch) = &branch_info {
+                    if branch.is_worktree {
+                        let worktree_path = branch.working_dir.to_string_lossy().to_string();
+
+                        // Get the Claude config to use (project default or global default)
+                        if let Some(project_id) = app.state.view.project_id() {
+                            let config_dir = app
+                                .project_store
+                                .get_project(project_id)
+                                .and_then(|p| p.default_claude_config)
+                                .or_else(|| app.claude_config_store.get_default_id())
+                                .and_then(|id| app.claude_config_store.get(id))
+                                .and_then(|c| c.config_dir.clone());
+
+                            if let Some(store) =
+                                ClaudeJsonStore::for_config_dir(config_dir.as_deref())
+                            {
+                                match store.remove_settings(&worktree_path) {
+                                    Ok(true) => {
+                                        tracing::info!(
+                                            "Removed Claude permissions for deleted worktree: {}",
+                                            worktree_path
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        tracing::debug!(
+                                            "No Claude permissions found for worktree: {}",
+                                            worktree_path
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to remove Claude permissions for {}: {}",
+                                            worktree_path,
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -371,6 +435,584 @@ pub fn handle_confirming_quit_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             // Cancel quit
             app.state.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when confirming Claude config deletion
+pub fn handle_confirming_claude_config_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Confirm deletion
+            if let Some(config_id) = app.state.pending_delete_claude_config.take() {
+                // Validate config still exists
+                if app.claude_config_store.get(config_id).is_none() {
+                    tracing::warn!(
+                        config_id = %config_id,
+                        "Config no longer exists when confirming delete"
+                    );
+                    app.state.input_mode = InputMode::Normal;
+                    return Ok(());
+                }
+
+                // Clear default_claude_config from any projects using this config
+                let affected_projects: Vec<_> = app
+                    .project_store
+                    .projects()
+                    .filter(|p| p.default_claude_config == Some(config_id))
+                    .map(|p| p.id)
+                    .collect();
+
+                for project_id in affected_projects {
+                    if let Some(project) = app.project_store.get_project_mut(project_id) {
+                        project.default_claude_config = None;
+                    }
+                }
+
+                // Save project store if any projects were affected
+                if let Err(e) = app.project_store.save() {
+                    tracing::error!("Failed to save project store: {}", e);
+                }
+
+                // Remove the config
+                app.claude_config_store.remove(config_id);
+
+                // Save config store
+                if let Err(e) = app.claude_config_store.save() {
+                    tracing::error!("Failed to save claude config store: {}", e);
+                    app.state.error_message = Some(format!("Failed to save: {}", e));
+                }
+
+                tracing::info!("Deleted Claude config: {}", config_id);
+
+                // Adjust selection if needed
+                let new_count = app.claude_config_store.count();
+                if app.state.claude_configs_selected_index >= new_count && new_count > 0 {
+                    app.state.claude_configs_selected_index = new_count - 1;
+                } else if new_count == 0 {
+                    app.state.claude_configs_selected_index = 0;
+                }
+            }
+            app.state.input_mode = InputMode::Normal;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            // Cancel deletion
+            app.state.pending_delete_claude_config = None;
+            app.state.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when confirming Claude settings copy after worktree creation
+pub fn handle_confirming_claude_settings_copy_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+            // Toggle selection
+            if let Some(ref mut state) = app.state.pending_claude_settings_copy {
+                state.selected_yes = !state.selected_yes;
+            }
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Force yes
+            if let Some(ref mut state) = app.state.pending_claude_settings_copy {
+                state.selected_yes = true;
+            }
+            confirm_claude_settings_copy(app);
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            // Force no
+            if let Some(ref mut state) = app.state.pending_claude_settings_copy {
+                state.selected_yes = false;
+            }
+            confirm_claude_settings_copy(app);
+        }
+        KeyCode::Enter => {
+            confirm_claude_settings_copy(app);
+        }
+        KeyCode::Esc => {
+            // Skip without copying, still navigate
+            let copy_state = app.state.pending_claude_settings_copy.take();
+            app.state.input_mode = InputMode::Normal;
+            if let Some(state) = copy_state {
+                app.state
+                    .navigate_to_branch(state.project_id, state.branch_id);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Confirm the Claude settings copy action
+fn confirm_claude_settings_copy(app: &mut App) {
+    let copy_state = app.state.pending_claude_settings_copy.take();
+    app.state.input_mode = InputMode::Normal;
+
+    if let Some(state) = copy_state {
+        if state.selected_yes {
+            let _ = app.show_loading("Copying Claude settings...");
+
+            // Copy modern local settings first (.claude/settings.local.json)
+            if state.has_local_settings {
+                match crate::claude_json::copy_local_settings(
+                    &state.source_path,
+                    &state.target_path,
+                ) {
+                    Ok(true) => {
+                        tracing::info!(
+                            "Copied local Claude settings from {} to {}",
+                            state.source_path.display(),
+                            state.target_path.display()
+                        );
+                    }
+                    Ok(false) => {
+                        tracing::debug!(
+                            "Local settings not copied (source missing or dest exists)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to copy local Claude settings: {}", e);
+                    }
+                }
+            }
+
+            // Copy legacy settings (.claude.json keyed by path)
+            let source = state.source_path.to_string_lossy().to_string();
+            let target = state.target_path.to_string_lossy().to_string();
+
+            if let Some(store) = ClaudeJsonStore::for_config_dir(state.claude_config_dir.as_deref())
+            {
+                match store.copy_settings(&source, &target) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Copied legacy Claude settings from {} to {}",
+                            source,
+                            target
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to copy legacy Claude settings: {}", e);
+                    }
+                }
+            }
+
+            app.state
+                .header_notifications
+                .push("Claude settings copied to worktree");
+            app.clear_loading();
+        }
+
+        // Navigate to the new branch
+        app.state
+            .navigate_to_branch(state.project_id, state.branch_id);
+    }
+}
+
+/// Handle key when confirming Claude settings migration before worktree deletion
+pub fn handle_confirming_claude_settings_migrate_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+            // Toggle selection
+            if let Some(ref mut state) = app.state.pending_claude_settings_migrate {
+                state.selected_yes = !state.selected_yes;
+            }
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Force yes
+            if let Some(ref mut state) = app.state.pending_claude_settings_migrate {
+                state.selected_yes = true;
+            }
+            confirm_claude_settings_migrate(app);
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            // Force no
+            if let Some(ref mut state) = app.state.pending_claude_settings_migrate {
+                state.selected_yes = false;
+            }
+            confirm_claude_settings_migrate(app);
+        }
+        KeyCode::Enter => {
+            confirm_claude_settings_migrate(app);
+        }
+        KeyCode::Esc => {
+            // Cancel entire deletion
+            app.state.pending_claude_settings_migrate = None;
+            app.state.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Confirm the Claude settings migration action
+fn confirm_claude_settings_migrate(app: &mut App) {
+    let migrate_state = app.state.pending_claude_settings_migrate.take();
+
+    if let Some(state) = migrate_state {
+        let branch_id = state.branch_id;
+
+        if state.selected_yes {
+            let _ = app.show_loading("Migrating permissions...");
+            let mut total_migrated = 0;
+
+            // Merge modern local settings first (.claude/settings.local.json)
+            if state.has_local_settings {
+                match crate::claude_json::merge_local_settings(
+                    &state.worktree_path,
+                    &state.main_path,
+                ) {
+                    Ok(added) => {
+                        if !added.is_empty() {
+                            tracing::info!(
+                                "Merged {} local settings from worktree to main: {:?}",
+                                added.len(),
+                                added
+                            );
+                            total_migrated += added.len();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to merge local settings: {}", e);
+                    }
+                }
+            }
+
+            // Merge legacy settings (tools from .claude.json)
+            if !state.unique_tools.is_empty() {
+                let worktree = state.worktree_path.to_string_lossy().to_string();
+                let main = state.main_path.to_string_lossy().to_string();
+
+                // Use the stored config_dir from state
+                if let Some(store) =
+                    ClaudeJsonStore::for_config_dir(state.claude_config_dir.as_deref())
+                {
+                    match store.merge_settings(&worktree, &main) {
+                        Ok(added) => {
+                            if !added.is_empty() {
+                                tracing::info!(
+                                    "Migrated {} legacy permissions from {} to {}",
+                                    added.len(),
+                                    worktree,
+                                    main
+                                );
+                                total_migrated += added.len();
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to migrate legacy permissions: {}", e);
+                            app.state
+                                .header_notifications
+                                .push(format!("Failed to migrate permissions: {}", e));
+                        }
+                    }
+                }
+            }
+
+            if total_migrated > 0 {
+                app.state.header_notifications.push(format!(
+                    "Migrated {} setting{} to main repo",
+                    total_migrated,
+                    if total_migrated == 1 { "" } else { "s" }
+                ));
+            }
+
+            app.clear_loading();
+        }
+
+        // Continue to branch delete confirmation
+        // Get branch info to set up delete state
+        if let Some(branch) = app.project_store.get_branch(branch_id) {
+            app.state.pending_delete_branch = Some(branch_id);
+            app.state.delete_worktree_on_disk = branch.is_worktree;
+            app.state.input_mode = InputMode::ConfirmingBranchDelete;
+        } else {
+            // Branch no longer exists, just go back to normal
+            app.state.input_mode = InputMode::Normal;
+        }
+    } else {
+        app.state.input_mode = InputMode::Normal;
+    }
+}
+
+// ============================================================================
+// Codex Config Delete Confirmation Handler
+// ============================================================================
+
+/// Handle key when confirming Codex config deletion
+pub fn handle_confirming_codex_config_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Confirm deletion
+            if let Some(config_id) = app.state.pending_delete_codex_config.take() {
+                // Validate config still exists
+                if app.codex_config_store.get(config_id).is_none() {
+                    tracing::warn!(
+                        config_id = %config_id,
+                        "Codex config no longer exists when confirming delete"
+                    );
+                    app.state.input_mode = InputMode::Normal;
+                    return Ok(());
+                }
+
+                // Clear default_codex_config from any projects using this config
+                let affected_projects: Vec<_> = app
+                    .project_store
+                    .projects()
+                    .filter(|p| p.default_codex_config == Some(config_id))
+                    .map(|p| p.id)
+                    .collect();
+
+                for project_id in affected_projects {
+                    if let Some(project) = app.project_store.get_project_mut(project_id) {
+                        project.default_codex_config = None;
+                    }
+                }
+
+                // Save project store if any projects were affected
+                if let Err(e) = app.project_store.save() {
+                    tracing::error!("Failed to save project store: {}", e);
+                }
+
+                // Remove the config
+                app.codex_config_store.remove(config_id);
+
+                // Save config store
+                if let Err(e) = app.codex_config_store.save() {
+                    tracing::error!("Failed to save codex config store: {}", e);
+                    app.state.error_message = Some(format!("Failed to save: {}", e));
+                }
+
+                tracing::info!("Deleted Codex config: {}", config_id);
+
+                // Adjust selection if needed
+                let new_count = app.codex_config_store.count();
+                if app.state.codex_configs_selected_index >= new_count && new_count > 0 {
+                    app.state.codex_configs_selected_index = new_count - 1;
+                } else if new_count == 0 {
+                    app.state.codex_configs_selected_index = 0;
+                }
+            }
+            app.state.input_mode = InputMode::Normal;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            // Cancel deletion
+            app.state.pending_delete_codex_config = None;
+            app.state.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Custom Shortcuts Dialog Handlers
+// ============================================================================
+
+/// Handle key when managing custom shortcuts (list view)
+pub fn handle_managing_custom_shortcuts_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    let shortcut_count = app.config.custom_shortcuts.len();
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            // Close the dialog
+            app.state.input_mode = InputMode::Normal;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            // Navigate down
+            if shortcut_count > 0 {
+                app.state.custom_shortcuts_selected =
+                    (app.state.custom_shortcuts_selected + 1) % shortcut_count;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            // Navigate up
+            if shortcut_count > 0 {
+                app.state.custom_shortcuts_selected = app
+                    .state
+                    .custom_shortcuts_selected
+                    .checked_sub(1)
+                    .unwrap_or(shortcut_count - 1);
+            }
+        }
+        KeyCode::Char('n') => {
+            // Start adding a new shortcut
+            app.state.new_shortcut_key = None;
+            app.state.new_shortcut_name.clear();
+            app.state.new_shortcut_command.clear();
+            app.state.shortcut_error = None;
+            app.state.input_mode = InputMode::AddingCustomShortcutKey;
+        }
+        KeyCode::Char('d') => {
+            // Delete selected shortcut (if any)
+            if shortcut_count > 0 {
+                app.state.pending_delete_shortcut_index = Some(app.state.custom_shortcuts_selected);
+                app.state.input_mode = InputMode::ConfirmingCustomShortcutDelete;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when adding a custom shortcut - capturing the key
+pub fn handle_adding_custom_shortcut_key_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            // Cancel and go back to management dialog
+            app.state.shortcut_error = None;
+            app.state.input_mode = InputMode::ManagingCustomShortcuts;
+        }
+        KeyCode::Char(c) => {
+            // Validate the key
+            if is_reserved_key(c) {
+                app.state.shortcut_error = Some(format!("Key '{}' is reserved", c));
+            } else if app.config.custom_shortcuts.iter().any(|s| s.key == c) {
+                app.state.shortcut_error = Some(format!("Key '{}' is already in use", c));
+            } else {
+                // Valid key, proceed to name input
+                app.state.new_shortcut_key = Some(c);
+                app.state.shortcut_error = None;
+                app.state.input_mode = InputMode::AddingCustomShortcutName;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when adding a custom shortcut - entering the name
+pub fn handle_adding_custom_shortcut_name_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            // Cancel and go back to key input
+            app.state.input_mode = InputMode::AddingCustomShortcutKey;
+        }
+        KeyCode::Enter => {
+            // Proceed to command input (name can be empty)
+            app.state.input_mode = InputMode::AddingCustomShortcutCommand;
+        }
+        KeyCode::Char(c) => {
+            app.state.new_shortcut_name.push(c);
+        }
+        KeyCode::Backspace => {
+            app.state.new_shortcut_name.pop();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when adding a custom shortcut - entering the command
+pub fn handle_adding_custom_shortcut_command_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            // Cancel and go back to name input
+            app.state.input_mode = InputMode::AddingCustomShortcutName;
+        }
+        KeyCode::Enter => {
+            // Save the shortcut if command is not empty
+            if app.state.new_shortcut_command.is_empty() {
+                app.state.shortcut_error = Some("Command cannot be empty".to_string());
+            } else if let Some(key) = app.state.new_shortcut_key {
+                let shortcut = CustomShortcut::new(
+                    key,
+                    app.state.new_shortcut_name.clone(),
+                    app.state.new_shortcut_command.clone(),
+                );
+                app.config.custom_shortcuts.push(shortcut);
+
+                // Save config to disk
+                if let Err(e) = app.config.save() {
+                    tracing::error!("Failed to save config: {}", e);
+                    app.state.error_message = Some(format!("Failed to save config: {}", e));
+                }
+
+                // Clear state and go back to management dialog
+                app.state.new_shortcut_key = None;
+                app.state.new_shortcut_name.clear();
+                app.state.new_shortcut_command.clear();
+                app.state.shortcut_error = None;
+                app.state.input_mode = InputMode::ManagingCustomShortcuts;
+            }
+        }
+        KeyCode::Char(c) => {
+            app.state.new_shortcut_command.push(c);
+            app.state.shortcut_error = None;
+        }
+        KeyCode::Backspace => {
+            app.state.new_shortcut_command.pop();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key when confirming custom shortcut deletion
+pub fn handle_confirming_custom_shortcut_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            // Confirm deletion
+            if let Some(index) = app.state.pending_delete_shortcut_index.take() {
+                if index < app.config.custom_shortcuts.len() {
+                    app.config.custom_shortcuts.remove(index);
+
+                    // Save config to disk
+                    if let Err(e) = app.config.save() {
+                        tracing::error!("Failed to save config: {}", e);
+                        app.state.error_message = Some(format!("Failed to save config: {}", e));
+                    }
+
+                    // Adjust selection if needed
+                    let new_count = app.config.custom_shortcuts.len();
+                    if app.state.custom_shortcuts_selected >= new_count && new_count > 0 {
+                        app.state.custom_shortcuts_selected = new_count - 1;
+                    }
+                }
+            }
+            app.state.input_mode = InputMode::ManagingCustomShortcuts;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            // Cancel deletion
+            app.state.pending_delete_shortcut_index = None;
+            app.state.input_mode = InputMode::ManagingCustomShortcuts;
         }
         _ => {}
     }

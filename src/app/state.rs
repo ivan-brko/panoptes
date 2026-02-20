@@ -5,13 +5,56 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::claude_config::{ClaudeConfig, ClaudeConfigId};
 use crate::focus_timing::stats::FocusSession;
 use crate::focus_timing::tracker::FocusTracker;
 use crate::focus_timing::FocusTimer;
 use crate::project::{BranchId, ProjectId};
-use crate::session::SessionId;
+use crate::session::{SessionId, SessionManager};
 use crate::tui::{HeaderNotificationManager, NotificationManager};
 use crate::wizards::worktree::{BranchRef, WorktreeCreationType};
+
+/// State for Claude settings copy dialog (copies ALL project settings)
+#[derive(Debug, Clone)]
+pub struct ClaudeSettingsCopyState {
+    /// Main repository path (source of settings)
+    pub source_path: PathBuf,
+    /// New worktree path (destination for settings)
+    pub target_path: PathBuf,
+    /// Project ID for navigation after dialog
+    pub project_id: ProjectId,
+    /// Branch ID for navigation after dialog
+    pub branch_id: BranchId,
+    /// Preview of tools to show user (subset of full settings)
+    pub tools_preview: Vec<String>,
+    /// Whether MCP servers will be copied (for display)
+    pub has_mcp_servers: bool,
+    /// Whether Yes is selected (default true)
+    pub selected_yes: bool,
+    /// Which Claude config directory to use (None = default ~/.claude)
+    pub claude_config_dir: Option<PathBuf>,
+    /// Whether local settings.local.json exists and will be copied
+    pub has_local_settings: bool,
+}
+
+/// State for Claude settings migrate dialog
+#[derive(Debug, Clone)]
+pub struct ClaudeSettingsMigrateState {
+    /// Worktree path being deleted
+    pub worktree_path: PathBuf,
+    /// Main repository path (destination for migration)
+    pub main_path: PathBuf,
+    /// Branch ID being deleted
+    pub branch_id: BranchId,
+    /// Tools unique to worktree that will be migrated (legacy format)
+    pub unique_tools: Vec<String>,
+    /// Whether Yes is selected (default true)
+    pub selected_yes: bool,
+    /// Which Claude config directory to use (None = default ~/.claude)
+    pub claude_config_dir: Option<PathBuf>,
+    /// Whether worktree has unique local settings to migrate (modern format)
+    pub has_local_settings: bool,
+}
 
 use super::input_mode::InputMode;
 use super::view::View;
@@ -202,6 +245,70 @@ pub struct AppState {
     pub pending_delete_focus_session: Option<uuid::Uuid>,
     /// Focus session being viewed in detail dialog
     pub viewing_focus_session: Option<FocusSession>,
+
+    // --- Claude config state ---
+    /// Selected index in Claude configs view
+    pub claude_configs_selected_index: usize,
+    /// Claude config pending deletion (for confirmation dialog)
+    pub pending_delete_claude_config: Option<ClaudeConfigId>,
+    /// Buffer for new config name input
+    pub new_claude_config_name: String,
+    /// Buffer for new config path input
+    pub new_claude_config_path: String,
+    /// Claude config being selected for session creation
+    pub creating_session_claude_config: Option<ClaudeConfigId>,
+    /// Available Claude configs for selection during session creation
+    pub available_claude_configs: Vec<ClaudeConfig>,
+    /// Selected index in Claude config selector
+    pub claude_config_selector_index: usize,
+    /// Whether Claude config selector is showing (overlay during session creation)
+    pub show_claude_config_selector: bool,
+    /// Project ID for setting project default config
+    pub setting_project_default_config: Option<ProjectId>,
+
+    // --- Claude settings dialogs ---
+    /// Pending Claude settings copy (after worktree creation)
+    pub pending_claude_settings_copy: Option<ClaudeSettingsCopyState>,
+    /// Pending Claude settings migration (before worktree deletion)
+    pub pending_claude_settings_migrate: Option<ClaudeSettingsMigrateState>,
+
+    // --- Codex config state ---
+    /// Selected index in Codex configs view
+    pub codex_configs_selected_index: usize,
+    /// Codex config pending deletion (for confirmation dialog)
+    pub pending_delete_codex_config: Option<crate::codex_config::CodexConfigId>,
+    /// Buffer for new Codex config name input
+    pub new_codex_config_name: String,
+    /// Buffer for new Codex config path input
+    pub new_codex_config_path: String,
+    /// Codex config being selected for session creation
+    pub creating_session_codex_config: Option<crate::codex_config::CodexConfigId>,
+    /// Available Codex configs for selection during session creation
+    pub available_codex_configs: Vec<crate::codex_config::CodexConfig>,
+    /// Selected index in Codex config selector
+    pub codex_config_selector_index: usize,
+    /// Whether Codex config selector is showing (overlay during session creation)
+    pub show_codex_config_selector: bool,
+    /// Agent type selector index (0 = Claude Code, 1 = Codex)
+    pub agent_type_selector_index: usize,
+
+    // --- Help overlay ---
+    /// Whether to show the help overlay with keyboard shortcuts
+    pub show_help_overlay: bool,
+
+    // --- Custom shortcuts dialog state ---
+    /// Selected index in the custom shortcuts list
+    pub custom_shortcuts_selected: usize,
+    /// Key being added for new shortcut
+    pub new_shortcut_key: Option<char>,
+    /// Name being entered for new shortcut
+    pub new_shortcut_name: String,
+    /// Command being entered for new shortcut
+    pub new_shortcut_command: String,
+    /// Index of shortcut pending deletion
+    pub pending_delete_shortcut_index: Option<usize>,
+    /// Validation error message for shortcut creation
+    pub shortcut_error: Option<String>,
 }
 
 impl AppState {
@@ -215,6 +322,8 @@ impl AppState {
             View::SessionView => 0,
             View::LogViewer => self.log_viewer_scroll,
             View::FocusStats => self.focus_stats_selected_index,
+            View::ClaudeConfigs => self.claude_configs_selected_index,
+            View::CodexConfigs => self.codex_configs_selected_index,
         }
     }
 
@@ -228,6 +337,8 @@ impl AppState {
             View::SessionView => {}
             View::LogViewer => self.log_viewer_scroll = index,
             View::FocusStats => self.focus_stats_selected_index = index,
+            View::ClaudeConfigs => self.claude_configs_selected_index = index,
+            View::CodexConfigs => self.codex_configs_selected_index = index,
         }
     }
 
@@ -282,7 +393,9 @@ impl AppState {
                 View::ProjectsOverview
                 | View::ActivityTimeline
                 | View::LogViewer
-                | View::FocusStats => {
+                | View::FocusStats
+                | View::ClaudeConfigs
+                | View::CodexConfigs => {
                     // Leaving project context - clear the context
                     self.focus_tracker.set_context(None, None);
                 }
@@ -346,14 +459,336 @@ impl AppState {
         self.selected_timeline_index = 0;
     }
 
-    /// Return from session view to the previous view
-    pub fn return_from_session(&mut self) {
-        if let Some(return_view) = self.session_return_view.take() {
-            self.view = return_view;
+    /// Navigate to Claude configs view
+    pub fn navigate_to_claude_configs(&mut self) {
+        self.view = View::ClaudeConfigs;
+        self.claude_configs_selected_index = 0;
+    }
+
+    /// Navigate to Codex configs view
+    pub fn navigate_to_codex_configs(&mut self) {
+        self.view = View::CodexConfigs;
+        self.codex_configs_selected_index = 0;
+    }
+
+    /// Return from session view based on the current session's context
+    ///
+    /// Navigates to the branch detail view for the current session's project/branch,
+    /// rather than returning to where the user originally came from. This ensures
+    /// consistent navigation when jumping between sessions with Space.
+    pub fn return_from_session(&mut self, sessions: &SessionManager) {
+        // Navigate based on the current session's context (not where we came from)
+        if let Some(session_id) = self.active_session {
+            if let Some(session) = sessions.get(session_id) {
+                // Go to the session's branch detail view
+                self.view = View::BranchDetail(session.info.project_id, session.info.branch_id);
+            } else {
+                // Session was deleted - fall back to stored return view or projects overview
+                self.view = self
+                    .session_return_view
+                    .take()
+                    .unwrap_or(View::ProjectsOverview);
+            }
         } else {
-            self.view = View::ProjectsOverview;
+            // No active session - fall back
+            self.view = self
+                .session_return_view
+                .take()
+                .unwrap_or(View::ProjectsOverview);
         }
         self.active_session = None;
         self.input_mode = InputMode::Normal;
+        self.session_return_view = None; // Clear it
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // HomepageFocus tests
+    #[test]
+    fn test_homepage_focus_default() {
+        let focus = HomepageFocus::default();
+        assert_eq!(focus, HomepageFocus::Projects);
+    }
+
+    // WorktreeWizardState tests
+    #[test]
+    fn test_worktree_wizard_state_default() {
+        let state = WorktreeWizardState::default();
+        assert!(state.search_text.is_empty());
+        assert!(state.all_branches.is_empty());
+        assert!(state.filtered_branches.is_empty());
+        assert_eq!(state.list_index, 0);
+        assert_eq!(state.creation_type, WorktreeCreationType::ExistingLocal);
+    }
+
+    #[test]
+    fn test_worktree_wizard_clamp_list_index_empty() {
+        let mut state = WorktreeWizardState {
+            list_index: 10,
+            ..Default::default()
+        };
+        state.clamp_list_index();
+        assert_eq!(state.list_index, 0);
+    }
+
+    #[test]
+    fn test_worktree_wizard_clamp_list_index_with_branches() {
+        use crate::wizards::worktree::{BranchRef, BranchRefType};
+
+        let mut state = WorktreeWizardState {
+            filtered_branches: vec![
+                BranchRef::new(BranchRefType::Local, "main".to_string()),
+                BranchRef::new(BranchRefType::Local, "develop".to_string()),
+            ],
+            list_index: 10,
+            ..Default::default()
+        };
+        state.clamp_list_index();
+        // Without search text, max index is filtered_count - 1 = 1
+        assert_eq!(state.list_index, 1);
+    }
+
+    #[test]
+    fn test_worktree_wizard_clamp_list_index_with_create_option() {
+        use crate::wizards::worktree::{BranchRef, BranchRefType};
+
+        let mut state = WorktreeWizardState {
+            search_text: "new-branch".to_string(), // Non-empty enables "create new" option
+            filtered_branches: vec![BranchRef::new(BranchRefType::Local, "main".to_string())],
+            list_index: 10,
+            ..Default::default()
+        };
+        state.clamp_list_index();
+        // With search text, max index is filtered_count (1) to allow "create new" option
+        assert_eq!(state.list_index, 1);
+    }
+
+    #[test]
+    fn test_worktree_wizard_clamp_base_list_index() {
+        let mut state = WorktreeWizardState {
+            base_list_index: 10,
+            ..Default::default()
+        };
+        state.clamp_base_list_index(3);
+        assert_eq!(state.base_list_index, 2);
+
+        state.clamp_base_list_index(0);
+        assert_eq!(state.base_list_index, 0);
+    }
+
+    // AppState navigation tests
+    #[test]
+    fn test_app_state_default() {
+        let state = AppState::default();
+        assert_eq!(state.view, View::ProjectsOverview);
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.selected_project_index, 0);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn test_select_next() {
+        let mut state = AppState {
+            view: View::ProjectsOverview,
+            selected_project_index: 0,
+            ..Default::default()
+        };
+
+        state.select_next(3);
+        assert_eq!(state.selected_project_index, 1);
+
+        state.select_next(3);
+        assert_eq!(state.selected_project_index, 2);
+
+        // Wrap around
+        state.select_next(3);
+        assert_eq!(state.selected_project_index, 0);
+    }
+
+    #[test]
+    fn test_select_prev() {
+        let mut state = AppState {
+            view: View::ProjectsOverview,
+            selected_project_index: 2,
+            ..Default::default()
+        };
+
+        state.select_prev(3);
+        assert_eq!(state.selected_project_index, 1);
+
+        state.select_prev(3);
+        assert_eq!(state.selected_project_index, 0);
+
+        // Wrap around
+        state.select_prev(3);
+        assert_eq!(state.selected_project_index, 2);
+    }
+
+    #[test]
+    fn test_select_by_number() {
+        let mut state = AppState {
+            view: View::ProjectsOverview,
+            ..Default::default()
+        };
+
+        state.select_by_number(2, 5);
+        assert_eq!(state.selected_project_index, 1); // 1-indexed, so 2 -> index 1
+
+        // Out of range - no change
+        state.select_by_number(10, 5);
+        assert_eq!(state.selected_project_index, 1);
+
+        // Zero - no change
+        state.select_by_number(0, 5);
+        assert_eq!(state.selected_project_index, 1);
+    }
+
+    #[test]
+    fn test_select_with_empty_list() {
+        let mut state = AppState {
+            selected_project_index: 5,
+            ..Default::default()
+        };
+
+        state.select_next(0);
+        assert_eq!(state.selected_project_index, 0);
+
+        state.select_prev(0);
+        assert_eq!(state.selected_project_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_project() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+
+        state.navigate_to_project(project_id);
+        assert_eq!(state.view, View::ProjectDetail(project_id));
+        assert_eq!(state.selected_branch_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_branch() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        state.navigate_to_branch(project_id, branch_id);
+        assert_eq!(state.view, View::BranchDetail(project_id, branch_id));
+        assert_eq!(state.selected_session_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_session() {
+        let mut state = AppState::default();
+        let session_id = uuid::Uuid::new_v4();
+
+        state.view = View::ProjectsOverview;
+        state.navigate_to_session(session_id);
+
+        assert_eq!(state.view, View::SessionView);
+        assert_eq!(state.active_session, Some(session_id));
+        assert_eq!(state.input_mode, InputMode::Session);
+        assert_eq!(state.session_return_view, Some(View::ProjectsOverview));
+        assert_eq!(state.session_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_timeline() {
+        let mut state = AppState::default();
+        state.navigate_to_timeline();
+        assert_eq!(state.view, View::ActivityTimeline);
+        assert_eq!(state.selected_timeline_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_to_claude_configs() {
+        let mut state = AppState::default();
+        state.navigate_to_claude_configs();
+        assert_eq!(state.view, View::ClaudeConfigs);
+        assert_eq!(state.claude_configs_selected_index, 0);
+    }
+
+    #[test]
+    fn test_navigate_back_from_project_detail() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+
+        state.view = View::ProjectDetail(project_id);
+        state.navigate_back();
+        assert_eq!(state.view, View::ProjectsOverview);
+    }
+
+    #[test]
+    fn test_navigate_back_from_branch_detail() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        state.view = View::BranchDetail(project_id, branch_id);
+        state.navigate_back();
+        assert_eq!(state.view, View::ProjectDetail(project_id));
+    }
+
+    #[test]
+    fn test_navigate_back_resets_input_mode() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+
+        state.view = View::ProjectDetail(project_id);
+        state.input_mode = InputMode::RenamingProject;
+        state.navigate_back();
+
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_current_selected_index_for_different_views() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        // ProjectsOverview
+        state.view = View::ProjectsOverview;
+        state.selected_project_index = 2;
+        assert_eq!(state.current_selected_index(), 2);
+
+        // ProjectDetail
+        state.view = View::ProjectDetail(project_id);
+        state.selected_branch_index = 3;
+        assert_eq!(state.current_selected_index(), 3);
+
+        // BranchDetail
+        state.view = View::BranchDetail(project_id, branch_id);
+        state.selected_session_index = 1;
+        assert_eq!(state.current_selected_index(), 1);
+
+        // ActivityTimeline
+        state.view = View::ActivityTimeline;
+        state.selected_timeline_index = 4;
+        assert_eq!(state.current_selected_index(), 4);
+    }
+
+    #[test]
+    fn test_resize_debounce_state() {
+        let mut state = AppState::default();
+
+        // Initially no resize pending
+        assert!(state.last_resize.is_none());
+        assert!(!state.pending_resize);
+
+        // Simulate resize event
+        state.last_resize = Some(Instant::now());
+        state.pending_resize = true;
+
+        assert!(state.pending_resize);
+        assert!(state.last_resize.is_some());
+
+        // After processing, pending should be cleared
+        state.pending_resize = false;
+        assert!(!state.pending_resize);
     }
 }

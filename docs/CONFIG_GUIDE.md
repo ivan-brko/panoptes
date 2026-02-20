@@ -17,6 +17,9 @@ hook_port = 9999
 # Maximum lines to keep in output buffer per session
 max_output_lines = 10000
 
+# Maximum scrollback lines per session (for terminal history)
+scrollback_lines = 10000
+
 # Seconds before a waiting session shows the yellow "idle" badge
 idle_threshold_secs = 300
 
@@ -42,6 +45,17 @@ focus_timer_minutes = 25
 
 # Days to retain focus session history
 focus_stats_retention_days = 30
+
+# Custom shortcuts for spawning shell sessions with predefined commands
+[[custom_shortcuts]]
+key = "v"
+name = "VSCode"
+command = "code . &"
+
+[[custom_shortcuts]]
+key = "e"
+name = "vim"
+command = "vim ."
 ```
 
 ## Options Reference
@@ -71,6 +85,21 @@ The port number for the HTTP server that receives Claude Code hook callbacks.
 Maximum number of lines to keep in the output buffer for each session. Older lines are discarded when this limit is reached.
 
 **When to change:** Increase if you need more scrollback history; decrease if you have memory constraints.
+
+---
+
+### scrollback_lines
+
+| Property | Value |
+|----------|-------|
+| Default | `10000` |
+| Type | Integer |
+
+Maximum number of scrollback lines to retain in the terminal emulator for each session. This controls how far back you can scroll in session history using PageUp/PageDown.
+
+Each 1000 lines uses approximately 10KB of memory per session.
+
+**When to change:** Increase if you need to scroll back further in session history; decrease if you have many concurrent sessions and want to reduce memory usage.
 
 ---
 
@@ -186,6 +215,52 @@ How long to keep focus session history. Sessions older than this are automatical
 
 ---
 
+### custom_shortcuts
+
+| Property | Value |
+|----------|-------|
+| Default | `[]` (empty array) |
+| Type | Array of shortcut objects |
+
+Defines custom keyboard shortcuts that spawn shell sessions with predefined commands. Each shortcut is an array entry with three fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` | character | Yes | Single character trigger (e.g., `'v'`, `'e'`) |
+| `name` | string | No | Display name shown in footer (if empty, uses first 6 chars of command) |
+| `command` | string | Yes | Command to run in the shell session |
+
+**Reserved keys** (cannot be used for custom shortcuts):
+- `q`, `i`, `g`, `G`, `t`, `T`, `k`, `x` - Already bound in session view
+- `0-9` - Used for session number jumping
+
+**Example:**
+
+```toml
+[[custom_shortcuts]]
+key = "v"
+name = "VSCode"
+command = "code . &"
+
+[[custom_shortcuts]]
+key = "e"
+name = ""  # Will show "vim ." in footer
+command = "vim ."
+
+[[custom_shortcuts]]
+key = "w"
+name = "Watch"
+command = "npm run dev"
+```
+
+**Managing shortcuts:**
+- Press `k` in any view to open the shortcuts management dialog
+- In session view (normal mode), press the shortcut key to spawn a shell session with that command
+
+**When to use:** Define shortcuts for commands you frequently run when working with Claude Code sessions, such as opening editors, starting dev servers, or running build tools.
+
+---
+
 ## Data Directories
 
 Panoptes stores data in the `~/.panoptes/` directory:
@@ -196,7 +271,8 @@ Panoptes stores data in the `~/.panoptes/` directory:
 | `~/.panoptes/projects.json` | Project and branch data |
 | `~/.panoptes/focus_sessions.json` | Focus timer history |
 | `~/.panoptes/worktrees/` | Git worktrees created by Panoptes |
-| `~/.panoptes/hooks/` | Hook scripts for Claude Code integration |
+| `~/.panoptes/codex_configs.json` | Codex account configurations |
+| `~/.panoptes/hooks/` | Hook scripts for agent integration |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
 
 ## Creating Configuration

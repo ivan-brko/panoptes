@@ -446,7 +446,7 @@ mod tests {
         let git_ops = GitOps::open(temp_dir.path()).unwrap();
         let branches = git_ops.list_local_branches().unwrap();
 
-        assert!(branches.len() >= 1);
+        assert!(!branches.is_empty());
         assert!(branches.contains(&"feature-test".to_string()));
     }
 

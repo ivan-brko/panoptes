@@ -8,8 +8,8 @@ pub mod pty;
 pub mod vterm;
 
 pub use manager::SessionManager;
-pub use pty::{mouse_event_to_bytes, PtyHandle};
-pub use vterm::VirtualTerminal;
+pub use pty::{mouse_event_to_bytes, ExitInfo, PtyHandle};
+pub use vterm::{VirtualTerminal, DEFAULT_SCROLLBACK_ROWS};
 
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -18,10 +18,49 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::claude_config::ClaudeConfigId;
+use crate::codex_config::CodexConfigId;
 use crate::project::{BranchId, ProjectId};
 
 /// Unique identifier for a session
 pub type SessionId = Uuid;
+
+/// Type of session (determines state tracking behavior)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SessionType {
+    /// Claude Code CLI session - uses hooks for state tracking
+    #[default]
+    ClaudeCode,
+    /// Generic shell session (bash/zsh/etc) - uses foreground detection
+    Shell,
+    /// OpenAI Codex CLI session - uses notify hook for state tracking
+    OpenAICodex,
+}
+
+impl SessionType {
+    /// Get the display name for this session type
+    pub fn display_name(&self) -> &str {
+        match self {
+            SessionType::ClaudeCode => "Claude Code",
+            SessionType::Shell => "Shell",
+            SessionType::OpenAICodex => "Codex",
+        }
+    }
+
+    /// Get a short tag for display in session lists (e.g. [CC], [CX], [SH])
+    pub fn short_tag(&self) -> &str {
+        match self {
+            SessionType::ClaudeCode => "[CC]",
+            SessionType::Shell => "[SH]",
+            SessionType::OpenAICodex => "[CX]",
+        }
+    }
+
+    /// Check if this session type uses hooks for state tracking
+    pub fn uses_hooks(&self) -> bool {
+        matches!(self, SessionType::ClaudeCode | SessionType::OpenAICodex)
+    }
+}
 
 /// State of a session
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -77,6 +116,9 @@ pub struct SessionInfo {
     pub name: String,
     /// Current state
     pub state: SessionState,
+    /// Type of session (ClaudeCode or Shell)
+    #[serde(default)]
+    pub session_type: SessionType,
     /// Working directory
     pub working_dir: std::path::PathBuf,
     /// Parent project identifier
@@ -99,6 +141,18 @@ pub struct SessionInfo {
     /// Timestamp when session exited (for cleanup)
     #[serde(default)]
     pub exited_at: Option<DateTime<Utc>>,
+    /// Claude configuration ID used for this session
+    #[serde(default)]
+    pub claude_config_id: Option<ClaudeConfigId>,
+    /// Claude configuration name (cached for display)
+    #[serde(default)]
+    pub claude_config_name: Option<String>,
+    /// Codex configuration ID used for this session
+    #[serde(default)]
+    pub codex_config_id: Option<CodexConfigId>,
+    /// Codex configuration name (cached for display)
+    #[serde(default)]
+    pub codex_config_name: Option<String>,
 }
 
 impl SessionInfo {
@@ -114,6 +168,7 @@ impl SessionInfo {
             id: Uuid::new_v4(),
             name,
             state: SessionState::default(),
+            session_type: SessionType::default(),
             working_dir,
             project_id,
             branch_id,
@@ -123,7 +178,67 @@ impl SessionInfo {
             needs_attention: false,
             exit_reason: None,
             exited_at: None,
+            claude_config_id: None,
+            claude_config_name: None,
+            codex_config_id: None,
+            codex_config_name: None,
         }
+    }
+
+    /// Create new session info with Claude configuration
+    pub fn with_claude_config(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        claude_config_id: Option<ClaudeConfigId>,
+        claude_config_name: Option<String>,
+    ) -> Self {
+        let mut info = Self::new(name, working_dir, project_id, branch_id);
+        info.claude_config_id = claude_config_id;
+        info.claude_config_name = claude_config_name;
+        info
+    }
+
+    /// Create new session info for a Codex session
+    pub fn codex(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Self {
+        let mut info = Self::new(name, working_dir, project_id, branch_id);
+        info.session_type = SessionType::OpenAICodex;
+        info
+    }
+
+    /// Create new session info for a Codex session with configuration
+    pub fn with_codex_config(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        codex_config_id: Option<CodexConfigId>,
+        codex_config_name: Option<String>,
+    ) -> Self {
+        let mut info = Self::codex(name, working_dir, project_id, branch_id);
+        info.codex_config_id = codex_config_id;
+        info.codex_config_name = codex_config_name;
+        info
+    }
+
+    /// Create new session info for a shell session
+    pub fn shell(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Self {
+        let mut info = Self::new(name, working_dir, project_id, branch_id);
+        info.session_type = SessionType::Shell;
+        // Shell sessions start in Waiting state (ready for input)
+        info.state = SessionState::Waiting;
+        info
     }
 }
 
@@ -226,6 +341,17 @@ impl OutputBuffer {
         self.scroll_offset = (self.scroll_offset + n).min(max_scroll);
     }
 
+    /// Scroll up by n lines, clamped for the current viewport height.
+    ///
+    /// Unlike `scroll_up`, this stops at the highest full-page position
+    /// (`total_lines - viewport_height`) so the visible page height stays stable
+    /// at the top of history.
+    pub fn scroll_up_with_viewport(&mut self, n: usize, viewport_height: usize) {
+        let effective_height = viewport_height.max(1);
+        let max_scroll = self.lines.len().saturating_sub(effective_height);
+        self.scroll_offset = (self.scroll_offset + n).min(max_scroll);
+    }
+
     /// Scroll down by n lines (toward newer content)
     pub fn scroll_down(&mut self, n: usize) {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
@@ -241,6 +367,14 @@ impl OutputBuffer {
         self.scroll_offset = self.lines.len().saturating_sub(1);
     }
 
+    /// Scroll to top for a given viewport height.
+    ///
+    /// This pins to the oldest full page rather than a single first line.
+    pub fn scroll_to_top_with_viewport(&mut self, viewport_height: usize) {
+        let effective_height = viewport_height.max(1);
+        self.scroll_offset = self.lines.len().saturating_sub(effective_height);
+    }
+
     /// Check if scrolled to bottom
     pub fn is_at_bottom(&self) -> bool {
         self.scroll_offset == 0
@@ -252,6 +386,27 @@ impl OutputBuffer {
     }
 }
 
+/// Codex-specific fallback scrollback state.
+#[derive(Debug)]
+struct CodexFallback {
+    /// Plain-text fallback history extracted from PTY output.
+    output_buffer: OutputBuffer,
+    /// Partial plain-text line carried between PTY reads.
+    partial_output_line: String,
+    /// Remainder bytes for incomplete ANSI escape sequences between reads.
+    ansi_remainder: Vec<u8>,
+}
+
+impl CodexFallback {
+    fn new(scrollback_rows: usize) -> Self {
+        Self {
+            output_buffer: OutputBuffer::new(scrollback_rows),
+            partial_output_line: String::new(),
+            ansi_remainder: Vec::new(),
+        }
+    }
+}
+
 /// A full session with PTY and virtual terminal
 pub struct Session {
     /// Session metadata
@@ -260,15 +415,43 @@ pub struct Session {
     pub pty: PtyHandle,
     /// Virtual terminal emulator
     pub vterm: VirtualTerminal,
+    /// Codex-only fallback state for cases where terminal-emulator scrollback
+    /// is unavailable.
+    codex_fallback: Option<CodexFallback>,
+    /// Rolling buffer for detecting DSR sequences across reads
+    dsr_buffer: Vec<u8>,
 }
 
 impl Session {
     /// Create a new session with the given info, PTY, and terminal dimensions
     pub fn new(info: SessionInfo, pty: PtyHandle, rows: usize, cols: usize) -> Self {
+        let codex_fallback = (info.session_type == SessionType::OpenAICodex)
+            .then(|| CodexFallback::new(DEFAULT_SCROLLBACK_ROWS));
         Self {
             info,
             pty,
             vterm: VirtualTerminal::new(rows, cols),
+            codex_fallback,
+            dsr_buffer: Vec::new(),
+        }
+    }
+
+    /// Create a new session with the given info, PTY, terminal dimensions, and scrollback
+    pub fn with_scrollback(
+        info: SessionInfo,
+        pty: PtyHandle,
+        rows: usize,
+        cols: usize,
+        scrollback_rows: usize,
+    ) -> Self {
+        let codex_fallback = (info.session_type == SessionType::OpenAICodex)
+            .then(|| CodexFallback::new(scrollback_rows));
+        Self {
+            info,
+            pty,
+            vterm: VirtualTerminal::with_scrollback(rows, cols, scrollback_rows),
+            codex_fallback,
+            dsr_buffer: Vec::new(),
         }
     }
 
@@ -278,6 +461,34 @@ impl Session {
         match self.pty.try_read() {
             Ok(Some(bytes)) => {
                 self.vterm.process(&bytes);
+                if let Some(fallback) = self.codex_fallback.as_mut() {
+                    let plain =
+                        Self::extract_plain_text_bytes(&mut fallback.ansi_remainder, &bytes);
+                    fallback
+                        .output_buffer
+                        .push_bytes(&plain, &mut fallback.partial_output_line);
+                }
+
+                // Respond to DSR (Device Status Report) queries from the child process.
+                // Some programs (e.g. Codex CLI) send \x1b[6n at startup to query cursor
+                // position and crash if no CPR response arrives in time.
+                let mut combined = Vec::with_capacity(self.dsr_buffer.len() + bytes.len());
+                combined.extend_from_slice(&self.dsr_buffer);
+                combined.extend_from_slice(&bytes);
+                let dsr_count = combined.windows(4).filter(|w| *w == b"\x1b[6n").count();
+                if dsr_count > 0 {
+                    let (row, col) = self.vterm.cursor_position();
+                    let response = format!("\x1b[{};{}R", row + 1, col + 1);
+                    for _ in 0..dsr_count {
+                        if let Err(e) = self.pty.write(response.as_bytes()) {
+                            tracing::debug!(error = %e, "Failed to write DSR response");
+                            break;
+                        }
+                    }
+                }
+                let keep_from = combined.len().saturating_sub(3);
+                self.dsr_buffer = combined[keep_from..].to_vec();
+
                 self.info.last_activity = Utc::now();
 
                 // If we're in Starting state and receiving output, Claude is running
@@ -319,6 +530,67 @@ impl Session {
         self.vterm.visible_styled_lines(viewport_height)
     }
 
+    /// Get visible lines from the plain-text fallback history buffer.
+    pub fn fallback_visible_lines(&self, viewport_height: usize) -> Vec<String> {
+        self.codex_fallback
+            .as_ref()
+            .map(|fallback| {
+                fallback
+                    .output_buffer
+                    .visible_lines(viewport_height)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Scroll the plain-text fallback history up.
+    pub fn fallback_scroll_up(&mut self, n: usize) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback.output_buffer.scroll_up(n);
+        }
+    }
+
+    /// Scroll the plain-text fallback history up, clamped for viewport height.
+    pub fn fallback_scroll_up_with_viewport(&mut self, n: usize, viewport_height: usize) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback
+                .output_buffer
+                .scroll_up_with_viewport(n, viewport_height);
+        }
+    }
+
+    /// Scroll the plain-text fallback history down.
+    pub fn fallback_scroll_down(&mut self, n: usize) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback.output_buffer.scroll_down(n);
+        }
+    }
+
+    /// Scroll plain-text fallback history to bottom.
+    pub fn fallback_scroll_to_bottom(&mut self) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback.output_buffer.scroll_to_bottom();
+        }
+    }
+
+    /// Scroll plain-text fallback history to top for a viewport.
+    pub fn fallback_scroll_to_top_with_viewport(&mut self, viewport_height: usize) {
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback
+                .output_buffer
+                .scroll_to_top_with_viewport(viewport_height);
+        }
+    }
+
+    /// Current fallback history scroll offset.
+    pub fn fallback_scroll_offset(&self) -> usize {
+        self.codex_fallback
+            .as_ref()
+            .map_or(0, |fallback| fallback.output_buffer.scroll_offset())
+    }
+
     /// Write bytes to the PTY
     pub fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
         self.pty.write(data)
@@ -356,8 +628,8 @@ impl Session {
     ///
     /// Returns:
     /// - `None` if the process is still running
-    /// - `Some((exit_code, success))` if the process has exited
-    pub fn exit_status(&mut self) -> Option<(i32, bool)> {
+    /// - `Some(ExitInfo)` if the process has exited
+    pub fn exit_status(&mut self) -> Option<ExitInfo> {
         self.pty.exit_status()
     }
 
@@ -383,6 +655,104 @@ impl Session {
         self.info.state = state;
         self.info.last_activity = now;
         self.info.state_entered_at = now;
+    }
+
+    /// Strip ANSI escape/control sequences from PTY bytes while preserving
+    /// printable UTF-8-compatible bytes and newlines for fallback history.
+    fn extract_plain_text_bytes(ansi_remainder: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(ansi_remainder.len() + bytes.len());
+        data.extend_from_slice(ansi_remainder);
+        data.extend_from_slice(bytes);
+        ansi_remainder.clear();
+
+        let mut out = Vec::with_capacity(data.len());
+        let mut i = 0;
+        while i < data.len() {
+            if data[i] == 0x1b {
+                let esc_start = i;
+                i += 1;
+                if i >= data.len() {
+                    ansi_remainder.extend_from_slice(&data[esc_start..]);
+                    break;
+                }
+
+                match data[i] {
+                    b'[' => {
+                        i += 1;
+                        let mut complete = false;
+                        while i < data.len() {
+                            let b = data[i];
+                            i += 1;
+                            if (0x40..=0x7e).contains(&b) {
+                                complete = true;
+                                break;
+                            }
+                        }
+                        if !complete {
+                            ansi_remainder.extend_from_slice(&data[esc_start..]);
+                            break;
+                        }
+                    }
+                    b']' => {
+                        i += 1;
+                        let mut complete = false;
+                        while i < data.len() {
+                            if data[i] == 0x07 {
+                                i += 1;
+                                complete = true;
+                                break;
+                            }
+                            if data[i] == 0x1b {
+                                if i + 1 < data.len() && data[i + 1] == b'\\' {
+                                    i += 2;
+                                    complete = true;
+                                    break;
+                                }
+                                ansi_remainder.extend_from_slice(&data[esc_start..]);
+                                return out;
+                            }
+                            i += 1;
+                        }
+                        if !complete {
+                            ansi_remainder.extend_from_slice(&data[esc_start..]);
+                            break;
+                        }
+                    }
+                    b'P' | b'X' | b'^' | b'_' => {
+                        i += 1;
+                        let mut complete = false;
+                        while i < data.len() {
+                            if data[i] == 0x1b {
+                                if i + 1 < data.len() && data[i + 1] == b'\\' {
+                                    i += 2;
+                                    complete = true;
+                                    break;
+                                }
+                                ansi_remainder.extend_from_slice(&data[esc_start..]);
+                                return out;
+                            }
+                            i += 1;
+                        }
+                        if !complete {
+                            ansi_remainder.extend_from_slice(&data[esc_start..]);
+                            break;
+                        }
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+
+            let b = data[i];
+            if b == b'\n' || b == b'\r' || b == b'\t' || b >= 0x20 {
+                out.push(b);
+            }
+            i += 1;
+        }
+
+        out
     }
 }
 
@@ -443,6 +813,41 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let parsed: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(state, parsed);
+    }
+
+    #[test]
+    fn test_session_type_default() {
+        let session_type = SessionType::default();
+        assert_eq!(session_type, SessionType::ClaudeCode);
+    }
+
+    #[test]
+    fn test_session_type_display() {
+        assert_eq!(SessionType::ClaudeCode.display_name(), "Claude Code");
+        assert_eq!(SessionType::Shell.display_name(), "Shell");
+    }
+
+    #[test]
+    fn test_session_type_short_tag() {
+        assert_eq!(SessionType::ClaudeCode.short_tag(), "[CC]");
+        assert_eq!(SessionType::Shell.short_tag(), "[SH]");
+        assert_eq!(SessionType::OpenAICodex.short_tag(), "[CX]");
+    }
+
+    #[test]
+    fn test_session_type_uses_hooks() {
+        assert!(SessionType::ClaudeCode.uses_hooks());
+        assert!(!SessionType::Shell.uses_hooks());
+    }
+
+    #[test]
+    fn test_session_info_shell() {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let info = SessionInfo::shell("shell".to_string(), "/tmp".into(), project_id, branch_id);
+        assert_eq!(info.name, "shell");
+        assert_eq!(info.session_type, SessionType::Shell);
+        assert_eq!(info.state, SessionState::Waiting); // Shell starts in Waiting
     }
 
     #[test]
@@ -554,6 +959,40 @@ mod tests {
     }
 
     #[test]
+    fn test_output_buffer_scroll_up_with_viewport_clamps_at_full_page_top() {
+        let mut buf = OutputBuffer::new(100);
+        for i in 0..10 {
+            buf.push(format!("line {}", i));
+        }
+
+        // Viewport is 5 lines, so max useful offset is 10 - 5 = 5.
+        buf.scroll_up_with_viewport(100, 5);
+        assert_eq!(buf.scroll_offset(), 5);
+
+        // Keep a full page visible at the top.
+        let visible = buf.visible_lines(5);
+        assert_eq!(visible.len(), 5);
+        assert_eq!(visible[0], "line 0");
+        assert_eq!(visible[4], "line 4");
+    }
+
+    #[test]
+    fn test_output_buffer_scroll_to_top_with_viewport() {
+        let mut buf = OutputBuffer::new(100);
+        for i in 0..3 {
+            buf.push(format!("line {}", i));
+        }
+
+        // When viewport is taller than content, top offset is 0.
+        buf.scroll_to_top_with_viewport(10);
+        assert_eq!(buf.scroll_offset(), 0);
+
+        // With a 2-line viewport over 3 lines, top offset is 1.
+        buf.scroll_to_top_with_viewport(2);
+        assert_eq!(buf.scroll_offset(), 1);
+    }
+
+    #[test]
     fn test_output_buffer_clear() {
         let mut buf = OutputBuffer::new(100);
         buf.push("line 1".to_string());
@@ -563,5 +1002,50 @@ mod tests {
         buf.clear();
         assert!(buf.is_empty());
         assert!(buf.is_at_bottom());
+    }
+
+    #[test]
+    fn test_session_resize_updates_vterm() {
+        // Create a session with spawn
+        let pty = crate::session::pty::PtyHandle::spawn(
+            "sleep",
+            &["1"],
+            std::path::Path::new("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let info = SessionInfo::new("test".to_string(), "/tmp".into(), project_id, branch_id);
+        let mut session = Session::new(info, pty, 24, 80);
+
+        // Initial size
+        assert_eq!(session.vterm.size(), (24, 80));
+
+        // Resize
+        session.resize(100, 40).unwrap();
+
+        // Verify vterm was resized (rows, cols)
+        assert_eq!(session.vterm.size(), (40, 100));
+    }
+
+    #[test]
+    fn test_extract_plain_text_bytes_strips_csi_sequences() {
+        let mut ansi_remainder = Vec::new();
+        let plain =
+            Session::extract_plain_text_bytes(&mut ansi_remainder, b"hello\x1b[31m red\x1b[0m\r\n");
+        assert_eq!(String::from_utf8_lossy(&plain), "hello red\r\n");
+    }
+
+    #[test]
+    fn test_extract_plain_text_bytes_handles_split_escape_sequence() {
+        let mut ansi_remainder = Vec::new();
+        let first = Session::extract_plain_text_bytes(&mut ansi_remainder, b"abc\x1b[3");
+        let second = Session::extract_plain_text_bytes(&mut ansi_remainder, b"1mdef\x1b[0m");
+        assert_eq!(String::from_utf8_lossy(&first), "abc");
+        assert_eq!(String::from_utf8_lossy(&second), "def");
     }
 }

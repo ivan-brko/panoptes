@@ -5,7 +5,8 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, InputMode, MAX_BRANCH_NAME_LEN};
+use crate::app::{App, ClaudeSettingsCopyState, InputMode, MAX_BRANCH_NAME_LEN};
+use crate::claude_json::ClaudeJsonStore;
 use crate::project::ProjectId;
 use crate::wizards::worktree::{
     filter_branch_refs, BranchRef, BranchRefType, WorktreeCreationType,
@@ -63,7 +64,13 @@ pub fn handle_worktree_select_branch_key(
                     return Ok(());
                 }
 
-                if selected.ref_type == BranchRefType::Local {
+                // Check if branch has an untracked git worktree - import instead of create
+                if selected.has_git_worktree {
+                    app.state.worktree_wizard.source_branch = Some(selected.clone());
+                    app.state.worktree_wizard.branch_name = selected.name.clone();
+                    app.state.worktree_wizard.creation_type = WorktreeCreationType::ImportExisting;
+                    app.state.input_mode = InputMode::WorktreeConfirm;
+                } else if selected.ref_type == BranchRefType::Local {
                     // Existing local branch -> go directly to confirm
                     app.state.worktree_wizard.source_branch = Some(selected.clone());
                     app.state.worktree_wizard.branch_name = selected.name.clone();
@@ -293,7 +300,7 @@ pub fn handle_worktree_confirm_key(
             }
         }
         KeyCode::Enter => {
-            // Create the worktree
+            // Create or import the worktree
             let result = match app.state.worktree_wizard.creation_type {
                 WorktreeCreationType::ExistingLocal => {
                     // Create worktree from existing local branch (don't create branch)
@@ -334,6 +341,13 @@ pub fn handle_worktree_confirm_key(
                         base_ref.as_deref(),
                     )
                 }
+                WorktreeCreationType::ImportExisting => {
+                    // Import existing git worktree that is not tracked by Panoptes
+                    app.import_existing_worktree(
+                        project_id,
+                        &app.state.worktree_wizard.branch_name.clone(),
+                    )
+                }
             };
 
             // Capture branch_id before canceling wizard (which clears state)
@@ -348,9 +362,16 @@ pub fn handle_worktree_confirm_key(
 
             cancel_worktree_wizard(app);
 
-            // Navigate to the newly created branch
+            // Navigate to the newly created branch, possibly showing permissions dialog
             if let Some(branch_id) = created_branch_id {
-                app.state.navigate_to_branch(project_id, branch_id);
+                // Check if we should offer to copy Claude settings
+                if let Some(copy_state) = check_claude_settings_for_copy(app, project_id, branch_id)
+                {
+                    app.state.pending_claude_settings_copy = Some(copy_state);
+                    app.state.input_mode = InputMode::ConfirmingClaudeSettingsCopy;
+                } else {
+                    app.state.navigate_to_branch(project_id, branch_id);
+                }
             }
         }
         _ => {}
@@ -726,6 +747,141 @@ pub fn update_worktree_filtered_branches(app: &mut App) {
     // Clamp index to valid range after filtering
     app.state.worktree_wizard.clamp_list_index();
 }
+
+/// Check if Claude settings should be copied to a new worktree
+///
+/// Returns Some(ClaudeSettingsCopyState) if the main repo has Claude settings
+/// that should be offered for copying to the new worktree.
+///
+/// This checks both:
+/// - Modern format: `.claude/settings.local.json` in the project directory
+/// - Legacy format: `.claude.json` in the Claude config directory (keyed by path)
+fn check_claude_settings_for_copy(
+    app: &App,
+    project_id: ProjectId,
+    branch_id: crate::project::BranchId,
+) -> Option<ClaudeSettingsCopyState> {
+    // Get project and branch info
+    let project = app.project_store.get_project(project_id)?;
+    let branch = app.project_store.get_branch(branch_id)?;
+
+    // Check modern format (.claude/settings.local.json)
+    let source_local_settings = project
+        .repo_path
+        .join(".claude")
+        .join("settings.local.json");
+    let has_local_settings = source_local_settings.exists();
+
+    // Get the Claude config to use (project default or global default)
+    let config_id = project
+        .default_claude_config
+        .or_else(|| app.claude_config_store.get_default_id());
+
+    let claude_config = config_id.and_then(|id| app.claude_config_store.get(id));
+    let config_dir = claude_config.and_then(|c| c.config_dir.clone());
+
+    // Create store for legacy config directory
+    let store = ClaudeJsonStore::for_config_dir(config_dir.as_deref())?;
+    let main_path = project.repo_path.to_string_lossy().to_string();
+
+    // Check if main repo has any legacy settings configured
+    let has_legacy_settings = store.has_settings(&main_path).ok().unwrap_or(false);
+
+    // Get legacy settings to show a preview (if they exist)
+    let legacy_settings = if has_legacy_settings {
+        store.get_settings(&main_path).ok().flatten()
+    } else {
+        None
+    };
+
+    // Read local settings preview (permissions from modern format)
+    let local_permissions = if has_local_settings {
+        read_local_settings_permissions(&source_local_settings)
+    } else {
+        vec![]
+    };
+
+    // Get legacy tools preview
+    let legacy_tools = legacy_settings
+        .as_ref()
+        .map(|s| s.allowed_tools.clone())
+        .unwrap_or_default();
+    let has_mcp_servers = legacy_settings
+        .as_ref()
+        .map(|s| !s.mcp_servers.is_empty())
+        .unwrap_or(false);
+
+    // Show dialog if EITHER format has settings
+    if !has_local_settings && legacy_tools.is_empty() && !has_mcp_servers {
+        return None;
+    }
+
+    // Combine previews from both sources (deduplicated)
+    let mut combined_preview: Vec<String> = Vec::new();
+    for tool in legacy_tools {
+        if !combined_preview.contains(&tool) {
+            combined_preview.push(tool);
+        }
+    }
+    for perm in local_permissions {
+        if !combined_preview.contains(&perm) {
+            combined_preview.push(perm);
+        }
+    }
+
+    Some(ClaudeSettingsCopyState {
+        source_path: project.repo_path.clone(),
+        target_path: branch.working_dir.clone(),
+        project_id,
+        branch_id,
+        tools_preview: combined_preview,
+        has_mcp_servers,
+        selected_yes: true,
+        claude_config_dir: config_dir,
+        has_local_settings,
+    })
+}
+
+/// Read permission strings from a local settings.local.json file for preview
+fn read_local_settings_permissions(path: &std::path::Path) -> Vec<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let mut permissions = Vec::new();
+
+    // Extract permissions.allow array
+    if let Some(perms) = json.get("permissions") {
+        if let Some(allow) = perms.get("allow") {
+            if let Some(arr) = allow.as_array() {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        permissions.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    permissions
+}
+
+// TODO: Codex permissions sharing
+// When Codex CLI supports per-project permissions (similar to Claude's
+// .claude/settings.local.json or .claude.json), implement detection and
+// copy dialog here. The pattern should mirror check_claude_settings_for_copy().
+// See also: CodexAdapter::setup_hooks() for where Codex config is modified.
+//
+// Similarly, when Codex CLI supports per-project permissions, implement
+// migration of unique worktree permissions back to main repo on deletion.
+// Pattern should mirror check_claude_settings_for_migrate() in
+// src/input/normal/project_detail.rs.
 
 /// Select the default base branch in the filtered list (legacy flow)
 fn select_default_base_branch(app: &mut App) {

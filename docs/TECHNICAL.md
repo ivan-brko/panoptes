@@ -93,6 +93,9 @@
 │  ┌──────────────┐    ┌────────┴────────┐                       │
 │  │ VTerm        │    │ Agent           │                       │
 │  │ (ANSI/color) │    │ Adapter         │                       │
+│  │              │    │ - ClaudeAdapter │                       │
+│  │              │    │ - CodexAdapter  │                       │
+│  │              │    │ - ShellAdapter  │                       │
 │  └──────┬───────┘    └────────┬────────┘                       │
 │         │                     │                                │
 │  ┌──────┴───────┐             │                                │
@@ -104,10 +107,10 @@
           │
           ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ Claude Code Instances (Child Processes)                         │
+│ Agent Instances (Child Processes)                                │
 │                                                                 │
-│  Each instance runs in its own PTY and sends hook events        │
-│  to the HTTP server when state changes occur                    │
+│  Claude Code / Codex / Shell instances run in PTYs and send     │
+│  hook events to the HTTP server when state changes occur        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -142,12 +145,16 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 3. TUI renders visible portion with ANSI color support
 
 ### State Updates (Hooks)
-1. Claude Code executes hook scripts on events
-2. Hook script extracts session_id from JSON stdin
+1. Agent (Claude Code or Codex) executes hook scripts on events
+2. Hook script extracts session_id from environment/JSON stdin
 3. Hook script POSTs event to localhost:9999
 4. Axum server updates session state
 5. SessionManager tracks attention flags
 6. TUI reflects new state on next render
+
+**Claude Code hooks:** Full event types (PreToolUse, PostToolUse, Stop, etc.) providing granular state tracking including Executing(tool) state.
+
+**Codex hooks:** Limited to `notify` config firing `agent-turn-complete` events. Maps to Waiting state. No granular tool-use tracking (no Executing state for Codex sessions).
 
 ### Attention Flow
 1. Session transitions to "Waiting" state
@@ -162,9 +169,37 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration |
 | `~/.panoptes/projects.json` | Project and branch persistence |
-| `~/.panoptes/hooks/` | Hook scripts for Claude Code |
+| `~/.panoptes/claude_configs.json` | Claude account configurations |
+| `~/.panoptes/codex_configs.json` | Codex account configurations |
+| `~/.panoptes/hooks/` | Hook scripts for Claude Code and Codex |
 | `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
+
+## Multi-Account Support
+
+Panoptes supports multiple accounts for both Claude Code and Codex CLI:
+
+### Claude Code Accounts
+
+Via the `CLAUDE_CONFIG_DIR` environment variable:
+
+1. **Define configurations** - Each configuration points to a Claude config directory (e.g., `~/.claude-work`, `~/.claude-personal`)
+2. **Set project defaults** - Each project can have a default Claude configuration
+3. **Session selection** - When creating a Claude session with multiple configs available, a selector appears
+4. **Environment injection** - `CLAUDE_CONFIG_DIR` is set when spawning with a non-default configuration
+
+### Codex Accounts
+
+Via the `CODEX_HOME` environment variable:
+
+1. **Define configurations** - Each configuration points to a Codex home directory (e.g., `~/.codex-work`, `~/.codex-personal`)
+2. **Set project defaults** - Each project can have a default Codex configuration (independent of Claude config)
+3. **Session selection** - When creating a Codex session with multiple configs available, a selector appears
+4. **Environment injection** - `CODEX_HOME` is set when spawning with a non-default configuration (defaults to `~/.codex/`)
+
+### Session Display
+
+Sessions display their configuration name in the header (e.g., `[Work]`) when using a non-default configuration.
 
 ## Configuration
 
@@ -173,6 +208,36 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 | `hook_port` | 9999 | Port for the HTTP hook server |
 | `max_output_lines` | 10,000 | Lines kept in output buffer per session |
 | `idle_threshold_secs` | 300 | Seconds before waiting session shows yellow attention badge |
+| `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
+
+### Custom Shortcuts
+
+Custom shortcuts provide quick access to shell sessions with predefined commands:
+
+```toml
+[[custom_shortcuts]]
+key = "v"
+name = "VSCode"
+command = "code . &"
+```
+
+**Architecture:**
+- Stored in `~/.panoptes/config.toml` as a TOML array
+- Managed via dialog UI (press `k` in any view)
+- Triggered in session view (normal mode) by pressing the shortcut key
+- Creates shell session using `SessionManager::create_shell_session_with_command()`
+
+**Key validation:**
+- Reserved keys are rejected (q, i, g, G, t, T, k, x, 0-9)
+- Duplicate keys are rejected
+- Validation occurs in `config::is_reserved_key()` and `Config::add_shortcut()`
+
+**Session creation flow:**
+1. User presses shortcut key in session view (normal mode)
+2. `session_view.rs` looks up shortcut in config
+3. Creates shell session with current project/branch context
+4. Writes command to PTY immediately after spawn
+5. Switches to session mode in the new session
 
 ## Platform Support
 
@@ -191,7 +256,7 @@ Sessions are cleaned up automatically when Panoptes exits:
 
 ## Testing
 
-The project has 134 unit tests covering:
+The project has 335+ unit tests covering:
 - Configuration loading/saving
 - Session state transitions
 - Output buffer management

@@ -14,8 +14,10 @@ use crate::session::{Session, SessionManager, SessionState};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
+use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
+use crate::tui::widgets::selection::{selection_prefix, selection_style};
 
 /// Render the activity timeline view showing all sessions sorted by activity
 #[allow(clippy::too_many_arguments)]
@@ -99,7 +101,7 @@ pub fn render_timeline(
             .enumerate()
             .map(|(i, session)| {
                 let selected = i == selected_index;
-                let prefix = if selected { "▶ " } else { "  " };
+                let prefix = selection_prefix(selected);
 
                 // Check if session needs attention
                 let needs_attention = sessions.session_needs_attention(session, idle_threshold);
@@ -139,9 +141,14 @@ pub fn render_timeline(
                 };
 
                 // Format: project / branch / session [state] - time
+                let t = theme();
                 let content = Line::from(vec![
                     Span::raw(prefix),
                     Span::styled(badge, Style::default().fg(badge_color)),
+                    Span::styled(
+                        format!("{} ", session.info.session_type.short_tag()),
+                        t.muted_style(),
+                    ),
                     Span::raw(format!(
                         "{}: {} / {} / {} [{}] - {}",
                         i + 1,
@@ -153,11 +160,7 @@ pub fn render_timeline(
                     )),
                 ]);
 
-                let style = if selected {
-                    Style::default().fg(session.info.state.color()).bold()
-                } else {
-                    Style::default().fg(session.info.state.color())
-                };
+                let style = selection_style(selected, session.info.state.color());
 
                 ListItem::new(content).style(style)
             })
@@ -221,8 +224,13 @@ fn render_attention_section(
                 ),
             };
 
+            let t = theme();
             let content = Line::from(vec![
                 Span::styled("● ", Style::default().fg(badge_color)),
+                Span::styled(
+                    format!("{} ", session.info.session_type.short_tag()),
+                    t.muted_style(),
+                ),
                 Span::raw(format!(
                     "{} / {} / {} {}",
                     project_name, branch_name, session.info.name, state_text

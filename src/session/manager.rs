@@ -12,9 +12,12 @@ use chrono::Utc;
 
 use crate::agent::adapter::SpawnConfig;
 use crate::agent::AgentType;
+use crate::claude_config::ClaudeConfigId;
 use crate::config::Config;
 use crate::hooks::{HookEvent, HookEventType};
 use crate::project::{BranchId, ProjectId};
+
+use crate::codex_config::CodexConfigId;
 
 use super::{Session, SessionId, SessionInfo, SessionState};
 
@@ -50,7 +53,43 @@ impl SessionManager {
         rows: usize,
         cols: usize,
     ) -> Result<SessionId> {
-        let info = SessionInfo::new(name.clone(), working_dir.clone(), project_id, branch_id);
+        self.create_session_with_config(
+            name,
+            working_dir,
+            project_id,
+            branch_id,
+            initial_prompt,
+            rows,
+            cols,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Create a new session with a specific Claude configuration
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_session_with_config(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        initial_prompt: Option<String>,
+        rows: usize,
+        cols: usize,
+        claude_config_id: Option<ClaudeConfigId>,
+        claude_config_dir: Option<PathBuf>,
+        claude_config_name: Option<String>,
+    ) -> Result<SessionId> {
+        let info = SessionInfo::with_claude_config(
+            name.clone(),
+            working_dir.clone(),
+            project_id,
+            branch_id,
+            claude_config_id,
+            claude_config_name,
+        );
         let session_id = info.id;
 
         // Create spawn config
@@ -61,6 +100,8 @@ impl SessionManager {
             initial_prompt,
             rows: rows as u16,
             cols: cols as u16,
+            claude_config_dir,
+            codex_home: None,
         };
 
         // Get adapter and spawn the process
@@ -69,7 +110,183 @@ impl SessionManager {
         let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
 
         // Create session with PTY and virtual terminal
-        let session = Session::new(info, spawn_result.pty, rows, cols);
+        let session = Session::with_scrollback(
+            info,
+            spawn_result.pty,
+            rows,
+            cols,
+            self.config.scrollback_lines,
+        );
+
+        // Store session
+        self.sessions.insert(session_id, session);
+        self.session_order.push(session_id);
+
+        Ok(session_id)
+    }
+
+    /// Create a new shell session (bash/zsh)
+    ///
+    /// Shell sessions don't use hooks - state tracking is done via foreground detection.
+    pub fn create_shell_session(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        rows: usize,
+        cols: usize,
+    ) -> Result<SessionId> {
+        let info = SessionInfo::shell(name.clone(), working_dir.clone(), project_id, branch_id);
+        let session_id = info.id;
+
+        // Create spawn config
+        let spawn_config = SpawnConfig {
+            session_id,
+            session_name: name,
+            working_dir,
+            initial_prompt: None, // Shell doesn't use initial prompts
+            rows: rows as u16,
+            cols: cols as u16,
+            claude_config_dir: None,
+            codex_home: None,
+        };
+
+        // Get adapter and spawn the process
+        let agent_type = AgentType::Shell;
+        let adapter = agent_type.create_adapter();
+        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
+
+        // Create session with PTY and virtual terminal
+        let session = Session::with_scrollback(
+            info,
+            spawn_result.pty,
+            rows,
+            cols,
+            self.config.scrollback_lines,
+        );
+
+        // Store session
+        self.sessions.insert(session_id, session);
+        self.session_order.push(session_id);
+
+        Ok(session_id)
+    }
+
+    /// Create a new shell session with an initial command to execute
+    ///
+    /// Shell sessions don't use hooks - state tracking is done via foreground detection.
+    /// The command is written to the PTY after the shell starts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_shell_session_with_command(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        initial_command: String,
+        rows: usize,
+        cols: usize,
+    ) -> Result<SessionId> {
+        // Create the shell session first
+        let session_id =
+            self.create_shell_session(name, working_dir, project_id, branch_id, rows, cols)?;
+
+        // Write the command to the PTY
+        // The shell should be ready immediately, but we can write right away since
+        // the PTY will buffer the input until the shell reads it
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            // Write the command followed by newline to execute it
+            let command_with_newline = format!("{}\n", initial_command);
+            if let Err(e) = session.pty.write(command_with_newline.as_bytes()) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    command = %initial_command,
+                    error = %e,
+                    "Failed to write initial command to shell session"
+                );
+            }
+        }
+
+        Ok(session_id)
+    }
+
+    /// Create a new Codex session
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_codex_session(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        initial_prompt: Option<String>,
+        rows: usize,
+        cols: usize,
+    ) -> Result<SessionId> {
+        self.create_codex_session_with_config(
+            name,
+            working_dir,
+            project_id,
+            branch_id,
+            initial_prompt,
+            rows,
+            cols,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Create a new Codex session with a specific Codex configuration
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_codex_session_with_config(
+        &mut self,
+        name: String,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+        initial_prompt: Option<String>,
+        rows: usize,
+        cols: usize,
+        codex_config_id: Option<CodexConfigId>,
+        codex_home: Option<PathBuf>,
+        codex_config_name: Option<String>,
+    ) -> Result<SessionId> {
+        let info = SessionInfo::with_codex_config(
+            name.clone(),
+            working_dir.clone(),
+            project_id,
+            branch_id,
+            codex_config_id,
+            codex_config_name,
+        );
+        let session_id = info.id;
+
+        // Create spawn config
+        let spawn_config = SpawnConfig {
+            session_id,
+            session_name: name,
+            working_dir,
+            initial_prompt,
+            rows: rows as u16,
+            cols: cols as u16,
+            claude_config_dir: None,
+            codex_home,
+        };
+
+        // Get adapter and spawn the process
+        let agent_type = AgentType::OpenAICodex;
+        let adapter = agent_type.create_adapter();
+        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
+
+        // Create session with PTY and virtual terminal
+        let session = Session::with_scrollback(
+            info,
+            spawn_result.pty,
+            rows,
+            cols,
+            self.config.scrollback_lines,
+        );
 
         // Store session
         self.sessions.insert(session_id, session);
@@ -153,9 +370,20 @@ impl SessionManager {
     /// Returns list of session IDs that had new output
     /// Drains ALL available PTY data before returning to prevent rendering lag
     pub fn poll_outputs(&mut self) -> Vec<SessionId> {
+        self.poll_outputs_except(None)
+    }
+
+    /// Poll all sessions for new output, optionally excluding one session.
+    ///
+    /// This is useful when the active session is scrolled up in history and the
+    /// UI should "freeze" that view while still polling other sessions.
+    pub fn poll_outputs_except(&mut self, excluded: Option<SessionId>) -> Vec<SessionId> {
         let mut sessions_with_output = Vec::new();
 
         for (&session_id, session) in &mut self.sessions {
+            if excluded == Some(session_id) {
+                continue;
+            }
             let mut had_output = false;
             // Drain ALL available PTY data before returning
             while session.poll_output() {
@@ -171,14 +399,15 @@ impl SessionManager {
 
     /// Check all sessions for exited processes
     /// Updates state to Exited for any dead sessions
-    /// Returns true if any session state changed
-    pub fn check_alive(&mut self) -> bool {
-        let mut changed = false;
+    /// Returns a list of (session_id, session_name, exit_reason) for sessions that crashed
+    pub fn check_alive(&mut self) -> Vec<(SessionId, String, String)> {
+        let mut crashed_sessions = Vec::new();
         for session in self.sessions.values_mut() {
             if session.info.state != SessionState::Exited {
                 // Check exit status to detect crashes vs normal termination
-                if let Some((exit_code, success)) = session.exit_status() {
-                    if success {
+                if let Some(exit_info) = session.exit_status() {
+                    let reason = exit_info.format_reason();
+                    if exit_info.success {
                         tracing::debug!(
                             session_id = %session.info.id,
                             session_name = %session.info.name,
@@ -189,17 +418,20 @@ impl SessionManager {
                         tracing::warn!(
                             session_id = %session.info.id,
                             session_name = %session.info.name,
-                            exit_code = exit_code,
+                            exit_code = exit_info.code,
+                            signal = ?exit_info.signal,
+                            exit_reason = %reason,
                             "Session exited abnormally"
                         );
-                        session.info.exit_reason = Some(format!("Exit code: {}", exit_code));
+                        session.info.exit_reason = Some(reason.clone());
+                        // Collect crashed sessions for notification
+                        crashed_sessions.push((session.info.id, session.info.name.clone(), reason));
                     }
                     session.set_state(SessionState::Exited);
-                    changed = true;
                 }
             }
         }
-        changed
+        crashed_sessions
     }
 
     /// Check for sessions stuck in Executing state too long
@@ -227,6 +459,54 @@ impl SessionManager {
             }
         }
         changed
+    }
+
+    /// Check shell session states by polling foreground process detection
+    ///
+    /// For shell sessions (SessionType::Shell), this checks whether a command
+    /// is currently running in the foreground and updates state accordingly:
+    /// - Foreground busy -> Executing("command")
+    /// - Foreground idle -> Waiting
+    ///
+    /// Returns a list of session IDs that transitioned from Executing to Waiting
+    /// (these sessions need notifications).
+    ///
+    /// The `active_session` parameter indicates which session the user is currently viewing.
+    /// Sessions that are active will not have `needs_attention` set or be included in the
+    /// notification list, since the user is already looking at them.
+    pub fn check_shell_states(&mut self, active_session: Option<SessionId>) -> Vec<SessionId> {
+        use super::SessionType;
+
+        let mut needs_notification = Vec::new();
+
+        for session in self.sessions.values_mut() {
+            // Only check shell sessions that haven't exited
+            if session.info.session_type != SessionType::Shell {
+                continue;
+            }
+            if session.info.state == SessionState::Exited {
+                continue;
+            }
+
+            let is_busy = session.pty.is_foreground_busy();
+            let current_is_executing = matches!(session.info.state, SessionState::Executing(_));
+
+            if is_busy && !current_is_executing {
+                // Transition to Executing
+                session.set_state(SessionState::Executing("command".to_string()));
+            } else if !is_busy && current_is_executing {
+                // Transition to Waiting - command finished
+                session.set_state(SessionState::Waiting);
+                // Only set needs_attention and add to notification list if not the active session
+                let is_active = active_session == Some(session.info.id);
+                if !is_active {
+                    session.info.needs_attention = true;
+                    needs_notification.push(session.info.id);
+                }
+            }
+        }
+
+        needs_notification
     }
 
     /// Clean up exited sessions that have been exited longer than retention_secs
@@ -260,8 +540,15 @@ impl SessionManager {
     }
 
     /// Handle a hook event and update session state accordingly
-    /// Returns the session ID if terminal bell should be rung (session entered Waiting state)
-    pub fn handle_hook_event(&mut self, event: &HookEvent) -> Option<SessionId> {
+    /// Returns the session ID if notification should be sent (session entered Waiting state)
+    ///
+    /// The `active_session` parameter indicates which session the user is currently viewing.
+    /// If the session entering Waiting state is the active session, `needs_attention` will
+    /// not be set and `None` will be returned (no notification needed).
+    pub fn handle_hook_event(
+        &mut self,
+        event: &HookEvent,
+    ) -> Option<SessionId> {
         // Try to parse session_id as UUID
         let session_id = match event.session_id.parse::<SessionId>() {
             Ok(id) => id,
@@ -302,6 +589,10 @@ impl SessionManager {
             }
             HookEventType::PermissionRequest => {
                 // Permission dialog is showing - session needs user input
+                SessionState::Waiting
+            }
+            HookEventType::AgentTurnComplete => {
+                // Codex CLI agent turn complete - agent is waiting for user input
                 SessionState::Waiting
             }
             HookEventType::Unknown => {
@@ -562,24 +853,57 @@ impl SessionManager {
 }
 
 #[cfg(test)]
+impl SessionManager {
+    /// Insert a stub session for testing
+    ///
+    /// Spawns a `sleep` process to create a valid Session with minimal overhead.
+    /// The session will have a real PTY but a short-lived process.
+    pub fn insert_test_session(
+        &mut self,
+        name: &str,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Result<SessionId> {
+        use super::pty::PtyHandle;
+        use super::{Session, SessionInfo};
+        use std::collections::HashMap;
+
+        let info = SessionInfo::new(
+            name.to_string(),
+            std::path::PathBuf::from("/tmp"),
+            project_id,
+            branch_id,
+        );
+        let session_id = info.id;
+
+        // Spawn a simple sleep process for the PTY
+        let pty = PtyHandle::spawn(
+            "sleep",
+            &["1"],
+            &std::path::PathBuf::from("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )?;
+        let session = Session::new(info, pty, 24, 80);
+
+        self.sessions.insert(session_id, session);
+        self.session_order.push(session_id);
+
+        Ok(session_id)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
     fn test_config(temp_dir: &TempDir) -> Config {
         Config {
-            hook_port: 9999,
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
-            max_output_lines: 1000,
-            idle_threshold_secs: 300,
-            state_timeout_secs: 300,
-            exited_retention_secs: 300,
-            theme_preset: "dark".to_string(),
-            notification_method: "bell".to_string(),
-            esc_hold_threshold_ms: 400,
-            focus_timer_minutes: 25,
-            focus_stats_retention_days: 30,
+            ..Config::default()
         }
     }
 
@@ -816,5 +1140,75 @@ mod tests {
         let fake_id = uuid::Uuid::new_v4();
         let result = manager.destroy_session(fake_id);
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_shell_states_sets_needs_attention() {
+        use crate::session::pty::PtyHandle;
+        use crate::session::{Session, SessionInfo, SessionType};
+        use std::collections::HashMap;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = SessionManager::new(config);
+
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        // Create a shell session info
+        let info = SessionInfo::shell(
+            "test-shell".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            project_id,
+            branch_id,
+        );
+        let session_id = info.id;
+
+        // Spawn a very short-lived process so it exits quickly
+        let pty = PtyHandle::spawn(
+            "true",
+            &[],
+            &std::path::PathBuf::from("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+
+        let mut session = Session::new(info, pty, 24, 80);
+
+        // Manually set the session to Executing state to simulate a command running
+        session.set_state(SessionState::Executing("test-command".to_string()));
+        assert_eq!(session.info.session_type, SessionType::Shell);
+        assert!(!session.info.needs_attention);
+
+        manager.sessions.insert(session_id, session);
+        manager.session_order.push(session_id);
+
+        // Wait for the process to exit so foreground becomes idle
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Call check_shell_states - should detect transition from Executing to Waiting
+        // Pass None for active_session so the session gets flagged for attention
+        let notified = manager.check_shell_states(None);
+
+        // The session should have transitioned and be in the notification list
+        assert!(
+            notified.contains(&session_id),
+            "Session should be in notification list after transitioning to Waiting"
+        );
+
+        // Verify needs_attention is set
+        let session = manager.get(session_id).unwrap();
+        assert!(
+            session.info.needs_attention,
+            "needs_attention should be true after command completion"
+        );
+        assert_eq!(
+            session.info.state,
+            SessionState::Waiting,
+            "State should be Waiting after command completion"
+        );
     }
 }

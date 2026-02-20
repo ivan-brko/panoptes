@@ -19,6 +19,9 @@ use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
+use crate::tui::widgets::selection::{
+    selection_prefix, selection_style, selection_style_with_accent,
+};
 
 /// Render the project detail view showing branches
 #[allow(clippy::too_many_arguments)]
@@ -131,7 +134,7 @@ pub fn render_project_detail(
                 );
 
                 let selected = item_index == selected_index;
-                let prefix = if selected { "▶ " } else { "  " };
+                let prefix = selection_prefix(selected);
 
                 // Count sessions for this branch
                 let active_count = sessions.active_session_count_for_branch(branch.id);
@@ -149,21 +152,22 @@ pub fn render_project_detail(
 
                 let content = format!("{}{}: {}{}", prefix, item_index + 1, display_name, status);
 
-                // Color precedence: Yellow (attention) > Green (active) > Cyan > White
+                // Color precedence: attention > active > accent
+                let t = theme();
                 let style = if selected {
                     if attention_count > 0 {
-                        Style::default().fg(Color::Yellow).bold()
+                        selection_style(true, t.attention_badge)
                     } else if active_count > 0 {
-                        Style::default().fg(Color::Green).bold()
+                        selection_style(true, t.active)
                     } else {
-                        Style::default().fg(Color::Cyan).bold()
+                        selection_style_with_accent(true, t)
                     }
                 } else if attention_count > 0 {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(t.attention_badge)
                 } else if active_count > 0 {
-                    Style::default().fg(Color::Green)
+                    Style::default().fg(t.active)
                 } else {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(t.accent)
                 };
 
                 items.push(ListItem::new(content).style(style));
@@ -185,7 +189,7 @@ pub fn render_project_detail(
 
                 for branch in &worktrees {
                     let selected = item_index == selected_index;
-                    let prefix = if selected { "▶ " } else { "  " };
+                    let prefix = selection_prefix(selected);
 
                     // Count sessions for this branch
                     let active_count = sessions.active_session_count_for_branch(branch.id);
@@ -208,27 +212,24 @@ pub fn render_project_detail(
                     let content =
                         format!("{}{}: {}{}", prefix, item_index + 1, branch.name, status);
 
-                    // Color precedence: Red (stale) > Yellow (attention) > Green (active) > White
+                    // Color precedence: stale > attention > active > text
+                    let t = theme();
                     let style = if branch.stale {
-                        if selected {
-                            Style::default().fg(Color::Red).bold()
-                        } else {
-                            Style::default().fg(Color::Red)
-                        }
+                        selection_style(selected, Color::Red)
                     } else if selected {
                         if attention_count > 0 {
-                            Style::default().fg(Color::Yellow).bold()
+                            selection_style(true, t.attention_badge)
                         } else if active_count > 0 {
-                            Style::default().fg(Color::Green).bold()
+                            selection_style(true, t.active)
                         } else {
-                            Style::default().fg(Color::White).bold()
+                            selection_style_with_accent(true, t)
                         }
                     } else if attention_count > 0 {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(t.attention_badge)
                     } else if active_count > 0 {
-                        Style::default().fg(Color::Green)
+                        Style::default().fg(t.active)
                     } else {
-                        Style::default().fg(Color::White)
+                        Style::default().fg(t.text)
                     };
 
                     items.push(ListItem::new(content).style(style));
@@ -267,10 +268,13 @@ pub fn render_project_detail(
             "Type: filter | ↑/↓: navigate | Enter: set default | Esc: cancel".to_string()
         }
         InputMode::RenamingProject => "Type: project name | Enter: save | Esc: cancel".to_string(),
+        InputMode::SelectingClaudeConfig | InputMode::SelectingCodexConfig => {
+            "↑/↓: navigate | Enter: select | Esc: cancel".to_string()
+        }
         _ => {
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let base = format!(
-                "n: new worktree | b: set default base | r: rename | R: refresh | d: delete | {} | ↑/↓: navigate | Enter: open | Esc: back | q: quit",
+                "n: new worktree | b: base | c/x: config | r: rename | d: delete | k: shortcuts | {} | q: quit",
                 timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
@@ -339,7 +343,7 @@ fn render_worktree_creation(
         .enumerate()
         .map(|(i, branch_ref)| {
             let selected = i == state.base_branch_selector_index;
-            let prefix = if selected { "▶ " } else { "  " };
+            let prefix = selection_prefix(selected);
             let type_prefix = match branch_ref.ref_type {
                 BranchRefType::Local => "[L]",
                 BranchRefType::Remote => "[R]",
@@ -353,14 +357,12 @@ fn render_worktree_creation(
 
             let style = if selected {
                 if branch_ref.is_default_base {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                    selection_style(true, t.accent)
                 } else {
-                    t.selected_style()
+                    selection_style_with_accent(true, t)
                 }
             } else if branch_ref.is_default_base {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(t.accent)
             } else if branch_ref.ref_type == BranchRefType::Local {
                 Style::default().fg(t.text)
             } else {
@@ -403,7 +405,7 @@ fn render_default_base_selection(frame: &mut Frame, area: Rect, state: &AppState
         .enumerate()
         .map(|(i, branch_ref)| {
             let selected = i == state.base_branch_selector_index;
-            let prefix = if selected { "▶ " } else { "  " };
+            let prefix = selection_prefix(selected);
             let type_prefix = match branch_ref.ref_type {
                 BranchRefType::Local => "[L]",
                 BranchRefType::Remote => "[R]",
@@ -421,14 +423,12 @@ fn render_default_base_selection(frame: &mut Frame, area: Rect, state: &AppState
 
             let style = if selected {
                 if branch_ref.is_default_base {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                    selection_style(true, t.accent)
                 } else {
-                    t.selected_style()
+                    selection_style_with_accent(true, t)
                 }
             } else if branch_ref.is_default_base {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(t.accent)
             } else {
                 Style::default().fg(t.text)
             };
@@ -579,38 +579,8 @@ pub fn render_branch_delete_confirmation(
         lines.push(Line::from(""));
     }
 
-    // Worktree deletion toggle
-    if is_worktree {
-        let checkbox = if state.delete_worktree_on_disk {
-            "[x]"
-        } else {
-            "[ ]"
-        };
-        let checkbox_style = if state.delete_worktree_on_disk {
-            Style::default()
-                .fg(t.border_warning)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(t.text_muted)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(checkbox, checkbox_style),
-            Span::styled(
-                " Also delete worktree from disk",
-                Style::default().fg(t.text),
-            ),
-            Span::styled(" (press w to toggle)", Style::default().fg(t.text_muted)),
-        ]));
-        if state.delete_worktree_on_disk {
-            lines.push(Line::from(vec![Span::styled(
-                "    ⚠  This will permanently delete the directory!",
-                Style::default()
-                    .fg(t.border_warning)
-                    .add_modifier(Modifier::BOLD),
-            )]));
-        }
-        lines.push(Line::from(""));
-    } else {
+    // Non-worktree info (shown before confirmation prompt)
+    if !is_worktree {
         lines.push(Line::from(vec![Span::styled(
             "This branch is not a worktree (tracked branch only)",
             Style::default().fg(t.text_muted),
@@ -639,6 +609,39 @@ pub fn render_branch_delete_confirmation(
         ),
         Span::styled(" to cancel", Style::default().fg(t.text)),
     ]));
+
+    // Worktree deletion toggle (shown after confirmation prompt)
+    if is_worktree {
+        lines.push(Line::from(""));
+        let checkbox = if state.delete_worktree_on_disk {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let checkbox_style = if state.delete_worktree_on_disk {
+            Style::default()
+                .fg(t.border_warning)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(t.text_muted)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(checkbox, checkbox_style),
+            Span::styled(
+                " Also delete worktree from disk",
+                Style::default().fg(t.text),
+            ),
+            Span::styled(" (press w to toggle)", Style::default().fg(t.text_muted)),
+        ]));
+        if state.delete_worktree_on_disk {
+            lines.push(Line::from(vec![Span::styled(
+                "    ⚠  This will permanently delete the directory!",
+                Style::default()
+                    .fg(t.border_warning)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+        }
+    }
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
         Block::default()
@@ -734,12 +737,28 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
             let type_prefix = branch.ref_type.prefix();
             let default_marker = if branch.is_default_base { " *" } else { "" };
 
+            // Show indicator for branches with untracked git worktrees
+            let worktree_marker = if branch.has_git_worktree {
+                " (has worktree)"
+            } else {
+                ""
+            };
+
             let content = format!(
-                "{}{} {}{}",
-                prefix, type_prefix, branch.name, default_marker
+                "{}{} {}{}{}",
+                prefix, type_prefix, branch.name, default_marker, worktree_marker
             );
 
-            let style = if selected {
+            // Branches with untracked git worktrees are highlighted in yellow
+            let style = if branch.has_git_worktree {
+                if selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                }
+            } else if selected {
                 if branch.is_default_base {
                     Style::default()
                         .fg(Color::Cyan)
@@ -978,20 +997,57 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
                 Style::default().fg(Color::Cyan),
             )]));
         }
+        WorktreeCreationType::ImportExisting => {
+            lines.push(Line::from(vec![Span::styled(
+                "Import existing worktree for branch:",
+                Style::default().fg(t.text),
+            )]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                format!("    {}", state.worktree_wizard.branch_name),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                "This worktree already exists in git but is not",
+                Style::default().fg(t.text_muted),
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                "tracked by Panoptes. Importing will add it to",
+                Style::default().fg(t.text_muted),
+            )]));
+            lines.push(Line::from(vec![Span::styled(
+                "your project without modifying the worktree.",
+                Style::default().fg(t.text_muted),
+            )]));
+        }
+    }
+
+    // For ImportExisting, we need to find the actual worktree path from git
+    let is_import = state.worktree_wizard.creation_type == WorktreeCreationType::ImportExisting;
+
+    if !is_import {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "Worktree location:",
+            Style::default().fg(t.text),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("  {}", worktree_display),
+            Style::default().fg(t.text_muted),
+        )]));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![Span::styled(
-        "Worktree location:",
-        Style::default().fg(t.text),
-    )]));
-    lines.push(Line::from(vec![Span::styled(
-        format!("  {}", worktree_display),
-        Style::default().fg(t.text_muted),
-    )]));
+    lines.push(Line::from(""));
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(""));
+    let action_text = if is_import {
+        " to import, "
+    } else {
+        " to create, "
+    };
     lines.push(Line::from(vec![
         Span::styled("Press ", Style::default().fg(t.text)),
         Span::styled(
@@ -1000,7 +1056,7 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" to create, ", Style::default().fg(t.text)),
+        Span::styled(action_text, Style::default().fg(t.text)),
         Span::styled(
             "Esc",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1008,11 +1064,16 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
         Span::styled(" to go back", Style::default().fg(t.text)),
     ]));
 
+    let title = if is_import {
+        "Import Worktree"
+    } else {
+        "Create Worktree"
+    };
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(t.border))
-            .title("Create Worktree"),
+            .title(title),
     );
 
     frame.render_widget(paragraph, area);

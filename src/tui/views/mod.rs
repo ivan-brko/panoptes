@@ -2,13 +2,18 @@
 //!
 //! Each view in the application has its own module for rendering logic.
 
-use crate::config::Config;
+use crate::config::{Config, CustomShortcut};
 use crate::focus_timing::FocusTimer;
 use crate::session::SessionManager;
 
 mod branch_detail;
+mod claude_configs;
+mod claude_settings;
+mod codex_configs;
 mod confirm;
+mod custom_shortcuts;
 mod focus_stats;
+mod help;
 mod logs;
 mod notifications;
 mod project_detail;
@@ -17,14 +22,28 @@ mod session;
 mod timeline;
 
 pub use branch_detail::render_branch_detail;
+pub use claude_configs::{
+    render_claude_configs, render_config_delete_dialog, render_config_name_input_dialog,
+    render_config_path_input_dialog, render_config_selector,
+};
+pub use claude_settings::{
+    render_claude_settings_copy_dialog, render_claude_settings_migrate_dialog,
+};
+pub use codex_configs::{
+    render_agent_type_selector, render_codex_config_delete_dialog,
+    render_codex_config_name_input_dialog, render_codex_config_path_input_dialog,
+    render_codex_config_selector, render_codex_configs,
+};
 pub use confirm::{
     render_confirm_dialog, render_loading_indicator, render_quit_confirm_dialog,
     ConfirmDialogConfig,
 };
+pub use custom_shortcuts::render_custom_shortcut_dialogs;
 pub use focus_stats::{
     render_focus_session_delete_dialog, render_focus_session_detail_dialog, render_focus_stats,
     render_timer_input_dialog,
 };
+pub use help::render_help_overlay;
 pub use logs::render_log_viewer;
 pub use notifications::{render_notification_badge, render_notifications};
 pub use project_detail::{render_project_delete_confirmation, render_project_detail};
@@ -48,6 +67,32 @@ pub fn format_focus_timer_hint(timer_running: bool) -> &'static str {
     } else {
         "t: timer | T: stats"
     }
+}
+
+/// Format custom shortcuts for footer display (e.g., "v:VSCode e:vim | ")
+pub fn format_custom_shortcuts_hint(shortcuts: &[CustomShortcut]) -> String {
+    if shortcuts.is_empty() {
+        return String::new();
+    }
+
+    // Show up to 3 shortcuts to avoid cluttering the footer
+    let display: Vec<String> = shortcuts
+        .iter()
+        .take(3)
+        .map(|s| format!("{}:{}", s.key, s.short_display_name()))
+        .collect();
+
+    let suffix = if shortcuts.len() > 3 { "..." } else { "" };
+    format!("{}{} | ", display.join(" "), suffix)
+}
+
+/// Format custom shortcuts for empty state display (multiline, one per line)
+pub fn format_custom_shortcuts_list(shortcuts: &[CustomShortcut]) -> String {
+    shortcuts
+        .iter()
+        .map(|s| format!("Press '{}' to run {}.", s.key, s.display_name()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Breadcrumb navigation path segments

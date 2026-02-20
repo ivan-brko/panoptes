@@ -5,6 +5,7 @@
 //! and process spawning.
 
 use crate::config::Config;
+use crate::hooks::HookEventType;
 use crate::session::PtyHandle;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -16,13 +17,13 @@ use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
 /// Base hook script filename (shared across all sessions)
 const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
 
-/// Hook event types that Claude Code supports
-const HOOK_EVENTS: &[&str] = &[
-    "PreToolUse",
-    "PostToolUse",
-    "Stop",
-    "Notification",
-    "PermissionRequest",
+/// Hook event types that Claude Code supports (using the type-safe enum)
+const HOOK_EVENTS: &[HookEventType] = &[
+    HookEventType::PreToolUse,
+    HookEventType::PostToolUse,
+    HookEventType::Stop,
+    HookEventType::Notification,
+    HookEventType::PermissionRequest,
 ];
 
 /// Claude Code adapter for spawning and managing Claude Code sessions
@@ -76,7 +77,8 @@ impl ClaudeCodeAdapter {
         // Create symlinks for each event type so basename $0 returns the event name
         let mut event_scripts = HashMap::new();
         for event in HOOK_EVENTS {
-            let symlink_path = config.hooks_dir.join(format!("{}.sh", event));
+            let event_name = event.as_str();
+            let symlink_path = config.hooks_dir.join(format!("{}.sh", event_name));
 
             // Remove existing symlink if present
             if symlink_path.exists() || symlink_path.is_symlink() {
@@ -87,10 +89,10 @@ impl ClaudeCodeAdapter {
             #[cfg(unix)]
             {
                 std::os::unix::fs::symlink(&script_path, &symlink_path)
-                    .with_context(|| format!("Failed to create symlink for {}", event))?;
+                    .with_context(|| format!("Failed to create symlink for {}", event_name))?;
             }
 
-            event_scripts.insert(event.to_string(), symlink_path);
+            event_scripts.insert(event_name.to_string(), symlink_path);
         }
 
         Ok(event_scripts)
@@ -142,6 +144,9 @@ exit 0
     }
 
     /// Create the session-specific settings file
+    ///
+    /// This function MERGES hooks into existing settings rather than overwriting,
+    /// preserving Claude Code trust settings and other user configurations.
     fn create_session_settings(
         working_dir: &Path,
         event_scripts: &HashMap<String, PathBuf>,
@@ -152,13 +157,29 @@ exit 0
 
         let settings_path = claude_dir.join("settings.local.json");
 
+        // Load existing settings if present, otherwise start fresh
+        let mut settings: serde_json::Value = if settings_path.exists() {
+            let content = std::fs::read_to_string(&settings_path)
+                .context("Failed to read existing settings")?;
+            serde_json::from_str(&content).unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to parse existing settings.local.json: {}, starting fresh",
+                    e
+                );
+                serde_json::json!({})
+            })
+        } else {
+            serde_json::json!({})
+        };
+
         // Build hooks config using the event-specific script paths
         let mut hooks = serde_json::Map::new();
         for event in HOOK_EVENTS {
-            if let Some(script_path) = event_scripts.get(*event) {
+            let event_name = event.as_str();
+            if let Some(script_path) = event_scripts.get(event_name) {
                 let script_path_str = script_path.to_string_lossy().to_string();
                 hooks.insert(
-                    event.to_string(),
+                    event_name.to_string(),
                     serde_json::json!([
                         {
                             "matcher": ".*",
@@ -169,7 +190,16 @@ exit 0
             }
         }
 
-        let settings = serde_json::json!({ "hooks": hooks });
+        // Merge hooks into settings (only overwrite the hooks key, preserve everything else)
+        settings["hooks"] = serde_json::Value::Object(hooks);
+
+        // Create backup before writing if file exists (safeguard)
+        if settings_path.exists() {
+            let backup_path = settings_path.with_extension("json.bak");
+            if let Err(e) = std::fs::copy(&settings_path, &backup_path) {
+                tracing::warn!("Failed to create backup of settings.local.json: {}", e);
+            }
+        }
 
         std::fs::write(
             &settings_path,
@@ -216,6 +246,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
         );
         // Force Claude Code to use consistent header mode (prevents flickering on resize)
         env.insert("CLAUDE_CODE_FORCE_FULL_LOGO".to_string(), "1".to_string());
+        // Set custom Claude config directory if specified
+        if let Some(ref config_dir) = spawn_config.claude_config_dir {
+            env.insert(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                config_dir.to_string_lossy().to_string(),
+            );
+        }
         env
     }
 
@@ -282,6 +319,8 @@ mod tests {
             initial_prompt: None,
             rows: 24,
             cols: 80,
+            claude_config_dir: None,
+            codex_home: None,
         }
     }
 
@@ -322,18 +361,9 @@ mod tests {
         let adapter = ClaudeCodeAdapter::new();
         let temp_dir = TempDir::new().unwrap();
         let config = Config {
-            hook_port: 9999,
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
-            max_output_lines: 1000,
-            idle_threshold_secs: 300,
-            state_timeout_secs: 300,
-            exited_retention_secs: 300,
-            theme_preset: "dark".to_string(),
-            notification_method: "bell".to_string(),
-            esc_hold_threshold_ms: 400,
-            focus_timer_minutes: 25,
-            focus_stats_retention_days: 30,
+            ..Config::default()
         };
         let session_id = Uuid::new_v4();
         let spawn_config = SpawnConfig {
@@ -343,12 +373,45 @@ mod tests {
             initial_prompt: None,
             rows: 24,
             cols: 80,
+            claude_config_dir: None,
+            codex_home: None,
         };
 
         let env = adapter.generate_env(&config, &spawn_config);
         assert_eq!(
             env.get("PANOPTES_SESSION_ID"),
             Some(&session_id.to_string())
+        );
+        // No CLAUDE_CONFIG_DIR when not specified
+        assert!(!env.contains_key("CLAUDE_CONFIG_DIR"));
+    }
+
+    #[test]
+    fn test_generate_env_with_claude_config_dir() {
+        let adapter = ClaudeCodeAdapter::new();
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config {
+            worktrees_dir: temp_dir.path().join("worktrees"),
+            hooks_dir: temp_dir.path().join("hooks"),
+            ..Config::default()
+        };
+        let session_id = Uuid::new_v4();
+        let claude_config_path = PathBuf::from("/home/user/.claude-work");
+        let spawn_config = SpawnConfig {
+            session_id,
+            session_name: "test".to_string(),
+            working_dir: temp_dir.path().to_path_buf(),
+            initial_prompt: None,
+            rows: 24,
+            cols: 80,
+            claude_config_dir: Some(claude_config_path.clone()),
+            codex_home: None,
+        };
+
+        let env = adapter.generate_env(&config, &spawn_config);
+        assert_eq!(
+            env.get("CLAUDE_CONFIG_DIR"),
+            Some(&claude_config_path.to_string_lossy().to_string())
         );
     }
 
@@ -365,18 +428,9 @@ mod tests {
     fn test_install_hook_script() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config {
-            hook_port: 9999,
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
-            max_output_lines: 1000,
-            idle_threshold_secs: 300,
-            state_timeout_secs: 300,
-            exited_retention_secs: 300,
-            theme_preset: "dark".to_string(),
-            notification_method: "bell".to_string(),
-            esc_hold_threshold_ms: 400,
-            focus_timer_minutes: 25,
-            focus_stats_retention_days: 30,
+            ..Config::default()
         };
 
         let event_scripts = ClaudeCodeAdapter::install_hook_script(&config).unwrap();
@@ -387,9 +441,12 @@ mod tests {
 
         // Verify symlinks were created for each event type
         for event in HOOK_EVENTS {
-            let symlink = event_scripts.get(*event).expect("Should have event script");
+            let event_name = event.as_str();
+            let symlink = event_scripts
+                .get(event_name)
+                .expect("Should have event script");
             assert!(symlink.exists() || symlink.is_symlink());
-            assert!(symlink.ends_with(format!("{}.sh", event)));
+            assert!(symlink.ends_with(format!("{}.sh", event_name)));
         }
 
         // Verify base script is executable on Unix
@@ -412,9 +469,10 @@ mod tests {
         // Create mock event scripts HashMap
         let mut event_scripts = HashMap::new();
         for event in HOOK_EVENTS {
+            let event_name = event.as_str();
             event_scripts.insert(
-                event.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event)),
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
             );
         }
 
@@ -445,9 +503,10 @@ mod tests {
         // Create mock event scripts HashMap
         let mut event_scripts = HashMap::new();
         for event in HOOK_EVENTS {
+            let event_name = event.as_str();
             event_scripts.insert(
-                event.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event)),
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
             );
         }
 
@@ -469,18 +528,9 @@ mod tests {
     fn test_setup_hooks_returns_cleanup_paths() {
         let temp_dir = TempDir::new().unwrap();
         let config = Config {
-            hook_port: 9999,
             worktrees_dir: temp_dir.path().join("worktrees"),
             hooks_dir: temp_dir.path().join("hooks"),
-            max_output_lines: 1000,
-            idle_threshold_secs: 300,
-            state_timeout_secs: 300,
-            exited_retention_secs: 300,
-            theme_preset: "dark".to_string(),
-            notification_method: "bell".to_string(),
-            esc_hold_threshold_ms: 400,
-            focus_timer_minutes: 25,
-            focus_stats_retention_days: 30,
+            ..Config::default()
         };
         let spawn_config = test_spawn_config(temp_dir.path().to_path_buf());
 
@@ -491,5 +541,121 @@ mod tests {
         assert!(!cleanup_paths.is_empty());
         assert!(cleanup_paths[0].ends_with("settings.local.json"));
         assert!(cleanup_paths[0].exists());
+    }
+
+    #[test]
+    fn test_create_session_settings_preserves_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+
+        // Create existing settings with trust and other fields
+        let claude_dir = working_dir.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let existing_settings = r#"{
+            "enabledBetaFeatures": ["feature1", "feature2"],
+            "hasTrustDialogAccepted": true,
+            "customSetting": 42
+        }"#;
+        std::fs::write(claude_dir.join("settings.local.json"), existing_settings).unwrap();
+
+        // Create mock event scripts
+        let mut event_scripts = HashMap::new();
+        for event in HOOK_EVENTS {
+            let event_name = event.as_str();
+            event_scripts.insert(
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
+            );
+        }
+
+        // Create session settings (should merge hooks, not overwrite)
+        let settings_path =
+            ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
+
+        // Read the resulting settings
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Verify existing settings are preserved
+        assert!(settings["hasTrustDialogAccepted"].as_bool().unwrap());
+        assert_eq!(settings["customSetting"].as_i64().unwrap(), 42);
+        let features = settings["enabledBetaFeatures"].as_array().unwrap();
+        assert_eq!(features.len(), 2);
+        assert!(features.iter().any(|v| v.as_str() == Some("feature1")));
+        assert!(features.iter().any(|v| v.as_str() == Some("feature2")));
+
+        // Verify hooks were added
+        assert!(settings.get("hooks").is_some());
+        let hooks = settings["hooks"].as_object().unwrap();
+        assert!(hooks.contains_key("PreToolUse"));
+        assert!(hooks.contains_key("PostToolUse"));
+        assert!(hooks.contains_key("Stop"));
+        assert!(hooks.contains_key("Notification"));
+    }
+
+    #[test]
+    fn test_create_session_settings_creates_backup() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+
+        // Create existing settings
+        let claude_dir = working_dir.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let original_content = r#"{"original": true}"#;
+        std::fs::write(claude_dir.join("settings.local.json"), original_content).unwrap();
+
+        // Create mock event scripts
+        let mut event_scripts = HashMap::new();
+        for event in HOOK_EVENTS {
+            let event_name = event.as_str();
+            event_scripts.insert(
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
+            );
+        }
+
+        // Create session settings
+        ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
+
+        // Verify backup was created
+        let backup_path = claude_dir.join("settings.local.json.bak");
+        assert!(backup_path.exists());
+
+        // Verify backup has original content
+        let backup_content = std::fs::read_to_string(&backup_path).unwrap();
+        let backup_json: serde_json::Value = serde_json::from_str(&backup_content).unwrap();
+        assert!(backup_json["original"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_create_session_settings_handles_invalid_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let working_dir = temp_dir.path().to_path_buf();
+
+        // Create existing settings with invalid JSON
+        let claude_dir = working_dir.join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join("settings.local.json"), "not valid json").unwrap();
+
+        // Create mock event scripts
+        let mut event_scripts = HashMap::new();
+        for event in HOOK_EVENTS {
+            let event_name = event.as_str();
+            event_scripts.insert(
+                event_name.to_string(),
+                PathBuf::from(format!("/test/{}.sh", event_name)),
+            );
+        }
+
+        // Create session settings (should start fresh when JSON is invalid)
+        let settings_path =
+            ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
+
+        // Read the resulting settings
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Verify hooks were added (fresh settings object)
+        assert!(settings.get("hooks").is_some());
     }
 }

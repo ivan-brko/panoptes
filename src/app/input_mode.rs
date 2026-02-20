@@ -10,8 +10,10 @@ pub enum InputMode {
     Normal,
     /// Session mode - keys are sent to the active session's PTY
     Session,
-    /// Creating a new session - typing session name
+    /// Creating a new Claude Code session - typing session name
     CreatingSession,
+    /// Creating a new shell session - typing session name
+    CreatingShellSession,
     /// Adding a new project - typing path
     AddingProject,
     /// Adding a new project - typing optional name (after path validation)
@@ -42,4 +44,38 @@ pub enum InputMode {
     ConfirmingFocusSessionDelete,
     /// Viewing focus session details
     ViewingFocusSessionDetail,
+    /// Adding a new Claude config - entering name
+    AddingClaudeConfigName,
+    /// Adding a new Claude config - entering path
+    AddingClaudeConfigPath,
+    /// Confirming Claude config deletion
+    ConfirmingClaudeConfigDelete,
+    /// Selecting Claude config for session creation or project default
+    SelectingClaudeConfig,
+    /// Confirming Claude settings copy after worktree creation
+    ConfirmingClaudeSettingsCopy,
+    /// Confirming Claude settings migration before worktree deletion
+    ConfirmingClaudeSettingsMigrate,
+    /// Managing custom shell shortcuts - list view with add/delete
+    ManagingCustomShortcuts,
+    /// Adding a custom shortcut - capturing the key
+    AddingCustomShortcutKey,
+    /// Adding a custom shortcut - entering the name
+    AddingCustomShortcutName,
+    /// Adding a custom shortcut - entering the command
+    AddingCustomShortcutCommand,
+    /// Confirming custom shortcut deletion
+    ConfirmingCustomShortcutDelete,
+    /// Selecting agent type (Claude Code vs Codex) for new session
+    SelectingAgentType,
+    /// Creating a new Codex session - typing session name
+    CreatingCodexSession,
+    /// Adding a new Codex config - entering name
+    AddingCodexConfigName,
+    /// Adding a new Codex config - entering path
+    AddingCodexConfigPath,
+    /// Confirming Codex config deletion
+    ConfirmingCodexConfigDelete,
+    /// Selecting Codex config for session creation or project default
+    SelectingCodexConfig,
 }

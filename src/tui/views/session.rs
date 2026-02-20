@@ -9,13 +9,15 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::project::ProjectStore;
-use crate::session::{Session, SessionManager, SessionState};
+use crate::session::{Session, SessionManager, SessionState, SessionType};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
+use crate::tui::views::{
+    format_attention_hint, format_custom_shortcuts_hint, format_focus_timer_hint,
+};
 
 /// Render the session view
 pub fn render_session_view(
@@ -67,7 +69,11 @@ pub fn render_session_view(
 
     // Build title with scroll indicator
     let title = if let Some(session) = session {
-        let scroll_offset = session.vterm.scrollback_offset();
+        let scroll_offset = if session.info.session_type == SessionType::OpenAICodex {
+            state.session_scroll_offset
+        } else {
+            session.vterm.scrollback_offset()
+        };
         if scroll_offset > 0 {
             format!("Output [{}{}]", '\u{2191}', scroll_offset)
         } else {
@@ -81,21 +87,35 @@ pub fn render_session_view(
 
     // === CONTENT ===
     if let Some(session) = session {
-        let styled_lines = session.visible_styled_lines(layout.content.height as usize);
-
-        // Get cursor info
-        let cursor_pos = session.vterm.cursor_position();
-        let cursor_visible = state.input_mode == InputMode::Session
-            && session.vterm.cursor_visible()
+        let use_fallback_history = session.info.session_type == SessionType::OpenAICodex
+            && state.session_scroll_offset > 0
             && session.vterm.scrollback_offset() == 0;
 
-        render_pty_content(
-            frame,
-            layout.content,
-            &styled_lines,
-            Some(cursor_pos),
-            cursor_visible,
-        );
+        if use_fallback_history {
+            let lines = session
+                .fallback_visible_lines(layout.content.height as usize)
+                .into_iter()
+                .map(Line::raw)
+                .collect::<Vec<_>>();
+            let content = Paragraph::new(lines);
+            frame.render_widget(content, layout.content);
+        } else {
+            let styled_lines = session.visible_styled_lines(layout.content.height as usize);
+
+            // Get cursor info
+            let cursor_pos = session.vterm.cursor_position();
+            let cursor_visible = state.input_mode == InputMode::Session
+                && session.vterm.cursor_visible()
+                && session.vterm.scrollback_offset() == 0;
+
+            render_pty_content(
+                frame,
+                layout.content,
+                &styled_lines,
+                Some(cursor_pos),
+                cursor_visible,
+            );
+        }
     } else {
         let empty = Paragraph::new("Session not found").style(Style::default().fg(t.error_bg));
         frame.render_widget(empty, layout.content);
@@ -103,7 +123,13 @@ pub fn render_session_view(
 
     // === FOOTER ===
     let is_scrolled = session
-        .map(|s| s.vterm.scrollback_offset() > 0)
+        .map(|s| {
+            if s.info.session_type == SessionType::OpenAICodex {
+                state.session_scroll_offset > 0
+            } else {
+                s.vterm.scrollback_offset() > 0
+            }
+        })
         .unwrap_or(false);
     let help_text = build_footer_text(state, is_scrolled, sessions, config);
 
@@ -134,6 +160,13 @@ fn build_header_breadcrumb(
         } else {
             String::new()
         };
+        // Show Claude config name if present
+        let config_display = session
+            .info
+            .claude_config_name
+            .as_ref()
+            .map(|n| format!(" [{}]", n))
+            .unwrap_or_default();
         let project_name = project_store
             .get_project(session.info.project_id)
             .map(|p| p.name.as_str())
@@ -147,9 +180,11 @@ fn build_header_breadcrumb(
             .push(branch_name)
             .push(&session.info.name);
         let suffix = format!(
-            "- {}{} {}",
+            "{} - {}{}{} {}",
+            session.info.session_type.short_tag(),
             session.info.state.display_name(),
             exit_info,
+            config_display,
             mode_indicator
         );
         (breadcrumb, suffix)
@@ -180,9 +215,13 @@ fn build_footer_text(
         _ => {
             let scroll_hint = if is_scrolled { "End: live view | " } else { "" };
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
+
+            // Build custom shortcuts hint
+            let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
+
             let base = format!(
-                "{}Enter: activate | Tab: next | {} | PgUp/Dn: scroll",
-                scroll_hint, timer_hint
+                "{}{}Enter: activate | Tab: next | {} | k:shortcuts | \u{2191}\u{2193}/PgUp/Dn: scroll",
+                scroll_hint, shortcuts_hint, timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)

@@ -16,9 +16,13 @@ struct StoreData {
     branches: Vec<Branch>,
 }
 
-/// Backup a corrupted file by renaming it with a .backup extension
-fn backup_corrupted_file(path: &Path) {
-    let backup_path = path.with_extension("json.backup");
+/// Backup a corrupted file by renaming it with a timestamped .backup extension
+///
+/// Returns the backup path on success
+fn backup_corrupted_file(path: &Path) -> Option<PathBuf> {
+    // Use timestamp to avoid overwriting previous backups
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let backup_path = path.with_extension(format!("json.corrupt.{}", timestamp));
     if let Err(e) = std::fs::rename(path, &backup_path) {
         tracing::warn!(
             "Failed to backup corrupted file {} to {}: {}",
@@ -26,11 +30,13 @@ fn backup_corrupted_file(path: &Path) {
             backup_path.display(),
             e
         );
+        None
     } else {
         tracing::info!(
             "Corrupted projects file backed up to {}",
             backup_path.display()
         );
+        Some(backup_path)
     }
 }
 
@@ -259,9 +265,67 @@ impl ProjectStore {
         Self::load_from(&projects_file_path())
     }
 
+    /// Load store from disk, returning a warning message if data was corrupted
+    ///
+    /// This is useful for showing a notification to the user on startup.
+    pub fn load_with_status() -> (Self, Option<String>) {
+        Self::load_from_with_status(&projects_file_path())
+    }
+
+    /// Load store from a specific path, returning a warning message if data was corrupted
+    pub fn load_from_with_status(path: &Path) -> (Self, Option<String>) {
+        if !path.exists() {
+            return (Self::with_path(path.to_path_buf()), None);
+        }
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to read projects file: {}", e);
+                if let Some(backup_path) = backup_corrupted_file(path) {
+                    let warning = format!(
+                        "Projects file was unreadable. Backup saved to {}. Starting fresh.",
+                        backup_path.display()
+                    );
+                    return (Self::with_path(path.to_path_buf()), Some(warning));
+                }
+                let warning = format!("Projects file was unreadable ({}). Starting fresh.", e);
+                return (Self::with_path(path.to_path_buf()), Some(warning));
+            }
+        };
+
+        let data: StoreData = match serde_json::from_str(&content) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("Projects file is corrupted: {}", e);
+                if let Some(backup_path) = backup_corrupted_file(path) {
+                    let warning = format!(
+                        "Projects file was corrupted. Backup saved to {}. Starting fresh.",
+                        backup_path.display()
+                    );
+                    return (Self::with_path(path.to_path_buf()), Some(warning));
+                }
+                let warning = format!("Projects file was corrupted ({}). Starting fresh.", e);
+                return (Self::with_path(path.to_path_buf()), Some(warning));
+            }
+        };
+
+        let projects = data.projects.into_iter().map(|p| (p.id, p)).collect();
+        let branches = data.branches.into_iter().map(|b| (b.id, b)).collect();
+
+        (
+            Self {
+                projects,
+                branches,
+                store_path: path.to_path_buf(),
+            },
+            None,
+        )
+    }
+
     /// Load store from a specific path
     ///
-    /// If the file is corrupted, this will create a backup and return an empty store.
+    /// If the file is corrupted, this will create a backup and return an error.
     pub fn load_from(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::with_path(path.to_path_buf()));
@@ -288,10 +352,9 @@ impl ProjectStore {
                 backup_corrupted_file(path);
                 return Err(anyhow::anyhow!(
                     "Projects file is corrupted and could not be parsed ({}). \
-                     A backup has been created at {}.backup. \
+                     A backup has been created. \
                      Starting with empty project list.",
-                    e,
-                    path.display()
+                    e
                 ));
             }
         };
@@ -580,5 +643,72 @@ mod tests {
         assert_eq!(sorted[0].name, "alpha");
         assert_eq!(sorted[1].name, "Beta");
         assert_eq!(sorted[2].name, "zebra");
+    }
+
+    // load_with_status corruption handling tests
+    #[test]
+    fn test_load_with_status_nonexistent_returns_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("nonexistent.json");
+
+        let (store, warning) = ProjectStore::load_from_with_status(&path);
+
+        assert_eq!(store.project_count(), 0);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn test_load_with_status_valid_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("projects.json");
+
+        // Create valid store and save
+        let mut store = ProjectStore::with_path(path.clone());
+        let project = Project::new("test".to_string(), "/tmp/test".into(), "main".to_string());
+        store.add_project(project);
+        store.save().unwrap();
+
+        // Load with status
+        let (loaded, warning) = ProjectStore::load_from_with_status(&path);
+
+        assert_eq!(loaded.project_count(), 1);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn test_load_with_status_corrupted_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("projects.json");
+
+        // Write invalid JSON
+        std::fs::write(&path, "{ invalid json }").unwrap();
+
+        // Load with status should return empty store with warning
+        let (store, warning) = ProjectStore::load_from_with_status(&path);
+
+        assert_eq!(store.project_count(), 0);
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("corrupted"));
+    }
+
+    #[test]
+    fn test_backup_corrupted_file_creates_timestamped_backup() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("projects.json");
+
+        // Write invalid JSON
+        std::fs::write(&path, "{ invalid json }").unwrap();
+
+        // Load with status (triggers backup)
+        let _ = ProjectStore::load_from_with_status(&path);
+
+        // Check for backup file with timestamp pattern
+        let entries: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt."))
+            .collect();
+
+        assert_eq!(entries.len(), 1);
     }
 }

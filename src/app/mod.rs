@@ -10,7 +10,10 @@ mod view;
 
 // Re-exports from submodules
 pub use input_mode::InputMode;
-pub use state::{AppState, HomepageFocus, WorktreeWizardState};
+pub use state::{
+    AppState, ClaudeSettingsCopyState, ClaudeSettingsMigrateState, HomepageFocus,
+    WorktreeWizardState,
+};
 pub use view::View;
 
 // Re-exports from wizards (for backwards compatibility)
@@ -22,6 +25,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
+use crate::claude_config::ClaudeConfigStore;
+use crate::codex_config::CodexConfigStore;
 use crate::config::Config;
 use crate::focus_timing::stats::{FocusContextBreakdown, FocusSession};
 use crate::focus_timing::store::FocusStore;
@@ -31,13 +36,18 @@ use crate::hooks::{
 };
 use crate::logging::{LogBuffer, LogFileInfo};
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::{mouse_event_to_bytes, SessionManager};
+use crate::session::{mouse_event_to_bytes, SessionId, SessionManager, SessionType};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
-    render_branch_detail, render_focus_session_delete_dialog, render_focus_session_detail_dialog,
-    render_focus_stats, render_loading_indicator, render_log_viewer, render_notifications,
-    render_project_detail, render_projects_overview, render_session_view, render_timeline,
-    render_timer_input_dialog,
+    render_agent_type_selector, render_branch_detail, render_claude_configs,
+    render_claude_settings_copy_dialog, render_claude_settings_migrate_dialog,
+    render_codex_config_delete_dialog, render_codex_config_name_input_dialog,
+    render_codex_config_path_input_dialog, render_codex_config_selector, render_codex_configs,
+    render_config_delete_dialog, render_config_name_input_dialog, render_config_path_input_dialog,
+    render_config_selector, render_custom_shortcut_dialogs, render_focus_session_delete_dialog,
+    render_focus_session_detail_dialog, render_focus_stats, render_help_overlay,
+    render_loading_indicator, render_log_viewer, render_notifications, render_project_detail,
+    render_projects_overview, render_session_view, render_timeline, render_timer_input_dialog,
 };
 use crate::tui::{NotificationType, Tui};
 use crate::wizards::worktree::{
@@ -55,6 +65,8 @@ pub const MAX_SESSION_NAME_LEN: usize = 256;
 pub const MAX_BRANCH_NAME_LEN: usize = 256;
 /// Maximum length for project names
 pub const MAX_PROJECT_NAME_LEN: usize = 256;
+/// Mouse-wheel line step used by local scroll handlers
+const MOUSE_SCROLL_STEP: usize = 3;
 
 /// Main application struct
 pub struct App {
@@ -64,6 +76,10 @@ pub struct App {
     pub(crate) state: AppState,
     /// Project store for project/branch persistence
     pub(crate) project_store: ProjectStore,
+    /// Claude config store for managing Claude configurations
+    pub(crate) claude_config_store: ClaudeConfigStore,
+    /// Codex config store for managing Codex configurations
+    pub(crate) codex_config_store: CodexConfigStore,
     /// Session manager
     pub(crate) sessions: SessionManager,
     /// Hook event receiver
@@ -76,23 +92,43 @@ pub struct App {
     pub(crate) log_buffer: Arc<LogBuffer>,
     /// Information about the current log file
     pub(crate) log_file_info: LogFileInfo,
+    /// Whether verbose mouse diagnostics are enabled
+    mouse_debug_enabled: bool,
 }
 
 impl App {
     /// Create a new application instance
     pub async fn new(log_buffer: Arc<LogBuffer>, log_file_info: LogFileInfo) -> Result<Self> {
         let config = Config::load()?;
+        let mouse_debug_enabled = mouse_debug_enabled_from_env();
+
+        // Track any startup warnings to show as notifications
+        let mut startup_warnings: Vec<String> = Vec::new();
 
         // Load project store (or create empty if doesn't exist)
-        let project_store = ProjectStore::load().unwrap_or_else(|e| {
-            tracing::warn!("Failed to load project store: {}, starting fresh", e);
-            ProjectStore::new()
-        });
+        let (project_store, corruption_warning) = ProjectStore::load_with_status();
+        if let Some(warning) = corruption_warning {
+            startup_warnings.push(warning);
+        }
         tracing::debug!(
             "Loaded {} projects, {} branches",
             project_store.project_count(),
             project_store.branch_count()
         );
+
+        // Load Claude config store (or create empty if doesn't exist)
+        let claude_config_store = ClaudeConfigStore::load().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load claude config store: {}, starting fresh", e);
+            ClaudeConfigStore::new()
+        });
+        tracing::debug!("Loaded {} claude configs", claude_config_store.count());
+
+        // Load Codex config store (or create empty if doesn't exist)
+        let codex_config_store = CodexConfigStore::load().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load codex config store: {}, starting fresh", e);
+            CodexConfigStore::new()
+        });
+        tracing::debug!("Loaded {} codex configs", codex_config_store.count());
 
         // Create hook event channel with large buffer to avoid dropping events
         let (hook_tx, hook_rx): (HookEventSender, HookEventReceiver) =
@@ -108,16 +144,33 @@ impl App {
         // Create TUI
         let tui = Tui::new()?;
 
+        let mut state = AppState::default();
+        // Add any startup warnings as notifications
+        for warning in startup_warnings {
+            state.header_notifications.push(warning);
+        }
+
+        if mouse_debug_enabled {
+            tracing::info!(
+                target: "panoptes::mouse",
+                log_file = %log_file_info.path.display(),
+                "Mouse debug logging enabled (PANOPTES_MOUSE_DEBUG)"
+            );
+        }
+
         Ok(Self {
             config,
-            state: AppState::default(),
+            state,
             project_store,
+            claude_config_store,
+            codex_config_store,
             sessions,
             hook_rx,
             hook_server,
             tui,
             log_buffer,
             log_file_info,
+            mouse_debug_enabled,
         })
     }
 
@@ -148,6 +201,18 @@ impl App {
         self.state.needs_render = true;
 
         loop {
+            // Safety net: Codex session mode requires mouse capture for wheel events.
+            if self.state.view == View::SessionView
+                && self.state.input_mode == InputMode::Session
+                && self
+                    .state
+                    .active_session
+                    .and_then(|session_id| self.sessions.get(session_id))
+                    .is_some_and(|session| session.info.session_type == SessionType::OpenAICodex)
+            {
+                self.tui.enable_mouse_capture();
+            }
+
             // Only render when something has changed
             if self.state.needs_render {
                 self.render()?;
@@ -179,7 +244,40 @@ impl App {
                         self.state.needs_render = true;
                     }
                     Event::Mouse(mouse) => {
-                        if self.handle_mouse_event(mouse)? {
+                        let is_scroll_event = matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp
+                                | MouseEventKind::ScrollDown
+                                | MouseEventKind::ScrollLeft
+                                | MouseEventKind::ScrollRight
+                        );
+
+                        if self.mouse_debug_enabled && is_scroll_event {
+                            tracing::info!(
+                                target: "panoptes::mouse",
+                                kind = ?mouse.kind,
+                                column = mouse.column,
+                                row = mouse.row,
+                                modifiers = ?mouse.modifiers,
+                                view = ?self.state.view,
+                                input_mode = ?self.state.input_mode,
+                                mouse_capture_enabled = self.tui.is_mouse_capture_enabled(),
+                                active_session = ?self.state.active_session,
+                                "Received mouse scroll event"
+                            );
+                        }
+
+                        let handled = self.handle_mouse_event(mouse)?;
+                        if self.mouse_debug_enabled && is_scroll_event {
+                            tracing::info!(
+                                target: "panoptes::mouse",
+                                handled,
+                                session_scroll_offset = self.state.session_scroll_offset,
+                                "Processed mouse scroll event"
+                            );
+                        }
+
+                        if handled {
                             self.state.needs_render = true;
                         }
                     }
@@ -236,14 +334,33 @@ impl App {
                 self.state.needs_render = true;
             }
 
-            // Poll session outputs - mark dirty if any session has new output
-            if !self.sessions.poll_outputs().is_empty() {
+            // Poll session outputs - mark dirty if any session has new output.
+            // Freeze active session PTY reads while user is scrolled up so the
+            // visible history doesn't shift under the cursor.
+            let frozen_session = if self.state.session_scroll_offset > 0 {
+                self.state.active_session.and_then(|session_id| {
+                    self.sessions.get(session_id).and_then(|session| {
+                        (session.info.session_type == SessionType::OpenAICodex)
+                            .then_some(session_id)
+                    })
+                })
+            } else {
+                None
+            };
+            if !self.sessions.poll_outputs_except(frozen_session).is_empty() {
                 self.state.needs_render = true;
             }
 
-            // Check for dead sessions
-            let had_state_changes = self.sessions.check_alive();
-            if had_state_changes {
+            // Check for dead sessions and notify about crashes
+            let crashed_sessions = self.sessions.check_alive();
+            if !crashed_sessions.is_empty() {
+                // Notify about each crashed session
+                for (_session_id, session_name, exit_reason) in &crashed_sessions {
+                    self.state.header_notifications.push(format!(
+                        "Session '{}' crashed: {}",
+                        session_name, exit_reason
+                    ));
+                }
                 self.state.needs_render = true;
             }
 
@@ -253,6 +370,28 @@ impl App {
                 .check_state_timeouts(self.config.state_timeout_secs);
             if had_timeout_changes {
                 self.state.needs_render = true;
+            }
+
+            // Check shell session states via foreground detection
+            let shell_notifications = self.sessions.check_shell_states(self.state.active_session);
+            if !shell_notifications.is_empty() {
+                self.state.needs_render = true;
+
+                // Send notifications for shell sessions that finished commands
+                for session_id in shell_notifications {
+                    let is_active = self.state.active_session == Some(session_id);
+                    if !is_active {
+                        let session_name = self
+                            .sessions
+                            .get(session_id)
+                            .map(|s| s.info.name.as_str())
+                            .unwrap_or("Shell");
+                        SessionManager::send_notification(
+                            &self.config.notification_method,
+                            session_name,
+                        );
+                    }
+                }
             }
 
             // Clean up old exited sessions to prevent memory growth
@@ -430,7 +569,7 @@ impl App {
                     ));
                 }
             }
-            InputMode::CreatingSession => {
+            InputMode::CreatingSession | InputMode::CreatingCodexSession => {
                 let (truncated, was_truncated) = Self::truncate_to_limit(
                     cleaned,
                     &self.state.new_session_name,
@@ -543,56 +682,230 @@ impl App {
             return Ok(false);
         };
 
-        let Some(session) = self.sessions.get_mut(session_id) else {
+        let is_codex_session = self
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.info.session_type == SessionType::OpenAICodex);
+        if self.sessions.get(session_id).is_none() {
             return Ok(false);
-        };
+        }
 
-        // Check if Claude Code has mouse mode enabled
-        let mouse_enabled = session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+        if is_codex_session && self.handle_codex_mouse_wheel(session_id, mouse.kind)? {
+            return Ok(true);
+        }
 
-        if mouse_enabled {
-            // Forward mouse events to PTY when Claude Code wants them
-            // (for vim, etc. with mouse support)
-            let terminal_size = self.tui.size()?;
-            let frame_config = FrameConfig::default();
-            let layout = FrameLayout::calculate(
-                ratatui::prelude::Rect::new(0, 0, terminal_size.width, terminal_size.height),
-                &frame_config,
-            );
-            if let Some(bytes) = mouse_event_to_bytes(mouse, layout.content) {
-                session.write(&bytes)?;
-                return Ok(true);
-            }
-        } else {
-            // Handle scroll wheel for our own scrollback when mouse mode is disabled
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    let max_scroll = session.vterm.max_scrollback();
-                    // Scroll up by 3 lines (same as claude-wrapper)
-                    self.state.session_scroll_offset = self
-                        .state
-                        .session_scroll_offset
-                        .saturating_add(3)
-                        .min(max_scroll);
-                    session
-                        .vterm
-                        .set_scrollback(self.state.session_scroll_offset);
-                    return Ok(true);
-                }
-                MouseEventKind::ScrollDown => {
-                    // Scroll down by 3 lines (same as claude-wrapper)
-                    self.state.session_scroll_offset =
-                        self.state.session_scroll_offset.saturating_sub(3);
-                    session
-                        .vterm
-                        .set_scrollback(self.state.session_scroll_offset);
-                    return Ok(true);
-                }
-                _ => {}
-            }
+        if self.forward_mouse_event_to_pty_if_enabled(session_id, mouse, is_codex_session)? {
+            return Ok(true);
+        }
+
+        if !is_codex_session && self.handle_non_codex_mouse_wheel(session_id, mouse.kind) {
+            return Ok(true);
         }
 
         Ok(false)
+    }
+
+    fn handle_codex_mouse_wheel(
+        &mut self,
+        session_id: SessionId,
+        kind: MouseEventKind,
+    ) -> Result<bool> {
+        match kind {
+            MouseEventKind::ScrollUp => {
+                let viewport_height = self.session_viewport_height();
+                let (requested, new_vterm, fallback_offset) = {
+                    let Some(session) = self.sessions.get_mut(session_id) else {
+                        return Ok(false);
+                    };
+
+                    let current_vterm = session.vterm.scrollback_offset();
+                    let requested = current_vterm.saturating_add(MOUSE_SCROLL_STEP);
+                    session.vterm.set_scrollback(requested);
+                    let new_vterm = session.vterm.scrollback_offset();
+                    let vterm_advanced = new_vterm > current_vterm;
+
+                    if new_vterm > 0 && vterm_advanced {
+                        session.fallback_scroll_to_bottom();
+                        self.state.session_scroll_offset = new_vterm;
+                    } else {
+                        // vterm scrollback may get "stuck" at a shallow offset (e.g. 1).
+                        // Force fallback rendering path for deeper history scrolling.
+                        session.vterm.scroll_to_bottom();
+                        session
+                            .fallback_scroll_up_with_viewport(MOUSE_SCROLL_STEP, viewport_height);
+                        self.state.session_scroll_offset = session.fallback_scroll_offset();
+                    }
+                    (requested, new_vterm, session.fallback_scroll_offset())
+                };
+                self.log_codex_mouse_scroll(
+                    session_id,
+                    requested,
+                    new_vterm,
+                    fallback_offset,
+                    "Handled mouse scroll up as Codex local scrollback",
+                );
+                Ok(true)
+            }
+            MouseEventKind::ScrollDown => {
+                let Some(current_vterm) = self
+                    .sessions
+                    .get(session_id)
+                    .map(|session| session.vterm.scrollback_offset())
+                else {
+                    return Ok(false);
+                };
+
+                if current_vterm > 0 {
+                    let (requested, new_vterm, fallback_offset) = {
+                        let Some(session) = self.sessions.get_mut(session_id) else {
+                            return Ok(false);
+                        };
+                        let requested = current_vterm.saturating_sub(MOUSE_SCROLL_STEP);
+                        session.vterm.set_scrollback(requested);
+                        let new_vterm = session.vterm.scrollback_offset();
+                        if new_vterm == 0 {
+                            session.fallback_scroll_to_bottom();
+                        }
+                        self.state.session_scroll_offset = new_vterm;
+                        (requested, new_vterm, session.fallback_scroll_offset())
+                    };
+                    self.log_codex_mouse_scroll(
+                        session_id,
+                        requested,
+                        new_vterm,
+                        fallback_offset,
+                        "Handled mouse scroll down as Codex local scrollback",
+                    );
+                    return Ok(true);
+                }
+
+                let fallback_offset = {
+                    let Some(session) = self.sessions.get_mut(session_id) else {
+                        return Ok(false);
+                    };
+                    session.fallback_scroll_down(MOUSE_SCROLL_STEP);
+                    self.state.session_scroll_offset = session.fallback_scroll_offset();
+                    session.fallback_scroll_offset()
+                };
+                self.log_codex_mouse_scroll(
+                    session_id,
+                    0,
+                    current_vterm,
+                    fallback_offset,
+                    "Handled mouse scroll down as Codex local scrollback",
+                );
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn handle_non_codex_mouse_wheel(
+        &mut self,
+        session_id: SessionId,
+        kind: MouseEventKind,
+    ) -> bool {
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return false;
+        };
+
+        match kind {
+            MouseEventKind::ScrollUp => {
+                let max_scroll = session.vterm.max_scrollback();
+                self.state.session_scroll_offset = self
+                    .state
+                    .session_scroll_offset
+                    .saturating_add(MOUSE_SCROLL_STEP)
+                    .min(max_scroll);
+                session
+                    .vterm
+                    .set_scrollback(self.state.session_scroll_offset);
+                true
+            }
+            MouseEventKind::ScrollDown => {
+                self.state.session_scroll_offset = self
+                    .state
+                    .session_scroll_offset
+                    .saturating_sub(MOUSE_SCROLL_STEP);
+                session
+                    .vterm
+                    .set_scrollback(self.state.session_scroll_offset);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn forward_mouse_event_to_pty_if_enabled(
+        &mut self,
+        session_id: SessionId,
+        mouse: MouseEvent,
+        is_codex_session: bool,
+    ) -> Result<bool> {
+        let mouse_enabled = self.sessions.get(session_id).is_some_and(|session| {
+            session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+        });
+        if !should_forward_mouse_to_pty(self.state.input_mode, mouse_enabled) {
+            return Ok(false);
+        }
+
+        if self.state.session_scroll_offset > 0 {
+            self.state.session_scroll_offset = 0;
+            if let Some(session) = self.sessions.get_mut(session_id) {
+                session.vterm.scroll_to_bottom();
+                if is_codex_session {
+                    session.fallback_scroll_to_bottom();
+                }
+            }
+        }
+
+        let content_area = self.session_content_area()?;
+        if let Some(bytes) = mouse_event_to_bytes(mouse, content_area) {
+            if let Some(session) = self.sessions.get_mut(session_id) {
+                session.write(&bytes)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn session_viewport_height(&self) -> usize {
+        let terminal_size = self.tui.size().unwrap_or_default();
+        let frame_config = FrameConfig::default();
+        let layout = FrameLayout::calculate(terminal_size, &frame_config);
+        layout.content.height as usize
+    }
+
+    fn session_content_area(&self) -> Result<ratatui::prelude::Rect> {
+        let terminal_size = self.tui.size()?;
+        let frame_config = FrameConfig::default();
+        let layout = FrameLayout::calculate(
+            ratatui::prelude::Rect::new(0, 0, terminal_size.width, terminal_size.height),
+            &frame_config,
+        );
+        Ok(layout.content)
+    }
+
+    fn log_codex_mouse_scroll(
+        &self,
+        session_id: SessionId,
+        requested_offset: usize,
+        vterm_offset: usize,
+        fallback_offset: usize,
+        message: &'static str,
+    ) {
+        if self.mouse_debug_enabled {
+            tracing::info!(
+                target: "panoptes::mouse",
+                session_id = %session_id,
+                is_codex_session = true,
+                requested_offset,
+                vterm_offset,
+                fallback_offset,
+                scroll_offset = self.state.session_scroll_offset,
+                message
+            );
+        }
     }
 
     // ========================================================================
@@ -614,6 +927,8 @@ impl App {
             View::ActivityTimeline => normal::timeline::handle_timeline_key(self, key),
             View::LogViewer => normal::log_viewer::handle_log_viewer_key(self, key),
             View::FocusStats => normal::focus_stats::handle_focus_stats_key(self, key),
+            View::ClaudeConfigs => normal::claude_configs::handle_claude_configs_key(self, key),
+            View::CodexConfigs => normal::codex_configs::handle_codex_configs_key(self, key),
         }
     }
 
@@ -871,6 +1186,16 @@ impl App {
             return;
         };
 
+        // Get existing git worktrees to detect untracked worktrees
+        let git_worktree_branches: std::collections::HashSet<String> =
+            match crate::git::worktree::list_worktrees(git.repository()) {
+                Ok(worktrees) => worktrees.into_iter().filter_map(|wt| wt.branch).collect(),
+                Err(e) => {
+                    tracing::warn!("Failed to list git worktrees: {}", e);
+                    std::collections::HashSet::new()
+                }
+            };
+
         // Try to fetch from remotes (may fail if offline)
         let _ = self.show_loading("Fetching branches from remotes...");
         if let Err(e) = git.fetch_all_remotes() {
@@ -890,12 +1215,17 @@ impl App {
                             crate::git::BranchRefInfoType::Local => BranchRefType::Local,
                             crate::git::BranchRefInfoType::Remote => BranchRefType::Remote,
                         };
+                        let is_tracked = tracked_branches.contains(&r.name);
+                        // Branch has untracked git worktree if git knows about it but Panoptes doesn't track it
+                        let has_git_worktree =
+                            !is_tracked && git_worktree_branches.contains(&r.name);
                         BranchRef {
                             ref_type,
                             name: r.name.clone(),
                             display_name: r.name.clone(),
                             is_default_base: r.is_default_base,
-                            is_already_tracked: tracked_branches.contains(&r.name),
+                            is_already_tracked: is_tracked,
+                            has_git_worktree,
                         }
                     })
                     .collect();
@@ -973,6 +1303,7 @@ impl App {
                             display_name: r.name,
                             is_default_base: r.is_default_base,
                             is_already_tracked: false, // Deprecated code path
+                            has_git_worktree: false,   // Deprecated code path
                         }
                     })
                     .collect();
@@ -1051,6 +1382,62 @@ impl App {
         Ok(branch_id)
     }
 
+    /// Import an existing git worktree that is not tracked by Panoptes
+    ///
+    /// This finds the worktree path from git's worktree list and creates a Branch
+    /// entry pointing to it, without modifying the worktree on disk.
+    ///
+    /// Returns the BranchId of the imported branch on success.
+    pub(crate) fn import_existing_worktree(
+        &mut self,
+        project_id: ProjectId,
+        branch_name: &str,
+    ) -> Result<BranchId> {
+        // Get project info
+        let (repo_path, session_subdir) = {
+            let Some(project) = self.project_store.get_project(project_id) else {
+                anyhow::bail!("Project not found");
+            };
+            (project.repo_path.clone(), project.session_subdir.clone())
+        };
+
+        let git = crate::git::GitOps::open(&repo_path)?;
+
+        // Find the worktree path for this branch from git
+        let worktrees = crate::git::worktree::list_worktrees(git.repository())?;
+        let worktree = worktrees
+            .into_iter()
+            .find(|wt| wt.branch.as_deref() == Some(branch_name))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No git worktree found for branch '{}'. It may have been removed.",
+                    branch_name
+                )
+            })?;
+
+        let worktree_path = worktree.path;
+
+        // Apply project's session_subdir to get effective working dir for sessions
+        let effective_working_dir = match &session_subdir {
+            Some(subdir) => worktree_path.join(subdir),
+            None => worktree_path,
+        };
+
+        let branch = crate::project::Branch::new(
+            project_id,
+            branch_name.to_string(),
+            effective_working_dir,
+            false, // is_default
+            true,  // is_worktree
+        );
+        let branch_id = branch.id;
+        self.project_store.add_branch(branch);
+        self.project_store.save()?;
+        tracing::info!("Imported existing worktree for branch: {}", branch_name);
+
+        Ok(branch_id)
+    }
+
     /// Jump to the next session needing attention (oldest first)
     pub(crate) fn jump_to_next_attention(&mut self) -> Result<()> {
         let attention_sessions = self
@@ -1077,19 +1464,44 @@ impl App {
     }
 
     /// Resize the active session's PTY to match the output viewport
+    ///
+    /// Uses FrameLayout to calculate the correct PTY dimensions, ensuring
+    /// consistency with how the session view is rendered.
     pub(crate) fn resize_active_session_pty(&mut self) -> Result<()> {
         if let Some(session_id) = self.state.active_session {
             let size = self.tui.size()?;
-            // Output area is: total height - header (3) - footer (3) - borders (2)
-            let output_rows = size.height.saturating_sub(8);
-            // Output width is: total width - borders (2)
-            let output_cols = size.width.saturating_sub(2);
+            let frame_config = FrameConfig::default();
+            let layout = FrameLayout::calculate(
+                ratatui::prelude::Rect::new(0, 0, size.width, size.height),
+                &frame_config,
+            );
+            let (rows, cols) = layout.pty_size();
 
             if let Some(session) = self.sessions.get_mut(session_id) {
-                session.resize(output_cols, output_rows)?;
+                session.resize(cols, rows)?;
             }
         }
         Ok(())
+    }
+
+    /// Refresh git state for all projects
+    ///
+    /// This checks if each worktree's working directory still exists and marks
+    /// branches as stale if their directories are missing.
+    pub(crate) fn refresh_all_git_state(&mut self) {
+        let mut total_stale = 0;
+        let project_ids: Vec<_> = self.project_store.projects().map(|p| p.id).collect();
+
+        for project_id in project_ids {
+            total_stale += self.project_store.refresh_branches(project_id);
+        }
+
+        if total_stale > 0 {
+            self.state.header_notifications.push(format!(
+                "{} worktree(s) marked stale - directories not found",
+                total_stale
+            ));
+        }
     }
 
     /// Show a loading indicator with the given message and force a render
@@ -1111,6 +1523,8 @@ impl App {
     fn render(&mut self) -> Result<()> {
         let state = &self.state;
         let project_store = &self.project_store;
+        let claude_config_store = &self.claude_config_store;
+        let codex_config_store = &self.codex_config_store;
         let sessions = &self.sessions;
         let config = &self.config;
         let log_buffer = &self.log_buffer;
@@ -1212,6 +1626,32 @@ impl App {
                         attention_count,
                     );
                 }
+                View::ClaudeConfigs => {
+                    let attention_count =
+                        sessions.total_attention_count(config.idle_threshold_secs);
+                    render_claude_configs(
+                        frame,
+                        area,
+                        claude_config_store,
+                        state.claude_configs_selected_index,
+                        state.focus_timer.as_ref(),
+                        &state.header_notifications,
+                        attention_count,
+                    );
+                }
+                View::CodexConfigs => {
+                    let attention_count =
+                        sessions.total_attention_count(config.idle_threshold_secs);
+                    render_codex_configs(
+                        frame,
+                        area,
+                        codex_config_store,
+                        state.codex_configs_selected_index,
+                        state.focus_timer.as_ref(),
+                        &state.header_notifications,
+                        attention_count,
+                    );
+                }
             }
 
             // Render timer input dialog if entering timer duration
@@ -1242,10 +1682,134 @@ impl App {
                 }
             }
 
+            // Render Claude config name input dialog
+            if state.input_mode == InputMode::AddingClaudeConfigName {
+                render_config_name_input_dialog(frame, area, &state.new_claude_config_name);
+            }
+
+            // Render Claude config path input dialog
+            if state.input_mode == InputMode::AddingClaudeConfigPath {
+                render_config_path_input_dialog(
+                    frame,
+                    area,
+                    &state.new_claude_config_name,
+                    &state.new_claude_config_path,
+                    &state.path_completions,
+                    state.path_completion_index,
+                    state.show_path_completions,
+                );
+            }
+
+            // Render Claude config delete confirmation dialog
+            if state.input_mode == InputMode::ConfirmingClaudeConfigDelete {
+                if let Some(config_id) = state.pending_delete_claude_config {
+                    if let Some(config) = claude_config_store.get(config_id) {
+                        // Find projects using this config
+                        let affected_projects: Vec<String> = project_store
+                            .projects()
+                            .filter(|p| p.default_claude_config == Some(config_id))
+                            .map(|p| p.name.clone())
+                            .collect();
+                        render_config_delete_dialog(frame, area, config, &affected_projects);
+                    }
+                }
+            }
+
+            // Render Claude config selector overlay
+            if state.input_mode == InputMode::SelectingClaudeConfig {
+                render_config_selector(
+                    frame,
+                    area,
+                    &state.available_claude_configs,
+                    state.claude_config_selector_index,
+                    claude_config_store.get_default_id(),
+                );
+            }
+
+            // Render Claude settings copy dialog
+            if state.input_mode == InputMode::ConfirmingClaudeSettingsCopy {
+                if let Some(ref copy_state) = state.pending_claude_settings_copy {
+                    render_claude_settings_copy_dialog(frame, area, copy_state);
+                }
+            }
+
+            // Render Claude settings migrate dialog
+            if state.input_mode == InputMode::ConfirmingClaudeSettingsMigrate {
+                if let Some(ref migrate_state) = state.pending_claude_settings_migrate {
+                    render_claude_settings_migrate_dialog(frame, area, migrate_state);
+                }
+            }
+
+            // Render agent type selector dialog
+            if state.input_mode == InputMode::SelectingAgentType {
+                render_agent_type_selector(frame, area, state.agent_type_selector_index);
+            }
+
+            // Render Codex config name input dialog
+            if state.input_mode == InputMode::AddingCodexConfigName {
+                render_codex_config_name_input_dialog(frame, area, &state.new_codex_config_name);
+            }
+
+            // Render Codex config path input dialog
+            if state.input_mode == InputMode::AddingCodexConfigPath {
+                render_codex_config_path_input_dialog(
+                    frame,
+                    area,
+                    &state.new_codex_config_name,
+                    &state.new_codex_config_path,
+                    &state.path_completions,
+                    state.path_completion_index,
+                    state.show_path_completions,
+                );
+            }
+
+            // Render Codex config delete confirmation dialog
+            if state.input_mode == InputMode::ConfirmingCodexConfigDelete {
+                if let Some(config_id) = state.pending_delete_codex_config {
+                    if let Some(config) = codex_config_store.get(config_id) {
+                        // Find projects using this config
+                        let affected_projects: Vec<String> = project_store
+                            .projects()
+                            .filter(|p| p.default_codex_config == Some(config_id))
+                            .map(|p| p.name.clone())
+                            .collect();
+                        render_codex_config_delete_dialog(frame, area, config, &affected_projects);
+                    }
+                }
+            }
+
+            // Render Codex config selector overlay
+            if state.input_mode == InputMode::SelectingCodexConfig {
+                render_codex_config_selector(
+                    frame,
+                    area,
+                    &state.available_codex_configs,
+                    state.codex_config_selector_index,
+                    codex_config_store.get_default_id(),
+                );
+            }
+
+            // Render custom shortcut dialogs
+            if matches!(
+                state.input_mode,
+                InputMode::ManagingCustomShortcuts
+                    | InputMode::AddingCustomShortcutKey
+                    | InputMode::AddingCustomShortcutName
+                    | InputMode::AddingCustomShortcutCommand
+                    | InputMode::ConfirmingCustomShortcutDelete
+            ) {
+                render_custom_shortcut_dialogs(frame, area, state, config);
+            }
+
             // Render notifications overlay
             let visible_notifications = state.notifications.visible();
             if !visible_notifications.is_empty() {
                 render_notifications(frame, area, &visible_notifications);
+            }
+
+            // Render help overlay if active
+            if state.show_help_overlay {
+                render_help_overlay(frame, area, &state.view);
             }
 
             // Render loading overlay if a blocking operation is in progress
@@ -1266,6 +1830,19 @@ impl App {
     pub fn project_store_mut(&mut self) -> &mut ProjectStore {
         &mut self.project_store
     }
+}
+
+fn should_forward_mouse_to_pty(input_mode: InputMode, mouse_enabled: bool) -> bool {
+    input_mode == InputMode::Session && mouse_enabled
+}
+
+fn mouse_debug_enabled_from_env() -> bool {
+    std::env::var("PANOPTES_MOUSE_DEBUG").ok().is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1369,6 +1946,9 @@ mod tests {
         let branch_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
 
+        // Create a SessionManager for testing (session won't exist, tests fallback path)
+        let sessions = SessionManager::new(Config::default());
+
         // Navigate to project
         state.navigate_to_project(project_id);
         assert_eq!(state.view, View::ProjectDetail(project_id));
@@ -1388,8 +1968,8 @@ mod tests {
             Some(View::BranchDetail(project_id, branch_id))
         );
 
-        // Return from session
-        state.return_from_session();
+        // Return from session (session not in manager, uses fallback to stored return view)
+        state.return_from_session(&sessions);
         assert_eq!(state.view, View::BranchDetail(project_id, branch_id));
         assert!(state.active_session.is_none());
 
@@ -1411,5 +1991,55 @@ mod tests {
 
         state.navigate_back();
         assert_eq!(state.view, View::ProjectsOverview);
+    }
+
+    #[test]
+    fn test_return_from_session_uses_session_context() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            worktrees_dir: temp_dir.path().join("worktrees"),
+            hooks_dir: temp_dir.path().join("hooks"),
+            ..Config::default()
+        };
+        let mut sessions = SessionManager::new(config);
+
+        let project_a = Uuid::new_v4();
+        let branch_a = Uuid::new_v4();
+        let project_b = Uuid::new_v4();
+        let branch_b = Uuid::new_v4();
+
+        // Create test sessions in different projects/branches
+        let _session_a = sessions
+            .insert_test_session("Session A", project_a, branch_a)
+            .unwrap();
+        let session_b = sessions
+            .insert_test_session("Session B", project_b, branch_b)
+            .unwrap();
+
+        let mut state = AppState {
+            view: View::ActivityTimeline,
+            ..Default::default()
+        };
+
+        // Start from timeline, navigate to session A
+        state.navigate_to_session(_session_a);
+        assert_eq!(state.session_return_view, Some(View::ActivityTimeline));
+
+        // Jump to session B (simulates Space key)
+        state.active_session = Some(session_b);
+        state.session_return_view = Some(View::SessionView); // This is what causes the bug
+
+        // Return from session - should go to session B's branch detail, NOT ActivityTimeline
+        state.return_from_session(&sessions);
+        assert_eq!(state.view, View::BranchDetail(project_b, branch_b));
+        assert!(state.active_session.is_none());
+        assert!(state.session_return_view.is_none());
+    }
+
+    #[test]
+    fn test_should_forward_mouse_to_pty() {
+        assert!(should_forward_mouse_to_pty(InputMode::Session, true));
+        assert!(!should_forward_mouse_to_pty(InputMode::Session, false));
+        assert!(!should_forward_mouse_to_pty(InputMode::Normal, true));
     }
 }
