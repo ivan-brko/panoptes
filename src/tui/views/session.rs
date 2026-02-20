@@ -220,7 +220,7 @@ fn build_footer_text(
             let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
 
             let base = format!(
-                "{}{}Enter: activate | Tab: next | {} | k:shortcuts | PgUp/Dn: scroll",
+                "{}{}Enter: activate | Tab: next | {} | k:shortcuts | \u{2191}\u{2193}/PgUp/Dn: scroll",
                 scroll_hint, shortcuts_hint, timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
