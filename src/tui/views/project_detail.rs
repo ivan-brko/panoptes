@@ -579,38 +579,8 @@ pub fn render_branch_delete_confirmation(
         lines.push(Line::from(""));
     }
 
-    // Worktree deletion toggle
-    if is_worktree {
-        let checkbox = if state.delete_worktree_on_disk {
-            "[x]"
-        } else {
-            "[ ]"
-        };
-        let checkbox_style = if state.delete_worktree_on_disk {
-            Style::default()
-                .fg(t.border_warning)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(t.text_muted)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(checkbox, checkbox_style),
-            Span::styled(
-                " Also delete worktree from disk",
-                Style::default().fg(t.text),
-            ),
-            Span::styled(" (press w to toggle)", Style::default().fg(t.text_muted)),
-        ]));
-        if state.delete_worktree_on_disk {
-            lines.push(Line::from(vec![Span::styled(
-                "    ⚠  This will permanently delete the directory!",
-                Style::default()
-                    .fg(t.border_warning)
-                    .add_modifier(Modifier::BOLD),
-            )]));
-        }
-        lines.push(Line::from(""));
-    } else {
+    // Non-worktree info (shown before confirmation prompt)
+    if !is_worktree {
         lines.push(Line::from(vec![Span::styled(
             "This branch is not a worktree (tracked branch only)",
             Style::default().fg(t.text_muted),
@@ -639,6 +609,39 @@ pub fn render_branch_delete_confirmation(
         ),
         Span::styled(" to cancel", Style::default().fg(t.text)),
     ]));
+
+    // Worktree deletion toggle (shown after confirmation prompt)
+    if is_worktree {
+        lines.push(Line::from(""));
+        let checkbox = if state.delete_worktree_on_disk {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let checkbox_style = if state.delete_worktree_on_disk {
+            Style::default()
+                .fg(t.border_warning)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(t.text_muted)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(checkbox, checkbox_style),
+            Span::styled(
+                " Also delete worktree from disk",
+                Style::default().fg(t.text),
+            ),
+            Span::styled(" (press w to toggle)", Style::default().fg(t.text_muted)),
+        ]));
+        if state.delete_worktree_on_disk {
+            lines.push(Line::from(vec![Span::styled(
+                "    ⚠  This will permanently delete the directory!",
+                Style::default()
+                    .fg(t.border_warning)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+        }
+    }
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
         Block::default()
