@@ -50,6 +50,8 @@ pub enum HookEventType {
     PostToolUse,
     /// Notification from Claude (e.g., waiting for input)
     Notification,
+    /// Permission request (Claude is waiting for user to approve/deny)
+    PermissionRequest,
     /// Agent turn complete (from Codex CLI notify hook)
     AgentTurnComplete,
     /// Unknown event type
@@ -65,6 +67,7 @@ impl HookEventType {
             HookEventType::PreToolUse => "PreToolUse",
             HookEventType::PostToolUse => "PostToolUse",
             HookEventType::Notification => "Notification",
+            HookEventType::PermissionRequest => "PermissionRequest",
             HookEventType::AgentTurnComplete => "AgentTurnComplete",
             HookEventType::Unknown => "Unknown",
         }
@@ -85,6 +88,7 @@ impl From<&str> for HookEventType {
             "PreToolUse" => HookEventType::PreToolUse,
             "PostToolUse" => HookEventType::PostToolUse,
             "Notification" => HookEventType::Notification,
+            "PermissionRequest" => HookEventType::PermissionRequest,
             "AgentTurnComplete" => HookEventType::AgentTurnComplete,
             _ => HookEventType::Unknown,
         }

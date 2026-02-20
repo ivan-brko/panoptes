@@ -23,6 +23,7 @@ const HOOK_EVENTS: &[HookEventType] = &[
     HookEventType::PostToolUse,
     HookEventType::Stop,
     HookEventType::Notification,
+    HookEventType::PermissionRequest,
 ];
 
 /// Claude Code adapter for spawning and managing Claude Code sessions
@@ -490,6 +491,7 @@ mod tests {
         assert!(hooks.get("PreToolUse").is_some());
         assert!(hooks.get("PostToolUse").is_some());
         assert!(hooks.get("Notification").is_some());
+        assert!(hooks.get("PermissionRequest").is_some());
         assert!(hooks.get("Stop").is_some());
     }
 

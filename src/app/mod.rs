@@ -483,52 +483,26 @@ impl App {
 
     /// Process pending hook events from the channel
     ///
-    /// Uses event coalescing: when multiple events arrive for the same session in a single
-    /// batch, only the latest event is processed. This prevents UI lag during rapid state
-    /// changes (e.g., quick tool executions).
+    /// Processes all events sequentially to ensure no events are dropped.
+    /// With subagents sharing a session_id, multiple important events (e.g.,
+    /// Notification + PostToolUse) can arrive in a single batch and all must
+    /// be applied to preserve correctness.
     ///
     /// Returns true if any events were processed
     fn process_hook_events(&mut self) -> bool {
-        use crate::hooks::HookEvent;
-        use std::collections::HashMap;
-
-        // Collect all pending events, coalescing by session_id (keep latest)
-        let mut coalesced: HashMap<String, HookEvent> = HashMap::new();
-        let mut event_count = 0;
+        // Collect all pending events
+        let mut events = Vec::new();
 
         while let Ok(event) = self.hook_rx.try_recv() {
-            event_count += 1;
-            // Insert or replace - later events overwrite earlier ones for the same session
-            coalesced.insert(event.session_id.clone(), event);
+            events.push(event);
         }
 
-        if coalesced.is_empty() {
+        if events.is_empty() {
             return false;
         }
 
-        // Log coalescing stats if we coalesced any events
-        let coalesced_count = coalesced.len();
-        if event_count > coalesced_count {
-            tracing::debug!(
-                "Coalesced {} hook events down to {} (one per session)",
-                event_count,
-                coalesced_count
-            );
-        }
-
-        // Warn if high event backlog (more than 100 events in one batch)
-        if event_count > 100 {
-            tracing::warn!("High hook event backlog: {} events in batch", event_count);
-            // Only notify once - don't spam the user
-            if self.state.dropped_events_count == 0 {
-                self.state
-                    .header_notifications
-                    .push("High event load - some state updates may be delayed".to_string());
-            }
-        }
-
-        // Process coalesced events
-        for event in coalesced.into_values() {
+        // Process all events sequentially
+        for event in &events {
             tracing::debug!(
                 "Hook event: session={}, event={}, tool={:?}",
                 event.session_id,
@@ -536,13 +510,15 @@ impl App {
                 event.tool
             );
             // handle_hook_event returns Some(session_id) if notification should be sent
-            if let Some(session_id) = self
-                .sessions
-                .handle_hook_event(&event, self.state.active_session)
-            {
-                // Only notify if this session is NOT the one we're currently viewing
+            if let Some(session_id) = self.sessions.handle_hook_event(event) {
                 let is_active_session = self.state.active_session == Some(session_id);
-                if !is_active_session {
+                // Send notification if: (a) not the active session, or
+                // (b) active session but terminal is unfocused (user Cmd+Tabbed away).
+                // Only check terminal focus when focus events are supported —
+                // otherwise we can't distinguish "unfocused" from "terminal doesn't report focus".
+                let terminal_unfocused =
+                    self.state.focus_events_supported && !self.state.terminal_focused;
+                if !is_active_session || terminal_unfocused {
                     let session_name = self
                         .sessions
                         .get(session_id)
