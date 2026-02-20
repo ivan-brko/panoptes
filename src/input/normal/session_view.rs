@@ -35,6 +35,18 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
             // Re-enable mouse capture for scroll wheel
             app.tui.enable_mouse_capture();
         }
+        KeyCode::Up => {
+            // Scroll up a few lines (toward older content)
+            if let Some(session_id) = app.state.active_session {
+                session_scroll::scroll_lines_up(app, session_id);
+            }
+        }
+        KeyCode::Down => {
+            // Scroll down a few lines (toward newer content)
+            if let Some(session_id) = app.state.active_session {
+                session_scroll::scroll_lines_down(app, session_id);
+            }
+        }
         KeyCode::PageUp => {
             // Scroll up in session output (toward older content)
             if let Some(session_id) = app.state.active_session {
