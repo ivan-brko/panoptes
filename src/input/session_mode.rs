@@ -63,8 +63,7 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
             return Ok(());
         }
         KeyCode::Home
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.kind == KeyEventKind::Press =>
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.kind == KeyEventKind::Press =>
         {
             // Ctrl+Home: scroll to top
             if let Some(session_id) = app.state.active_session {
@@ -79,8 +78,7 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
             return Ok(());
         }
         KeyCode::End
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.kind == KeyEventKind::Press =>
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.kind == KeyEventKind::Press =>
         {
             // Ctrl+End: scroll to bottom (live view)
             if let Some(session_id) = app.state.active_session {

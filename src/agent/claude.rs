@@ -433,6 +433,7 @@ mod tests {
         assert!(hooks.get("PreToolUse").is_some());
         assert!(hooks.get("PostToolUse").is_some());
         assert!(hooks.get("Notification").is_some());
+        assert!(hooks.get("PermissionRequest").is_some());
         assert!(hooks.get("Stop").is_some());
     }
 
