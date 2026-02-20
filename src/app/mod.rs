@@ -372,9 +372,14 @@ impl App {
             );
             // handle_hook_event returns Some(session_id) if notification should be sent
             if let Some(session_id) = self.sessions.handle_hook_event(event) {
-                // Only notify if this session is NOT the one we're currently viewing
                 let is_active_session = self.state.active_session == Some(session_id);
-                if !is_active_session {
+                // Send notification if: (a) not the active session, or
+                // (b) active session but terminal is unfocused (user Cmd+Tabbed away).
+                // Only check terminal focus when focus events are supported —
+                // otherwise we can't distinguish "unfocused" from "terminal doesn't report focus".
+                let terminal_unfocused =
+                    self.state.focus_events_supported && !self.state.terminal_focused;
+                if !is_active_session || terminal_unfocused {
                     let session_name = self
                         .sessions
                         .get(session_id)
