@@ -50,6 +50,8 @@ pub enum HookEventType {
     PostToolUse,
     /// Notification from Claude (e.g., waiting for input)
     Notification,
+    /// Permission request (Claude is waiting for user to approve/deny)
+    PermissionRequest,
     /// Unknown event type
     Unknown,
 }
@@ -62,6 +64,7 @@ impl From<&str> for HookEventType {
             "PreToolUse" => HookEventType::PreToolUse,
             "PostToolUse" => HookEventType::PostToolUse,
             "Notification" => HookEventType::Notification,
+            "PermissionRequest" => HookEventType::PermissionRequest,
             _ => HookEventType::Unknown,
         }
     }

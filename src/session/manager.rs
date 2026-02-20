@@ -300,6 +300,10 @@ impl SessionManager {
                 // Notification usually means waiting for user (e.g., permission prompt)
                 SessionState::Waiting
             }
+            HookEventType::PermissionRequest => {
+                // Permission dialog is showing - session needs user input
+                SessionState::Waiting
+            }
             HookEventType::Unknown => {
                 // For unknown events, just update last_activity
                 session.info.last_activity = Utc::now();
@@ -309,10 +313,24 @@ impl SessionManager {
 
         session.set_state(new_state.clone());
 
-        // Return session ID if bell should ring (entered Waiting from non-Waiting)
-        if new_state == SessionState::Waiting && old_state != SessionState::Waiting {
-            session.info.needs_attention = true;
-            Some(session_id)
+        // PermissionRequest/Notification always need attention regardless of state transition.
+        // Other events only set attention on non-Waiting → Waiting transition.
+        // Bell only rings on false → true transition to avoid duplicate notifications.
+        let always_needs_attention = matches!(
+            event.event_type(),
+            HookEventType::PermissionRequest | HookEventType::Notification
+        );
+
+        if always_needs_attention
+            || (new_state == SessionState::Waiting && old_state != SessionState::Waiting)
+        {
+            if session.info.needs_attention {
+                // Already flagged — don't re-notify
+                None
+            } else {
+                session.info.needs_attention = true;
+                Some(session_id)
+            }
         } else {
             None
         }
@@ -460,17 +478,25 @@ impl SessionManager {
             .count()
     }
 
-    /// Check if a session needs attention (Waiting with flag set, or Idle beyond threshold)
+    /// Check if a session needs attention (needs_attention flag set, or Idle beyond threshold)
+    ///
+    /// The `needs_attention` flag is decoupled from state because subagents share a
+    /// session_id — one subagent can be waiting for input while another is actively
+    /// working, so the session may be in Thinking/Executing state while still needing
+    /// attention. The flag is set only by hook events (not PTY output transitions),
+    /// since hook events like PermissionRequest and Notification explicitly signal
+    /// that user interaction is required.
     pub fn session_needs_attention(&self, session: &Session, idle_threshold_secs: u64) -> bool {
-        match session.info.state {
-            SessionState::Waiting => session.info.needs_attention, // Use flag (cleared when viewed)
-            SessionState::Idle => {
-                // Idle beyond threshold always needs attention (time-based)
-                let idle_duration = Utc::now().signed_duration_since(session.info.last_activity);
-                idle_duration.num_seconds() > idle_threshold_secs as i64
-            }
-            _ => false,
+        // Sticky flag: set by hook events requiring user attention, cleared on acknowledgment
+        if session.info.needs_attention {
+            return true;
         }
+        // Idle beyond threshold always needs attention (time-based)
+        if session.info.state == SessionState::Idle {
+            let idle_duration = Utc::now().signed_duration_since(session.info.last_activity);
+            return idle_duration.num_seconds() > idle_threshold_secs as i64;
+        }
+        false
     }
 
     /// Get all sessions needing attention, sorted by urgency (Waiting first, then by idle duration)
@@ -481,19 +507,15 @@ impl SessionManager {
             .filter(|s| self.session_needs_attention(s, idle_threshold_secs))
             .collect();
 
-        // Sort: Waiting sessions first, then by last_activity (oldest first for Idle)
+        // Sort: sessions with needs_attention flag first, then by last_activity (oldest first)
         sessions.sort_by(|a, b| {
-            match (&a.info.state, &b.info.state) {
-                (SessionState::Waiting, SessionState::Waiting) => {
-                    // Both waiting: sort by oldest activity first
+            match (a.info.needs_attention, b.info.needs_attention) {
+                (true, true) | (false, false) => {
+                    // Same priority: sort by oldest activity first
                     a.info.last_activity.cmp(&b.info.last_activity)
                 }
-                (SessionState::Waiting, _) => std::cmp::Ordering::Less,
-                (_, SessionState::Waiting) => std::cmp::Ordering::Greater,
-                _ => {
-                    // Both idle: sort by oldest activity first
-                    a.info.last_activity.cmp(&b.info.last_activity)
-                }
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
             }
         });
 
@@ -637,6 +659,152 @@ mod tests {
 
         assert!(manager.get_by_index(0).is_none());
         assert!(manager.get_by_index(100).is_none());
+    }
+
+    /// Helper: create a real session in the manager by spawning a lightweight process.
+    /// Returns the session ID (which is also the UUID string for hook events).
+    fn insert_test_session(manager: &mut SessionManager) -> SessionId {
+        use crate::session::pty::PtyHandle;
+        use crate::session::{Session, SessionInfo};
+        use std::collections::HashMap;
+
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+        let info = SessionInfo::new(
+            "test-session".to_string(),
+            "/tmp".into(),
+            project_id,
+            branch_id,
+        );
+        let session_id = info.id;
+
+        let pty = PtyHandle::spawn(
+            "sleep",
+            &["60"],
+            std::path::Path::new("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .expect("Failed to spawn test process");
+        let session = Session::new(info, pty, 24, 80);
+
+        manager.sessions.insert(session_id, session);
+        manager.session_order.push(session_id);
+        session_id
+    }
+
+    #[test]
+    fn test_permission_request_sets_needs_attention_while_waiting() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = SessionManager::new(config);
+        let session_id = insert_test_session(&mut manager);
+
+        // Put session into Waiting state (simulating a Stop event already processed)
+        manager
+            .get_mut(session_id)
+            .unwrap()
+            .set_state(SessionState::Waiting);
+        assert!(!manager.get(session_id).unwrap().info.needs_attention);
+
+        // PermissionRequest while already Waiting should set needs_attention and ring bell
+        let event = HookEvent {
+            session_id: session_id.to_string(),
+            event: "PermissionRequest".to_string(),
+            tool: None,
+            timestamp: 100,
+        };
+        let result = manager.handle_hook_event(&event);
+        assert_eq!(
+            result,
+            Some(session_id),
+            "First PermissionRequest should ring bell"
+        );
+        assert!(manager.get(session_id).unwrap().info.needs_attention);
+
+        // Second PermissionRequest while already flagged should NOT ring bell
+        let event2 = HookEvent {
+            session_id: session_id.to_string(),
+            event: "PermissionRequest".to_string(),
+            tool: None,
+            timestamp: 200,
+        };
+        let result2 = manager.handle_hook_event(&event2);
+        assert_eq!(
+            result2, None,
+            "Duplicate PermissionRequest should not ring bell"
+        );
+        assert!(manager.get(session_id).unwrap().info.needs_attention);
+
+        // After acknowledgment, a third PermissionRequest should ring bell again
+        manager.acknowledge_attention(session_id);
+        assert!(!manager.get(session_id).unwrap().info.needs_attention);
+
+        let event3 = HookEvent {
+            session_id: session_id.to_string(),
+            event: "PermissionRequest".to_string(),
+            tool: None,
+            timestamp: 300,
+        };
+        let result3 = manager.handle_hook_event(&event3);
+        assert_eq!(
+            result3,
+            Some(session_id),
+            "PermissionRequest after ack should ring bell"
+        );
+        assert!(manager.get(session_id).unwrap().info.needs_attention);
+    }
+
+    #[test]
+    fn test_notification_sets_needs_attention_while_waiting() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = SessionManager::new(config);
+        let session_id = insert_test_session(&mut manager);
+
+        // Put session into Waiting state
+        manager
+            .get_mut(session_id)
+            .unwrap()
+            .set_state(SessionState::Waiting);
+
+        // Notification while already Waiting should set needs_attention
+        let event = HookEvent {
+            session_id: session_id.to_string(),
+            event: "Notification".to_string(),
+            tool: None,
+            timestamp: 100,
+        };
+        let result = manager.handle_hook_event(&event);
+        assert_eq!(result, Some(session_id));
+        assert!(manager.get(session_id).unwrap().info.needs_attention);
+    }
+
+    #[test]
+    fn test_stop_while_already_waiting_does_not_set_attention() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = SessionManager::new(config);
+        let session_id = insert_test_session(&mut manager);
+
+        // Put session into Waiting state
+        manager
+            .get_mut(session_id)
+            .unwrap()
+            .set_state(SessionState::Waiting);
+
+        // Stop event while already Waiting should NOT set needs_attention
+        // (Waiting → Waiting is not a non-Waiting → Waiting transition)
+        let event = HookEvent {
+            session_id: session_id.to_string(),
+            event: "Stop".to_string(),
+            tool: None,
+            timestamp: 100,
+        };
+        let result = manager.handle_hook_event(&event);
+        assert_eq!(result, None);
+        assert!(!manager.get(session_id).unwrap().info.needs_attention);
     }
 
     #[test]

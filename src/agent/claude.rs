@@ -17,7 +17,13 @@ use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
 const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
 
 /// Hook event types that Claude Code supports
-const HOOK_EVENTS: &[&str] = &["PreToolUse", "PostToolUse", "Stop", "Notification"];
+const HOOK_EVENTS: &[&str] = &[
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "Notification",
+    "PermissionRequest",
+];
 
 /// Claude Code adapter for spawning and managing Claude Code sessions
 pub struct ClaudeCodeAdapter {
