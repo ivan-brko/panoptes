@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app::{App, InputMode};
 use crate::input::session_scroll;
+use crate::session::SessionManager;
 
 /// Handle key in session mode (keys go to PTY)
 pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -65,6 +66,17 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if let Some(session_id) = app.state.active_session {
         if let Some(session) = app.sessions.get_mut(session_id) {
             session.send_key(key)?;
+        }
+        // Clear attention flag if set — user is actively interacting with this session
+        if app
+            .sessions
+            .get(session_id)
+            .is_some_and(|s| s.info.needs_attention)
+        {
+            app.sessions.acknowledge_attention(session_id);
+            if app.config.notification_method == "title" {
+                SessionManager::reset_terminal_title();
+            }
         }
     }
     Ok(())
