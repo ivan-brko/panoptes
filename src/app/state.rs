@@ -309,6 +309,8 @@ pub struct AppState {
     pub pending_delete_shortcut_index: Option<usize>,
     /// Validation error message for shortcut creation
     pub shortcut_error: Option<String>,
+    /// Auto-close toggle for new shortcut being added
+    pub new_shortcut_auto_close: bool,
 }
 
 impl AppState {

@@ -64,6 +64,8 @@ pub enum InputMode {
     AddingCustomShortcutName,
     /// Adding a custom shortcut - entering the command
     AddingCustomShortcutCommand,
+    /// Adding a custom shortcut - toggling auto-close option
+    AddingCustomShortcutAutoClose,
     /// Confirming custom shortcut deletion
     ConfirmingCustomShortcutDelete,
     /// Selecting agent type (Claude Code vs Codex) for new session

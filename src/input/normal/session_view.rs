@@ -149,6 +149,11 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                             cols,
                         ) {
                             Ok(new_session_id) => {
+                                if shortcut.auto_close {
+                                    if let Some(session) = app.sessions.get_mut(new_session_id) {
+                                        session.info.auto_close_after_command = true;
+                                    }
+                                }
                                 // Navigate to the new session
                                 app.state.active_session = Some(new_session_id);
                                 session_scroll::reset_for_session_switch(app, new_session_id);

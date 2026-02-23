@@ -861,6 +861,7 @@ pub fn handle_managing_custom_shortcuts_key(app: &mut App, key: KeyEvent) -> Res
             app.state.new_shortcut_key = None;
             app.state.new_shortcut_name.clear();
             app.state.new_shortcut_command.clear();
+            app.state.new_shortcut_auto_close = false;
             app.state.shortcut_error = None;
             app.state.input_mode = InputMode::AddingCustomShortcutKey;
         }
@@ -944,29 +945,12 @@ pub fn handle_adding_custom_shortcut_command_key(app: &mut App, key: KeyEvent) -
             app.state.input_mode = InputMode::AddingCustomShortcutName;
         }
         KeyCode::Enter => {
-            // Save the shortcut if command is not empty
+            // Proceed to auto-close toggle if command is not empty
             if app.state.new_shortcut_command.is_empty() {
                 app.state.shortcut_error = Some("Command cannot be empty".to_string());
-            } else if let Some(key) = app.state.new_shortcut_key {
-                let shortcut = CustomShortcut::new(
-                    key,
-                    app.state.new_shortcut_name.clone(),
-                    app.state.new_shortcut_command.clone(),
-                );
-                app.config.custom_shortcuts.push(shortcut);
-
-                // Save config to disk
-                if let Err(e) = app.config.save() {
-                    tracing::error!("Failed to save config: {}", e);
-                    app.state.error_message = Some(format!("Failed to save config: {}", e));
-                }
-
-                // Clear state and go back to management dialog
-                app.state.new_shortcut_key = None;
-                app.state.new_shortcut_name.clear();
-                app.state.new_shortcut_command.clear();
+            } else {
                 app.state.shortcut_error = None;
-                app.state.input_mode = InputMode::ManagingCustomShortcuts;
+                app.state.input_mode = InputMode::AddingCustomShortcutAutoClose;
             }
         }
         KeyCode::Char(c) => {
@@ -979,6 +963,68 @@ pub fn handle_adding_custom_shortcut_command_key(app: &mut App, key: KeyEvent) -
         _ => {}
     }
     Ok(())
+}
+
+/// Handle key when adding a custom shortcut - toggling auto-close option
+pub fn handle_adding_custom_shortcut_auto_close_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            // Go back to command input
+            app.state.input_mode = InputMode::AddingCustomShortcutCommand;
+        }
+        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+            // Toggle auto-close
+            app.state.new_shortcut_auto_close = !app.state.new_shortcut_auto_close;
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.state.new_shortcut_auto_close = true;
+            save_new_shortcut(app);
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            app.state.new_shortcut_auto_close = false;
+            save_new_shortcut(app);
+        }
+        KeyCode::Enter => {
+            save_new_shortcut(app);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Save the new shortcut being created and return to the management dialog
+fn save_new_shortcut(app: &mut App) {
+    if let Some(key) = app.state.new_shortcut_key {
+        let shortcut = CustomShortcut::new(
+            key,
+            app.state.new_shortcut_name.clone(),
+            app.state.new_shortcut_command.clone(),
+            app.state.new_shortcut_auto_close,
+        );
+
+        if let Err(e) = app.config.add_shortcut(shortcut) {
+            app.state.shortcut_error = Some(e.to_string());
+            return;
+        }
+
+        // Save config to disk
+        if let Err(e) = app.config.save() {
+            tracing::error!("Failed to save config: {}", e);
+            app.state.error_message = Some(format!("Failed to save config: {}", e));
+        }
+
+        // Clear state and go back to management dialog
+        app.state.new_shortcut_key = None;
+        app.state.new_shortcut_name.clear();
+        app.state.new_shortcut_command.clear();
+        app.state.new_shortcut_auto_close = false;
+        app.state.shortcut_error = None;
+        app.state.input_mode = InputMode::ManagingCustomShortcuts;
+    }
 }
 
 /// Handle key when confirming custom shortcut deletion

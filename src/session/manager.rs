@@ -545,10 +545,7 @@ impl SessionManager {
     /// The `active_session` parameter indicates which session the user is currently viewing.
     /// If the session entering Waiting state is the active session, `needs_attention` will
     /// not be set and `None` will be returned (no notification needed).
-    pub fn handle_hook_event(
-        &mut self,
-        event: &HookEvent,
-    ) -> Option<SessionId> {
+    pub fn handle_hook_event(&mut self, event: &HookEvent) -> Option<SessionId> {
         // Try to parse session_id as UUID
         let session_id = match event.session_id.parse::<SessionId>() {
             Ok(id) => id,

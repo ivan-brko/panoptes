@@ -148,6 +148,9 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::AddingCustomShortcutCommand => {
             super::dialogs::handle_adding_custom_shortcut_command_key(app, key)
         }
+        InputMode::AddingCustomShortcutAutoClose => {
+            super::dialogs::handle_adding_custom_shortcut_auto_close_key(app, key)
+        }
         InputMode::ConfirmingCustomShortcutDelete => {
             super::dialogs::handle_confirming_custom_shortcut_delete_key(app, key)
         }

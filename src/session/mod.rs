@@ -153,6 +153,9 @@ pub struct SessionInfo {
     /// Codex configuration name (cached for display)
     #[serde(default)]
     pub codex_config_name: Option<String>,
+    /// Whether to automatically close this session after its command finishes
+    #[serde(default)]
+    pub auto_close_after_command: bool,
 }
 
 impl SessionInfo {
@@ -182,6 +185,7 @@ impl SessionInfo {
             claude_config_name: None,
             codex_config_id: None,
             codex_config_name: None,
+            auto_close_after_command: false,
         }
     }
 
@@ -239,6 +243,21 @@ impl SessionInfo {
         // Shell sessions start in Waiting state (ready for input)
         info.state = SessionState::Waiting;
         info
+    }
+
+    /// Check if this session should be auto-closed.
+    ///
+    /// Returns true when the session has `auto_close_after_command` enabled,
+    /// is a shell session in `Waiting` state, and the grace period (seconds
+    /// since `Waiting` was entered) has elapsed.
+    pub fn should_auto_close(&self, grace_secs: i64) -> bool {
+        self.auto_close_after_command
+            && self.session_type == SessionType::Shell
+            && self.state == SessionState::Waiting
+            && Utc::now()
+                .signed_duration_since(self.state_entered_at)
+                .num_seconds()
+                >= grace_secs
     }
 }
 
@@ -848,6 +867,60 @@ mod tests {
         assert_eq!(info.name, "shell");
         assert_eq!(info.session_type, SessionType::Shell);
         assert_eq!(info.state, SessionState::Waiting); // Shell starts in Waiting
+    }
+
+    #[test]
+    fn test_should_auto_close_all_conditions_met() {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let mut info = SessionInfo::shell("sh".to_string(), "/tmp".into(), project_id, branch_id);
+        info.auto_close_after_command = true;
+        // Simulate state_entered_at 5 seconds ago
+        info.state_entered_at = Utc::now() - chrono::Duration::seconds(5);
+        assert!(info.should_auto_close(3));
+    }
+
+    #[test]
+    fn test_should_auto_close_within_grace_period() {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let mut info = SessionInfo::shell("sh".to_string(), "/tmp".into(), project_id, branch_id);
+        info.auto_close_after_command = true;
+        // state_entered_at is now (just created), so <3s elapsed
+        assert!(!info.should_auto_close(3));
+    }
+
+    #[test]
+    fn test_should_auto_close_disabled() {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let mut info = SessionInfo::shell("sh".to_string(), "/tmp".into(), project_id, branch_id);
+        info.auto_close_after_command = false;
+        info.state_entered_at = Utc::now() - chrono::Duration::seconds(10);
+        assert!(!info.should_auto_close(3));
+    }
+
+    #[test]
+    fn test_should_auto_close_not_waiting_state() {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let mut info = SessionInfo::shell("sh".to_string(), "/tmp".into(), project_id, branch_id);
+        info.auto_close_after_command = true;
+        info.state = SessionState::Executing("cargo build".to_string());
+        info.state_entered_at = Utc::now() - chrono::Duration::seconds(10);
+        assert!(!info.should_auto_close(3));
+    }
+
+    #[test]
+    fn test_should_auto_close_not_shell_type() {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let mut info = SessionInfo::new("cc".to_string(), "/tmp".into(), project_id, branch_id);
+        info.auto_close_after_command = true;
+        info.state = SessionState::Waiting;
+        info.state_entered_at = Utc::now() - chrono::Duration::seconds(10);
+        // ClaudeCode session type should not auto-close
+        assert!(!info.should_auto_close(3));
     }
 
     #[test]

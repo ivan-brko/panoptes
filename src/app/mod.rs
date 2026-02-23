@@ -394,6 +394,31 @@ impl App {
                 }
             }
 
+            // Auto-close sessions whose commands have finished.
+            // Uses state_entered_at (when Waiting was entered) so the grace period
+            // starts after the command finishes, not after session creation.
+            {
+                let auto_close_ids: Vec<SessionId> = self
+                    .sessions
+                    .iter()
+                    .filter(|(_, session)| session.info.should_auto_close(3))
+                    .map(|(&id, _)| id)
+                    .collect();
+
+                for session_id in auto_close_ids {
+                    // return_from_session must be called before destroy_session so
+                    // the session's project/branch context is still available for
+                    // navigation.
+                    if self.state.active_session == Some(session_id) {
+                        self.state.return_from_session(&self.sessions);
+                        self.tui.enable_mouse_capture();
+                        self.state.header_notifications.push("Session auto-closed");
+                    }
+                    let _ = self.sessions.destroy_session(session_id);
+                    self.state.needs_render = true;
+                }
+            }
+
             // Clean up old exited sessions to prevent memory growth
             let cleaned_up = self
                 .sessions
@@ -1796,6 +1821,7 @@ impl App {
                     | InputMode::AddingCustomShortcutKey
                     | InputMode::AddingCustomShortcutName
                     | InputMode::AddingCustomShortcutCommand
+                    | InputMode::AddingCustomShortcutAutoClose
                     | InputMode::ConfirmingCustomShortcutDelete
             ) {
                 render_custom_shortcut_dialogs(frame, area, state, config);
