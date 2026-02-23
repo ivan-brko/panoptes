@@ -107,6 +107,11 @@ pub fn handle_branch_detail_key(
                         cols,
                     ) {
                         Ok(new_session_id) => {
+                            if shortcut.auto_close {
+                                if let Some(session) = app.sessions.get_mut(new_session_id) {
+                                    session.info.auto_close_after_command = true;
+                                }
+                            }
                             app.state.navigate_to_session(new_session_id);
                             app.tui.enable_mouse_capture();
                             app.state.input_mode = InputMode::Session;

@@ -16,12 +16,20 @@ pub struct CustomShortcut {
     pub name: String,
     /// Command to run in the shell (e.g., "code . &")
     pub command: String,
+    /// Whether to automatically close the session after the command finishes
+    #[serde(default)]
+    pub auto_close: bool,
 }
 
 impl CustomShortcut {
     /// Create a new custom shortcut
-    pub fn new(key: char, name: String, command: String) -> Self {
-        Self { key, name, command }
+    pub fn new(key: char, name: String, command: String, auto_close: bool) -> Self {
+        Self {
+            key,
+            name,
+            command,
+            auto_close,
+        }
     }
 
     /// Get the display name for this shortcut
@@ -421,19 +429,25 @@ mod tests {
     // Custom shortcut tests
     #[test]
     fn test_custom_shortcut_display_name_with_name() {
-        let shortcut = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
+        let shortcut =
+            CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string(), false);
         assert_eq!(shortcut.display_name(), "VSCode");
     }
 
     #[test]
     fn test_custom_shortcut_display_name_without_name() {
-        let shortcut = CustomShortcut::new('v', String::new(), "code . &".to_string());
+        let shortcut = CustomShortcut::new('v', String::new(), "code . &".to_string(), false);
         assert_eq!(shortcut.display_name(), "code . &");
     }
 
     #[test]
     fn test_custom_shortcut_short_display_name() {
-        let shortcut = CustomShortcut::new('v', "VSCodeEditor".to_string(), "code . &".to_string());
+        let shortcut = CustomShortcut::new(
+            'v',
+            "VSCodeEditor".to_string(),
+            "code . &".to_string(),
+            false,
+        );
         assert_eq!(shortcut.short_display_name(), "VSCode");
     }
 
@@ -463,7 +477,8 @@ mod tests {
     #[test]
     fn test_config_add_shortcut() {
         let mut config = Config::default();
-        let shortcut = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
+        let shortcut =
+            CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string(), false);
 
         assert!(config.add_shortcut(shortcut).is_ok());
         assert_eq!(config.custom_shortcuts.len(), 1);
@@ -472,7 +487,7 @@ mod tests {
     #[test]
     fn test_config_add_shortcut_reserved_key() {
         let mut config = Config::default();
-        let shortcut = CustomShortcut::new('q', "Quit".to_string(), "exit".to_string());
+        let shortcut = CustomShortcut::new('q', "Quit".to_string(), "exit".to_string(), false);
 
         assert!(config.add_shortcut(shortcut).is_err());
     }
@@ -480,8 +495,9 @@ mod tests {
     #[test]
     fn test_config_add_shortcut_duplicate_key() {
         let mut config = Config::default();
-        let shortcut1 = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
-        let shortcut2 = CustomShortcut::new('v', "Vim".to_string(), "vim .".to_string());
+        let shortcut1 =
+            CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string(), false);
+        let shortcut2 = CustomShortcut::new('v', "Vim".to_string(), "vim .".to_string(), false);
 
         assert!(config.add_shortcut(shortcut1).is_ok());
         assert!(config.add_shortcut(shortcut2).is_err());
@@ -490,7 +506,8 @@ mod tests {
     #[test]
     fn test_config_get_shortcut() {
         let mut config = Config::default();
-        let shortcut = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
+        let shortcut =
+            CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string(), false);
         config.add_shortcut(shortcut).unwrap();
 
         assert!(config.get_shortcut('v').is_some());
@@ -500,7 +517,8 @@ mod tests {
     #[test]
     fn test_config_remove_shortcut() {
         let mut config = Config::default();
-        let shortcut = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string());
+        let shortcut =
+            CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string(), false);
         config.add_shortcut(shortcut).unwrap();
 
         let removed = config.remove_shortcut(0);
@@ -517,6 +535,7 @@ mod tests {
                 'v',
                 "VSCode".to_string(),
                 "code . &".to_string(),
+                false,
             ))
             .unwrap();
 
@@ -527,5 +546,35 @@ mod tests {
         assert_eq!(parsed.custom_shortcuts[0].key, 'v');
         assert_eq!(parsed.custom_shortcuts[0].name, "VSCode");
         assert_eq!(parsed.custom_shortcuts[0].command, "code . &");
+    }
+
+    #[test]
+    fn test_custom_shortcut_auto_close_defaults_false() {
+        // Old config without auto_close field should deserialize with auto_close = false
+        let toml_str = r#"
+[[custom_shortcuts]]
+key = "v"
+name = "VSCode"
+command = "code . &"
+"#;
+        let parsed: Config = toml::from_str(&format!(
+            "hook_port = 9999\nworktrees_dir = '/tmp/wt'\nhooks_dir = '/tmp/hooks'\nmax_output_lines = 100\n{}",
+            toml_str
+        ))
+        .unwrap();
+        assert_eq!(parsed.custom_shortcuts.len(), 1);
+        assert!(!parsed.custom_shortcuts[0].auto_close);
+    }
+
+    #[test]
+    fn test_custom_shortcut_auto_close_serialization() {
+        let shortcut = CustomShortcut::new('v', "VSCode".to_string(), "code . &".to_string(), true);
+        assert!(shortcut.auto_close);
+
+        let mut config = Config::default();
+        config.custom_shortcuts.push(shortcut);
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert!(parsed.custom_shortcuts[0].auto_close);
     }
 }

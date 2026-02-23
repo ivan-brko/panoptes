@@ -74,9 +74,10 @@ pub fn render_custom_shortcuts_dialog(
                     ""
                 };
 
+                let ac_indicator = if shortcut.auto_close { " [AC]" } else { "" };
                 let content = format!(
-                    "{}{}  {:10}  {}{}",
-                    prefix, shortcut.key, name_display, cmd_display, cmd_suffix
+                    "{}{}  {:10}  {}{}{}",
+                    prefix, shortcut.key, name_display, cmd_display, cmd_suffix, ac_indicator
                 );
 
                 let style = selection_style_with_accent(selected, t);
@@ -276,6 +277,92 @@ pub fn render_add_shortcut_command_dialog(frame: &mut Frame, area: Rect, state: 
     frame.render_widget(paragraph, dialog_area);
 }
 
+/// Render the add shortcut auto-close toggle dialog
+pub fn render_add_shortcut_auto_close_dialog(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
+
+    // Calculate centered dialog
+    let width = (area.width * 60 / 100).clamp(40, 60);
+    let height = 12;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
+
+    // Clear background
+    frame.render_widget(Clear, dialog_area);
+
+    let key_display = state
+        .new_shortcut_key
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let name_display = if state.new_shortcut_name.is_empty() {
+        "(auto)".to_string()
+    } else {
+        state.new_shortcut_name.clone()
+    };
+
+    let yes_selected = state.new_shortcut_auto_close;
+    let yes_style = if yes_selected {
+        Style::default()
+            .fg(t.accent)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(t.text_muted)
+    };
+    let no_style = if !yes_selected {
+        Style::default()
+            .fg(t.accent)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(t.text_muted)
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Key: ", Style::default().fg(t.text_muted)),
+            Span::styled(
+                &key_display,
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("     "),
+            Span::styled("Name: ", Style::default().fg(t.text_muted)),
+            Span::styled(&name_display, Style::default().fg(t.text)),
+        ]),
+        Line::from(vec![
+            Span::styled("Cmd: ", Style::default().fg(t.text_muted)),
+            Span::styled(&state.new_shortcut_command, Style::default().fg(t.text)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Auto-close after command?",
+            Style::default().fg(t.text),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled(" Yes ", yes_style),
+            Span::raw("   "),
+            Span::styled(" No ", no_style),
+            Span::raw("    "),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Tab: toggle | y/n: select | Enter: save | Esc: back",
+            Style::default().fg(t.text_muted),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(t.accent))
+            .title(" Add Custom Shortcut "),
+    );
+
+    frame.render_widget(paragraph, dialog_area);
+}
+
 /// Render the delete shortcut confirmation dialog
 pub fn render_delete_shortcut_confirm_dialog(
     frame: &mut Frame,
@@ -346,6 +433,9 @@ pub fn render_custom_shortcut_dialogs(
         }
         InputMode::AddingCustomShortcutCommand => {
             render_add_shortcut_command_dialog(frame, area, state);
+        }
+        InputMode::AddingCustomShortcutAutoClose => {
+            render_add_shortcut_auto_close_dialog(frame, area, state);
         }
         InputMode::ConfirmingCustomShortcutDelete => {
             render_delete_shortcut_confirm_dialog(frame, area, state, config);

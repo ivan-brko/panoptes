@@ -22,10 +22,7 @@ fn scroll_up_by(app: &mut App, session_id: SessionId, amount: usize) {
     let viewport_height = viewport_height(app);
     if let Some(session) = app.sessions.get_mut(session_id) {
         if session.info.session_type == SessionType::OpenAICodex {
-            let requested = session
-                .vterm
-                .scrollback_offset()
-                .saturating_add(amount);
+            let requested = session.vterm.scrollback_offset().saturating_add(amount);
             let current_vterm = session.vterm.scrollback_offset();
             session.vterm.set_scrollback(requested);
             let vterm_offset = session.vterm.scrollback_offset();
@@ -72,10 +69,8 @@ fn scroll_down_by(app: &mut App, session_id: SessionId, amount: usize) {
                 app.state.session_scroll_offset = session.fallback_scroll_offset();
             }
         } else {
-            app.state.session_scroll_offset = app
-                .state
-                .session_scroll_offset
-                .saturating_sub(amount);
+            app.state.session_scroll_offset =
+                app.state.session_scroll_offset.saturating_sub(amount);
             session
                 .vterm
                 .set_scrollback(app.state.session_scroll_offset);
