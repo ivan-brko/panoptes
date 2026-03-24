@@ -227,7 +227,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn default_args(&self) -> Vec<String> {
-        self.extra_args.clone()
+        let mut args = vec!["--enable-auto-mode".to_string()];
+        args.extend(self.extra_args.clone());
+        args
     }
 
     fn supports_hooks(&self) -> bool {
@@ -346,14 +348,20 @@ mod tests {
     fn test_claude_adapter_default_args() {
         let adapter = ClaudeCodeAdapter::new();
         let args = adapter.default_args();
-        assert!(args.is_empty());
+        assert_eq!(args, vec!["--enable-auto-mode".to_string()]);
     }
 
     #[test]
     fn test_claude_adapter_with_extra_args() {
         let adapter = ClaudeCodeAdapter::with_args(vec!["--verbose".to_string()]);
         let args = adapter.default_args();
-        assert_eq!(args, vec!["--verbose".to_string()]);
+        assert_eq!(
+            args,
+            vec![
+                "--enable-auto-mode".to_string(),
+                "--verbose".to_string()
+            ]
+        );
     }
 
     #[test]
