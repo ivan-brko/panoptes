@@ -78,6 +78,15 @@ pub fn project_count_label(count: usize) -> String {
     }
 }
 
+/// Format a branch count for display, e.g. "1 branch" / "3 branches"
+pub fn branch_count_label(count: usize) -> String {
+    if count == 1 {
+        "1 branch".to_string()
+    } else {
+        format!("{} branches", count)
+    }
+}
+
 /// Render folder segments as a display/lookup path (e.g. "Acme/Platform")
 ///
 /// Segments can never contain `/`, so this is a lossless key.
@@ -390,6 +399,16 @@ mod tests {
     fn test_parse_folder_path_rejects_overlong_segment() {
         let long = "x".repeat(MAX_FOLDER_SEGMENT_LEN + 1);
         assert!(parse_folder_path(&long).is_err());
+    }
+
+    #[test]
+    fn test_count_labels_are_singular_for_one() {
+        assert_eq!(project_count_label(0), "0 projects");
+        assert_eq!(project_count_label(1), "1 project");
+        assert_eq!(project_count_label(2), "2 projects");
+        assert_eq!(branch_count_label(0), "0 branches");
+        assert_eq!(branch_count_label(1), "1 branch");
+        assert_eq!(branch_count_label(2), "2 branches");
     }
 
     #[test]

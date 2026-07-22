@@ -10,7 +10,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use crate::app::{AppState, FolderMoveTarget, HomepageFocus, InputMode};
 use crate::config::Config;
 use crate::project::{
-    folder_path_key, project_count_label, ProjectStore, TreeRow, MAX_FOLDER_DEPTH,
+    branch_count_label, folder_path_key, project_count_label, ProjectStore, TreeRow,
+    MAX_FOLDER_DEPTH,
 };
 use crate::session::{Session, SessionManager};
 use crate::tui::header::Header;
@@ -549,12 +550,13 @@ fn render_project_list(
                     let attention =
                         sessions.attention_count_for_project(project.id, idle_threshold_secs);
 
+                    let branches = branch_count_label(branch_count);
                     let status = if active > 0 {
-                        format!("{} branches, {} active", branch_count, active)
+                        format!("{}, {} active", branches, active)
                     } else if session_count > 0 {
-                        format!("{} branches, {} sessions", branch_count, session_count)
+                        format!("{}, {} sessions", branches, session_count)
                     } else {
-                        format!("{} branches", branch_count)
+                        branches
                     };
 
                     (format!("{} ({})", project.name, status), active, attention)
@@ -577,7 +579,10 @@ fn render_project_list(
             } else if active_count > 0 {
                 Style::default().fg(t.active)
             } else if matches!(row, TreeRow::Folder(_)) {
-                Style::default().fg(t.accent_secondary)
+                // Folders are structure, not status. Every hue in the theme
+                // already means something about a session, so headings are set
+                // apart by weight and keep the plain text color.
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(t.text)
             };
@@ -860,8 +865,8 @@ mod tests {
         store
     }
 
-    /// Render the projects overview and return its lines, trimmed of padding
-    fn render_to_lines(state: &AppState, project_store: &ProjectStore) -> Vec<String> {
+    /// Render the projects overview into a buffer
+    fn render_to_buffer(state: &AppState, project_store: &ProjectStore) -> Buffer {
         let config = Config::default();
         let sessions = SessionManager::with_store(config.clone(), SessionStore::new());
         let header_notifications = HeaderNotificationManager::default();
@@ -881,8 +886,26 @@ mod tests {
                 );
             })
             .unwrap();
+        terminal.backend().buffer().clone()
+    }
 
-        let buffer = terminal.backend().buffer().clone();
+    /// Style of the first non-blank cell on the row containing `needle`
+    fn style_of_row_with(buffer: &Buffer, needle: &str) -> Style {
+        for y in 0..buffer.area.height {
+            let line: String = (0..buffer.area.width)
+                .map(|x| buffer.get(x, y).symbol())
+                .collect();
+            if line.contains(needle) {
+                let col = line.find(needle).unwrap() as u16;
+                return buffer.get(col, y).style();
+            }
+        }
+        panic!("no rendered row contains {:?}", needle);
+    }
+
+    /// Render the projects overview and return its lines, trimmed of padding
+    fn render_to_lines(state: &AppState, project_store: &ProjectStore) -> Vec<String> {
+        let buffer = render_to_buffer(state, project_store);
         (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
@@ -918,6 +941,48 @@ mod tests {
         assert!(contains_line(&lines, "│      auth-service"), "{:?}", lines);
         assert!(contains_line(&lines, "│    api-gateway"), "{:?}", lines);
         assert!(contains_line(&lines, "│  panoptes"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_folder_rows_are_bold_plain_text_not_a_status_hue() {
+        let store = store_with(&[("api-gateway", &["Acme"][..])]);
+        // Select nothing in the tree so neither row picks up selection styling
+        let state = AppState {
+            selected_project_index: 99,
+            ..Default::default()
+        };
+        let t = theme();
+
+        let buffer = render_to_buffer(&state, &store);
+        let folder = style_of_row_with(&buffer, "▾ Acme/");
+        let project = style_of_row_with(&buffer, "api-gateway");
+
+        // Folder: same color as a project row, set apart by weight alone
+        assert_eq!(
+            folder.fg,
+            Some(t.text),
+            "folder should use plain text color"
+        );
+        assert_eq!(project.fg, Some(t.text));
+        assert!(folder.add_modifier.contains(Modifier::BOLD));
+        assert!(!project.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_branch_count_is_singular_for_one() {
+        let mut store = store_with(&[("solo", &[][..])]);
+        let project_id = store.projects().next().unwrap().id;
+        store.add_branch(crate::project::Branch::default_for_project(
+            project_id,
+            "main".to_string(),
+            PathBuf::from("/tmp/solo"),
+        ));
+        let state = AppState::default();
+
+        let lines = render_to_lines(&state, &store);
+
+        assert!(contains_line(&lines, "solo (1 branch)"), "{:?}", lines);
+        assert!(!contains_line(&lines, "1 branches"), "{:?}", lines);
     }
 
     #[test]
