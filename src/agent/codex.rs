@@ -21,6 +21,114 @@ const CODEX_NOTIFY_SCRIPT_NAME: &str = "codex-notify.sh";
 /// Disable Codex alternate screen so Panoptes scrollback behaves like Claude sessions.
 const NO_ALT_SCREEN_FLAG: &str = "--no-alt-screen";
 
+/// Clock tolerance when matching a rollout file against a session start time
+///
+/// Guards against the rollout's mtime being marginally earlier than the moment
+/// Panoptes recorded the session as created.
+const ROLLOUT_TIME_TOLERANCE_SECS: i64 = 5;
+
+/// Resolve a path for comparison, tolerating symlinks
+///
+/// Necessary on macOS, where `/tmp` is a symlink to `/private/tmp`: Codex
+/// records the resolved path while Panoptes may hold the unresolved one, and a
+/// textual comparison would never match.
+fn canonical_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Find the Codex conversation ID for a session, by locating its rollout file
+///
+/// Unlike Claude Code, Codex offers no flag to dictate the session ID, so it has
+/// to be discovered after the fact. Every rollout file begins with a
+/// `session_meta` record carrying the session `id` and the `cwd` it started in,
+/// which together are enough to match a rollout to a Panoptes session.
+///
+/// Returns `None` while Codex has not written the file yet, which is the normal
+/// state for the first moments of a session - callers are expected to retry.
+pub fn discover_session_id(
+    codex_home: &Path,
+    working_dir: &Path,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let sessions_dir = codex_home.join("sessions");
+    let target_cwd = canonical_or_original(working_dir);
+    let cutoff = started_at - chrono::Duration::seconds(ROLLOUT_TIME_TOLERANCE_SECS);
+
+    // Rollouts are filed under sessions/YYYY/MM/DD, so walk exactly three
+    // levels rather than recursing over an unbounded tree
+    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for year in read_subdirs(&sessions_dir) {
+        for month in read_subdirs(&year) {
+            for day in read_subdirs(&month) {
+                let Ok(entries) = std::fs::read_dir(&day) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+                        continue;
+                    };
+                    let modified_at: chrono::DateTime<chrono::Utc> = modified.into();
+                    if modified_at < cutoff {
+                        continue;
+                    }
+                    candidates.push((modified, path));
+                }
+            }
+        }
+    }
+
+    // Most recently written first: if a directory somehow holds two matching
+    // rollouts, the newer one is the session we just started
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    candidates
+        .into_iter()
+        .find_map(|(_, path)| match read_session_meta(&path) {
+            Some((id, cwd)) if canonical_or_original(&cwd) == target_cwd => Some(id),
+            _ => None,
+        })
+}
+
+/// List immediate subdirectories, ignoring anything unreadable
+fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+/// Read the `session_meta` header of a rollout file, returning its ID and cwd
+///
+/// Only the first line is read: the rest of a rollout is the conversation, which
+/// can be large and is of no interest here.
+fn read_session_meta(path: &Path) -> Option<(String, PathBuf)> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut first_line = String::new();
+    std::io::BufReader::new(file)
+        .read_line(&mut first_line)
+        .ok()?;
+
+    let value: serde_json::Value = serde_json::from_str(&first_line).ok()?;
+    if value.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    let id = payload.get("id").and_then(|i| i.as_str())?.to_string();
+    let cwd = payload.get("cwd").and_then(|c| c.as_str())?;
+
+    Some((id, PathBuf::from(cwd)))
+}
+
 /// OpenAI Codex CLI adapter for spawning and managing Codex sessions
 pub struct CodexAdapter {
     /// Additional command-line arguments
@@ -501,6 +609,7 @@ mod tests {
             cols: 80,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         };
 
         let env = adapter.generate_env(&config, &spawn_config);
@@ -539,6 +648,7 @@ mod tests {
             cols: 80,
             claude_config_dir: None,
             codex_home: Some(codex_home_path.clone()),
+            resume: None,
         };
 
         let env = adapter.generate_env(&config, &spawn_config);
@@ -572,6 +682,7 @@ mod tests {
             cols: 80,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         };
 
         let args = adapter.build_args(&spawn_config);
@@ -591,6 +702,7 @@ mod tests {
             cols: 80,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         };
 
         let args = adapter.build_args(&spawn_config);
@@ -610,6 +722,7 @@ mod tests {
             cols: 80,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         };
 
         let args = adapter.build_args(&spawn_config);
@@ -784,6 +897,7 @@ notify = ["bash", "__LEGACY__", 42]
             cols: 80,
             claude_config_dir: None,
             codex_home: Some(codex_home.clone()),
+            resume: None,
         };
 
         let adapter = CodexAdapter::new();
@@ -809,6 +923,7 @@ notify = ["bash", "__LEGACY__", 42]
             cols: 80,
             claude_config_dir: None,
             codex_home: Some(PathBuf::from("/custom/codex")),
+            resume: None,
         };
 
         let resolved = CodexAdapter::resolve_codex_home(&spawn_config);
@@ -826,10 +941,161 @@ notify = ["bash", "__LEGACY__", 42]
             cols: 80,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         };
 
         let resolved = CodexAdapter::resolve_codex_home(&spawn_config);
         // Should resolve to ~/.codex
         assert!(resolved.ends_with(".codex"));
+    }
+
+    // Rollout discovery
+    //
+    // Codex has no flag to dictate its session ID, so this is the one place in
+    // the recovery path that infers rather than dictates - it earns the tests.
+
+    /// Write a rollout file the way Codex does: `session_meta` on line one,
+    /// conversation after it.
+    fn write_rollout(codex_home: &Path, date: (&str, &str, &str), id: &str, cwd: &Path) -> PathBuf {
+        let dir = codex_home
+            .join("sessions")
+            .join(date.0)
+            .join(date.1)
+            .join(date.2);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-2026-01-01T00-00-00-{}.jsonl", id));
+        let meta = serde_json::json!({
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "type": "session_meta",
+            "payload": { "id": id, "cwd": cwd.to_string_lossy(), "originator": "codex_cli_rs" }
+        });
+        std::fs::write(&path, format!("{}\n{{\"type\":\"message\"}}\n", meta)).unwrap();
+        path
+    }
+
+    fn an_hour_ago() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() - chrono::Duration::hours(1)
+    }
+
+    #[test]
+    fn test_discovers_session_id_from_rollout() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        write_rollout(
+            home.path(),
+            ("2026", "01", "01"),
+            "019aa0c9-8dea-7611-89d1-9d94731a6a6d",
+            cwd.path(),
+        );
+
+        let found = discover_session_id(home.path(), cwd.path(), an_hour_ago());
+
+        assert_eq!(
+            found.as_deref(),
+            Some("019aa0c9-8dea-7611-89d1-9d94731a6a6d")
+        );
+    }
+
+    #[test]
+    fn test_ignores_rollouts_from_a_different_working_directory() {
+        let home = TempDir::new().unwrap();
+        let ours = TempDir::new().unwrap();
+        let theirs = TempDir::new().unwrap();
+        write_rollout(home.path(), ("2026", "01", "01"), "not-ours", theirs.path());
+
+        // Another Codex session running concurrently elsewhere must not be
+        // mistaken for this one
+        assert!(discover_session_id(home.path(), ours.path(), an_hour_ago()).is_none());
+    }
+
+    #[test]
+    fn test_ignores_rollouts_written_before_the_session_started() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        write_rollout(
+            home.path(),
+            ("2025", "09", "18"),
+            "older-session",
+            cwd.path(),
+        );
+
+        // A previous session in the same directory would otherwise be adopted,
+        // silently pointing this session at the wrong conversation
+        let started_in_the_future = chrono::Utc::now() + chrono::Duration::hours(1);
+        assert!(discover_session_id(home.path(), cwd.path(), started_in_the_future).is_none());
+    }
+
+    #[test]
+    fn test_returns_none_when_codex_has_not_written_a_rollout_yet() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join("sessions")).unwrap();
+
+        // The normal state for the first moments of a session
+        assert!(discover_session_id(home.path(), cwd.path(), an_hour_ago()).is_none());
+    }
+
+    #[test]
+    fn test_missing_sessions_directory_is_not_an_error() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+
+        assert!(discover_session_id(home.path(), cwd.path(), an_hour_ago()).is_none());
+    }
+
+    #[test]
+    fn test_skips_unparseable_rollouts() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let dir = home.path().join("sessions/2026/01/01");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rollout-broken.jsonl"), "not json at all\n").unwrap();
+        std::fs::write(dir.join("rollout-empty.jsonl"), "").unwrap();
+        write_rollout(
+            home.path(),
+            ("2026", "01", "01"),
+            "the-good-one",
+            cwd.path(),
+        );
+
+        // One corrupt file must not hide a valid one
+        assert_eq!(
+            discover_session_id(home.path(), cwd.path(), an_hour_ago()).as_deref(),
+            Some("the-good-one")
+        );
+    }
+
+    #[test]
+    fn test_matches_through_symlinked_working_directory() {
+        let home = TempDir::new().unwrap();
+        let real = TempDir::new().unwrap();
+        let link_parent = TempDir::new().unwrap();
+        let link = link_parent.path().join("linked");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+
+        // Codex records the resolved path; Panoptes may hold the symlinked one.
+        // This is the /tmp -> /private/tmp case on macOS.
+        write_rollout(
+            home.path(),
+            ("2026", "01", "01"),
+            "via-symlink",
+            real.path(),
+        );
+
+        assert_eq!(
+            discover_session_id(home.path(), &link, an_hour_ago()).as_deref(),
+            Some("via-symlink")
+        );
+    }
+
+    #[test]
+    fn test_ignores_non_jsonl_files() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let dir = home.path().join("sessions/2026/01/01");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "irrelevant\n").unwrap();
+
+        assert!(discover_session_id(home.path(), cwd.path(), an_hour_ago()).is_none());
     }
 }

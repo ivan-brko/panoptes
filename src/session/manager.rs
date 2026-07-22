@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::agent::adapter::SpawnConfig;
 use crate::agent::AgentType;
@@ -19,7 +19,7 @@ use crate::project::{BranchId, ProjectId};
 
 use crate::codex_config::CodexConfigId;
 
-use super::{Session, SessionId, SessionInfo, SessionState};
+use super::{Session, SessionId, SessionInfo, SessionState, SessionStore, SessionType};
 
 /// Manages multiple Claude Code sessions
 pub struct SessionManager {
@@ -29,15 +29,327 @@ pub struct SessionManager {
     session_order: Vec<SessionId>,
     /// Application configuration
     config: Config,
+    /// Durable index of sessions, so they can be recovered after a restart
+    store: SessionStore,
+    /// Sessions inherited from a previous Panoptes run, not yet brought back
+    ///
+    /// These have no PTY and therefore cannot be `Session` values. They stay
+    /// inert until the user opens one, at which point the entry moves from here
+    /// into `sessions`.
+    recovered: HashMap<SessionId, SessionInfo>,
+}
+
+/// A session as it appears in a list
+///
+/// Lists mix sessions running right now with ones recoverable from a previous
+/// run, and both render from `SessionInfo`. Keeping them in one ordered
+/// sequence means selection indices stay meaningful without callers having to
+/// merge two collections themselves.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionEntry<'a> {
+    /// Metadata for the session
+    pub info: &'a SessionInfo,
+    /// Whether a process is currently attached
+    pub live: bool,
 }
 
 impl SessionManager {
     /// Create a new session manager
+    ///
+    /// A corrupted or unreadable session store is not fatal: it degrades to the
+    /// pre-persistence behaviour of starting with nothing to recover.
     pub fn new(config: Config) -> Self {
+        let (store, warning) = SessionStore::load_with_status();
+        if let Some(warning) = warning {
+            tracing::warn!("{}", warning);
+        }
+        Self::with_store(config, store)
+    }
+
+    /// Create a session manager backed by a specific store (for testing)
+    ///
+    /// Tests must use this rather than `new`, which reads and writes the real
+    /// `~/.panoptes/sessions.json` owned by any running Panoptes instance.
+    pub fn with_store(config: Config, store: SessionStore) -> Self {
+        let recovered = Self::reconcile(&store);
         Self {
             sessions: HashMap::new(),
             session_order: Vec::new(),
             config,
+            store,
+            recovered,
+        }
+    }
+
+    /// Turn stored records into the recovery list
+    ///
+    /// Every record in the store is by definition dead at startup: its PTY died
+    /// with the Panoptes process that owned it. So the live state captured in
+    /// the record (Thinking, Waiting, an attention flag) describes a process
+    /// that no longer exists and is discarded rather than shown as if current.
+    fn reconcile(store: &SessionStore) -> HashMap<SessionId, SessionInfo> {
+        store
+            .sessions()
+            .map(|stored| {
+                let mut info = stored.clone();
+                info.state = SessionState::Resumable;
+                info.state_entered_at = Utc::now();
+                // Belonged to a process that is gone; re-derived once resumed
+                info.needs_attention = false;
+                info.exit_reason = None;
+                info.exited_at = None;
+                (info.id, info)
+            })
+            .collect()
+    }
+
+    /// Access the durable session store
+    pub fn store(&self) -> &SessionStore {
+        &self.store
+    }
+
+    /// Sessions inherited from a previous run that have not been brought back
+    pub fn recovered(&self) -> impl Iterator<Item = &SessionInfo> {
+        self.recovered.values()
+    }
+
+    /// Number of sessions awaiting recovery
+    pub fn recovered_count(&self) -> usize {
+        self.recovered.len()
+    }
+
+    /// Look up a recovered session by ID
+    pub fn get_recovered(&self, session_id: SessionId) -> Option<&SessionInfo> {
+        self.recovered.get(&session_id)
+    }
+
+    /// Discard a recovered session without ever bringing it back
+    pub fn discard_recovered(&mut self, session_id: SessionId) -> bool {
+        if self.recovered.remove(&session_id).is_none() {
+            return false;
+        }
+        self.forget_session(session_id);
+        true
+    }
+
+    /// All sessions in navigation order, live first then recoverable
+    ///
+    /// Live sessions keep their existing order so navigation is unchanged for
+    /// anyone not using recovery; recovered ones follow, most recent first.
+    pub fn entries_in_order(&self) -> Vec<SessionEntry<'_>> {
+        let mut entries: Vec<SessionEntry<'_>> = self
+            .session_order
+            .iter()
+            .filter_map(|id| self.sessions.get(id))
+            .map(|session| SessionEntry {
+                info: &session.info,
+                live: true,
+            })
+            .collect();
+
+        // A session that has been brought back lives in `sessions`; skip its
+        // stale recovery entry rather than listing it twice
+        let mut recovered: Vec<&SessionInfo> = self
+            .recovered
+            .values()
+            .filter(|info| !self.sessions.contains_key(&info.id))
+            .collect();
+        recovered.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        entries.extend(
+            recovered
+                .into_iter()
+                .map(|info| SessionEntry { info, live: false }),
+        );
+
+        entries
+    }
+
+    /// All sessions for a branch, live first then recoverable
+    pub fn entries_for_branch(&self, branch_id: BranchId) -> Vec<SessionEntry<'_>> {
+        self.entries_in_order()
+            .into_iter()
+            .filter(|entry| entry.info.branch_id == branch_id)
+            .collect()
+    }
+
+    /// All sessions for a project, live first then recoverable
+    pub fn entries_for_project(&self, project_id: ProjectId) -> Vec<SessionEntry<'_>> {
+        self.entries_in_order()
+            .into_iter()
+            .filter(|entry| entry.info.project_id == project_id)
+            .collect()
+    }
+
+    /// Bring a recovered session back to life
+    ///
+    /// Relaunches the agent in the session's original working directory,
+    /// reattaching to its conversation via the recorded ID. The Panoptes session
+    /// ID is preserved, which keeps hook routing working: hooks key off
+    /// `PANOPTES_SESSION_ID`, so a resumed session reports state exactly as it
+    /// did before the restart.
+    ///
+    /// Config directories are passed in rather than looked up here, mirroring
+    /// `create_session_with_config` - the manager does not own the account
+    /// stores.
+    ///
+    /// On failure the recovery entry is left untouched so the user can retry or
+    /// discard it; a failed resume must not silently consume the record.
+    pub fn resume_session(
+        &mut self,
+        session_id: SessionId,
+        rows: usize,
+        cols: usize,
+        claude_config_dir: Option<PathBuf>,
+        codex_home: Option<PathBuf>,
+    ) -> Result<SessionId> {
+        let info = self
+            .recovered
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("No recovered session with ID {}", session_id))?
+            .clone();
+
+        if let Some(reason) = info.resume_blocker() {
+            return Err(anyhow!("Cannot resume '{}': {}", info.name, reason));
+        }
+
+        let agent_type = match info.session_type {
+            SessionType::ClaudeCode => AgentType::ClaudeCode,
+            SessionType::OpenAICodex => AgentType::OpenAICodex,
+            SessionType::Shell => AgentType::Shell,
+        };
+
+        // A shell has no conversation to reattach to - it is restored by
+        // respawning in the same directory, so it must not carry a resume cursor
+        let resume = match info.session_type {
+            SessionType::Shell => None,
+            _ => info.agent_session_id.clone(),
+        };
+
+        let spawn_config = SpawnConfig {
+            session_id,
+            session_name: info.name.clone(),
+            working_dir: info.working_dir.clone(),
+            initial_prompt: None,
+            rows: rows as u16,
+            cols: cols as u16,
+            claude_config_dir,
+            codex_home,
+            resume,
+        };
+
+        let adapter = agent_type.create_adapter();
+        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
+
+        let mut info = info;
+        info.state = SessionState::Starting;
+        info.state_entered_at = Utc::now();
+        info.last_activity = Utc::now();
+        if spawn_result.agent_session_id.is_some() {
+            info.agent_session_id = spawn_result.agent_session_id;
+        }
+
+        let session = Session::with_scrollback(
+            info,
+            spawn_result.pty,
+            rows,
+            cols,
+            self.config.scrollback_lines,
+        );
+
+        // Only now that the process exists does the session stop being "recovered"
+        self.recovered.remove(&session_id);
+        self.sessions.insert(session_id, session);
+        self.session_order.push(session_id);
+        self.persist_session(session_id);
+
+        tracing::info!(session_id = %session_id, "Resumed session from a previous run");
+
+        Ok(session_id)
+    }
+
+    /// Live Codex sessions whose conversation ID has not been resolved yet
+    ///
+    /// Returns the session ID, its working directory, and when it started -
+    /// everything needed to match it against a rollout file. Empty once every
+    /// Codex session has an ID, which is the steady state.
+    pub fn sessions_pending_codex_id(&self) -> Vec<(SessionId, PathBuf, DateTime<Utc>)> {
+        self.sessions
+            .values()
+            .filter(|session| {
+                session.info.session_type == SessionType::OpenAICodex
+                    && session.info.agent_session_id.is_none()
+                    && session.info.state != SessionState::Exited
+            })
+            .map(|session| {
+                (
+                    session.info.id,
+                    session.info.working_dir.clone(),
+                    session.info.created_at,
+                )
+            })
+            .collect()
+    }
+
+    /// Record the agent conversation ID for a live session
+    ///
+    /// Returns whether the session was found and updated. Persists immediately:
+    /// an ID that only exists in memory is exactly the pointer this whole
+    /// mechanism is meant to stop losing.
+    pub fn set_agent_session_id(
+        &mut self,
+        session_id: SessionId,
+        agent_session_id: String,
+    ) -> bool {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return false;
+        };
+        if session.info.agent_session_id.as_deref() == Some(agent_session_id.as_str()) {
+            return false;
+        }
+        session.info.agent_session_id = Some(agent_session_id);
+        self.persist_session(session_id);
+        true
+    }
+
+    /// Write a session's record to the durable index
+    ///
+    /// Called on membership changes rather than state changes: identity and
+    /// context are what survive a restart, whereas live state (Thinking,
+    /// Executing) is meaningless once the process is gone. Hook events fire on
+    /// every tool call, so persisting state would mean writing to disk
+    /// constantly for data that gets discarded on load anyway.
+    ///
+    /// Failure to persist never fails the operation that triggered it - losing
+    /// the ability to recover a session later is strictly better than refusing
+    /// to create it now.
+    fn persist_session(&mut self, session_id: SessionId) {
+        let Some(session) = self.sessions.get(&session_id) else {
+            return;
+        };
+        self.store.upsert(session.info.clone());
+        if let Err(e) = self.store.save() {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to persist session record; this session will not be recoverable"
+            );
+        }
+    }
+
+    /// Drop a session's record from the durable index
+    ///
+    /// Used when the user explicitly discards a session, as opposed to quitting
+    /// Panoptes - the latter must leave records intact so they can be resumed.
+    fn forget_session(&mut self, session_id: SessionId) {
+        if self.store.remove(session_id).is_none() {
+            return;
+        }
+        if let Err(e) = self.store.save() {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to remove session record; it may reappear as recoverable"
+            );
         }
     }
 
@@ -82,7 +394,7 @@ impl SessionManager {
         claude_config_dir: Option<PathBuf>,
         claude_config_name: Option<String>,
     ) -> Result<SessionId> {
-        let info = SessionInfo::with_claude_config(
+        let mut info = SessionInfo::with_claude_config(
             name.clone(),
             working_dir.clone(),
             project_id,
@@ -102,12 +414,17 @@ impl SessionManager {
             cols: cols as u16,
             claude_config_dir,
             codex_home: None,
+            resume: None,
         };
 
         // Get adapter and spawn the process
         let agent_type = AgentType::ClaudeCode;
         let adapter = agent_type.create_adapter();
         let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
+
+        // Record the agent's conversation ID so this session can be resumed
+        // after a restart
+        info.agent_session_id = spawn_result.agent_session_id;
 
         // Create session with PTY and virtual terminal
         let session = Session::with_scrollback(
@@ -121,6 +438,7 @@ impl SessionManager {
         // Store session
         self.sessions.insert(session_id, session);
         self.session_order.push(session_id);
+        self.persist_session(session_id);
 
         Ok(session_id)
     }
@@ -150,6 +468,7 @@ impl SessionManager {
             cols: cols as u16,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         };
 
         // Get adapter and spawn the process
@@ -169,6 +488,7 @@ impl SessionManager {
         // Store session
         self.sessions.insert(session_id, session);
         self.session_order.push(session_id);
+        self.persist_session(session_id);
 
         Ok(session_id)
     }
@@ -252,7 +572,7 @@ impl SessionManager {
         codex_home: Option<PathBuf>,
         codex_config_name: Option<String>,
     ) -> Result<SessionId> {
-        let info = SessionInfo::with_codex_config(
+        let mut info = SessionInfo::with_codex_config(
             name.clone(),
             working_dir.clone(),
             project_id,
@@ -272,12 +592,17 @@ impl SessionManager {
             cols: cols as u16,
             claude_config_dir: None,
             codex_home,
+            resume: None,
         };
 
         // Get adapter and spawn the process
         let agent_type = AgentType::OpenAICodex;
         let adapter = agent_type.create_adapter();
         let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
+
+        // Codex has no flag to dictate its session ID, so this stays None until
+        // the rollout file is resolved (see step 4)
+        info.agent_session_id = spawn_result.agent_session_id;
 
         // Create session with PTY and virtual terminal
         let session = Session::with_scrollback(
@@ -291,6 +616,7 @@ impl SessionManager {
         // Store session
         self.sessions.insert(session_id, session);
         self.session_order.push(session_id);
+        self.persist_session(session_id);
 
         Ok(session_id)
     }
@@ -305,6 +631,10 @@ impl SessionManager {
 
             // Remove from order list
             self.session_order.retain(|&id| id != session_id);
+
+            // Closing a session is an explicit discard, so drop its durable
+            // record too. Quitting Panoptes deliberately does not do this.
+            self.forget_session(session_id);
 
             Ok(())
         } else {
@@ -535,6 +865,9 @@ impl SessionManager {
         let count = to_remove.len();
         for session_id in to_remove {
             self.sessions.remove(&session_id);
+            // These aged out under the retention policy, which is an explicit
+            // statement that they are no longer wanted
+            self.forget_session(session_id);
         }
         count
     }
@@ -697,6 +1030,19 @@ impl SessionManager {
     pub fn shutdown_all(&mut self) {
         tracing::info!("Shutting down {} session(s)", self.sessions.len());
 
+        // Refresh the durable records before tearing down, so the recovery list
+        // reflects the final state of this run. Records are deliberately kept:
+        // quitting Panoptes is not the same as discarding your sessions.
+        for session in self.sessions.values() {
+            self.store.upsert(session.info.clone());
+        }
+        if let Err(e) = self.store.save() {
+            tracing::warn!(
+                error = %e,
+                "Failed to persist session records on shutdown; recovery list may be stale"
+            );
+        }
+
         for (id, session) in self.sessions.iter_mut() {
             if session.is_alive() {
                 tracing::debug!("Killing session {}", id);
@@ -774,14 +1120,16 @@ impl SessionManager {
     /// attention. The flag is set only by hook events (not PTY output transitions),
     /// since hook events like PermissionRequest and Notification explicitly signal
     /// that user interaction is required.
-    pub fn session_needs_attention(&self, session: &Session, idle_threshold_secs: u64) -> bool {
+    /// Takes `SessionInfo` rather than `Session` so that list views can call it
+    /// for recovered sessions too, which have no process attached.
+    pub fn session_needs_attention(&self, info: &SessionInfo, idle_threshold_secs: u64) -> bool {
         // Sticky flag: set by hook events requiring user attention, cleared on acknowledgment
-        if session.info.needs_attention {
+        if info.needs_attention {
             return true;
         }
         // Idle beyond threshold always needs attention (time-based)
-        if session.info.state == SessionState::Idle {
-            let idle_duration = Utc::now().signed_duration_since(session.info.last_activity);
+        if info.state == SessionState::Idle {
+            let idle_duration = Utc::now().signed_duration_since(info.last_activity);
             return idle_duration.num_seconds() > idle_threshold_secs as i64;
         }
         false
@@ -792,7 +1140,7 @@ impl SessionManager {
         let mut sessions: Vec<_> = self
             .sessions
             .values()
-            .filter(|s| self.session_needs_attention(s, idle_threshold_secs))
+            .filter(|s| self.session_needs_attention(&s.info, idle_threshold_secs))
             .collect();
 
         // Sort: sessions with needs_attention flag first, then by last_activity (oldest first)
@@ -820,7 +1168,7 @@ impl SessionManager {
             .values()
             .filter(|s| {
                 s.info.project_id == project_id
-                    && self.session_needs_attention(s, idle_threshold_secs)
+                    && self.session_needs_attention(&s.info, idle_threshold_secs)
             })
             .count()
     }
@@ -835,7 +1183,7 @@ impl SessionManager {
             .values()
             .filter(|s| {
                 s.info.branch_id == branch_id
-                    && self.session_needs_attention(s, idle_threshold_secs)
+                    && self.session_needs_attention(&s.info, idle_threshold_secs)
             })
             .count()
     }
@@ -844,7 +1192,7 @@ impl SessionManager {
     pub fn total_attention_count(&self, idle_threshold_secs: u64) -> usize {
         self.sessions
             .values()
-            .filter(|s| self.session_needs_attention(s, idle_threshold_secs))
+            .filter(|s| self.session_needs_attention(&s.info, idle_threshold_secs))
             .count()
     }
 }
@@ -894,7 +1242,20 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionType;
     use tempfile::TempDir;
+    use uuid::Uuid;
+
+    /// Build a manager backed by a temp store.
+    ///
+    /// Never use `SessionManager::new` in tests: it reads and writes the real
+    /// `~/.panoptes/sessions.json`, which a running Panoptes instance owns.
+    fn test_manager(temp_dir: &TempDir, config: Config) -> SessionManager {
+        SessionManager::with_store(
+            config,
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        )
+    }
 
     fn test_config(temp_dir: &TempDir) -> Config {
         Config {
@@ -908,7 +1269,7 @@ mod tests {
     fn test_session_manager_new() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
-        let manager = SessionManager::new(config);
+        let manager = test_manager(&temp_dir, config);
 
         assert!(manager.is_empty());
         assert_eq!(manager.len(), 0);
@@ -918,7 +1279,7 @@ mod tests {
     fn test_handle_hook_event_pre_tool_use() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
-        let mut manager = SessionManager::new(config);
+        let mut manager = test_manager(&temp_dir, config);
 
         // We can't easily create a real session without spawning a process,
         // so we'll test the event parsing logic indirectly
@@ -965,7 +1326,7 @@ mod tests {
     fn test_session_order_tracking() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
-        let manager = SessionManager::new(config);
+        let manager = test_manager(&temp_dir, config);
 
         // Initially empty
         assert!(manager.session_ids().is_empty());
@@ -976,7 +1337,7 @@ mod tests {
     fn test_get_by_index_empty() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
-        let manager = SessionManager::new(config);
+        let manager = test_manager(&temp_dir, config);
 
         assert!(manager.get_by_index(0).is_none());
         assert!(manager.get_by_index(100).is_none());
@@ -1019,7 +1380,7 @@ mod tests {
     fn test_permission_request_sets_needs_attention_while_waiting() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
-        let mut manager = SessionManager::new(config);
+        let mut manager = test_manager(&temp_dir, config);
         let session_id = insert_test_session(&mut manager);
 
         // Put session into Waiting state (simulating a Stop event already processed)
@@ -1081,7 +1442,7 @@ mod tests {
     fn test_notification_sets_needs_attention_while_waiting() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
-        let mut manager = SessionManager::new(config);
+        let mut manager = test_manager(&temp_dir, config);
         let session_id = insert_test_session(&mut manager);
 
         // Put session into Waiting state
@@ -1106,7 +1467,7 @@ mod tests {
     fn test_stop_while_already_waiting_does_not_set_attention() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
-        let mut manager = SessionManager::new(config);
+        let mut manager = test_manager(&temp_dir, config);
         let session_id = insert_test_session(&mut manager);
 
         // Put session into Waiting state
@@ -1132,7 +1493,7 @@ mod tests {
     fn test_destroy_nonexistent_session() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
-        let mut manager = SessionManager::new(config);
+        let mut manager = test_manager(&temp_dir, config);
 
         let fake_id = uuid::Uuid::new_v4();
         let result = manager.destroy_session(fake_id);
@@ -1148,7 +1509,7 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
-        let mut manager = SessionManager::new(config);
+        let mut manager = test_manager(&temp_dir, config);
 
         let project_id = uuid::Uuid::new_v4();
         let branch_id = uuid::Uuid::new_v4();
@@ -1207,5 +1568,538 @@ mod tests {
             SessionState::Waiting,
             "State should be Waiting after command completion"
         );
+    }
+
+    // Persistence lifecycle
+    //
+    // These use shell sessions because they spawn without needing a Claude or
+    // Codex binary on PATH.
+
+    #[test]
+    fn test_creating_a_session_persists_its_record() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager =
+            SessionManager::with_store(test_config(&temp_dir), SessionStore::with_path(store_path));
+
+        let session_id = manager
+            .create_shell_session(
+                "persisted".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                24,
+                80,
+            )
+            .unwrap();
+
+        // Written immediately, not deferred to shutdown - a crash one second
+        // after creation must still leave a usable record
+        let record = manager
+            .store()
+            .get(session_id)
+            .expect("record should exist");
+        assert_eq!(record.name, "persisted");
+        assert_eq!(record.working_dir, PathBuf::from("/tmp"));
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_record_survives_a_reload_from_disk() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(store_path.clone()),
+        );
+
+        let session_id = manager
+            .create_shell_session(
+                "survivor".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                24,
+                80,
+            )
+            .unwrap();
+        manager.shutdown_all();
+
+        // Simulates the next Panoptes launch reading what the previous run left
+        let reloaded = SessionStore::load_from(&store_path).unwrap();
+        assert_eq!(
+            reloaded.get(session_id).map(|s| s.name.as_str()),
+            Some("survivor")
+        );
+    }
+
+    #[test]
+    fn test_quitting_panoptes_keeps_records() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(store_path.clone()),
+        );
+
+        manager
+            .create_shell_session(
+                "kept".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                24,
+                80,
+            )
+            .unwrap();
+
+        manager.shutdown_all();
+
+        // Quitting is not the same as discarding: the session must still be
+        // offered as recoverable on the next launch
+        assert_eq!(manager.store().len(), 1);
+        assert_eq!(SessionStore::load_from(&store_path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_closing_a_session_discards_its_record() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(store_path.clone()),
+        );
+
+        let session_id = manager
+            .create_shell_session(
+                "discarded".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                24,
+                80,
+            )
+            .unwrap();
+        assert_eq!(manager.store().len(), 1);
+
+        manager.destroy_session(session_id).unwrap();
+
+        // Explicitly closing a session is intent to discard it
+        assert!(manager.store().get(session_id).is_none());
+        assert!(SessionStore::load_from(&store_path).unwrap().is_empty());
+    }
+
+    // Startup reconciliation
+
+    /// A store pre-populated as if a previous Panoptes run had left it behind
+    fn store_with_record(dir: &TempDir, mutate: impl FnOnce(&mut SessionInfo)) -> SessionStore {
+        let mut store = SessionStore::with_path(dir.path().join("sessions.json"));
+        let mut info = SessionInfo::new(
+            "from-last-run".to_string(),
+            dir.path().to_path_buf(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        info.agent_session_id = Some(Uuid::new_v4().to_string());
+        mutate(&mut info);
+        store.upsert(info);
+        store
+    }
+
+    #[test]
+    fn test_stored_sessions_come_back_as_resumable() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |_| {});
+        let manager = SessionManager::with_store(test_config(&temp_dir), store);
+
+        assert_eq!(manager.recovered_count(), 1);
+        let recovered = manager.recovered().next().unwrap();
+        assert_eq!(recovered.state, SessionState::Resumable);
+        assert_eq!(recovered.name, "from-last-run");
+    }
+
+    #[test]
+    fn test_reconciliation_discards_state_from_the_dead_process() {
+        let temp_dir = TempDir::new().unwrap();
+        // The previous run crashed mid-turn with an unread notification
+        let store = store_with_record(&temp_dir, |info| {
+            info.state = SessionState::Thinking;
+            info.needs_attention = true;
+            info.exit_reason = Some("killed".to_string());
+            info.exited_at = Some(Utc::now());
+        });
+        let manager = SessionManager::with_store(test_config(&temp_dir), store);
+
+        let recovered = manager.recovered().next().unwrap();
+        // None of this describes anything that still exists
+        assert_eq!(recovered.state, SessionState::Resumable);
+        assert!(!recovered.needs_attention);
+        assert!(recovered.exit_reason.is_none());
+        assert!(recovered.exited_at.is_none());
+    }
+
+    #[test]
+    fn test_recovered_sessions_are_not_live_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |_| {});
+        let manager = SessionManager::with_store(test_config(&temp_dir), store);
+
+        // Nothing is running: recovery is on demand, not automatic
+        assert!(manager.is_empty());
+        assert_eq!(manager.len(), 0);
+        assert_eq!(manager.total_active_count(), 0);
+    }
+
+    #[test]
+    fn test_entries_list_live_sessions_before_recovered_ones() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |_| {});
+        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
+
+        manager
+            .create_shell_session(
+                "live".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                24,
+                80,
+            )
+            .unwrap();
+
+        let entries = manager.entries_in_order();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].live);
+        assert_eq!(entries[0].info.name, "live");
+        assert!(!entries[1].live);
+        assert_eq!(entries[1].info.name, "from-last-run");
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_discarding_a_recovered_session_removes_it_permanently() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let store = store_with_record(&temp_dir, |_| {});
+        store.save().unwrap();
+        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
+
+        let session_id = manager.recovered().next().unwrap().id;
+        assert!(manager.discard_recovered(session_id));
+
+        assert_eq!(manager.recovered_count(), 0);
+        assert!(manager.entries_in_order().is_empty());
+        // Must not reappear on the next launch
+        assert!(SessionStore::load_from(&store_path).unwrap().is_empty());
+        // Discarding something that is not recovered is a no-op, not a panic
+        assert!(!manager.discard_recovered(session_id));
+    }
+
+    #[test]
+    fn test_missing_working_directory_blocks_resume() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |info| {
+            info.working_dir = PathBuf::from("/nonexistent/worktree/deleted");
+        });
+        let manager = SessionManager::with_store(test_config(&temp_dir), store);
+
+        let recovered = manager.recovered().next().unwrap();
+        // Still listed - surfacing why it cannot come back beats hiding it
+        assert_eq!(recovered.state, SessionState::Resumable);
+        assert!(!recovered.is_resumable());
+        assert_eq!(
+            recovered.resume_blocker(),
+            Some("working directory is missing")
+        );
+    }
+
+    #[test]
+    fn test_agent_session_without_a_conversation_id_blocks_resume() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |info| {
+            info.session_type = SessionType::OpenAICodex;
+            info.agent_session_id = None;
+        });
+        let manager = SessionManager::with_store(test_config(&temp_dir), store);
+
+        let recovered = manager.recovered().next().unwrap();
+        assert_eq!(
+            recovered.resume_blocker(),
+            Some("no conversation was recorded")
+        );
+    }
+
+    #[test]
+    fn test_shell_needs_no_conversation_id_to_be_resumable() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |info| {
+            info.session_type = SessionType::Shell;
+            info.agent_session_id = None;
+        });
+        let manager = SessionManager::with_store(test_config(&temp_dir), store);
+
+        // Shells are restored by respawning in the same directory
+        let recovered = manager.recovered().next().unwrap();
+        assert!(recovered.is_resumable(), "shell should be restorable");
+    }
+
+    // Resume
+
+    #[test]
+    fn test_resuming_a_shell_brings_it_back_as_a_live_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |info| {
+            info.session_type = SessionType::Shell;
+            info.agent_session_id = None;
+        });
+        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
+        let session_id = manager.recovered().next().unwrap().id;
+
+        let resumed = manager
+            .resume_session(session_id, 24, 80, None, None)
+            .unwrap();
+
+        // The Panoptes session ID is preserved, which is what keeps hook
+        // routing working across the restart
+        assert_eq!(resumed, session_id);
+        assert!(manager.get(session_id).is_some());
+        assert_eq!(manager.recovered_count(), 0);
+        assert_eq!(manager.len(), 1);
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_resumed_session_appears_once_and_as_live() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |info| {
+            info.session_type = SessionType::Shell;
+            info.agent_session_id = None;
+        });
+        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
+        let session_id = manager.recovered().next().unwrap().id;
+
+        manager
+            .resume_session(session_id, 24, 80, None, None)
+            .unwrap();
+
+        let entries = manager.entries_in_order();
+        assert_eq!(entries.len(), 1, "resumed session must not be listed twice");
+        assert!(entries[0].live);
+        assert_eq!(entries[0].info.state, SessionState::Starting);
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_resume_refuses_when_blocked_and_keeps_the_record() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |info| {
+            info.working_dir = PathBuf::from("/nonexistent/worktree/deleted");
+        });
+        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
+        let session_id = manager.recovered().next().unwrap().id;
+
+        let err = manager
+            .resume_session(session_id, 24, 80, None, None)
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("working directory is missing"),
+            "error should explain why: {err}"
+        );
+        // A failed resume must not consume the record - the user can still
+        // retry or discard it
+        assert_eq!(manager.recovered_count(), 1);
+        assert!(manager.is_empty());
+    }
+
+    #[test]
+    fn test_resuming_an_unknown_session_is_an_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+
+        let err = manager
+            .resume_session(Uuid::new_v4(), 24, 80, None, None)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("No recovered session"));
+    }
+
+    #[test]
+    fn test_resuming_twice_fails_the_second_time() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = store_with_record(&temp_dir, |info| {
+            info.session_type = SessionType::Shell;
+            info.agent_session_id = None;
+        });
+        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
+        let session_id = manager.recovered().next().unwrap().id;
+
+        manager
+            .resume_session(session_id, 24, 80, None, None)
+            .unwrap();
+
+        // Guards against spawning a second process for one conversation
+        assert!(manager
+            .resume_session(session_id, 24, 80, None, None)
+            .is_err());
+        assert_eq!(manager.len(), 1);
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_resumed_session_is_still_persisted() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let store = store_with_record(&temp_dir, |info| {
+            info.session_type = SessionType::Shell;
+            info.agent_session_id = None;
+        });
+        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
+        let session_id = manager.recovered().next().unwrap().id;
+
+        manager
+            .resume_session(session_id, 24, 80, None, None)
+            .unwrap();
+
+        // Resuming must not lose the record: a crash right after resuming has
+        // to leave the session recoverable again
+        assert!(SessionStore::load_from(&store_path)
+            .unwrap()
+            .get(session_id)
+            .is_some());
+
+        manager.shutdown_all();
+    }
+
+    // Codex conversation ID resolution
+
+    #[test]
+    fn test_shell_and_claude_sessions_are_never_pending_codex_resolution() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+
+        manager
+            .create_shell_session(
+                "shell".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                24,
+                80,
+            )
+            .unwrap();
+
+        // Claude dictates its ID at spawn and shells have none to find, so
+        // neither should ever trigger a filesystem scan
+        assert!(manager.sessions_pending_codex_id().is_empty());
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_setting_the_conversation_id_persists_it() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(store_path.clone()),
+        );
+
+        let session_id = manager
+            .create_shell_session(
+                "session".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                24,
+                80,
+            )
+            .unwrap();
+
+        assert!(manager.set_agent_session_id(session_id, "codex-abc".to_string()));
+
+        // An ID that only exists in memory is the pointer this whole mechanism
+        // exists to stop losing
+        let stored = SessionStore::load_from(&store_path).unwrap();
+        assert_eq!(
+            stored.get(session_id).unwrap().agent_session_id.as_deref(),
+            Some("codex-abc")
+        );
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_setting_the_same_conversation_id_twice_is_a_no_op() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+
+        let session_id = manager
+            .create_shell_session(
+                "session".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                24,
+                80,
+            )
+            .unwrap();
+
+        assert!(manager.set_agent_session_id(session_id, "codex-abc".to_string()));
+        // Avoids rewriting the store on every scan once resolved
+        assert!(!manager.set_agent_session_id(session_id, "codex-abc".to_string()));
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_setting_the_conversation_id_of_an_unknown_session_is_a_no_op() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+
+        assert!(!manager.set_agent_session_id(Uuid::new_v4(), "codex-abc".to_string()));
+    }
+
+    #[test]
+    fn test_shell_sessions_have_no_agent_conversation_to_resume() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager =
+            SessionManager::with_store(test_config(&temp_dir), SessionStore::with_path(store_path));
+
+        let session_id = manager
+            .create_shell_session(
+                "shell".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                24,
+                80,
+            )
+            .unwrap();
+
+        // Shells are restored by respawning in the same directory, not by
+        // resuming a conversation - there is nothing to resume
+        let record = manager.store().get(session_id).unwrap();
+        assert!(record.agent_session_id.is_none());
+
+        manager.shutdown_all();
     }
 }

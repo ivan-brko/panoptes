@@ -5,10 +5,12 @@
 
 pub mod manager;
 pub mod pty;
+pub mod store;
 pub mod vterm;
 
 pub use manager::SessionManager;
 pub use pty::{mouse_event_to_bytes, ExitInfo, PtyHandle};
+pub use store::{sessions_file_path, SessionStore};
 pub use vterm::{VirtualTerminal, DEFAULT_SCROLLBACK_ROWS};
 
 use std::collections::VecDeque;
@@ -78,6 +80,13 @@ pub enum SessionState {
     Idle,
     /// Session has exited
     Exited,
+    /// Session belongs to a previous Panoptes run and can be brought back
+    ///
+    /// Distinct from `Exited`: a session you deliberately closed and one
+    /// orphaned by a crash should not look the same in the list. This state is
+    /// only ever assigned at startup, when reconciling the durable store
+    /// against the (empty) set of running processes.
+    Resumable,
 }
 
 impl SessionState {
@@ -90,6 +99,7 @@ impl SessionState {
             SessionState::Waiting => "Waiting",
             SessionState::Idle => "Idle",
             SessionState::Exited => "Exited",
+            SessionState::Resumable => "Resumable",
         }
     }
 
@@ -156,9 +166,40 @@ pub struct SessionInfo {
     /// Whether to automatically close this session after its command finishes
     #[serde(default)]
     pub auto_close_after_command: bool,
+    /// The agent's own conversation ID, used to resume this session after a restart.
+    ///
+    /// For Claude Code this equals `id` - Panoptes dictates the conversation UUID
+    /// via `--session-id` rather than discovering it. For Codex it is resolved
+    /// from the rollout file, since Codex has no equivalent flag. Always `None`
+    /// for shell sessions, which have no conversation to resume.
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
 }
 
 impl SessionInfo {
+    /// Why this session cannot be brought back, if it cannot
+    ///
+    /// Returns `None` when the session is resumable. A recovered session can
+    /// become unusable between runs - its worktree may have been deleted, or an
+    /// agent session may have died before ever recording a conversation ID -
+    /// and the reason is worth showing rather than silently hiding the entry.
+    pub fn resume_blocker(&self) -> Option<&'static str> {
+        if !self.working_dir.exists() {
+            return Some("working directory is missing");
+        }
+        // Shells are restored by respawning in the same directory, so they have
+        // no conversation to reattach to and need no ID
+        if self.session_type != SessionType::Shell && self.agent_session_id.is_none() {
+            return Some("no conversation was recorded");
+        }
+        None
+    }
+
+    /// Whether this session can be brought back
+    pub fn is_resumable(&self) -> bool {
+        self.resume_blocker().is_none()
+    }
+
     /// Create new session info
     pub fn new(
         name: String,
@@ -186,6 +227,7 @@ impl SessionInfo {
             codex_config_id: None,
             codex_config_name: None,
             auto_close_after_command: false,
+            agent_session_id: None,
         }
     }
 

@@ -126,6 +126,7 @@ mod tests {
             cols: 80,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         }
     }
 

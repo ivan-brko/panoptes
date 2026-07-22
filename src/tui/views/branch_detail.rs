@@ -84,7 +84,7 @@ pub fn render_branch_detail(
     } else if state.input_mode == InputMode::ConfirmingSessionDelete {
         render_delete_confirmation(frame, areas.content, state, sessions);
     } else if let Some(branch) = branch {
-        let branch_sessions = sessions.sessions_for_branch(branch_id);
+        let branch_sessions = sessions.entries_for_branch(branch_id);
 
         if branch_sessions.is_empty() {
             // Build custom shortcuts text if any exist
@@ -116,18 +116,25 @@ pub fn render_branch_detail(
             let items: Vec<ListItem> = branch_sessions
                 .iter()
                 .enumerate()
-                .map(|(i, session)| {
+                .map(|(i, entry)| {
+                    let info = entry.info;
                     let selected = i == selected_index;
                     let prefix = selection_prefix(selected);
 
                     // Check if session needs attention
-                    let needs_attention = sessions.session_needs_attention(session, idle_threshold);
+                    let needs_attention = sessions.session_needs_attention(info, idle_threshold);
 
                     // Build state display with idle duration if applicable
                     // Shell sessions show simpler state (Running/Ready instead of Thinking/Executing)
-                    let state_display = match (&session.info.session_type, &session.info.state) {
+                    let state_display = match (&info.session_type, &info.state) {
+                        // A recovered session that cannot come back says why,
+                        // rather than offering an action that will fail
+                        (_, SessionState::Resumable) => match info.resume_blocker() {
+                            Some(reason) => format!("Unavailable - {}", reason),
+                            None => "Resumable".to_string(),
+                        },
                         (_, SessionState::Idle) => {
-                            let duration = now.signed_duration_since(session.info.last_activity);
+                            let duration = now.signed_duration_since(info.last_activity);
                             let mins = duration.num_minutes();
                             format!("Idle - {}m", mins)
                         }
@@ -137,11 +144,11 @@ pub fn render_branch_detail(
                     };
 
                     let t = theme();
-                    let short_tag = session.info.session_type.short_tag();
+                    let short_tag = info.session_type.short_tag();
 
                     // Build attention badge
                     let (badge, badge_color) = if needs_attention {
-                        match &session.info.state {
+                        match &info.state {
                             SessionState::Waiting => ("● ", Color::Green),
                             SessionState::Idle => ("● ", Color::Yellow),
                             _ => ("  ", Color::White),
@@ -154,15 +161,10 @@ pub fn render_branch_detail(
                         Span::raw(prefix),
                         Span::styled(badge, Style::default().fg(badge_color)),
                         Span::styled(format!("{} ", short_tag), t.muted_style()),
-                        Span::raw(format!(
-                            "{}: {} [{}]",
-                            i + 1,
-                            session.info.name,
-                            state_display
-                        )),
+                        Span::raw(format!("{}: {} [{}]", i + 1, info.name, state_display)),
                     ]);
 
-                    let style = selection_style(selected, session.info.state.color());
+                    let style = selection_style(selected, info.state.color());
 
                     ListItem::new(content).style(style)
                 })
@@ -190,7 +192,7 @@ pub fn render_branch_detail(
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
             let base = format!(
-                "n: new AI | s: shell | d: delete | {}k: shortcuts | {} | ↑/↓: navigate | Enter: open | Esc/q: back",
+                "n: new AI | s: shell | d: delete | {}k: shortcuts | {} | ↑/↓: navigate | Enter: open/resume | Esc/q: back",
                 shortcuts_hint, timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {

@@ -22,6 +22,8 @@ pub struct Theme {
     pub state_idle: Color,
     /// Session has exited
     pub state_exited: Color,
+    /// Session is recoverable from a previous Panoptes run
+    pub state_resumable: Color,
 
     // === UI Elements ===
     /// Primary accent color (headers, titles)
@@ -85,6 +87,9 @@ impl Theme {
             state_waiting: Color::Green,
             state_idle: Color::DarkGray,
             state_exited: Color::Red,
+            // Magenta is unused by the live states, so a recoverable session
+            // reads as its own category rather than a variant of "dead"
+            state_resumable: Color::Magenta,
 
             // UI elements
             accent: Color::Cyan,
@@ -125,6 +130,7 @@ impl Theme {
             SessionState::Waiting => self.state_waiting,
             SessionState::Idle => self.state_idle,
             SessionState::Exited => self.state_exited,
+            SessionState::Resumable => self.state_resumable,
         }
     }
 

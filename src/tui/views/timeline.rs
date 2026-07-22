@@ -100,28 +100,29 @@ pub fn render_timeline(
             .iter()
             .enumerate()
             .map(|(i, session)| {
+                let info = &session.info;
                 let selected = i == selected_index;
                 let prefix = selection_prefix(selected);
 
                 // Check if session needs attention
-                let needs_attention = sessions.session_needs_attention(session, idle_threshold);
+                let needs_attention = sessions.session_needs_attention(info, idle_threshold);
 
                 // Get project/branch info
                 let project_name = project_store
-                    .get_project(session.info.project_id)
+                    .get_project(info.project_id)
                     .map(|p| p.name.as_str())
                     .unwrap_or("?");
                 let branch_name = project_store
-                    .get_branch(session.info.branch_id)
+                    .get_branch(info.branch_id)
                     .map(|b| b.name.as_str())
                     .unwrap_or("?");
 
                 // Format time ago
-                let duration = now.signed_duration_since(session.info.last_activity);
+                let duration = now.signed_duration_since(info.last_activity);
                 let time_ago = format_duration(duration);
 
                 // Build state display with idle duration if applicable
-                let state_display = match &session.info.state {
+                let state_display = match &info.state {
                     SessionState::Idle => {
                         let mins = duration.num_minutes();
                         format!("Idle - {}m", mins)
@@ -131,7 +132,7 @@ pub fn render_timeline(
 
                 // Build attention badge
                 let (badge, badge_color) = if needs_attention {
-                    match &session.info.state {
+                    match &info.state {
                         SessionState::Waiting => ("● ", Color::Green),
                         SessionState::Idle => ("● ", Color::Yellow),
                         _ => ("  ", Color::White),
@@ -146,7 +147,7 @@ pub fn render_timeline(
                     Span::raw(prefix),
                     Span::styled(badge, Style::default().fg(badge_color)),
                     Span::styled(
-                        format!("{} ", session.info.session_type.short_tag()),
+                        format!("{} ", info.session_type.short_tag()),
                         t.muted_style(),
                     ),
                     Span::raw(format!(
@@ -154,13 +155,13 @@ pub fn render_timeline(
                         i + 1,
                         project_name,
                         branch_name,
-                        session.info.name,
+                        info.name,
                         state_display,
                         time_ago
                     )),
                 ]);
 
-                let style = selection_style(selected, session.info.state.color());
+                let style = selection_style(selected, info.state.color());
 
                 ListItem::new(content).style(style)
             })

@@ -169,6 +169,7 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration |
 | `~/.panoptes/projects.json` | Project and branch persistence |
+| `~/.panoptes/sessions.json` | Session index for recovery after a restart |
 | `~/.panoptes/claude_configs.json` | Claude account configurations |
 | `~/.panoptes/codex_configs.json` | Codex account configurations |
 | `~/.panoptes/hooks/` | Hook scripts for Claude Code and Codex |
@@ -253,6 +254,40 @@ Sessions are cleaned up automatically when Panoptes exits:
 - All child processes (Claude Code instances) are terminated
 - PTY handles are closed
 - No orphaned processes are left behind
+
+### Session Recovery
+
+Agent processes do not outlive Panoptes - the PTY closes and the child is
+signalled. The conversation, however, is owned by the agent and already durable:
+Claude Code writes `~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl` and Codex
+writes `~/.codex/sessions/<date>/rollout-<ts>-<uuid>.jsonl`. What Panoptes stores
+in `sessions.json` is the *index* over that data - which conversation belongs to
+which session, plus the working directory, project, branch, and account config
+needed to relaunch it.
+
+- **Claude Code**: Panoptes dictates the conversation UUID with `--session-id`
+  rather than discovering it, so the Panoptes session ID and the Claude session
+  ID are the same value. Resume passes `--resume <uuid>`; `--fork-session` is
+  never used, since forking would mint a new ID and orphan the stored pointer.
+- **Codex**: has no equivalent flag, so its ID is discovered instead. Codex
+  writes a rollout file whose first line is a `session_meta` record carrying the
+  session `id` and the `cwd` it started in; Panoptes matches on that `cwd` plus
+  the session start time. A throttled scan runs only while some Codex session
+  still lacks an ID, so it costs nothing in the steady state. The notify hook
+  cannot be used for this - it must not read stdin, or it stalls Codex's output
+  pipeline and drops keystrokes.
+- **Shell**: has no conversation. Restoring one respawns a fresh shell in the
+  same directory; its scrollback is not recovered.
+
+Records are written on membership change (create, close), not on state change -
+live state describes a process that no longer exists and is discarded at load.
+Quitting Panoptes keeps records so sessions can be resumed; explicitly closing a
+session discards its record.
+
+At startup every record is reconciled to `SessionState::Resumable` and listed
+inertly - nothing is spawned until the user opens it. A record whose working
+directory has been deleted, or which never recorded a conversation ID, is still
+listed but shows why it cannot be brought back.
 
 ## Testing
 

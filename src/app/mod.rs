@@ -94,6 +94,21 @@ pub struct App {
     pub(crate) log_file_info: LogFileInfo,
     /// Whether verbose mouse diagnostics are enabled
     mouse_debug_enabled: bool,
+    /// When the Codex rollout directory was last scanned for conversation IDs
+    last_codex_id_scan: Option<Instant>,
+}
+
+/// How often to scan for Codex rollout files while any session lacks an ID
+///
+/// Codex writes its rollout within a moment of starting, so this resolves on the
+/// first or second scan and then stops costing anything.
+const CODEX_ID_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The default `CODEX_HOME`, used when a session ran on the default account
+fn default_codex_home() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".codex")
 }
 
 impl App {
@@ -171,6 +186,7 @@ impl App {
             log_buffer,
             log_file_info,
             mouse_debug_enabled,
+            last_codex_id_scan: None,
         })
     }
 
@@ -363,6 +379,10 @@ impl App {
                 }
                 self.state.needs_render = true;
             }
+
+            // Give Codex sessions a resumable pointer as soon as their rollout
+            // file appears; no-ops once every session has one
+            self.resolve_pending_codex_session_ids();
 
             // Check for sessions stuck in Executing state too long
             let had_timeout_changes = self
@@ -1509,6 +1529,115 @@ impl App {
         Ok(())
     }
 
+    /// Resolve conversation IDs for Codex sessions that do not have one yet
+    ///
+    /// Codex offers no flag to dictate its session ID, so unlike Claude Code it
+    /// has to be discovered from the rollout file it writes shortly after
+    /// starting. Until that resolves, the session has no pointer and would not
+    /// be resumable after a crash.
+    ///
+    /// Throttled, and does no filesystem work at all once every Codex session
+    /// has an ID - which is the steady state within seconds of starting one.
+    pub(crate) fn resolve_pending_codex_session_ids(&mut self) {
+        let pending = self.sessions.sessions_pending_codex_id();
+        if pending.is_empty() {
+            return;
+        }
+
+        if let Some(last) = self.last_codex_id_scan {
+            if last.elapsed() < CODEX_ID_SCAN_INTERVAL {
+                return;
+            }
+        }
+        self.last_codex_id_scan = Some(Instant::now());
+
+        for (session_id, working_dir, created_at) in pending {
+            let codex_home = self
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.info.codex_config_id)
+                .and_then(|id| self.codex_config_store.get(id))
+                .and_then(|config| config.codex_home.clone())
+                .unwrap_or_else(default_codex_home);
+
+            if let Some(agent_session_id) =
+                crate::agent::codex::discover_session_id(&codex_home, &working_dir, created_at)
+            {
+                if self
+                    .sessions
+                    .set_agent_session_id(session_id, agent_session_id.clone())
+                {
+                    tracing::info!(
+                        session_id = %session_id,
+                        codex_session_id = %agent_session_id,
+                        "Resolved Codex conversation ID; session is now resumable"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Bring a session recovered from a previous run back to life
+    ///
+    /// Resolves the account configuration the session originally ran under, so
+    /// a resumed session reattaches using the same Claude or Codex account
+    /// rather than silently falling back to the default one.
+    ///
+    /// Returns `Ok(false)` when the ID does not name a recovered session, so
+    /// callers can fall through to their normal open path.
+    pub(crate) fn resume_recovered_session(
+        &mut self,
+        session_id: crate::session::SessionId,
+    ) -> Result<bool> {
+        let Some(info) = self.sessions.get_recovered(session_id) else {
+            return Ok(false);
+        };
+
+        // Read the config IDs before borrowing the stores
+        let claude_config_id = info.claude_config_id;
+        let codex_config_id = info.codex_config_id;
+
+        let claude_config_dir = claude_config_id
+            .and_then(|id| self.claude_config_store.get(id))
+            .and_then(|config| config.config_dir.clone());
+        let codex_home = codex_config_id
+            .and_then(|id| self.codex_config_store.get(id))
+            .and_then(|config| config.codex_home.clone());
+
+        // A config the user has since deleted is worth saying out loud: the
+        // session will come back on the default account, which may be wrong
+        if claude_config_id.is_some() && claude_config_dir.is_none() {
+            tracing::warn!(
+                session_id = %session_id,
+                "Claude config for this session no longer exists; resuming on the default account"
+            );
+        }
+        if codex_config_id.is_some() && codex_home.is_none() {
+            tracing::warn!(
+                session_id = %session_id,
+                "Codex config for this session no longer exists; resuming on the default account"
+            );
+        }
+
+        let size = self.tui.size()?;
+        let frame_config = FrameConfig::default();
+        let layout = FrameLayout::calculate(
+            ratatui::prelude::Rect::new(0, 0, size.width, size.height),
+            &frame_config,
+        );
+        let (rows, cols) = layout.pty_size();
+
+        self.sessions.resume_session(
+            session_id,
+            rows as usize,
+            cols as usize,
+            claude_config_dir,
+            codex_home,
+        )?;
+
+        Ok(true)
+    }
+
     /// Refresh git state for all projects
     ///
     /// This checks if each worktree's working directory still exists and marks
@@ -1972,8 +2101,14 @@ mod tests {
         let branch_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
 
-        // Create a SessionManager for testing (session won't exist, tests fallback path)
-        let sessions = SessionManager::new(Config::default());
+        // Create a SessionManager for testing (session won't exist, tests fallback path).
+        // Backed by a temp store so the test never touches the real
+        // ~/.panoptes/sessions.json.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions = SessionManager::with_store(
+            Config::default(),
+            crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
 
         // Navigate to project
         state.navigate_to_project(project_id);
@@ -2027,7 +2162,10 @@ mod tests {
             hooks_dir: temp_dir.path().join("hooks"),
             ..Config::default()
         };
-        let mut sessions = SessionManager::new(config);
+        let mut sessions = SessionManager::with_store(
+            config,
+            crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
 
         let project_a = Uuid::new_v4();
         let branch_a = Uuid::new_v4();

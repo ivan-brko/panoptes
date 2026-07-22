@@ -209,6 +209,38 @@ exit 0
 
         Ok(settings_path)
     }
+
+    /// The Claude conversation ID this spawn will use
+    ///
+    /// Panoptes dictates the conversation UUID rather than discovering it, so
+    /// the Panoptes session ID and the Claude session ID are the same value.
+    /// That removes the whole class of races where a session dies before it
+    /// ever reports an ID back, leaving an unreachable transcript on disk.
+    fn conversation_id(spawn_config: &SpawnConfig) -> String {
+        spawn_config
+            .resume
+            .clone()
+            .unwrap_or_else(|| spawn_config.session_id.to_string())
+    }
+
+    /// Arguments that bind this spawn to a specific Claude conversation
+    ///
+    /// A fresh session claims its UUID with `--session-id`; a recovered one
+    /// reattaches with `--resume`. `--fork-session` is deliberately omitted so
+    /// that resuming preserves the original ID, keeping the stored pointer
+    /// valid across any number of restarts.
+    ///
+    /// Note that `--session-id` fails if the UUID is already in use, so callers
+    /// must pass `resume` for any session that has been started before.
+    fn conversation_args(spawn_config: &SpawnConfig) -> Vec<String> {
+        match &spawn_config.resume {
+            Some(id) => vec!["--resume".to_string(), id.clone()],
+            None => vec![
+                "--session-id".to_string(),
+                spawn_config.session_id.to_string(),
+            ],
+        }
+    }
 }
 
 impl Default for ClaudeCodeAdapter {
@@ -282,6 +314,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         // Build arguments
         let mut args = self.default_args();
+        args.extend(Self::conversation_args(spawn_config));
         if let Some(ref prompt) = spawn_config.initial_prompt {
             args.push("--print".to_string());
             args.push(prompt.clone());
@@ -302,7 +335,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         Ok(SpawnResult {
             pty,
-            agent_session_id: None,
+            agent_session_id: Some(Self::conversation_id(spawn_config)),
         })
     }
 }
@@ -323,6 +356,7 @@ mod tests {
             cols: 80,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         }
     }
 
@@ -357,10 +391,71 @@ mod tests {
         let args = adapter.default_args();
         assert_eq!(
             args,
+            vec!["--enable-auto-mode".to_string(), "--verbose".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_fresh_spawn_claims_the_panoptes_session_id() {
+        let spawn_config = test_spawn_config(PathBuf::from("/tmp"));
+        let args = ClaudeCodeAdapter::conversation_args(&spawn_config);
+
+        assert_eq!(
+            args,
             vec![
-                "--enable-auto-mode".to_string(),
-                "--verbose".to_string()
+                "--session-id".to_string(),
+                spawn_config.session_id.to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn test_resume_spawn_reattaches_without_forking() {
+        let mut spawn_config = test_spawn_config(PathBuf::from("/tmp"));
+        let prior = Uuid::new_v4().to_string();
+        spawn_config.resume = Some(prior.clone());
+
+        let args = ClaudeCodeAdapter::conversation_args(&spawn_config);
+
+        assert_eq!(args, vec!["--resume".to_string(), prior]);
+        // Forking would mint a new conversation ID and orphan the stored pointer
+        assert!(!args.contains(&"--fork-session".to_string()));
+        // --session-id would be rejected for an ID that is already in use
+        assert!(!args.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
+    fn test_conversation_id_matches_session_id_for_fresh_spawn() {
+        let spawn_config = test_spawn_config(PathBuf::from("/tmp"));
+
+        assert_eq!(
+            ClaudeCodeAdapter::conversation_id(&spawn_config),
+            spawn_config.session_id.to_string(),
+            "Panoptes and Claude must agree on the conversation UUID"
+        );
+    }
+
+    #[test]
+    fn test_conversation_id_is_stable_across_resume() {
+        let mut spawn_config = test_spawn_config(PathBuf::from("/tmp"));
+        let original = ClaudeCodeAdapter::conversation_id(&spawn_config);
+
+        // Resuming feeds the stored ID back in; it must round-trip unchanged
+        spawn_config.resume = Some(original.clone());
+
+        assert_eq!(ClaudeCodeAdapter::conversation_id(&spawn_config), original);
+    }
+
+    #[test]
+    fn test_session_id_arg_is_a_valid_uuid() {
+        // Claude rejects --session-id values that do not parse as UUIDs
+        let spawn_config = test_spawn_config(PathBuf::from("/tmp"));
+        let args = ClaudeCodeAdapter::conversation_args(&spawn_config);
+
+        let value = &args[1];
+        assert!(
+            Uuid::parse_str(value).is_ok(),
+            "expected a UUID, got {value:?}"
         );
     }
 
@@ -383,6 +478,7 @@ mod tests {
             cols: 80,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         };
 
         let env = adapter.generate_env(&config, &spawn_config);
@@ -414,6 +510,7 @@ mod tests {
             cols: 80,
             claude_config_dir: Some(claude_config_path.clone()),
             codex_home: None,
+            resume: None,
         };
 
         let env = adapter.generate_env(&config, &spawn_config);
