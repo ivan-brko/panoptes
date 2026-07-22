@@ -98,6 +98,17 @@ impl HookEvent {
         self.str_field("session_title")
     }
 
+    /// What caused a `SessionStart`
+    ///
+    /// Claude's schema for this field is
+    /// `"startup" | "resume" | "clear" | "compact" | "fork"`. Only the first
+    /// two mean "a process just came up"; the rest fire in the middle of a
+    /// live conversation, and `compact` fires without the user doing anything
+    /// at all, whenever the context window fills up.
+    pub fn session_start_source(&self) -> Option<&str> {
+        self.str_field("source")
+    }
+
     /// The last thing the assistant said, from a `Stop` event
     pub fn last_assistant_message(&self) -> Option<&str> {
         self.str_field("last_assistant_message")

@@ -176,6 +176,12 @@ lost.
 `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Notification`,
 `PermissionRequest`.
 
+`SessionStart` does not only mean "a process came up". Its `source` is one of
+`startup`, `resume`, `clear`, `compact`, `fork` - and `compact` fires on its own
+whenever the context window fills, in the middle of a turn the agent is still
+working on. Only `startup`, `resume`, `clear` and `fork` reset the session to
+`Waiting`; anything else leaves the state alone.
+
 **Codex hooks:** Limited to `notify` config firing `agent-turn-complete`
 events. Maps to Waiting state. No granular tool-use tracking - the notify hook
 must not read stdin or it stalls Codex's output pipeline, so it cannot be

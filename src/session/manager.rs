@@ -1001,8 +1001,31 @@ impl SessionManager {
                 if let Some(title) = event.session_title() {
                     session.info.adopt_agent_title(title);
                 }
-                // The agent is up but has not been asked anything yet
-                Move::Authoritative(SessionState::Waiting)
+                // `SessionStart` does not only mean "a process came up". Claude
+                // also fires it for `clear`, `fork` and - crucially - `compact`,
+                // which happens on its own whenever the context window fills up,
+                // in the middle of a turn the agent is still working on. Forcing
+                // Waiting there would report a busy session as finished and
+                // eventually badge it as unattended.
+                match event.session_start_source() {
+                    // Genuine starts and user-driven conversation resets: the
+                    // agent is up and has not been asked anything yet
+                    Some("startup") | Some("resume") | Some("clear") | Some("fork") => {
+                        session.info.in_flight.clear();
+                        clear_attention = true;
+                        Move::Authoritative(SessionState::Waiting)
+                    }
+                    // Mid-turn compaction, or a source added after this was
+                    // written. Leave the state alone rather than guess wrong.
+                    other => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            source = ?other,
+                            "SessionStart mid-conversation, leaving state unchanged"
+                        );
+                        Move::Unchanged
+                    }
+                }
             }
 
             HookEventType::SessionEnd => {
@@ -1943,6 +1966,75 @@ mod tests {
             manager.get(session_id).unwrap().info.name,
             "Fixing the login bug"
         );
+    }
+
+    #[test]
+    fn test_session_start_from_compaction_does_not_report_a_busy_session_as_idle() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        // A long agentic loop, mid-tool
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"}),
+        ));
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Executing
+        );
+
+        // Claude auto-compacts when the context window fills. This fires
+        // SessionStart with no user involvement at all, while the agent is
+        // still working.
+        manager.handle_hook_event(&hook(
+            session_id,
+            "SessionStart",
+            serde_json::json!({"source": "compact", "model": "claude-opus-4-8"}),
+        ));
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(
+            info.state,
+            SessionState::Executing,
+            "compaction must not report a working session as finished"
+        );
+        assert_eq!(
+            info.in_flight_summary().as_deref(),
+            Some("Bash"),
+            "the tool is still running across a compaction"
+        );
+    }
+
+    #[test]
+    fn test_session_start_from_a_real_start_resets_the_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"}),
+        ));
+        manager.handle_hook_event(&hook(session_id, "Stop", serde_json::json!({})));
+        assert!(manager.get(session_id).unwrap().info.attention.is_some());
+
+        // /clear starts a fresh conversation: nothing is running and nothing
+        // is owed to the user
+        manager.handle_hook_event(&hook(
+            session_id,
+            "SessionStart",
+            serde_json::json!({"source": "clear"}),
+        ));
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Waiting);
+        assert!(info.in_flight.is_empty());
+        assert!(info.attention.is_none());
     }
 
     #[test]
