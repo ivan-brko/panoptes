@@ -8,9 +8,6 @@ These shortcuts work in most views (except when in Session mode or text input di
 
 | Key | Action |
 |-----|--------|
-| `t` | Start focus timer (opens duration input) |
-| `T` | Open focus statistics view |
-| `Ctrl+t` | Stop focus timer (when running) |
 | `Esc` | Go back / Cancel current action |
 | `q` | Quit (with confirmation in Projects Overview) |
 
@@ -25,8 +22,29 @@ The main view showing all projects and sessions.
 | `Down` / `j` | Move selection down |
 | `Up` / `k` | Move selection up |
 | `Tab` | Toggle focus between Projects and Sessions lists |
-| `1-9` | Select item by number |
-| `Enter` | Open selected project or session |
+| `1-9` | Select session by number (Sessions list only — the project tree is not numbered) |
+| `Enter` | Open selected project or session; expand/collapse selected folder |
+| `Right` | Expand selected folder |
+| `Left` | Collapse selected folder, or jump to its parent folder |
+
+Expanded folders are marked `▾`, collapsed ones `▸`. The footer changes to show
+folder actions whenever a folder heading is selected.
+
+### Folders
+
+Projects can be grouped into folders, nested up to 3 levels deep. Folders are
+created by moving a project into a path that does not exist yet.
+
+| Key | Action |
+|-----|--------|
+| `m` | Move selected project (or folder subtree) into a folder |
+| `r` | Rename selected folder |
+| `d` | Remove selected folder — its contents move up one level, nothing is deleted |
+
+In the move dialog, type a path like `Acme/Platform`, use `Tab` to autocomplete
+against existing folders, and leave the input empty to move back to the root level.
+Collapsed folders show a rollup of the sessions inside them, so you still see
+active and attention counts without expanding.
 
 ### Actions
 
@@ -37,7 +55,8 @@ The main view showing all projects and sessions.
 | `c` | Open Claude configs management |
 | `x` | Open Codex configs management |
 | `l` | Open log viewer |
-| `d` | Delete selected item (project or session) |
+| `d` | Delete selected project or session (removes a folder when one is selected) |
+| `R` | Refresh git state for all projects |
 | `q` / `Esc` | Quit (prompts for confirmation) |
 
 ## Project Detail
@@ -175,25 +194,6 @@ Manage multiple Claude Code accounts (`c` from Projects Overview) or Codex accou
 | `s` | Set selected as global default |
 | `d` | Delete selected configuration (prompts for confirmation) |
 
-## Focus Statistics
-
-Shows focus timer history and statistics.
-
-### Navigation
-
-| Key | Action |
-|-----|--------|
-| `Down` / `j` | Move selection down |
-| `Up` / `k` | Move selection up |
-| `Enter` | View session details |
-| `Esc` / `q` | Return to previous view |
-
-### Actions
-
-| Key | Action |
-|-----|--------|
-| `d` | Delete selected focus session (prompts for confirmation) |
-
 ## Worktree Creation Wizard
 
 ### Step 1: Select Branch
@@ -244,16 +244,6 @@ When prompted to confirm an action:
 | `y` | Confirm |
 | `n` / `Esc` | Cancel |
 | `w` | (Branch delete) Toggle worktree deletion checkbox |
-
-## Focus Timer Dialog
-
-When setting focus timer duration:
-
-| Key | Action |
-|-----|--------|
-| `0-9` | Enter duration in minutes |
-| `Enter` | Start timer (or use default if empty) |
-| `Esc` | Cancel |
 
 ## Mouse Support
 

@@ -32,18 +32,18 @@ pub enum InputMode {
     ConfirmingQuit,
     /// Renaming a project
     RenamingProject,
+    /// Moving a project or folder into a folder - typing the folder path
+    MovingToFolder,
+    /// Renaming a folder in the projects overview
+    RenamingFolder,
+    /// Confirming that a folder should be dissolved (contents move up a level)
+    ConfirmingFolderRemove,
     /// Worktree creation Step 1: Search/select existing branch or create new
     WorktreeSelectBranch,
     /// Worktree creation Step 2: Select base branch for new branch
     WorktreeSelectBase,
     /// Worktree creation Step 3: Confirmation before creation
     WorktreeConfirm,
-    /// Starting a focus timer - entering duration
-    StartingFocusTimer,
-    /// Confirming focus session deletion
-    ConfirmingFocusSessionDelete,
-    /// Viewing focus session details
-    ViewingFocusSessionDetail,
     /// Adding a new Claude config - entering name
     AddingClaudeConfigName,
     /// Adding a new Claude config - entering path

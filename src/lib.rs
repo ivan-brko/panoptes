@@ -8,7 +8,6 @@ pub mod claude_config;
 pub mod claude_json;
 pub mod codex_config;
 pub mod config;
-pub mod focus_timing;
 pub mod git;
 pub mod hooks;
 pub mod input;

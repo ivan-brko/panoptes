@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Projects can be grouped into folders in the projects overview, nested up to 3 levels deep (`m` to move, `r` to rename, `d` to ungroup, `Enter`/`←`/`→` to fold).
+
+### Removed
+- **Focus timer and focus statistics.** The `t`, `T`, and `Ctrl+t` shortcuts, the Focus Statistics view, and all focus-interval tracking are gone.
+  - The `focus_timer_minutes` and `focus_stats_retention_days` config keys are no longer read. Leaving them in `config.toml` is harmless — unknown keys are ignored.
+  - `~/.panoptes/focus_sessions.json` is no longer read or written. Existing files are left on disk and can be deleted by hand.
+  - `t` and `T` are no longer reserved and can now be bound as custom shortcuts.
+- **Overlay notification system.** The focus timer was its only producer, so `NotificationManager`, `NotificationType`, and the notification overlay are gone. Transient messages still appear in the header, and session attention still rings the bell / sets the terminal title per `notification_method`.
+- **Terminal focus tracking.** Focus-change reporting is no longer requested from the terminal. A session you are currently viewing no longer rings when you switch away from the terminal window — attention notifications now fire only for sessions you are *not* looking at.
+- Ordinal numbering in the projects list; digit keys now select only in the Sessions list.
+
 ## [0.3.1] - 2026-02-11
 
 ### Changed

@@ -97,6 +97,7 @@ mod tests {
             session_subdir: None,
             default_claude_config: None,
             default_codex_config: None,
+            folder: Vec::new(),
             created_at: Utc::now(),
             last_activity: Utc::now(),
         }

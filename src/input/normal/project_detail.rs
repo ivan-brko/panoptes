@@ -15,11 +15,6 @@ pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
-    // Handle focus timer shortcuts (t, T, Ctrl+t)
-    if app.handle_focus_timer_shortcut(key) {
-        return Ok(());
-    }
-
     let project_id = match app.state.view {
         View::ProjectDetail(id) => id,
         _ => return Ok(()),

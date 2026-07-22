@@ -6,7 +6,6 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::codex_config::{CodexConfig, CodexConfigId, CodexConfigStore};
-use crate::focus_timing::FocusTimer;
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
@@ -21,7 +20,6 @@ pub fn render_codex_configs(
     area: Rect,
     config_store: &CodexConfigStore,
     selected_index: usize,
-    focus_timer: Option<&FocusTimer>,
     header_notifications: &HeaderNotificationManager,
     attention_count: usize,
 ) {
@@ -33,7 +31,6 @@ pub fn render_codex_configs(
 
     let header = Header::new(breadcrumb)
         .with_suffix(suffix)
-        .with_timer(focus_timer)
         .with_notifications(Some(header_notifications))
         .with_attention_count(attention_count);
 

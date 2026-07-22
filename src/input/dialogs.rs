@@ -8,105 +8,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use crate::app::{App, InputMode, View};
 use crate::claude_json::ClaudeJsonStore;
 use crate::config::{is_reserved_key, CustomShortcut};
-use crate::focus_timing::store::FocusStore;
-
-/// Handle key when starting a focus timer (entering duration)
-pub fn handle_starting_focus_timer_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    // Only process key press events (not release/repeat)
-    if key.kind != KeyEventKind::Press {
-        return Ok(());
-    }
-
-    match key.code {
-        KeyCode::Esc => {
-            // Cancel timer start
-            app.state.input_mode = InputMode::Normal;
-            app.state.focus_timer_input.clear();
-        }
-        KeyCode::Enter => {
-            // Start the timer with entered duration (or default)
-            let minutes = if app.state.focus_timer_input.is_empty() {
-                app.config.focus_timer_minutes
-            } else {
-                app.state
-                    .focus_timer_input
-                    .parse()
-                    .unwrap_or(app.config.focus_timer_minutes)
-            };
-
-            app.start_focus_timer(minutes);
-            app.state.input_mode = InputMode::Normal;
-            app.state.focus_timer_input.clear();
-        }
-        KeyCode::Char(c) if c.is_ascii_digit() => {
-            // Only allow digits
-            if app.state.focus_timer_input.len() < 3 {
-                app.state.focus_timer_input.push(c);
-            }
-        }
-        KeyCode::Backspace => {
-            app.state.focus_timer_input.pop();
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// Handle key when confirming focus session deletion
-pub fn handle_confirming_focus_session_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    if key.kind != KeyEventKind::Press {
-        return Ok(());
-    }
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
-            // Confirm deletion
-            if let Some(session_id) = app.state.pending_delete_focus_session.take() {
-                // Delete from persistent storage
-                let store = FocusStore::new();
-                if let Err(e) = store.delete_session(session_id) {
-                    tracing::error!("Failed to delete focus session: {}", e);
-                }
-
-                // Reload sessions from disk to sync state
-                app.load_focus_sessions();
-
-                // Adjust selection if needed
-                let session_count = app.state.focus_sessions.len();
-                if app.state.focus_stats_selected_index >= session_count && session_count > 0 {
-                    app.state.focus_stats_selected_index = session_count - 1;
-                }
-            }
-            app.state.input_mode = InputMode::Normal;
-        }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            // Cancel deletion
-            app.state.pending_delete_focus_session = None;
-            app.state.input_mode = InputMode::Normal;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// Handle key when viewing focus session details
-pub fn handle_viewing_focus_session_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    if key.kind != KeyEventKind::Press {
-        return Ok(());
-    }
-    // Any key closes the detail dialog
-    match key.code {
-        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
-            app.state.viewing_focus_session = None;
-            app.state.input_mode = InputMode::Normal;
-        }
-        _ => {
-            // Close on any other key as well
-            app.state.viewing_focus_session = None;
-            app.state.input_mode = InputMode::Normal;
-        }
-    }
-    Ok(())
-}
 
 /// Handle key when confirming session deletion
 pub fn handle_confirming_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -419,12 +320,10 @@ pub fn handle_confirming_project_delete_key(app: &mut App, key: KeyEvent) -> Res
                 // Navigate back to projects overview
                 app.state.view = View::ProjectsOverview;
 
-                // Adjust selected index if needed
-                let new_project_count = app.project_store.project_count();
-                if app.state.selected_project_index >= new_project_count && new_project_count > 0 {
-                    app.state.selected_project_index = new_project_count - 1;
-                } else if new_project_count == 0 {
-                    app.state.selected_project_index = 0;
+                // Adjust selected index if needed (counted over visible tree rows)
+                let new_row_count = crate::project::row_count(&app.project_store);
+                if app.state.selected_project_index >= new_row_count {
+                    app.state.selected_project_index = new_row_count.saturating_sub(1);
                 }
             }
             app.state.input_mode = InputMode::Normal;
@@ -432,6 +331,48 @@ pub fn handle_confirming_project_delete_key(app: &mut App, key: KeyEvent) -> Res
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             // Cancel deletion
             app.state.pending_delete_project = None;
+            app.state.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key while confirming that a folder should be dissolved
+///
+/// Removing a folder never deletes projects: its contents move up one level.
+pub fn handle_confirming_folder_remove_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            if let Some(path) = app.state.pending_remove_folder.take() {
+                let moved = app.project_store.remove_folder(&path);
+                if let Err(e) = app.project_store.save() {
+                    tracing::error!("Failed to save project store: {}", e);
+                    app.state.error_message = Some(format!("Failed to save projects: {}", e));
+                }
+                tracing::info!(
+                    "Removed folder '{}', moved {} project(s) up a level",
+                    crate::project::folder_path_key(&path),
+                    moved
+                );
+                app.state.header_notifications.push(format!(
+                    "Ungrouped {}",
+                    crate::project::project_count_label(moved)
+                ));
+
+                // The heading row is gone, so clamp the selection
+                let row_count = crate::project::row_count(&app.project_store);
+                if app.state.selected_project_index >= row_count {
+                    app.state.selected_project_index = row_count.saturating_sub(1);
+                }
+            }
+            app.state.input_mode = InputMode::Normal;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.state.pending_remove_folder = None;
             app.state.input_mode = InputMode::Normal;
         }
         _ => {}

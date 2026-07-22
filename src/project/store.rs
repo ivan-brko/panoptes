@@ -2,11 +2,11 @@
 //!
 //! Handles saving and loading projects and branches to/from disk.
 
-use super::{Branch, BranchId, Project, ProjectId};
+use super::{folder_path_key, Branch, BranchId, Project, ProjectId, MAX_FOLDER_DEPTH};
 use crate::config::config_dir;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Serializable format for the project store
@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 struct StoreData {
     projects: Vec<Project>,
     branches: Vec<Branch>,
+    /// Display paths of folders the user has collapsed in the projects overview
+    #[serde(default)]
+    collapsed_folders: Vec<String>,
 }
 
 /// Backup a corrupted file by renaming it with a timestamped .backup extension
@@ -47,6 +50,8 @@ pub struct ProjectStore {
     projects: HashMap<ProjectId, Project>,
     /// All branches indexed by ID
     branches: HashMap<BranchId, Branch>,
+    /// Display paths of folders collapsed in the projects overview
+    collapsed_folders: HashSet<String>,
     /// Path to the projects.json file
     store_path: PathBuf,
 }
@@ -56,6 +61,7 @@ impl Default for ProjectStore {
         Self {
             projects: HashMap::new(),
             branches: HashMap::new(),
+            collapsed_folders: HashSet::new(),
             store_path: projects_file_path(),
         }
     }
@@ -72,6 +78,7 @@ impl ProjectStore {
         Self {
             projects: HashMap::new(),
             branches: HashMap::new(),
+            collapsed_folders: HashSet::new(),
             store_path: path,
         }
     }
@@ -187,6 +194,185 @@ impl ProjectStore {
     /// Remove a branch
     pub fn remove_branch(&mut self, id: BranchId) -> Option<Branch> {
         self.branches.remove(&id)
+    }
+
+    // ====================================================================
+    // Folder organization
+    // ====================================================================
+
+    /// Move a project into `folder` (empty = root level)
+    ///
+    /// Returns an error if the folder would exceed [`MAX_FOLDER_DEPTH`].
+    pub fn set_project_folder(&mut self, id: ProjectId, folder: Vec<String>) -> Result<()> {
+        if folder.len() > MAX_FOLDER_DEPTH {
+            bail!(
+                "Folders can nest at most {} levels deep (got {})",
+                MAX_FOLDER_DEPTH,
+                folder.len()
+            );
+        }
+        let project = self
+            .projects
+            .get_mut(&id)
+            .context("Project not found while setting folder")?;
+        project.folder = folder;
+        Ok(())
+    }
+
+    /// Rename the last segment of `path`, keeping the subtree intact
+    ///
+    /// Returns the number of projects whose folder path changed.
+    pub fn rename_folder(&mut self, path: &[String], new_name: &str) -> Result<usize> {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            bail!("Folder name cannot be empty");
+        }
+        if new_name.contains('/') {
+            bail!("Folder names cannot contain '/' - move the folder instead");
+        }
+        let Some((_, parent)) = path.split_last() else {
+            bail!("Cannot rename the root level");
+        };
+
+        let mut renamed = 0;
+        for project in self.projects.values_mut() {
+            if project.is_under_folder(path) {
+                project.folder[path.len() - 1] = new_name.to_string();
+                renamed += 1;
+            }
+        }
+
+        let mut new_path = parent.to_vec();
+        new_path.push(new_name.to_string());
+        self.remap_collapsed(path, Some(&new_path));
+
+        Ok(renamed)
+    }
+
+    /// Re-parent a folder subtree under `new_parent` (empty = root level)
+    ///
+    /// Returns the number of projects that moved.
+    pub fn move_folder(&mut self, path: &[String], new_parent: &[String]) -> Result<usize> {
+        let Some(name) = path.last() else {
+            bail!("Cannot move the root level");
+        };
+        if new_parent.len() >= path.len() && new_parent[..path.len()] == *path {
+            bail!("Cannot move a folder into itself");
+        }
+
+        let mut new_path = new_parent.to_vec();
+        new_path.push(name.clone());
+        if new_path.len() > MAX_FOLDER_DEPTH {
+            bail!(
+                "Moving here would nest deeper than {} levels",
+                MAX_FOLDER_DEPTH
+            );
+        }
+
+        // The deepest project in the subtree determines the resulting depth
+        let deepest = self
+            .projects
+            .values()
+            .filter(|p| p.is_under_folder(path))
+            .map(|p| p.folder.len())
+            .max()
+            .unwrap_or(path.len());
+        let resulting_depth = deepest - path.len() + new_path.len();
+        if resulting_depth > MAX_FOLDER_DEPTH {
+            bail!(
+                "Moving here would nest its contents deeper than {} levels",
+                MAX_FOLDER_DEPTH
+            );
+        }
+
+        let mut moved = 0;
+        for project in self.projects.values_mut() {
+            if project.is_under_folder(path) {
+                let mut folder = new_path.clone();
+                folder.extend_from_slice(&project.folder[path.len()..]);
+                project.folder = folder;
+                moved += 1;
+            }
+        }
+        self.remap_collapsed(path, Some(&new_path));
+
+        Ok(moved)
+    }
+
+    /// Dissolve a folder, moving its direct contents up one level
+    ///
+    /// Projects are never deleted. Subfolders are lifted along with their
+    /// contents. Returns the number of projects that moved.
+    pub fn remove_folder(&mut self, path: &[String]) -> usize {
+        if path.is_empty() {
+            return 0;
+        }
+        let cut = path.len() - 1;
+
+        let mut moved = 0;
+        for project in self.projects.values_mut() {
+            if project.is_under_folder(path) {
+                // Drop just this folder's segment, keeping any nested structure
+                project.folder.remove(cut);
+                moved += 1;
+            }
+        }
+        self.remap_collapsed(path, None);
+
+        moved
+    }
+
+    /// Whether a folder is currently collapsed in the overview
+    pub fn is_folder_collapsed(&self, path: &[String]) -> bool {
+        self.collapsed_folders.contains(&folder_path_key(path))
+    }
+
+    /// Toggle a folder's collapsed state, returning the new state
+    pub fn toggle_folder_collapsed(&mut self, path: &[String]) -> bool {
+        let key = folder_path_key(path);
+        if self.collapsed_folders.remove(&key) {
+            false
+        } else {
+            self.collapsed_folders.insert(key);
+            true
+        }
+    }
+
+    /// Set a folder's collapsed state explicitly
+    pub fn set_folder_collapsed(&mut self, path: &[String], collapsed: bool) {
+        let key = folder_path_key(path);
+        if collapsed {
+            self.collapsed_folders.insert(key);
+        } else {
+            self.collapsed_folders.remove(&key);
+        }
+    }
+
+    /// The set of collapsed folder keys, for tree flattening
+    pub fn collapsed_folders(&self) -> &HashSet<String> {
+        &self.collapsed_folders
+    }
+
+    /// Rewrite collapse keys for a subtree that moved (`Some`) or vanished (`None`)
+    fn remap_collapsed(&mut self, old_path: &[String], new_path: Option<&[String]>) {
+        let old_key = folder_path_key(old_path);
+        let prefix = format!("{}/", old_key);
+
+        let affected: Vec<String> = self
+            .collapsed_folders
+            .iter()
+            .filter(|k| **k == old_key || k.starts_with(&prefix))
+            .cloned()
+            .collect();
+
+        for key in affected {
+            self.collapsed_folders.remove(&key);
+            if let Some(new_path) = new_path {
+                let suffix = &key[old_key.len()..];
+                self.collapsed_folders
+                    .insert(format!("{}{}", folder_path_key(new_path), suffix));
+            }
+        }
     }
 
     /// Get the number of projects
@@ -312,11 +498,13 @@ impl ProjectStore {
 
         let projects = data.projects.into_iter().map(|p| (p.id, p)).collect();
         let branches = data.branches.into_iter().map(|b| (b.id, b)).collect();
+        let collapsed_folders = data.collapsed_folders.into_iter().collect();
 
         (
             Self {
                 projects,
                 branches,
+                collapsed_folders,
                 store_path: path.to_path_buf(),
             },
             None,
@@ -361,10 +549,12 @@ impl ProjectStore {
 
         let projects = data.projects.into_iter().map(|p| (p.id, p)).collect();
         let branches = data.branches.into_iter().map(|b| (b.id, b)).collect();
+        let collapsed_folders = data.collapsed_folders.into_iter().collect();
 
         Ok(Self {
             projects,
             branches,
+            collapsed_folders,
             store_path: path.to_path_buf(),
         })
     }
@@ -399,9 +589,23 @@ impl ProjectStore {
             }
         }
 
+        // Drop collapse entries for folders that no longer hold any project,
+        // so the file does not accumulate stale paths
+        let mut collapsed_folders: Vec<String> = self
+            .collapsed_folders
+            .iter()
+            .filter(|key| {
+                let segments: Vec<String> = key.split('/').map(|s| s.to_string()).collect();
+                self.projects.values().any(|p| p.is_under_folder(&segments))
+            })
+            .cloned()
+            .collect();
+        collapsed_folders.sort();
+
         let data = StoreData {
             projects: self.projects.values().cloned().collect(),
             branches: self.branches.values().cloned().collect(),
+            collapsed_folders,
         };
 
         let content =
@@ -689,6 +893,253 @@ mod tests {
         assert_eq!(store.project_count(), 0);
         assert!(warning.is_some());
         assert!(warning.unwrap().contains("corrupted"));
+    }
+
+    // ====================================================================
+    // Folder organization tests
+    // ====================================================================
+
+    fn folder(segments: &[&str]) -> Vec<String> {
+        segments.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Add a project filed under `segments`, returning its id
+    fn add_filed_project(store: &mut ProjectStore, name: &str, segments: &[&str]) -> ProjectId {
+        let mut project = Project::new(
+            name.to_string(),
+            PathBuf::from(format!("/tmp/{}", name)),
+            "main".to_string(),
+        );
+        project.folder = folder(segments);
+        let id = project.id;
+        store.add_project(project);
+        id
+    }
+
+    #[test]
+    fn test_set_project_folder() {
+        let mut store = ProjectStore::new();
+        let id = add_filed_project(&mut store, "api", &[]);
+
+        store
+            .set_project_folder(id, folder(&["Acme", "Platform"]))
+            .unwrap();
+
+        assert_eq!(
+            store.get_project(id).unwrap().folder,
+            folder(&["Acme", "Platform"])
+        );
+    }
+
+    #[test]
+    fn test_set_project_folder_rejects_excess_depth() {
+        let mut store = ProjectStore::new();
+        let id = add_filed_project(&mut store, "api", &[]);
+
+        let result = store.set_project_folder(id, folder(&["a", "b", "c", "d"]));
+
+        assert!(result.is_err());
+        assert!(store.get_project(id).unwrap().folder.is_empty());
+    }
+
+    #[test]
+    fn test_rename_folder_rewrites_subtree() {
+        let mut store = ProjectStore::new();
+        let shallow = add_filed_project(&mut store, "api", &["Acme"]);
+        let deep = add_filed_project(&mut store, "web", &["Acme", "Platform"]);
+        let other = add_filed_project(&mut store, "blog", &["Personal"]);
+
+        let renamed = store.rename_folder(&folder(&["Acme"]), "AcmeCorp").unwrap();
+
+        assert_eq!(renamed, 2);
+        assert_eq!(
+            store.get_project(shallow).unwrap().folder,
+            folder(&["AcmeCorp"])
+        );
+        assert_eq!(
+            store.get_project(deep).unwrap().folder,
+            folder(&["AcmeCorp", "Platform"])
+        );
+        assert_eq!(
+            store.get_project(other).unwrap().folder,
+            folder(&["Personal"])
+        );
+    }
+
+    #[test]
+    fn test_rename_folder_rejects_slash_and_empty() {
+        let mut store = ProjectStore::new();
+        add_filed_project(&mut store, "api", &["Acme"]);
+
+        assert!(store.rename_folder(&folder(&["Acme"]), "A/B").is_err());
+        assert!(store.rename_folder(&folder(&["Acme"]), "   ").is_err());
+    }
+
+    #[test]
+    fn test_rename_folder_carries_collapse_state() {
+        let mut store = ProjectStore::new();
+        add_filed_project(&mut store, "web", &["Acme", "Platform"]);
+        store.set_folder_collapsed(&folder(&["Acme", "Platform"]), true);
+
+        store.rename_folder(&folder(&["Acme"]), "AcmeCorp").unwrap();
+
+        assert!(store.is_folder_collapsed(&folder(&["AcmeCorp", "Platform"])));
+        assert!(!store.is_folder_collapsed(&folder(&["Acme", "Platform"])));
+    }
+
+    #[test]
+    fn test_move_folder_reparents_subtree() {
+        let mut store = ProjectStore::new();
+        let id = add_filed_project(&mut store, "web", &["Platform"]);
+
+        let moved = store
+            .move_folder(&folder(&["Platform"]), &folder(&["Acme"]))
+            .unwrap();
+
+        assert_eq!(moved, 1);
+        assert_eq!(
+            store.get_project(id).unwrap().folder,
+            folder(&["Acme", "Platform"])
+        );
+    }
+
+    #[test]
+    fn test_move_folder_to_root() {
+        let mut store = ProjectStore::new();
+        let id = add_filed_project(&mut store, "web", &["Acme", "Platform"]);
+
+        store
+            .move_folder(&folder(&["Acme", "Platform"]), &[])
+            .unwrap();
+
+        assert_eq!(store.get_project(id).unwrap().folder, folder(&["Platform"]));
+    }
+
+    #[test]
+    fn test_move_folder_rejects_move_into_itself() {
+        let mut store = ProjectStore::new();
+        add_filed_project(&mut store, "web", &["Acme", "Platform"]);
+
+        let result = store.move_folder(&folder(&["Acme"]), &folder(&["Acme", "Platform"]));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_move_folder_rejects_when_contents_would_exceed_depth() {
+        let mut store = ProjectStore::new();
+        // "Group" holds a two-level subtree; nesting it one deeper hits the limit
+        add_filed_project(&mut store, "web", &["Group", "Mid", "Leaf"]);
+        add_filed_project(&mut store, "api", &["Other"]);
+
+        let result = store.move_folder(&folder(&["Group"]), &folder(&["Other"]));
+
+        assert!(result.is_err());
+        assert_eq!(
+            store.projects().find(|p| p.name == "web").unwrap().folder,
+            folder(&["Group", "Mid", "Leaf"])
+        );
+    }
+
+    #[test]
+    fn test_remove_folder_lifts_contents_without_deleting() {
+        let mut store = ProjectStore::new();
+        let direct = add_filed_project(&mut store, "api", &["Acme"]);
+        let nested = add_filed_project(&mut store, "web", &["Acme", "Platform"]);
+
+        let moved = store.remove_folder(&folder(&["Acme"]));
+
+        assert_eq!(moved, 2);
+        assert_eq!(store.project_count(), 2);
+        assert!(store.get_project(direct).unwrap().folder.is_empty());
+        assert_eq!(
+            store.get_project(nested).unwrap().folder,
+            folder(&["Platform"])
+        );
+    }
+
+    #[test]
+    fn test_remove_nested_folder_keeps_parent() {
+        let mut store = ProjectStore::new();
+        let id = add_filed_project(&mut store, "web", &["Acme", "Platform"]);
+
+        store.remove_folder(&folder(&["Acme", "Platform"]));
+
+        assert_eq!(store.get_project(id).unwrap().folder, folder(&["Acme"]));
+    }
+
+    #[test]
+    fn test_toggle_folder_collapsed() {
+        let mut store = ProjectStore::new();
+        let path = folder(&["Acme"]);
+
+        assert!(!store.is_folder_collapsed(&path));
+        assert!(store.toggle_folder_collapsed(&path));
+        assert!(store.is_folder_collapsed(&path));
+        assert!(!store.toggle_folder_collapsed(&path));
+        assert!(!store.is_folder_collapsed(&path));
+    }
+
+    #[test]
+    fn test_folders_and_collapse_state_survive_round_trip() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("projects.json");
+
+        let mut store = ProjectStore::with_path(path.clone());
+        let id = add_filed_project(&mut store, "web", &["Acme", "Platform"]);
+        store.set_folder_collapsed(&folder(&["Acme"]), true);
+        store.save().unwrap();
+
+        let loaded = ProjectStore::load_from(&path).unwrap();
+
+        assert_eq!(
+            loaded.get_project(id).unwrap().folder,
+            folder(&["Acme", "Platform"])
+        );
+        assert!(loaded.is_folder_collapsed(&folder(&["Acme"])));
+    }
+
+    #[test]
+    fn test_save_prunes_collapse_state_for_vanished_folders() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("projects.json");
+
+        let mut store = ProjectStore::with_path(path.clone());
+        add_filed_project(&mut store, "web", &["Acme"]);
+        store.set_folder_collapsed(&folder(&["Acme"]), true);
+        store.set_folder_collapsed(&folder(&["Ghost"]), true);
+        store.save().unwrap();
+
+        let loaded = ProjectStore::load_from(&path).unwrap();
+
+        assert!(loaded.is_folder_collapsed(&folder(&["Acme"])));
+        assert!(!loaded.is_folder_collapsed(&folder(&["Ghost"])));
+    }
+
+    #[test]
+    fn test_legacy_store_without_folders_loads() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("projects.json");
+        // A pre-folders projects.json has neither `folder` nor `collapsed_folders`
+        let legacy = r#"{
+            "projects": [{
+                "id": "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+                "name": "legacy",
+                "repo_path": "/tmp/legacy",
+                "remote_url": null,
+                "default_branch": "main",
+                "created_at": "2024-01-01T00:00:00Z",
+                "last_activity": "2024-01-01T00:00:00Z"
+            }],
+            "branches": []
+        }"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let store = ProjectStore::load_from(&path).unwrap();
+
+        assert_eq!(store.project_count(), 1);
+        assert!(store.projects().next().unwrap().folder.is_empty());
+        assert!(store.collapsed_folders().is_empty());
     }
 
     #[test]

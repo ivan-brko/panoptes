@@ -9,7 +9,6 @@ Quick answers to common questions. For detailed information, see the linked docu
 - [Sessions](#sessions)
 - [Multiple Claude Accounts](#multiple-claude-accounts)
 - [Configuration](#configuration)
-- [Focus Timer](#focus-timer)
 - [Permissions Sync](#permissions-sync)
 - [Quick Reference](#quick-reference)
 
@@ -214,29 +213,6 @@ Yes. Press `q` to quit, then restart Panoptes.
 
 ---
 
-## Focus Timer
-
-### How do I start a focus timer?
-
-Press `t` from any view, enter duration in minutes (or press Enter for default), and the timer starts.
-
-### How do I change the default timer duration?
-
-Add to `~/.panoptes/config.toml`:
-```toml
-focus_timer_minutes = 50  # Default is 25
-```
-
-### How do I stop a running timer?
-
-Press `Ctrl+t` from any view.
-
-### How do I view my focus history?
-
-Press `T` (Shift+t) to open Focus Statistics view.
-
----
-
 ## Permissions Sync
 
 ### What is permissions sync?
@@ -290,8 +266,6 @@ The prompts are optional—you can decline each time. There's no global setting 
 | `c` | Claude configs |
 | `x` | Codex configs |
 | `l` | Log viewer |
-| `t` | Start focus timer |
-| `T` | Focus statistics |
 
 For the complete list, see [Keyboard Reference](KEYBOARD_REFERENCE.md).
 

@@ -8,7 +8,6 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{AppState, BranchRef, BranchRefType, InputMode, WorktreeCreationType};
 use crate::config::Config;
-use crate::focus_timing::FocusTimer;
 use crate::git::GitOps;
 use crate::project::{Project, ProjectId, ProjectStore};
 use crate::session::SessionManager;
@@ -17,8 +16,8 @@ use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
+use crate::tui::views::format_attention_hint;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
 use crate::tui::widgets::selection::{
     selection_prefix, selection_style, selection_style_with_accent,
 };
@@ -33,7 +32,6 @@ pub fn render_project_detail(
     project_store: &ProjectStore,
     sessions: &SessionManager,
     config: &Config,
-    focus_timer: Option<&FocusTimer>,
     header_notifications: &HeaderNotificationManager,
 ) {
     let idle_threshold = config.idle_threshold_secs;
@@ -63,7 +61,6 @@ pub fn render_project_detail(
 
     let header = Header::new(breadcrumb)
         .with_suffix(suffix)
-        .with_timer(focus_timer)
         .with_notifications(Some(header_notifications))
         .with_attention_count(attention_count);
 
@@ -272,11 +269,9 @@ pub fn render_project_detail(
             "↑/↓: navigate | Enter: select | Esc: cancel".to_string()
         }
         _ => {
-            let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
-            let base = format!(
-                "n: new worktree | b: base | c/x: config | r: rename | d: delete | k: shortcuts | {} | q: quit",
-                timer_hint
-            );
+            let base =
+                "n: new worktree | b: base | c/x: config | r: rename | d: delete | k: shortcuts | q: quit"
+                    .to_string();
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {

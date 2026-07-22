@@ -9,7 +9,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use uuid::Uuid;
 
 use crate::app::{
-    App, InputMode, MAX_PROJECT_NAME_LEN, MAX_PROJECT_PATH_LEN, MAX_SESSION_NAME_LEN,
+    App, FolderMoveTarget, InputMode, MAX_PROJECT_NAME_LEN, MAX_PROJECT_PATH_LEN,
+    MAX_SESSION_NAME_LEN,
 };
 use crate::session::SessionManager;
 
@@ -549,6 +550,250 @@ pub fn handle_renaming_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+// ========================================================================
+// Folder Organization Input Handlers
+// ========================================================================
+
+/// Maximum length for a folder path input
+const MAX_FOLDER_PATH_LEN: usize = 150;
+
+/// Handle key while typing the destination folder for a project or folder
+pub fn handle_moving_to_folder_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Esc => {
+            if app.state.show_folder_completions {
+                // First Esc hides completions
+                clear_folder_completions(app);
+            } else {
+                cancel_folder_input(app);
+            }
+        }
+        KeyCode::Tab => {
+            if app.state.show_folder_completions && !app.state.folder_completions.is_empty() {
+                apply_folder_completion(app);
+            } else {
+                update_folder_completions(app);
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            cycle_folder_completion(app, false);
+        }
+        KeyCode::Down => {
+            cycle_folder_completion(app, true);
+        }
+        KeyCode::Enter => {
+            apply_folder_move(app);
+        }
+        KeyCode::Backspace => {
+            app.state.folder_input.pop();
+            app.state.folder_error = None;
+            update_folder_completions(app);
+        }
+        KeyCode::Char(c) => {
+            if app.state.folder_input.len() < MAX_FOLDER_PATH_LEN {
+                app.state.folder_input.push(c);
+                app.state.folder_error = None;
+                update_folder_completions(app);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Handle key while renaming a folder
+pub fn handle_renaming_folder_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Esc => {
+            cancel_folder_input(app);
+        }
+        KeyCode::Enter => {
+            let Some(path) = app.state.renaming_folder.clone() else {
+                cancel_folder_input(app);
+                return Ok(());
+            };
+            let new_name = app.state.folder_input.trim().to_string();
+
+            match app.project_store.rename_folder(&path, &new_name) {
+                Ok(count) => {
+                    save_project_store(app);
+                    // Follow the folder to its new position in the list
+                    let mut renamed = path.clone();
+                    if let Some(last) = renamed.last_mut() {
+                        *last = new_name;
+                    }
+                    if let Some(index) =
+                        crate::project::row_index_of_folder(&app.project_store, &renamed)
+                    {
+                        app.state.selected_project_index = index;
+                    }
+                    app.state.header_notifications.push(format!(
+                        "Renamed folder ({})",
+                        crate::project::project_count_label(count)
+                    ));
+                    cancel_folder_input(app);
+                }
+                Err(e) => {
+                    app.state.folder_error = Some(e.to_string());
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            app.state.folder_input.pop();
+            app.state.folder_error = None;
+        }
+        KeyCode::Char(c) => {
+            if app.state.folder_input.len() < MAX_FOLDER_PATH_LEN {
+                app.state.folder_input.push(c);
+                app.state.folder_error = None;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Apply the typed destination to the pending move target
+fn apply_folder_move(app: &mut App) {
+    let Some(target) = app.state.moving_to_folder.clone() else {
+        cancel_folder_input(app);
+        return;
+    };
+
+    let destination = match crate::project::parse_folder_path(&app.state.folder_input) {
+        Ok(segments) => segments,
+        Err(e) => {
+            app.state.folder_error = Some(e.to_string());
+            return;
+        }
+    };
+
+    let outcome = match &target {
+        FolderMoveTarget::Project(id) => app
+            .project_store
+            .set_project_folder(*id, destination.clone())
+            .map(|_| 1),
+        FolderMoveTarget::Folder(path) => app.project_store.move_folder(path, &destination),
+    };
+
+    match outcome {
+        Ok(count) => {
+            save_project_store(app);
+
+            // Keep the moved row selected, expanding collapsed ancestors so it
+            // stays visible
+            for depth in 1..=destination.len() {
+                app.project_store
+                    .set_folder_collapsed(&destination[..depth], false);
+            }
+            let index = match &target {
+                FolderMoveTarget::Project(id) => {
+                    crate::project::row_index_of_project(&app.project_store, *id)
+                }
+                FolderMoveTarget::Folder(path) => {
+                    let mut moved = destination.clone();
+                    if let Some(name) = path.last() {
+                        moved.push(name.clone());
+                    }
+                    crate::project::row_index_of_folder(&app.project_store, &moved)
+                }
+            };
+            if let Some(index) = index {
+                app.state.selected_project_index = index;
+            }
+
+            let where_to = if destination.is_empty() {
+                "the root level".to_string()
+            } else {
+                format!("'{}'", crate::project::folder_path_key(&destination))
+            };
+            app.state.header_notifications.push(format!(
+                "Moved {} to {}",
+                crate::project::project_count_label(count),
+                where_to
+            ));
+            cancel_folder_input(app);
+        }
+        Err(e) => {
+            app.state.folder_error = Some(e.to_string());
+        }
+    }
+}
+
+/// Persist the project store, surfacing failures to the user
+fn save_project_store(app: &mut App) {
+    if let Err(e) = app.project_store.save() {
+        tracing::error!("Failed to save project store: {}", e);
+        app.state.error_message = Some(format!("Failed to save projects: {}", e));
+    }
+}
+
+/// Clear all folder dialog state and return to normal mode
+fn cancel_folder_input(app: &mut App) {
+    app.state.input_mode = InputMode::Normal;
+    app.state.folder_input.clear();
+    app.state.moving_to_folder = None;
+    app.state.renaming_folder = None;
+    app.state.folder_error = None;
+    clear_folder_completions(app);
+}
+
+/// Refresh folder completions for the current input
+fn update_folder_completions(app: &mut App) {
+    let query = app.state.folder_input.to_lowercase();
+    app.state.folder_completions = crate::project::all_folder_paths(&app.project_store)
+        .iter()
+        .map(|path| crate::project::folder_path_key(path))
+        .filter(|key| key.to_lowercase().starts_with(&query))
+        .collect();
+    app.state.folder_completion_index = 0;
+    app.state.show_folder_completions = !app.state.folder_completions.is_empty();
+}
+
+/// Clear folder completion state
+fn clear_folder_completions(app: &mut App) {
+    app.state.folder_completions.clear();
+    app.state.folder_completion_index = 0;
+    app.state.show_folder_completions = false;
+}
+
+/// Move the folder completion selection forward or backward
+fn cycle_folder_completion(app: &mut App, forward: bool) {
+    if !app.state.show_folder_completions {
+        return;
+    }
+    let count = app.state.folder_completions.len();
+    if count == 0 {
+        app.state.folder_completion_index = 0;
+        return;
+    }
+    // Clamp current index first to handle stale indices
+    let current = app.state.folder_completion_index.min(count - 1);
+    app.state.folder_completion_index = if forward {
+        (current + 1) % count
+    } else {
+        current.checked_sub(1).unwrap_or(count - 1)
+    };
+}
+
+/// Apply the selected folder completion to the input field
+fn apply_folder_completion(app: &mut App) {
+    if let Some(path) = app
+        .state
+        .folder_completions
+        .get(app.state.folder_completion_index)
+    {
+        app.state.folder_input = path.clone();
+        update_folder_completions(app);
+    }
 }
 
 // ========================================================================

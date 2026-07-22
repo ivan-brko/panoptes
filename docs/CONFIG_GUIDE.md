@@ -54,12 +54,6 @@ crashed = true        # a session's process died unexpectedly
 # Milliseconds to hold Escape for exiting session mode (deprecated)
 esc_hold_threshold_ms = 400
 
-# Default focus timer duration in minutes
-focus_timer_minutes = 25
-
-# Days to retain focus session history
-focus_stats_retention_days = 30
-
 # Custom shortcuts for spawning shell sessions with predefined commands
 [[custom_shortcuts]]
 key = "v"
@@ -126,7 +120,7 @@ Each 1000 lines uses approximately 10KB of memory per session.
 
 When a session has been in the "Waiting" state (waiting for your input) for longer than this threshold, its attention badge changes from green to yellow.
 
-**When to change:** Decrease if you want to be notified sooner about idle sessions; increase if you prefer longer focus periods.
+**When to change:** Decrease if you want to be notified sooner about idle sessions; increase if you prefer longer uninterrupted stretches.
 
 ---
 
@@ -291,32 +285,6 @@ reminder back.
 
 ---
 
-### focus_timer_minutes
-
-| Property | Value |
-|----------|-------|
-| Default | `25` |
-| Type | Integer (minutes) |
-
-The default duration for focus timer sessions when you press Enter without typing a number.
-
-**When to change:** Adjust to match your preferred focus session length. Common values: 25 (Pomodoro), 50, 90.
-
----
-
-### focus_stats_retention_days
-
-| Property | Value |
-|----------|-------|
-| Default | `30` |
-| Type | Integer (days) |
-
-How long to keep focus session history. Sessions older than this are automatically pruned.
-
-**When to change:** Increase to keep longer history; decrease to save disk space.
-
----
-
 ### custom_shortcuts
 
 | Property | Value |
@@ -371,11 +339,44 @@ Panoptes stores data in the `~/.panoptes/` directory:
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration file |
 | `~/.panoptes/projects.json` | Project and branch data |
-| `~/.panoptes/focus_sessions.json` | Focus timer history |
 | `~/.panoptes/worktrees/` | Git worktrees created by Panoptes |
 | `~/.panoptes/codex_configs.json` | Codex account configurations |
 | `~/.panoptes/hooks/` | Hook scripts for agent integration |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
+
+## Project Folders
+
+Projects in the overview can be grouped into folders, nested up to 3 levels deep.
+Folders are not separate records — each project stores the folder path it belongs
+to, and a folder exists as long as at least one project references it.
+
+Normally you manage this from the UI (`m` to move, `r` to rename, `d` to remove a
+folder — see the [Keyboard Reference](KEYBOARD_REFERENCE.md)), but the underlying
+fields in `~/.panoptes/projects.json` are editable by hand:
+
+```json
+{
+  "projects": [
+    {
+      "name": "auth-service",
+      "folder": ["Acme", "Platform"]
+    },
+    {
+      "name": "personal-blog",
+      "folder": []
+    }
+  ],
+  "collapsed_folders": ["Acme/Platform"]
+}
+```
+
+| Field | Purpose |
+|-------|---------|
+| `folder` | Folder path segments for a project. `[]` (or omitted) puts it at the root level. Max 3 segments. |
+| `collapsed_folders` | Display paths of folders currently collapsed in the overview. Entries for folders that no longer hold projects are pruned on save. |
+
+Files written before this feature existed load unchanged: a missing `folder` is
+treated as the root level.
 
 ## Creating Configuration
 
@@ -388,7 +389,6 @@ hook_port = 9999
 max_output_lines = 10000
 idle_threshold_secs = 300
 notification_method = "bell"
-focus_timer_minutes = 25
 EOF
 ```
 

@@ -148,6 +148,8 @@ let _ = file.flush();
 
 #### 1.4 Focus Session Persistence Feedback (P1 - High)
 
+**Obsolete:** the focus timer feature was removed; this item no longer applies.
+
 **Problem:** When saving focus sessions fails, error is logged but user sees no feedback. Focus data silently lost.
 
 **File:** `src/app/mod.rs:620`

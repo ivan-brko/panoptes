@@ -8,15 +8,14 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::AppState;
 use crate::config::Config;
-use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
+use crate::tui::views::format_attention_hint;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
 use crate::tui::widgets::selection::{selection_prefix, selection_style};
 
 /// Render the activity timeline view showing all sessions sorted by activity
@@ -28,7 +27,6 @@ pub fn render_timeline(
     sessions: &SessionManager,
     project_store: &ProjectStore,
     config: &Config,
-    focus_timer: Option<&FocusTimer>,
     header_notifications: &HeaderNotificationManager,
 ) {
     let idle_threshold = config.idle_threshold_secs;
@@ -53,7 +51,6 @@ pub fn render_timeline(
 
     let header = Header::new(breadcrumb)
         .with_suffix(suffix)
-        .with_timer(focus_timer)
         .with_notifications(Some(header_notifications))
         .with_attention_count(attention_count);
 
@@ -159,8 +156,7 @@ pub fn render_timeline(
     }
 
     // Footer
-    let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
-    let base_help = format!("{} | ↑/↓: navigate | Enter: open | Esc/q: back", timer_hint);
+    let base_help = "↑/↓: navigate | Enter: open | Esc/q: back".to_string();
     let help_text = if let Some(hint) = format_attention_hint(sessions, config) {
         format!("{} | {}", hint, base_help)
     } else {

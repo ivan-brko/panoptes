@@ -297,7 +297,7 @@ tracing::debug!("Left alternate screen successfully");
 
 ### Ticket 7: Focus Session Persistence Feedback
 
-- [x] **Completed**
+- [x] **Completed** (later obsoleted: the focus timer feature was removed)
 
 **Priority:** P1 - High
 **Category:** Critical Error Handling

@@ -111,13 +111,6 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
                 Ok(())
             }
         }
-        InputMode::StartingFocusTimer => super::dialogs::handle_starting_focus_timer_key(app, key),
-        InputMode::ConfirmingFocusSessionDelete => {
-            super::dialogs::handle_confirming_focus_session_delete_key(app, key)
-        }
-        InputMode::ViewingFocusSessionDetail => {
-            super::dialogs::handle_viewing_focus_session_detail_key(app, key)
-        }
         InputMode::AddingClaudeConfigName => {
             super::text_input::handle_adding_claude_config_name_key(app, key)
         }
@@ -172,6 +165,11 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::SelectingCodexConfig => {
             super::text_input::handle_selecting_codex_config_key(app, key)
         }
+        InputMode::MovingToFolder => super::text_input::handle_moving_to_folder_key(app, key),
+        InputMode::RenamingFolder => super::text_input::handle_renaming_folder_key(app, key),
+        InputMode::ConfirmingFolderRemove => {
+            super::dialogs::handle_confirming_folder_remove_key(app, key)
+        }
     }
 }
 
@@ -206,6 +204,14 @@ fn validate_mode_view_consistency(state: &mut AppState) {
         (InputMode::ConfirmingSessionDelete, View::SessionView) => true,
         (InputMode::ConfirmingSessionDelete, View::BranchDetail(_, _)) => true,
         (InputMode::ConfirmingSessionDelete, _) => false,
+
+        // Folder organization only happens in the projects overview
+        (
+            InputMode::MovingToFolder
+            | InputMode::RenamingFolder
+            | InputMode::ConfirmingFolderRemove,
+            view,
+        ) => *view == View::ProjectsOverview,
 
         // Branch delete confirmation only valid in ProjectDetail or BranchDetail
         (InputMode::ConfirmingBranchDelete, View::ProjectDetail(_)) => true,

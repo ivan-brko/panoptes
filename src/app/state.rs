@@ -6,12 +6,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::claude_config::{ClaudeConfig, ClaudeConfigId};
-use crate::focus_timing::stats::FocusSession;
-use crate::focus_timing::tracker::FocusTracker;
-use crate::focus_timing::FocusTimer;
 use crate::project::{BranchId, ProjectId};
 use crate::session::{SessionId, SessionManager};
-use crate::tui::{HeaderNotificationManager, NotificationManager};
+use crate::tui::HeaderNotificationManager;
 use crate::wizards::worktree::{BranchRef, WorktreeCreationType};
 
 /// State for Claude settings copy dialog (copies ALL project settings)
@@ -58,6 +55,15 @@ pub struct ClaudeSettingsMigrateState {
 
 use super::input_mode::InputMode;
 use super::view::View;
+
+/// What a pending folder move applies to
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderMoveTarget {
+    /// A single project is being filed
+    Project(ProjectId),
+    /// A folder and everything under it is being re-parented
+    Folder(Vec<String>),
+}
 
 /// Focus state for the homepage (projects overview)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -135,7 +141,8 @@ pub struct AppState {
     pub view: View,
     /// Current input mode
     pub input_mode: InputMode,
-    /// Selected index in ProjectsOverview
+    /// Selected index in ProjectsOverview, counted over *visible tree rows*
+    /// (folder headings included), not over projects
     pub selected_project_index: usize,
     /// Selected index in ProjectDetail (branch selection)
     pub selected_branch_index: usize,
@@ -195,6 +202,24 @@ pub struct AppState {
     pub delete_worktree_on_disk: bool,
     /// Project being renamed
     pub renaming_project: Option<ProjectId>,
+
+    // --- Project folder organization ---
+    /// Buffer for folder path input (move and rename dialogs)
+    pub folder_input: String,
+    /// Existing folder paths matching the current input, for autocomplete
+    pub folder_completions: Vec<String>,
+    /// Selected index in the folder completions list
+    pub folder_completion_index: usize,
+    /// Whether the folder completions list is showing
+    pub show_folder_completions: bool,
+    /// What the pending folder move applies to
+    pub moving_to_folder: Option<FolderMoveTarget>,
+    /// Folder being renamed
+    pub renaming_folder: Option<Vec<String>>,
+    /// Folder pending removal (for confirmation dialog)
+    pub pending_remove_folder: Option<Vec<String>>,
+    /// Validation error for the folder dialogs (displayed inline)
+    pub folder_error: Option<String>,
     /// Whether the application should quit
     pub should_quit: bool,
     /// Whether the UI needs to be re-rendered
@@ -222,29 +247,8 @@ pub struct AppState {
     /// Focus state for homepage (projects vs sessions list)
     pub homepage_focus: HomepageFocus,
 
-    // --- Focus timing state ---
-    /// Focus tracker for recording focus intervals
-    pub focus_tracker: FocusTracker,
-    /// Active focus timer (if any)
-    pub focus_timer: Option<FocusTimer>,
-    /// Notification manager for displaying alerts (overlay notifications)
-    pub notifications: NotificationManager,
     /// Header notification manager for transient header messages
     pub header_notifications: HeaderNotificationManager,
-    /// Whether terminal currently has focus
-    pub terminal_focused: bool,
-    /// Whether focus events are supported by terminal
-    pub focus_events_supported: bool,
-    /// Input buffer for timer duration entry
-    pub focus_timer_input: String,
-    /// Selected index in focus stats view
-    pub focus_stats_selected_index: usize,
-    /// Cached focus sessions for stats view
-    pub focus_sessions: Vec<FocusSession>,
-    /// Focus session pending deletion (for confirmation dialog)
-    pub pending_delete_focus_session: Option<uuid::Uuid>,
-    /// Focus session being viewed in detail dialog
-    pub viewing_focus_session: Option<FocusSession>,
 
     // --- Claude config state ---
     /// Selected index in Claude configs view
@@ -323,7 +327,6 @@ impl AppState {
             View::ActivityTimeline => self.selected_timeline_index,
             View::SessionView => 0,
             View::LogViewer => self.log_viewer_scroll,
-            View::FocusStats => self.focus_stats_selected_index,
             View::ClaudeConfigs => self.claude_configs_selected_index,
             View::CodexConfigs => self.codex_configs_selected_index,
         }
@@ -338,7 +341,6 @@ impl AppState {
             View::ActivityTimeline => self.selected_timeline_index = index,
             View::SessionView => {}
             View::LogViewer => self.log_viewer_scroll = index,
-            View::FocusStats => self.focus_stats_selected_index = index,
             View::ClaudeConfigs => self.claude_configs_selected_index = index,
             View::CodexConfigs => self.codex_configs_selected_index = index,
         }
@@ -390,30 +392,6 @@ impl AppState {
                 self.input_mode = InputMode::Normal;
             }
 
-            // Update focus context based on the parent view
-            match parent {
-                View::ProjectsOverview
-                | View::ActivityTimeline
-                | View::LogViewer
-                | View::FocusStats
-                | View::ClaudeConfigs
-                | View::CodexConfigs => {
-                    // Leaving project context - clear the context
-                    self.focus_tracker.set_context(None, None);
-                }
-                View::ProjectDetail(project_id) => {
-                    // Going back from BranchDetail to ProjectDetail - keep project, clear branch
-                    self.focus_tracker.set_context(Some(project_id), None);
-                }
-                View::BranchDetail(project_id, branch_id) => {
-                    // Going back to branch detail - set both
-                    self.focus_tracker
-                        .set_context(Some(project_id), Some(branch_id));
-                }
-                View::SessionView => {
-                    // Unlikely to navigate back TO session view, but handle it
-                }
-            }
             self.view = parent;
 
             // Reset input mode if it's not Normal (handles cases where user was in a text input mode)
@@ -430,17 +408,12 @@ impl AppState {
     pub fn navigate_to_project(&mut self, project_id: ProjectId) {
         self.view = View::ProjectDetail(project_id);
         self.selected_branch_index = 0;
-        // Update focus tracker context to attribute time to this project
-        self.focus_tracker.set_context(Some(project_id), None);
     }
 
     /// Navigate to a branch detail view
     pub fn navigate_to_branch(&mut self, project_id: ProjectId, branch_id: BranchId) {
         self.view = View::BranchDetail(project_id, branch_id);
         self.selected_session_index = 0;
-        // Update focus tracker context to attribute time to this project and branch
-        self.focus_tracker
-            .set_context(Some(project_id), Some(branch_id));
     }
 
     /// Navigate to session view (auto-activates session mode)

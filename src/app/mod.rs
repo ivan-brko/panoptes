@@ -11,7 +11,7 @@ mod view;
 // Re-exports from submodules
 pub use input_mode::InputMode;
 pub use state::{
-    AppState, ClaudeSettingsCopyState, ClaudeSettingsMigrateState, HomepageFocus,
+    AppState, ClaudeSettingsCopyState, ClaudeSettingsMigrateState, FolderMoveTarget, HomepageFocus,
     WorktreeWizardState,
 };
 pub use view::View;
@@ -25,14 +25,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{self, Event, KeyEvent, MouseEvent, MouseEventKind};
 
 use crate::claude_config::ClaudeConfigStore;
 use crate::codex_config::CodexConfigStore;
 use crate::config::Config;
-use crate::focus_timing::stats::{FocusContextBreakdown, FocusSession};
-use crate::focus_timing::store::FocusStore;
-use crate::focus_timing::FocusTimer;
 use crate::hooks::{
     self, HookEventReceiver, HookEventSender, ServerHandle, ServerStatus, DEFAULT_CHANNEL_BUFFER,
 };
@@ -47,12 +44,11 @@ use crate::tui::views::{
     render_codex_config_delete_dialog, render_codex_config_name_input_dialog,
     render_codex_config_path_input_dialog, render_codex_config_selector, render_codex_configs,
     render_config_delete_dialog, render_config_name_input_dialog, render_config_path_input_dialog,
-    render_config_selector, render_custom_shortcut_dialogs, render_focus_session_delete_dialog,
-    render_focus_session_detail_dialog, render_focus_stats, render_help_overlay,
-    render_loading_indicator, render_log_viewer, render_notifications, render_project_detail,
-    render_projects_overview, render_session_view, render_timeline, render_timer_input_dialog,
+    render_config_selector, render_custom_shortcut_dialogs, render_help_overlay,
+    render_loading_indicator, render_log_viewer, render_project_detail, render_projects_overview,
+    render_session_view, render_timeline,
 };
-use crate::tui::{NotificationType, Tui};
+use crate::tui::Tui;
 use crate::wizards::worktree::{
     filter_branch_refs, update_worktree_filtered_branches, worktree_select_first_selectable,
 };
@@ -332,31 +328,10 @@ impl App {
                             self.state.needs_render = true;
                         }
                     }
-                    Event::FocusGained => {
-                        self.state.terminal_focused = true;
-                        self.state.focus_events_supported = true;
-                        self.state.focus_tracker.handle_focus_gained();
-                        // Timer runs on wall-clock time, no pause/resume needed
-                        self.state.needs_render = true;
-                    }
-                    Event::FocusLost => {
-                        self.state.terminal_focused = false;
-                        self.state.focus_events_supported = true;
-                        self.state.focus_tracker.handle_focus_lost();
-                        // Timer runs on wall-clock time, no pause/resume needed
-                        self.state.needs_render = true;
-                    }
+                    // Focus reporting is not enabled, so these do not arrive;
+                    // the arms exist only to keep the match exhaustive
+                    Event::FocusGained | Event::FocusLost => {}
                 }
-            }
-
-            // Force render when focus timer is running to update countdown display
-            if self
-                .state
-                .focus_timer
-                .as_ref()
-                .is_some_and(|t| t.is_running())
-            {
-                self.state.needs_render = true;
             }
 
             // Process debounced resize: wait 50ms after last resize event before actually resizing
@@ -541,33 +516,7 @@ impl App {
                 }
             }
 
-            // Check focus timer completion
-            let timer_complete = self
-                .state
-                .focus_timer
-                .as_ref()
-                .map(|t| (t.is_complete(), t.target_duration));
-
-            if let Some((true, target)) = timer_complete {
-                // Query focus tracker for the focused time during this timer window
-                let focused = self.state.focus_tracker.focused_time_in_last(target);
-                // Complete and save the timer
-                self.complete_focus_timer(focused);
-                // Show notification
-                self.state.notifications.push(
-                    NotificationType::TimerComplete { focused, target },
-                    Some(Duration::from_secs(30)),
-                );
-                // Terminal bell
-                if self.config.notification_method == "bell" {
-                    print!("\x07");
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
-                }
-                self.state.needs_render = true;
-            }
-
             // Tick notifications (remove expired)
-            self.state.notifications.tick();
             self.state.header_notifications.tick();
 
             // Check if we should quit
@@ -1017,190 +966,9 @@ impl App {
             View::SessionView => normal::session_view::handle_session_view_normal_key(self, key),
             View::ActivityTimeline => normal::timeline::handle_timeline_key(self, key),
             View::LogViewer => normal::log_viewer::handle_log_viewer_key(self, key),
-            View::FocusStats => normal::focus_stats::handle_focus_stats_key(self, key),
             View::ClaudeConfigs => normal::claude_configs::handle_claude_configs_key(self, key),
             View::CodexConfigs => normal::codex_configs::handle_codex_configs_key(self, key),
         }
-    }
-
-    /// Handle common focus timer shortcuts. Returns true if the key was handled.
-    pub(crate) fn handle_focus_timer_shortcut(&mut self, key: KeyEvent) -> bool {
-        // Ctrl+t: stop timer (if running)
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == KeyCode::Char('t')
-            && self.state.focus_timer.is_some()
-        {
-            self.stop_focus_timer();
-            return true;
-        }
-
-        match key.code {
-            KeyCode::Char('t') => {
-                self.start_focus_timer_dialog();
-                true
-            }
-            KeyCode::Char('T') => {
-                self.load_focus_sessions();
-                self.state.view = View::FocusStats;
-                self.state.focus_stats_selected_index = 0;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Start the focus timer dialog
-    fn start_focus_timer_dialog(&mut self) {
-        self.state.input_mode = InputMode::StartingFocusTimer;
-        self.state.focus_timer_input.clear();
-    }
-
-    /// Start a focus timer with the given duration
-    pub(crate) fn start_focus_timer(&mut self, minutes: u64) {
-        let mut timer = FocusTimer::new(minutes);
-
-        // Set context based on current view
-        if let Some(project_id) = self.state.view.project_id() {
-            timer = timer.with_project(project_id);
-        }
-        if let Some(branch_id) = self.state.view.branch_id() {
-            timer = timer.with_branch(branch_id);
-        }
-
-        // Set focus tracker context
-        self.state
-            .focus_tracker
-            .set_context(self.state.view.project_id(), self.state.view.branch_id());
-
-        timer.start();
-        self.state.focus_timer = Some(timer);
-
-        tracing::info!("Started focus timer for {} minutes", minutes);
-    }
-
-    /// Stop the active focus timer (user-initiated)
-    fn stop_focus_timer(&mut self) {
-        if let Some(mut timer) = self.state.focus_timer.take() {
-            let target = timer.target_duration;
-            if let Some(elapsed) = timer.stop() {
-                // Query focus tracker for the focused time during this timer window
-                let focused = self.state.focus_tracker.focused_time_in_last(elapsed);
-                // Get per-project/branch breakdown
-                let breakdown_map = self
-                    .state
-                    .focus_tracker
-                    .focused_time_breakdown_in_last(elapsed);
-                let breakdown: Vec<FocusContextBreakdown> = breakdown_map
-                    .into_iter()
-                    .map(
-                        |((project_id, branch_id), duration)| FocusContextBreakdown {
-                            project_id,
-                            branch_id,
-                            duration,
-                        },
-                    )
-                    .collect();
-                self.save_focus_session(
-                    target,
-                    focused,
-                    elapsed,
-                    timer.project_id,
-                    timer.branch_id,
-                    breakdown,
-                );
-            }
-        }
-    }
-
-    /// Complete the focus timer (called when timer reaches target)
-    /// Takes the focused_duration which was already calculated from focus_tracker
-    fn complete_focus_timer(&mut self, focused_duration: Duration) {
-        if let Some(mut timer) = self.state.focus_timer.take() {
-            let target = timer.target_duration;
-            if let Some(elapsed) = timer.stop() {
-                // Get per-project/branch breakdown
-                let breakdown_map = self
-                    .state
-                    .focus_tracker
-                    .focused_time_breakdown_in_last(elapsed);
-                let breakdown: Vec<FocusContextBreakdown> = breakdown_map
-                    .into_iter()
-                    .map(
-                        |((project_id, branch_id), duration)| FocusContextBreakdown {
-                            project_id,
-                            branch_id,
-                            duration,
-                        },
-                    )
-                    .collect();
-                self.save_focus_session(
-                    target,
-                    focused_duration,
-                    elapsed,
-                    timer.project_id,
-                    timer.branch_id,
-                    breakdown,
-                );
-            }
-        }
-    }
-
-    /// Load focus sessions from disk into state
-    pub(crate) fn load_focus_sessions(&mut self) {
-        let store = FocusStore::new();
-        match store.load() {
-            Ok(sessions) => {
-                self.state.focus_sessions = sessions;
-            }
-            Err(e) => {
-                tracing::error!("Failed to load focus sessions: {}", e);
-                self.state.focus_sessions = Vec::new();
-                // Notify user that history couldn't be loaded
-                self.state
-                    .header_notifications
-                    .push(format!("Could not load focus session history: {}", e));
-            }
-        }
-    }
-
-    /// Save a focus session result
-    fn save_focus_session(
-        &mut self,
-        target_duration: Duration,
-        focused_duration: Duration,
-        elapsed_duration: Duration,
-        project_id: Option<uuid::Uuid>,
-        branch_id: Option<uuid::Uuid>,
-        context_breakdown: Vec<FocusContextBreakdown>,
-    ) {
-        // Save the session
-        let session = FocusSession::from_timer_result(
-            target_duration,
-            focused_duration,
-            elapsed_duration,
-            project_id,
-            branch_id,
-            context_breakdown,
-        );
-
-        // Add to cached sessions
-        self.state.focus_sessions.push(session.clone());
-
-        // Persist to disk
-        let store = FocusStore::new();
-        if let Err(e) = store.add_session(session) {
-            tracing::error!("Failed to save focus session: {}", e);
-            // Notify user - session is kept in memory but not persisted
-            self.state.header_notifications.push(format!(
-                "Focus session not saved: {}. Data retained in memory.",
-                e
-            ));
-        }
-
-        tracing::info!(
-            "Focus session complete: {:.0}% focus",
-            (focused_duration.as_secs_f64() / target_duration.as_secs_f64()) * 100.0
-        );
     }
 
     /// Select the default base branch in the filtered list
@@ -1775,12 +1543,7 @@ impl App {
     /// already looking at it
     fn notify_session_needs_attention(&self, session_id: SessionId) {
         let is_active_session = self.state.active_session == Some(session_id);
-        // Notify if: (a) not the active session, or (b) active session but the
-        // terminal is unfocused (user Cmd+Tabbed away). Only check terminal
-        // focus when focus events are supported - otherwise "unfocused" cannot
-        // be told apart from "terminal doesn't report focus".
-        let terminal_unfocused = self.state.focus_events_supported && !self.state.terminal_focused;
-        if !is_active_session || terminal_unfocused {
+        if !is_active_session {
             let session_name = self
                 .sessions
                 .get(session_id)
@@ -1972,7 +1735,6 @@ impl App {
                         project_store,
                         sessions,
                         config,
-                        state.focus_timer.as_ref(),
                         &state.header_notifications,
                     );
                 }
@@ -1985,7 +1747,6 @@ impl App {
                         project_store,
                         sessions,
                         config,
-                        state.focus_timer.as_ref(),
                         &state.header_notifications,
                     );
                 }
@@ -1999,7 +1760,6 @@ impl App {
                         project_store,
                         sessions,
                         config,
-                        state.focus_timer.as_ref(),
                         &state.header_notifications,
                     );
                 }
@@ -2022,7 +1782,6 @@ impl App {
                         sessions,
                         project_store,
                         config,
-                        state.focus_timer.as_ref(),
                         &state.header_notifications,
                     );
                 }
@@ -2036,22 +1795,6 @@ impl App {
                         log_file_info,
                         state.log_viewer_scroll,
                         state.log_viewer_auto_scroll,
-                        state.focus_timer.as_ref(),
-                        &state.header_notifications,
-                        attention_count,
-                    );
-                }
-                View::FocusStats => {
-                    let attention_count =
-                        sessions.total_attention_count(config.idle_threshold_secs);
-                    render_focus_stats(
-                        frame,
-                        area,
-                        &state.focus_sessions,
-                        project_store,
-                        state.focus_stats_selected_index,
-                        state.focus_events_supported,
-                        state.focus_timer.as_ref(),
                         &state.header_notifications,
                         attention_count,
                     );
@@ -2064,7 +1807,6 @@ impl App {
                         area,
                         claude_config_store,
                         state.claude_configs_selected_index,
-                        state.focus_timer.as_ref(),
                         &state.header_notifications,
                         attention_count,
                     );
@@ -2077,38 +1819,9 @@ impl App {
                         area,
                         codex_config_store,
                         state.codex_configs_selected_index,
-                        state.focus_timer.as_ref(),
                         &state.header_notifications,
                         attention_count,
                     );
-                }
-            }
-
-            // Render timer input dialog if entering timer duration
-            if state.input_mode == InputMode::StartingFocusTimer {
-                render_timer_input_dialog(
-                    frame,
-                    area,
-                    &state.focus_timer_input,
-                    config.focus_timer_minutes,
-                );
-            }
-
-            // Render focus session delete confirmation dialog
-            if state.input_mode == InputMode::ConfirmingFocusSessionDelete {
-                if let Some(session_id) = state.pending_delete_focus_session {
-                    // Find the session in the list
-                    if let Some(session) = state.focus_sessions.iter().find(|s| s.id == session_id)
-                    {
-                        render_focus_session_delete_dialog(frame, area, session, project_store);
-                    }
-                }
-            }
-
-            // Render focus session detail dialog
-            if state.input_mode == InputMode::ViewingFocusSessionDetail {
-                if let Some(ref session) = state.viewing_focus_session {
-                    render_focus_session_detail_dialog(frame, area, session, project_store);
                 }
             }
 
@@ -2230,12 +1943,6 @@ impl App {
                     | InputMode::ConfirmingCustomShortcutDelete
             ) {
                 render_custom_shortcut_dialogs(frame, area, state, config);
-            }
-
-            // Render notifications overlay
-            let visible_notifications = state.notifications.visible();
-            if !visible_notifications.is_empty() {
-                render_notifications(frame, area, &visible_notifications);
             }
 
             // Render help overlay if active

@@ -20,8 +20,6 @@ pub enum View {
     ActivityTimeline,
     /// Log viewer showing application logs
     LogViewer,
-    /// Focus timing statistics view
-    FocusStats,
     /// Claude configurations management
     ClaudeConfigs,
     /// Codex configurations management
@@ -54,11 +52,6 @@ impl View {
         matches!(self, View::ActivityTimeline)
     }
 
-    /// Check if this view is the focus stats view
-    pub fn is_focus_stats(&self) -> bool {
-        matches!(self, View::FocusStats)
-    }
-
     /// Check if this view is the Claude configs view
     pub fn is_claude_configs(&self) -> bool {
         matches!(self, View::ClaudeConfigs)
@@ -78,7 +71,6 @@ impl View {
             View::SessionView => None, // Handled specially based on context
             View::ActivityTimeline => Some(View::ProjectsOverview),
             View::LogViewer => Some(View::ProjectsOverview),
-            View::FocusStats => Some(View::ProjectsOverview),
             View::ClaudeConfigs => Some(View::ProjectsOverview),
             View::CodexConfigs => Some(View::ProjectsOverview),
         }
@@ -128,7 +120,6 @@ mod tests {
 
         assert!(View::SessionView.is_session_view());
         assert!(View::ActivityTimeline.is_activity_timeline());
-        assert!(View::FocusStats.is_focus_stats());
         assert!(View::ClaudeConfigs.is_claude_configs());
     }
 
@@ -161,7 +152,6 @@ mod tests {
             Some(View::ProjectsOverview)
         );
         assert_eq!(View::LogViewer.parent(), Some(View::ProjectsOverview));
-        assert_eq!(View::FocusStats.parent(), Some(View::ProjectsOverview));
         assert_eq!(View::ClaudeConfigs.parent(), Some(View::ProjectsOverview));
     }
 

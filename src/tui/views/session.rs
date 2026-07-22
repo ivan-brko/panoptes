@@ -15,9 +15,7 @@ use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{
-    format_attention_hint, format_custom_shortcuts_hint, format_focus_timer_hint,
-};
+use crate::tui::views::{format_attention_hint, format_custom_shortcuts_hint};
 
 /// Render the session view
 pub fn render_session_view(
@@ -53,7 +51,6 @@ pub fn render_session_view(
 
     let header = Header::new(breadcrumb)
         .with_suffix(suffix)
-        .with_timer(state.focus_timer.as_ref())
         .with_notifications(Some(header_notifications))
         .with_attention_count(attention_count)
         .with_custom_style(custom_style);
@@ -245,14 +242,12 @@ fn build_footer_text(
         }
         _ => {
             let scroll_hint = if is_scrolled { "End: live view | " } else { "" };
-            let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
-
             // Build custom shortcuts hint
             let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
 
             let base = format!(
-                "{}{}Enter: activate | Tab: next | {} | k:shortcuts | \u{2191}\u{2193}/PgUp/Dn: scroll",
-                scroll_hint, shortcuts_hint, timer_hint
+                "{}{}Enter: activate | Tab: next | k:shortcuts | \u{2191}\u{2193}/PgUp/Dn: scroll",
+                scroll_hint, shortcuts_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)

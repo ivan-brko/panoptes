@@ -17,11 +17,6 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
         return Ok(());
     }
 
-    // Handle focus timer shortcuts (t, T, Ctrl+t) - only in Normal mode
-    if app.handle_focus_timer_shortcut(key) {
-        return Ok(());
-    }
-
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             // Go back to the session's branch detail view

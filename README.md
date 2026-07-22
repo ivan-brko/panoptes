@@ -24,7 +24,6 @@ Named after the hundred-eyed giant of Greek mythology.
 - **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Idle
 - **Attention System** - Get notified when sessions need your input, with visual badges and terminal bell alerts
 - **Activity Timeline** - View all sessions sorted by recent activity across all projects
-- **Focus Timer** - Built-in Pomodoro-style focus timer with per-project time tracking
 - **Keyboard-Driven Interface** - Fast navigation with vim-style keys and number shortcuts
 - **Shell Sessions** - Run normal shell sessions alongside Claude Code sessions and get notified when commands finish — useful for running tests, builds, or anything you'd rather not route through Claude, while still benefiting from Panoptes' automatic worktree handling
 - **Session Naming** - Name sessions for easy identification ("frontend-auth", "api-refactor")
@@ -106,8 +105,6 @@ cargo build --release
 | Key | Action |
 |-----|--------|
 | `a` | Open activity timeline |
-| `t` | Start focus timer |
-| `T` | Open focus statistics |
 | `l` | Open log viewer |
 
 See [Keyboard Reference](docs/KEYBOARD_REFERENCE.md) for the complete list.
@@ -138,7 +135,6 @@ Configuration is stored in `~/.panoptes/config.toml`:
 hook_port = 9999                # HTTP server port for Claude Code hooks
 idle_threshold_secs = 300       # Seconds before session shows attention badge
 notification_method = "bell"    # "bell", "title", or "none"
-focus_timer_minutes = 25        # Default focus timer duration
 ```
 
 See [Configuration Guide](docs/CONFIG_GUIDE.md) for all options.
@@ -162,7 +158,6 @@ See [Configuration Guide](docs/CONFIG_GUIDE.md) for all options.
 | `~/.panoptes/projects.json` | Projects and branches |
 | `~/.panoptes/claude_configs.json` | Claude account configurations |
 | `~/.panoptes/codex_configs.json` | Codex account configurations |
-| `~/.panoptes/focus_sessions.json` | Focus timer history |
 | `~/.panoptes/worktrees/` | Git worktrees |
 | `~/.panoptes/hooks/` | Hook scripts |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |

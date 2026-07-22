@@ -9,12 +9,11 @@ use ratatui::widgets::{
     Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use crate::focus_timing::FocusTimer;
 use crate::logging::{LogBuffer, LogFileInfo, LogLevel};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
-use crate::tui::views::{format_focus_timer_hint, Breadcrumb};
+use crate::tui::views::Breadcrumb;
 
 /// Render the log viewer showing all log entries
 #[allow(clippy::too_many_arguments)]
@@ -25,7 +24,6 @@ pub fn render_log_viewer(
     log_file_info: &LogFileInfo,
     scroll_offset: usize,
     auto_scroll: bool,
-    focus_timer: Option<&FocusTimer>,
     header_notifications: &HeaderNotificationManager,
     attention_count: usize,
 ) {
@@ -44,7 +42,6 @@ pub fn render_log_viewer(
 
     let header = Header::new(breadcrumb)
         .with_suffix(suffix)
-        .with_timer(focus_timer)
         .with_notifications(Some(header_notifications))
         .with_attention_count(attention_count);
 
@@ -140,11 +137,8 @@ pub fn render_log_viewer(
     }
 
     // Footer with navigation help
-    let timer_hint = format_focus_timer_hint(focus_timer.map(|t| t.is_running()).unwrap_or(false));
-    let footer_text = format!(
-        "{} | ↑/k ↓/j: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | Esc/q: back",
-        timer_hint
-    );
+    let footer_text =
+        "↑/k ↓/j: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | Esc/q: back".to_string();
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));

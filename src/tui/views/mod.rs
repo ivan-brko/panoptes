@@ -6,7 +6,6 @@ use chrono::{DateTime, Utc};
 use ratatui::style::Color;
 
 use crate::config::{Config, CustomShortcut};
-use crate::focus_timing::FocusTimer;
 use crate::session::{SessionInfo, SessionManager, SessionState, SessionType};
 
 mod branch_detail;
@@ -15,10 +14,8 @@ mod claude_settings;
 mod codex_configs;
 mod confirm;
 mod custom_shortcuts;
-mod focus_stats;
 mod help;
 mod logs;
-mod notifications;
 mod project_detail;
 mod projects;
 mod session;
@@ -42,13 +39,8 @@ pub use confirm::{
     ConfirmDialogConfig,
 };
 pub use custom_shortcuts::render_custom_shortcut_dialogs;
-pub use focus_stats::{
-    render_focus_session_delete_dialog, render_focus_session_detail_dialog, render_focus_stats,
-    render_timer_input_dialog,
-};
 pub use help::render_help_overlay;
 pub use logs::render_log_viewer;
-pub use notifications::{render_notification_badge, render_notifications};
 pub use project_detail::{render_project_delete_confirmation, render_project_detail};
 pub use projects::render_projects_overview;
 pub use session::render_session_view;
@@ -141,15 +133,6 @@ pub fn format_attention_hint(sessions: &SessionManager, config: &Config) -> Opti
         .map(|s| format!("Space: → {}", s.info.name))
 }
 
-/// Format focus timer hint for footer. Shows different text based on timer state.
-pub fn format_focus_timer_hint(timer_running: bool) -> &'static str {
-    if timer_running {
-        "Ctrl+t: stop timer | T: stats"
-    } else {
-        "t: timer | T: stats"
-    }
-}
-
 /// Format custom shortcuts for footer display (e.g., "v:VSCode e:vim | ")
 pub fn format_custom_shortcuts_hint(shortcuts: &[CustomShortcut]) -> String {
     if shortcuts.is_empty() {
@@ -214,29 +197,4 @@ impl Default for Breadcrumb {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Format header text with optional right-aligned timer display.
-/// Returns a string with the breadcrumb on the left and timer on the right.
-pub fn format_header_with_timer(
-    breadcrumb_text: &str,
-    timer: Option<&FocusTimer>,
-    width: u16,
-) -> String {
-    let timer_text = match timer {
-        Some(t) if t.is_running() => format!("⏱ {}", t.format_remaining()),
-        _ => String::new(),
-    };
-
-    if timer_text.is_empty() {
-        return breadcrumb_text.to_string();
-    }
-
-    // Calculate padding needed (width - breadcrumb_len - timer_len - 2 for borders)
-    let available = width.saturating_sub(2) as usize;
-    let breadcrumb_len = breadcrumb_text.chars().count();
-    let timer_len = timer_text.chars().count();
-    let padding = available.saturating_sub(breadcrumb_len + timer_len);
-
-    format!("{}{}{}", breadcrumb_text, " ".repeat(padding), timer_text)
 }

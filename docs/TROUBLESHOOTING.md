@@ -342,8 +342,6 @@ rm -rf ~/.panoptes/
 To keep projects but remove session history:
 
 ```bash
-# Remove focus sessions only
-rm ~/.panoptes/focus_sessions.json
 
 # Note: Active sessions are only in memory
 # Restarting Panoptes clears them

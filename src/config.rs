@@ -60,12 +60,11 @@ impl CustomShortcut {
 /// - q: quit/back
 /// - i: enter session mode (if used)
 /// - g, G: scroll to top/bottom
-/// - t, T: focus timer
 /// - k: manage shortcuts (this feature)
 /// - 0-9: jump to session by number
 /// - Space: jump to attention
 /// - Esc, Enter, Tab: navigation
-const RESERVED_KEYS: &[char] = &['q', 'i', 'g', 'G', 't', 'T', 'k', 'x'];
+const RESERVED_KEYS: &[char] = &['q', 'i', 'g', 'G', 'k', 'x'];
 const RESERVED_DIGITS: bool = true;
 
 /// Check if a key is reserved and cannot be used for custom shortcuts
@@ -197,14 +196,6 @@ pub struct Config {
     #[serde(default = "default_esc_hold_threshold_ms")]
     pub esc_hold_threshold_ms: u64,
 
-    /// Default focus timer duration in minutes (default: 25)
-    #[serde(default = "default_focus_timer_minutes")]
-    pub focus_timer_minutes: u64,
-
-    /// Focus stats retention in days (default: 30)
-    #[serde(default = "default_focus_stats_retention_days")]
-    pub focus_stats_retention_days: u64,
-
     /// Maximum scrollback lines per session (default: 10000)
     /// Each 1000 lines uses approximately 10KB of memory
     #[serde(default = "default_scrollback_lines")]
@@ -326,14 +317,6 @@ fn default_esc_hold_threshold_ms() -> u64 {
     400
 }
 
-fn default_focus_timer_minutes() -> u64 {
-    25 // Pomodoro-style default
-}
-
-fn default_focus_stats_retention_days() -> u64 {
-    30
-}
-
 fn default_scrollback_lines() -> usize {
     10_000
 }
@@ -356,8 +339,6 @@ impl Default for Config {
             theme_preset: default_theme_preset(),
             notification_method: default_notification_method(),
             esc_hold_threshold_ms: default_esc_hold_threshold_ms(),
-            focus_timer_minutes: default_focus_timer_minutes(),
-            focus_stats_retention_days: default_focus_stats_retention_days(),
             scrollback_lines: default_scrollback_lines(),
             suspend_after_secs: default_suspend_after(),
             log_agent_events: false,
@@ -600,8 +581,6 @@ notification_method = "title"
         assert!(is_reserved_key('q'));
         assert!(is_reserved_key('g'));
         assert!(is_reserved_key('G'));
-        assert!(is_reserved_key('t'));
-        assert!(is_reserved_key('T'));
         assert!(is_reserved_key('k'));
 
         // Reserved digits
@@ -615,6 +594,10 @@ notification_method = "title"
         // Non-reserved keys
         assert!(!is_reserved_key('v'));
         assert!(!is_reserved_key('e'));
+
+        // Freed when the focus timer was removed
+        assert!(!is_reserved_key('t'));
+        assert!(!is_reserved_key('T'));
     }
 
     #[test]

@@ -5,14 +5,12 @@
 //! - Optional suffix (e.g., status counts)
 //! - Header notifications (shown after breadcrumb)
 //! - Attention indicator (blinking when sessions need attention)
-//! - Focus timer countdown (right-aligned)
 
 use std::time::Instant;
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::focus_timing::FocusTimer;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
@@ -30,8 +28,6 @@ pub struct Header<'a> {
     breadcrumb: Breadcrumb,
     /// Optional suffix text (e.g., "(3 active, 2 need attention)")
     suffix: Option<String>,
-    /// Focus timer reference
-    timer: Option<&'a FocusTimer>,
     /// Header notifications manager
     notifications: Option<&'a HeaderNotificationManager>,
     /// Number of sessions needing attention
@@ -46,7 +42,6 @@ impl<'a> Header<'a> {
         Self {
             breadcrumb,
             suffix: None,
-            timer: None,
             notifications: None,
             attention_count: 0,
             custom_style: None,
@@ -59,12 +54,6 @@ impl<'a> Header<'a> {
         if !s.is_empty() {
             self.suffix = Some(s);
         }
-        self
-    }
-
-    /// Add focus timer display
-    pub fn with_timer(mut self, timer: Option<&'a FocusTimer>) -> Self {
-        self.timer = timer;
         self
     }
 
@@ -155,16 +144,6 @@ impl<'a> Header<'a> {
             }
         }
 
-        // Timer display
-        if let Some(timer) = self.timer {
-            if timer.is_running() {
-                right_spans.push(Span::styled(
-                    format!("\u{23F1} {}", timer.format_remaining()),
-                    Style::default().fg(t.accent),
-                ));
-            }
-        }
-
         // Calculate layout
         let width = area.width.saturating_sub(2) as usize; // Account for borders
         let right_text: String = right_spans.iter().map(|s| s.content.as_ref()).collect();
@@ -208,7 +187,6 @@ mod tests {
         let breadcrumb = Breadcrumb::new().push("Projects");
         let header = Header::new(breadcrumb);
         assert!(header.suffix.is_none());
-        assert!(header.timer.is_none());
         assert_eq!(header.attention_count, 0);
     }
 

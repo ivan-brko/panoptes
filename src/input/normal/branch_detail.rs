@@ -22,11 +22,6 @@ pub fn handle_branch_detail_key(
         return Ok(());
     }
 
-    // Handle focus timer shortcuts (t, T, Ctrl+t)
-    if app.handle_focus_timer_shortcut(key) {
-        return Ok(());
-    }
-
     // Entries mix live sessions with ones recoverable from a previous run, so
     // the selected index may land on a session that has no process attached
     let branch_sessions: Vec<(uuid::Uuid, bool)> = app

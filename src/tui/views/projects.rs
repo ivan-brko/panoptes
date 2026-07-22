@@ -7,19 +7,20 @@ use chrono::Utc;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
-use crate::app::{AppState, HomepageFocus, InputMode};
+use crate::app::{AppState, FolderMoveTarget, HomepageFocus, InputMode};
 use crate::config::Config;
-use crate::focus_timing::FocusTimer;
-use crate::project::ProjectStore;
+use crate::project::{
+    folder_path_key, project_count_label, ProjectStore, TreeRow, MAX_FOLDER_DEPTH,
+};
 use crate::session::{Session, SessionManager};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
+use crate::tui::views::format_attention_hint;
 use crate::tui::views::render_project_delete_confirmation;
 use crate::tui::views::render_quit_confirm_dialog;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_focus_timer_hint};
 use crate::tui::widgets::selection::{
     selection_prefix, selection_style, selection_style_with_accent,
 };
@@ -33,7 +34,6 @@ pub fn render_projects_overview(
     project_store: &ProjectStore,
     sessions: &SessionManager,
     config: &Config,
-    focus_timer: Option<&FocusTimer>,
     header_notifications: &HeaderNotificationManager,
 ) {
     let idle_threshold = config.idle_threshold_secs;
@@ -57,7 +57,6 @@ pub fn render_projects_overview(
 
     let header = Header::new(breadcrumb)
         .with_suffix(suffix)
-        .with_timer(focus_timer)
         .with_notifications(Some(header_notifications))
         .with_attention_count(attention_count);
 
@@ -144,6 +143,15 @@ pub fn render_projects_overview(
                 .and_then(|id| project_store.get_project(id));
             render_project_delete_confirmation(frame, main_area, state, project, sessions, config);
         }
+        InputMode::MovingToFolder => {
+            render_folder_move(frame, main_area, state);
+        }
+        InputMode::RenamingFolder => {
+            render_folder_rename(frame, main_area, state);
+        }
+        InputMode::ConfirmingFolderRemove => {
+            render_folder_remove_confirmation(frame, main_area, state, project_store);
+        }
         _ => {
             render_main_content(
                 frame,
@@ -165,26 +173,11 @@ pub fn render_projects_overview(
         InputMode::AddingProjectName => "Enter: create project | Esc: cancel".to_string(),
         InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         InputMode::ConfirmingQuit => "y/Enter: quit | n/Esc: cancel".to_string(),
+        InputMode::MovingToFolder => "Tab: complete | Enter: move | Esc: cancel".to_string(),
+        InputMode::RenamingFolder => "Enter: rename | Esc: cancel".to_string(),
+        InputMode::ConfirmingFolderRemove => "y: remove folder | n/Esc: cancel".to_string(),
         _ => {
-            let has_projects = project_store.project_count() > 0;
-            let has_sessions = !sessions.is_empty();
-            let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
-            let base = if has_projects && has_sessions {
-                format!(
-                    "n: new | d: delete | Tab: switch | a: timeline | c/x: configs | k: shortcuts | {} | q: quit",
-                    timer_hint
-                )
-            } else if has_projects {
-                format!(
-                    "n: new | d: delete | a: timeline | c/x: configs | k: shortcuts | {} | q: quit",
-                    timer_hint
-                )
-            } else {
-                format!(
-                    "n: new | a: timeline | c/x: configs | k: shortcuts | {} | q: quit",
-                    timer_hint
-                )
-            };
+            let base = normal_mode_footer(state, project_store, sessions);
             if let Some(hint) = format_attention_hint(sessions, config) {
                 format!("{} | {}", hint, base)
             } else {
@@ -200,6 +193,51 @@ pub fn render_projects_overview(
     // Render quit confirmation dialog as overlay
     if state.input_mode == InputMode::ConfirmingQuit {
         render_quit_confirm_dialog(frame, area);
+    }
+}
+
+/// Build the normal-mode footer hint
+///
+/// The keys are context-sensitive: selecting a folder heading offers folder
+/// actions, so the expand/collapse binding is advertised exactly when it
+/// applies. The footer is one line, so the full list lives in the '?' overlay.
+fn normal_mode_footer(
+    state: &AppState,
+    project_store: &ProjectStore,
+    sessions: &SessionManager,
+) -> String {
+    let has_projects = project_store.project_count() > 0;
+    let has_sessions = !sessions.is_empty();
+    let switch_hint = if has_projects && has_sessions {
+        "Tab: switch | "
+    } else {
+        ""
+    };
+
+    if !has_projects {
+        return "n: new | a: timeline | c/x: configs | k: shortcuts | q: quit".to_string();
+    }
+
+    // Which list the keys currently act on
+    let projects_focused = !has_sessions || state.homepage_focus == HomepageFocus::Projects;
+    let selected_folder = projects_focused
+        && matches!(
+            crate::project::row_at(project_store, state.selected_project_index),
+            Some(crate::project::RowRef::Folder { .. })
+        );
+
+    if selected_folder {
+        // Folder context drops the global keys to keep the line inside a
+        // narrow terminal; "ungroup" signals that nothing gets deleted
+        format!(
+            "Enter/←→: expand/collapse | m: move | r: rename | d: ungroup | {}q: quit",
+            switch_hint
+        )
+    } else {
+        format!(
+            "Enter: open | n: new | m: move | d: delete | {}a: timeline | c/x: configs | k: shortcuts | q: quit",
+            switch_hint
+        )
     }
 }
 
@@ -463,31 +501,67 @@ fn render_project_list(
 ) {
     let t = theme();
     let selected_index = state.selected_project_index;
-    let projects = project_store.projects_sorted();
+    let rows = crate::project::visible_rows(project_store, project_store.collapsed_folders());
 
-    let items: Vec<ListItem> = projects
+    let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
-        .map(|(i, project)| {
+        .map(|(i, row)| {
             let selected = i == selected_index && focused;
             let prefix = selection_prefix(selected);
+            let indent = "  ".repeat(row.depth());
 
-            // Count branches and active sessions for this project
-            let branch_count = project_store.branch_count_for_project(project.id);
-            let session_count = sessions.session_count_for_project(project.id);
-            let active_count = sessions.active_session_count_for_project(project.id);
-            let attention_count =
-                sessions.attention_count_for_project(project.id, idle_threshold_secs);
+            let (label, active_count, attention_count) = match row {
+                TreeRow::Folder(folder) => {
+                    // Roll up the whole subtree so a collapsed folder still
+                    // shows what is happening inside it
+                    let active: usize = folder
+                        .descendants
+                        .iter()
+                        .map(|id| sessions.active_session_count_for_project(*id))
+                        .sum();
+                    let attention: usize = folder
+                        .descendants
+                        .iter()
+                        .map(|id| sessions.attention_count_for_project(*id, idle_threshold_secs))
+                        .sum();
 
-            let status = if active_count > 0 {
-                format!("{} branches, {} active", branch_count, active_count)
-            } else if session_count > 0 {
-                format!("{} branches, {} sessions", branch_count, session_count)
-            } else {
-                format!("{} branches", branch_count)
+                    let mut parts = vec![project_count_label(folder.descendants.len())];
+                    if active > 0 {
+                        parts.push(format!("{} active", active));
+                    }
+                    if attention > 0 {
+                        parts.push(format!("{} need attention", attention));
+                    }
+
+                    let marker = if folder.expanded { "▾" } else { "▸" };
+                    (
+                        format!("{} {}/  ({})", marker, folder.name(), parts.join(", ")),
+                        active,
+                        attention,
+                    )
+                }
+                TreeRow::Project(entry) => {
+                    let project = entry.project;
+                    let branch_count = project_store.branch_count_for_project(project.id);
+                    let session_count = sessions.session_count_for_project(project.id);
+                    let active = sessions.active_session_count_for_project(project.id);
+                    let attention =
+                        sessions.attention_count_for_project(project.id, idle_threshold_secs);
+
+                    let status = if active > 0 {
+                        format!("{} branches, {} active", branch_count, active)
+                    } else if session_count > 0 {
+                        format!("{} branches, {} sessions", branch_count, session_count)
+                    } else {
+                        format!("{} branches", branch_count)
+                    };
+
+                    (format!("{} ({})", project.name, status), active, attention)
+                }
             };
 
-            let content = format!("{}{}: {} ({})", prefix, i + 1, project.name, status);
+            let content = format!("{}{}{}", prefix, indent, label);
 
             // Color precedence: attention > active > selected > default
             let style = if selected {
@@ -502,6 +576,8 @@ fn render_project_list(
                 Style::default().fg(t.attention_badge)
             } else if active_count > 0 {
                 Style::default().fg(t.active)
+            } else if matches!(row, TreeRow::Folder(_)) {
+                Style::default().fg(t.accent_secondary)
             } else {
                 Style::default().fg(t.text)
             };
@@ -518,6 +594,172 @@ fn render_project_list(
             .border_style(Style::default().fg(border_color)),
     );
     frame.render_widget(list, area);
+}
+
+/// Render the "move to folder" input with folder autocomplete
+fn render_folder_move(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
+
+    let what = match &state.moving_to_folder {
+        Some(FolderMoveTarget::Folder(path)) => {
+            format!("folder '{}' and its contents", folder_path_key(path))
+        }
+        _ => "the selected project".to_string(),
+    };
+
+    let show_completions = state.show_folder_completions && !state.folder_completions.is_empty();
+    let completions_height = if show_completions {
+        (state.folder_completions.len().min(8) + 2) as u16
+    } else {
+        0
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(if state.folder_error.is_some() { 8 } else { 7 }),
+            Constraint::Length(completions_height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    let mut text = format!(
+        "Move {} into a folder.\n\
+         Use '/' to nest (max {} levels), leave empty for the root level.\n\n\
+         > {}_",
+        what, MAX_FOLDER_DEPTH, state.folder_input
+    );
+    if let Some(error) = &state.folder_error {
+        text.push_str(&format!("\n\n✖ {}", error));
+    }
+
+    let input = Paragraph::new(text).style(t.input_style()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Move to Folder"),
+    );
+    frame.render_widget(input, chunks[0]);
+
+    if show_completions {
+        render_folder_completions(frame, chunks[1], state);
+    }
+}
+
+/// Render the folder completions list
+fn render_folder_completions(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
+    let completions = &state.folder_completions;
+    let selected_idx = state.folder_completion_index;
+
+    let max_visible = 8;
+    let total = completions.len();
+    let (start, end) = if total <= max_visible {
+        (0, total)
+    } else {
+        let half = max_visible / 2;
+        let start = if selected_idx < half {
+            0
+        } else if selected_idx >= total - half {
+            total - max_visible
+        } else {
+            selected_idx - half
+        };
+        (start, start + max_visible)
+    };
+
+    let items: Vec<ListItem> = completions[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let is_selected = start + i == selected_idx;
+            let content = format!("{}{}/", selection_prefix(is_selected), path);
+            ListItem::new(content).style(selection_style_with_accent(is_selected, t))
+        })
+        .collect();
+
+    let title = if total > max_visible {
+        format!("Existing folders ({}/{}) ↑↓", selected_idx + 1, total)
+    } else {
+        format!("Existing folders ({})", total)
+    };
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(t.border_focused)),
+    );
+    frame.render_widget(list, area);
+}
+
+/// Render the folder rename input
+fn render_folder_rename(frame: &mut Frame, area: Rect, state: &AppState) {
+    let t = theme();
+
+    let current = state
+        .renaming_folder
+        .as_ref()
+        .map(|path| folder_path_key(path))
+        .unwrap_or_default();
+
+    let mut text = format!(
+        "Renaming folder '{}'.\n\nEnter a new name:\n\n> {}_",
+        current, state.folder_input
+    );
+    if let Some(error) = &state.folder_error {
+        text.push_str(&format!("\n\n✖ {}", error));
+    }
+
+    let input = Paragraph::new(text).style(t.input_style()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Rename Folder"),
+    );
+    frame.render_widget(input, area);
+}
+
+/// Render the confirmation for dissolving a folder
+fn render_folder_remove_confirmation(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    project_store: &ProjectStore,
+) {
+    let t = theme();
+
+    let Some(path) = &state.pending_remove_folder else {
+        return;
+    };
+    let affected = project_store
+        .projects()
+        .filter(|p| p.is_under_folder(path))
+        .count();
+    let destination = if path.len() > 1 {
+        format!("'{}'", folder_path_key(&path[..path.len() - 1]))
+    } else {
+        "the root level".to_string()
+    };
+
+    let text = format!(
+        "Remove folder '{}'?\n\n\
+         Its {} move up to {}.\n\
+         No projects or sessions are deleted.\n\n\
+         y: remove folder    n/Esc: cancel",
+        folder_path_key(path),
+        project_count_label(affected),
+        destination
+    );
+
+    let dialog = Paragraph::new(text)
+        .style(Style::default().fg(t.text))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Remove Folder")
+                .border_style(Style::default().fg(t.border_warning)),
+        );
+    frame.render_widget(dialog, area);
 }
 
 /// Render quick sessions (sessions not tied to a specific project)
@@ -592,4 +834,222 @@ fn render_quick_sessions(
             .border_style(Style::default().fg(border_color)),
     );
     frame.render_widget(list, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::Project;
+    use crate::session::store::SessionStore;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::path::PathBuf;
+
+    /// Build a store holding projects at the given folder paths
+    fn store_with(entries: &[(&str, &[&str])]) -> ProjectStore {
+        let mut store = ProjectStore::new();
+        for (name, folder) in entries {
+            let mut project = Project::new(
+                name.to_string(),
+                PathBuf::from(format!("/tmp/{}", name)),
+                "main".to_string(),
+            );
+            project.folder = folder.iter().map(|s| s.to_string()).collect();
+            store.add_project(project);
+        }
+        store
+    }
+
+    /// Render the projects overview and return its lines, trimmed of padding
+    fn render_to_lines(state: &AppState, project_store: &ProjectStore) -> Vec<String> {
+        let config = Config::default();
+        let sessions = SessionManager::with_store(config.clone(), SessionStore::new());
+        let header_notifications = HeaderNotificationManager::default();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_projects_overview(
+                    frame,
+                    frame.size(),
+                    state,
+                    project_store,
+                    &sessions,
+                    &config,
+                    &header_notifications,
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Whether any rendered line contains `needle`
+    fn contains_line(lines: &[String], needle: &str) -> bool {
+        lines.iter().any(|line| line.contains(needle))
+    }
+
+    #[test]
+    fn test_renders_nested_folders_with_indentation() {
+        let store = store_with(&[
+            ("panoptes", &[][..]),
+            ("api-gateway", &["Acme"][..]),
+            ("auth-service", &["Acme", "Platform"][..]),
+        ]);
+        let state = AppState::default();
+
+        let lines = render_to_lines(&state, &store);
+
+        // Leading "│" is the list border, so these pin the exact indentation.
+        // Row 0 is selected by default, so it carries the "▶ " marker instead
+        // of the two-space prefix - both are two columns wide.
+        assert!(contains_line(&lines, "│▶ ▾ Acme/"), "{:?}", lines);
+        assert!(contains_line(&lines, "│    ▾ Platform/"), "{:?}", lines);
+        assert!(contains_line(&lines, "│      auth-service"), "{:?}", lines);
+        assert!(contains_line(&lines, "│    api-gateway"), "{:?}", lines);
+        assert!(contains_line(&lines, "│  panoptes"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_rows_are_not_numbered() {
+        let store = store_with(&[("panoptes", &[][..]), ("api-gateway", &["Acme"][..])]);
+        let state = AppState::default();
+
+        let lines = render_to_lines(&state, &store);
+
+        assert!(!contains_line(&lines, "1:"), "{:?}", lines);
+        assert!(!contains_line(&lines, "2:"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_collapsed_folder_hides_contents_and_shows_rollup() {
+        let mut store = store_with(&[
+            ("api-gateway", &["Acme"][..]),
+            ("auth-service", &["Acme", "Platform"][..]),
+        ]);
+        store.set_folder_collapsed(&["Acme".to_string()], true);
+        let state = AppState::default();
+
+        let lines = render_to_lines(&state, &store);
+
+        assert!(
+            contains_line(&lines, "▸ Acme/  (2 projects)"),
+            "{:?}",
+            lines
+        );
+        assert!(!contains_line(&lines, "auth-service"), "{:?}", lines);
+        assert!(!contains_line(&lines, "api-gateway"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_footer_advertises_fold_when_folder_selected() {
+        let store = store_with(&[("api-gateway", &["Acme"][..])]);
+        let state = AppState {
+            selected_project_index: 0, // the "Acme" heading
+            ..Default::default()
+        };
+
+        let lines = render_to_lines(&state, &store);
+
+        assert!(
+            contains_line(&lines, "Enter/←→: expand/collapse"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "d: ungroup"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_footer_advertises_open_when_project_selected() {
+        let store = store_with(&[("api-gateway", &["Acme"][..])]);
+        let state = AppState {
+            selected_project_index: 1, // the project under "Acme"
+            ..Default::default()
+        };
+
+        let lines = render_to_lines(&state, &store);
+
+        assert!(contains_line(&lines, "Enter: open"), "{:?}", lines);
+        assert!(!contains_line(&lines, "expand/collapse"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_selection_marks_folder_row() {
+        let store = store_with(&[("api-gateway", &["Acme"][..])]);
+        let state = AppState {
+            selected_project_index: 0,
+            ..Default::default()
+        };
+
+        let lines = render_to_lines(&state, &store);
+
+        assert!(contains_line(&lines, "▶ ▾ Acme/"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_folder_remove_confirmation_states_projects_are_kept() {
+        let store = store_with(&[
+            ("api-gateway", &["Acme"][..]),
+            ("auth-service", &["Acme", "Platform"][..]),
+        ]);
+        let state = AppState {
+            input_mode: InputMode::ConfirmingFolderRemove,
+            pending_remove_folder: Some(vec!["Acme".to_string()]),
+            ..Default::default()
+        };
+
+        let lines = render_to_lines(&state, &store);
+
+        assert!(
+            contains_line(&lines, "Remove folder 'Acme'?"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Its 2 projects move up to the root level."),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "No projects or sessions are deleted."),
+            "{:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_move_dialog_shows_error_and_completions() {
+        let store = store_with(&[("api-gateway", &["Acme"][..])]);
+        let project_id = store.projects().next().unwrap().id;
+        let state = AppState {
+            input_mode: InputMode::MovingToFolder,
+            moving_to_folder: Some(FolderMoveTarget::Project(project_id)),
+            folder_input: "a/b/c/d".to_string(),
+            folder_error: Some("Folders can nest at most 3 levels deep (got 4)".to_string()),
+            folder_completions: vec!["Acme".to_string()],
+            show_folder_completions: true,
+            ..Default::default()
+        };
+
+        let lines = render_to_lines(&state, &store);
+
+        assert!(contains_line(&lines, "Move to Folder"), "{:?}", lines);
+        assert!(contains_line(&lines, "> a/b/c/d_"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "at most 3 levels deep"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "Acme/"), "{:?}", lines);
+    }
 }
