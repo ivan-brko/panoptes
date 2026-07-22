@@ -19,6 +19,8 @@ pub use view::View;
 // Re-exports from wizards (for backwards compatibility)
 pub use crate::wizards::worktree::{BranchRef, BranchRefType, WorktreeCreationType};
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +39,7 @@ use crate::hooks::{
 use crate::logging::{LogBuffer, LogFileInfo};
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionId, SessionManager, SessionType};
+use crate::transcript::{TranscriptKind, TranscriptWatcher, WatchTarget};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
     render_agent_type_selector, render_branch_detail, render_claude_configs,
@@ -94,6 +97,40 @@ pub struct App {
     pub(crate) log_file_info: LogFileInfo,
     /// Whether verbose mouse diagnostics are enabled
     mouse_debug_enabled: bool,
+    /// When the Codex rollout directory was last scanned for conversation IDs
+    last_codex_id_scan: Option<Instant>,
+    /// Background reader of agent transcripts
+    transcripts: TranscriptWatcher,
+    /// Which transcript each session is currently being followed at
+    watched_transcripts: HashMap<SessionId, PathBuf>,
+    /// When transcript watching was last reconciled against live sessions
+    last_transcript_sync: Option<Instant>,
+}
+
+/// How often to reconcile transcript watching against the live session list
+///
+/// Only decides how quickly a *new* session starts being followed; the watcher
+/// thread polls the files themselves far more often.
+const TRANSCRIPT_SYNC_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The default `CLAUDE_CONFIG_DIR`, used when a session ran on the default account
+fn default_claude_config_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".claude")
+}
+
+/// How often to scan for Codex rollout files while any session lacks an ID
+///
+/// Codex writes its rollout within a moment of starting, so this resolves on the
+/// first or second scan and then stops costing anything.
+const CODEX_ID_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The default `CODEX_HOME`, used when a session ran on the default account
+fn default_codex_home() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".codex")
 }
 
 impl App {
@@ -141,6 +178,16 @@ impl App {
         // Create session manager
         let sessions = SessionManager::new(config.clone());
 
+        // Start reading agent transcripts. Runs on its own thread: the reads
+        // are incremental, but a burst of tool output can append a lot at once
+        // and parsing that on the render thread would show as a stutter.
+        let transcripts = TranscriptWatcher::spawn();
+        transcripts.set_debug_log_dir(
+            config
+                .log_agent_events
+                .then(|| crate::config::logs_dir().join("agent-events")),
+        );
+
         // Create TUI
         let tui = Tui::new()?;
 
@@ -171,6 +218,10 @@ impl App {
             log_buffer,
             log_file_info,
             mouse_debug_enabled,
+            last_codex_id_scan: None,
+            transcripts,
+            watched_transcripts: HashMap::new(),
+            last_transcript_sync: None,
         })
     }
 
@@ -364,6 +415,18 @@ impl App {
                 self.state.needs_render = true;
             }
 
+            // Give Codex sessions a resumable pointer as soon as their rollout
+            // file appears; no-ops once every session has one
+            self.resolve_pending_codex_session_ids();
+
+            // Follow each session's transcript. For Codex this is the only
+            // source of state at all; for Claude it adds usage figures the
+            // hooks do not carry.
+            self.sync_transcript_watchers();
+            if self.process_transcript_events() {
+                self.state.needs_render = true;
+            }
+
             // Check for sessions stuck in Executing state too long
             let had_timeout_changes = self
                 .sessions
@@ -417,6 +480,16 @@ impl App {
                     let _ = self.sessions.destroy_session(session_id);
                     self.state.needs_render = true;
                 }
+            }
+
+            // Suspend agent sessions left idle, reclaiming their memory. Runs
+            // before cleanup so a session suspended this tick is already
+            // excluded from the Exited path that would delete its record.
+            let suspended = self
+                .sessions
+                .suspend_idle_sessions(self.config.suspend_after_secs, self.state.active_session);
+            if !suspended.is_empty() {
+                self.state.needs_render = true;
             }
 
             // Clean up old exited sessions to prevent memory growth
@@ -532,28 +605,11 @@ impl App {
                 "Hook event: session={}, event={}, tool={:?}",
                 event.session_id,
                 event.event,
-                event.tool
+                event.tool_name()
             );
             // handle_hook_event returns Some(session_id) if notification should be sent
             if let Some(session_id) = self.sessions.handle_hook_event(event) {
-                let is_active_session = self.state.active_session == Some(session_id);
-                // Send notification if: (a) not the active session, or
-                // (b) active session but terminal is unfocused (user Cmd+Tabbed away).
-                // Only check terminal focus when focus events are supported —
-                // otherwise we can't distinguish "unfocused" from "terminal doesn't report focus".
-                let terminal_unfocused =
-                    self.state.focus_events_supported && !self.state.terminal_focused;
-                if !is_active_session || terminal_unfocused {
-                    let session_name = self
-                        .sessions
-                        .get(session_id)
-                        .map(|s| s.info.name.as_str())
-                        .unwrap_or("Session");
-                    SessionManager::send_notification(
-                        &self.config.notification_method,
-                        session_name,
-                    );
-                }
+                self.notify_session_needs_attention(session_id);
             }
         }
         true
@@ -668,6 +724,9 @@ impl App {
             InputMode::Session => {
                 // Send pasted text to PTY (wrapped in brackets if app enabled it)
                 if let Some(session_id) = self.state.active_session {
+                    if self.sessions.is_suspended(session_id) && !self.wake_session(session_id)? {
+                        return Ok(());
+                    }
                     if let Some(session) = self.sessions.get_mut(session_id) {
                         session.write_paste(text)?;
                     }
@@ -867,6 +926,13 @@ impl App {
         mouse: MouseEvent,
         is_codex_session: bool,
     ) -> Result<bool> {
+        // A suspended session has no PTY to forward to. Deliberately does not
+        // wake it either: scrolling back through a suspended session is the
+        // point, and a stray click should not relaunch an agent.
+        if self.sessions.is_suspended(session_id) {
+            return Ok(false);
+        }
+
         let mouse_enabled = self.sessions.get(session_id).is_some_and(|session| {
             session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None
         });
@@ -1509,6 +1575,345 @@ impl App {
         Ok(())
     }
 
+    /// Resolve conversation IDs for Codex sessions that do not have one yet
+    ///
+    /// Codex offers no flag to dictate its session ID, so unlike Claude Code it
+    /// has to be discovered from the rollout file it writes shortly after
+    /// starting. Until that resolves, the session has no pointer and would not
+    /// be resumable after a crash.
+    ///
+    /// Throttled, and does no filesystem work at all once every Codex session
+    /// has an ID - which is the steady state within seconds of starting one.
+    pub(crate) fn resolve_pending_codex_session_ids(&mut self) {
+        let pending = self.sessions.sessions_pending_codex_id();
+        if pending.is_empty() {
+            return;
+        }
+
+        if let Some(last) = self.last_codex_id_scan {
+            if last.elapsed() < CODEX_ID_SCAN_INTERVAL {
+                return;
+            }
+        }
+        self.last_codex_id_scan = Some(Instant::now());
+
+        // Conversations already spoken for, so that two Codex sessions sharing
+        // a working directory cannot be handed the same rollout. Grows as this
+        // sweep resolves sessions, which is why `pending` is ordered oldest
+        // first: each session claims the rollout it actually created.
+        let mut claimed = self.sessions.claimed_agent_session_ids();
+
+        for (session_id, working_dir, created_at) in pending {
+            let codex_home = self
+                .sessions
+                .get(session_id)
+                .and_then(|session| session.info.codex_config_id)
+                .and_then(|id| self.codex_config_store.get(id))
+                .and_then(|config| config.codex_home.clone())
+                .unwrap_or_else(default_codex_home);
+
+            if let Some(agent_session_id) = crate::agent::codex::discover_session_id(
+                &codex_home,
+                &working_dir,
+                created_at,
+                &claimed,
+            ) {
+                claimed.insert(agent_session_id.clone());
+                if self
+                    .sessions
+                    .set_agent_session_id(session_id, agent_session_id.clone())
+                {
+                    tracing::info!(
+                        session_id = %session_id,
+                        codex_session_id = %agent_session_id,
+                        "Resolved Codex conversation ID; session is now resumable"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Keep transcript watching in step with the live session list
+    ///
+    /// Sessions appear, get their conversation ID resolved, and go away, and
+    /// each of those changes what should be followed. Reconciling on a timer
+    /// rather than hooking every lifecycle path means a session cannot be
+    /// created down some route that forgot to register it.
+    pub(crate) fn sync_transcript_watchers(&mut self) {
+        if let Some(last) = self.last_transcript_sync {
+            if last.elapsed() < TRANSCRIPT_SYNC_INTERVAL {
+                return;
+            }
+        }
+        self.last_transcript_sync = Some(Instant::now());
+
+        let live: Vec<(SessionId, SessionType, PathBuf, Option<String>)> = self
+            .sessions
+            .iter()
+            .map(|(&id, session)| {
+                (
+                    id,
+                    session.info.session_type,
+                    session.info.working_dir.clone(),
+                    session.info.agent_session_id.clone(),
+                )
+            })
+            .collect();
+
+        let mut still_here = Vec::new();
+
+        for (session_id, session_type, working_dir, conversation_id) in live {
+            still_here.push(session_id);
+
+            // A shell has no conversation, and a session whose ID has not been
+            // resolved yet has no file to point at. Both resolve themselves.
+            let Some(conversation_id) = conversation_id else {
+                continue;
+            };
+            let Some(target) =
+                self.watch_target(session_id, session_type, &working_dir, &conversation_id)
+            else {
+                continue;
+            };
+
+            // Re-watching the same file would re-attach at EOF and skip
+            // anything written since, so only act on a genuine change
+            if self.watched_transcripts.get(&session_id) == Some(&target.path) {
+                continue;
+            }
+            self.watched_transcripts
+                .insert(session_id, target.path.clone());
+            self.transcripts.watch(target);
+        }
+
+        self.watched_transcripts.retain(|session_id, _| {
+            let kept = still_here.contains(session_id);
+            if !kept {
+                self.transcripts.forget(*session_id);
+            }
+            kept
+        });
+    }
+
+    /// Work out which file to follow for a session, if there is one
+    fn watch_target(
+        &self,
+        session_id: SessionId,
+        session_type: SessionType,
+        working_dir: &std::path::Path,
+        conversation_id: &str,
+    ) -> Option<WatchTarget> {
+        let info = self.sessions.get(session_id).map(|s| &s.info);
+        let claude_config_id = info.and_then(|i| i.claude_config_id);
+        let codex_config_id = info.and_then(|i| i.codex_config_id);
+        // A session that started its own conversation owns everything in the
+        // file, including whatever it did in the seconds before Panoptes
+        // managed to locate it
+        let from_start = info.is_some_and(|i| !i.resumed_conversation);
+
+        match session_type {
+            SessionType::Shell => None,
+
+            SessionType::ClaudeCode => {
+                let config_dir = claude_config_id
+                    .and_then(|id| self.claude_config_store.get(id))
+                    .and_then(|config| config.config_dir.clone())
+                    .unwrap_or_else(default_claude_config_dir);
+
+                Some(WatchTarget {
+                    session_id,
+                    kind: TranscriptKind::Claude,
+                    path: crate::transcript::claude::transcript_path(
+                        &config_dir,
+                        working_dir,
+                        conversation_id,
+                    ),
+                    codex_sessions_dir: None,
+                    conversation_id: None,
+                    from_start,
+                })
+            }
+
+            SessionType::OpenAICodex => {
+                let codex_home = codex_config_id
+                    .and_then(|id| self.codex_config_store.get(id))
+                    .and_then(|config| config.codex_home.clone())
+                    .unwrap_or_else(default_codex_home);
+
+                // Codex names its rollouts by timestamp as well as ID, so
+                // unlike Claude the path has to be found rather than derived
+                let path = crate::agent::codex::rollout_path(&codex_home, conversation_id)?;
+
+                Some(WatchTarget {
+                    session_id,
+                    kind: TranscriptKind::Codex,
+                    path,
+                    codex_sessions_dir: Some(codex_home.join("sessions")),
+                    conversation_id: Some(conversation_id.to_string()),
+                    from_start,
+                })
+            }
+        }
+    }
+
+    /// Apply everything the transcript watcher has observed
+    fn process_transcript_events(&mut self) -> bool {
+        let events = self.transcripts.drain();
+        if events.is_empty() {
+            return false;
+        }
+
+        for (session_id, event) in events {
+            if let Some(session_id) = self.sessions.apply_agent_event(session_id, event) {
+                self.notify_session_needs_attention(session_id);
+            }
+        }
+        true
+    }
+
+    /// Sound the configured notification for a session, unless the user is
+    /// already looking at it
+    fn notify_session_needs_attention(&self, session_id: SessionId) {
+        let is_active_session = self.state.active_session == Some(session_id);
+        // Notify if: (a) not the active session, or (b) active session but the
+        // terminal is unfocused (user Cmd+Tabbed away). Only check terminal
+        // focus when focus events are supported - otherwise "unfocused" cannot
+        // be told apart from "terminal doesn't report focus".
+        let terminal_unfocused = self.state.focus_events_supported && !self.state.terminal_focused;
+        if !is_active_session || terminal_unfocused {
+            let session_name = self
+                .sessions
+                .get(session_id)
+                .map(|s| s.info.name.as_str())
+                .unwrap_or("Session");
+            SessionManager::send_notification(&self.config.notification_method, session_name);
+        }
+    }
+
+    /// Bring a session recovered from a previous run back to life
+    ///
+    /// Resolves the account configuration the session originally ran under, so
+    /// a resumed session reattaches using the same Claude or Codex account
+    /// rather than silently falling back to the default one.
+    ///
+    /// Returns `Ok(false)` when the ID does not name a recovered session, so
+    /// callers can fall through to their normal open path.
+    pub(crate) fn resume_recovered_session(
+        &mut self,
+        session_id: crate::session::SessionId,
+    ) -> Result<bool> {
+        let Some(info) = self.sessions.get_recovered(session_id) else {
+            return Ok(false);
+        };
+
+        // Read the config IDs before borrowing the stores
+        let claude_config_id = info.claude_config_id;
+        let codex_config_id = info.codex_config_id;
+        let (claude_config_dir, codex_home) =
+            self.resolve_agent_config_dirs(session_id, claude_config_id, codex_config_id);
+
+        let size = self.tui.size()?;
+        let frame_config = FrameConfig::default();
+        let layout = FrameLayout::calculate(
+            ratatui::prelude::Rect::new(0, 0, size.width, size.height),
+            &frame_config,
+        );
+        let (rows, cols) = layout.pty_size();
+
+        self.sessions.resume_session(
+            session_id,
+            rows as usize,
+            cols as usize,
+            claude_config_dir,
+            codex_home,
+        )?;
+
+        Ok(true)
+    }
+
+    /// Relaunch the agent of a session Panoptes suspended
+    ///
+    /// Returns `Ok(false)` when the session could not be brought back - its
+    /// worktree deleted, its conversation gone - having told the user why. The
+    /// caller must then not go on to write to a PTY that is not there.
+    pub(crate) fn wake_session(&mut self, session_id: crate::session::SessionId) -> Result<bool> {
+        let Some(session) = self.sessions.get(session_id) else {
+            return Ok(false);
+        };
+        if session.info.state != crate::session::SessionState::Suspended {
+            return Ok(true);
+        }
+
+        let claude_config_id = session.info.claude_config_id;
+        let codex_config_id = session.info.codex_config_id;
+        let (claude_config_dir, codex_home) =
+            self.resolve_agent_config_dirs(session_id, claude_config_id, codex_config_id);
+
+        let size = self.tui.size()?;
+        let frame_config = FrameConfig::default();
+        let layout = FrameLayout::calculate(
+            ratatui::prelude::Rect::new(0, 0, size.width, size.height),
+            &frame_config,
+        );
+        let (rows, cols) = layout.pty_size();
+
+        match self.sessions.wake_session(
+            session_id,
+            rows as usize,
+            cols as usize,
+            claude_config_dir,
+            codex_home,
+        ) {
+            Ok(()) => {
+                self.state.needs_render = true;
+                Ok(true)
+            }
+            Err(e) => {
+                // Same treatment a recovered session gets: say why rather than
+                // failing obscurely, and leave the session suspended
+                tracing::warn!(session_id = %session_id, error = %e, "Failed to wake session");
+                self.state
+                    .header_notifications
+                    .push(format!("Could not wake session: {}", e));
+                self.state.needs_render = true;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Resolve the account config directories a session should run under
+    ///
+    /// A config the user has since deleted is worth saying out loud: the
+    /// session will come back on the default account, which may be wrong.
+    fn resolve_agent_config_dirs(
+        &self,
+        session_id: crate::session::SessionId,
+        claude_config_id: Option<crate::claude_config::ClaudeConfigId>,
+        codex_config_id: Option<crate::codex_config::CodexConfigId>,
+    ) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+        let claude_config_dir = claude_config_id
+            .and_then(|id| self.claude_config_store.get(id))
+            .and_then(|config| config.config_dir.clone());
+        let codex_home = codex_config_id
+            .and_then(|id| self.codex_config_store.get(id))
+            .and_then(|config| config.codex_home.clone());
+
+        if claude_config_id.is_some() && claude_config_dir.is_none() {
+            tracing::warn!(
+                session_id = %session_id,
+                "Claude config for this session no longer exists; resuming on the default account"
+            );
+        }
+        if codex_config_id.is_some() && codex_home.is_none() {
+            tracing::warn!(
+                session_id = %session_id,
+                "Codex config for this session no longer exists; resuming on the default account"
+            );
+        }
+
+        (claude_config_dir, codex_home)
+    }
+
     /// Refresh git state for all projects
     ///
     /// This checks if each worktree's working directory still exists and marks
@@ -1972,8 +2377,14 @@ mod tests {
         let branch_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
 
-        // Create a SessionManager for testing (session won't exist, tests fallback path)
-        let sessions = SessionManager::new(Config::default());
+        // Create a SessionManager for testing (session won't exist, tests fallback path).
+        // Backed by a temp store so the test never touches the real
+        // ~/.panoptes/sessions.json.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions = SessionManager::with_store(
+            Config::default(),
+            crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
 
         // Navigate to project
         state.navigate_to_project(project_id);
@@ -2027,7 +2438,10 @@ mod tests {
             hooks_dir: temp_dir.path().join("hooks"),
             ..Config::default()
         };
-        let mut sessions = SessionManager::new(config);
+        let mut sessions = SessionManager::with_store(
+            config,
+            crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
 
         let project_a = Uuid::new_v4();
         let branch_a = Uuid::new_v4();

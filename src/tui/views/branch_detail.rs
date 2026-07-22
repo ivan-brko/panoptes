@@ -10,7 +10,7 @@ use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::focus_timing::FocusTimer;
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::{SessionManager, SessionState, SessionType};
+use crate::session::{SessionManager, SessionType};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
@@ -84,7 +84,7 @@ pub fn render_branch_detail(
     } else if state.input_mode == InputMode::ConfirmingSessionDelete {
         render_delete_confirmation(frame, areas.content, state, sessions);
     } else if let Some(branch) = branch {
-        let branch_sessions = sessions.sessions_for_branch(branch_id);
+        let branch_sessions = sessions.entries_for_branch(branch_id);
 
         if branch_sessions.is_empty() {
             // Build custom shortcuts text if any exist
@@ -116,53 +116,41 @@ pub fn render_branch_detail(
             let items: Vec<ListItem> = branch_sessions
                 .iter()
                 .enumerate()
-                .map(|(i, session)| {
+                .map(|(i, entry)| {
+                    let info = entry.info;
                     let selected = i == selected_index;
                     let prefix = selection_prefix(selected);
 
                     // Check if session needs attention
-                    let needs_attention = sessions.session_needs_attention(session, idle_threshold);
+                    let needs_attention = sessions.session_needs_attention(info, idle_threshold);
 
-                    // Build state display with idle duration if applicable
-                    // Shell sessions show simpler state (Running/Ready instead of Thinking/Executing)
-                    let state_display = match (&session.info.session_type, &session.info.state) {
-                        (_, SessionState::Idle) => {
-                            let duration = now.signed_duration_since(session.info.last_activity);
-                            let mins = duration.num_minutes();
-                            format!("Idle - {}m", mins)
-                        }
-                        (SessionType::Shell, SessionState::Executing(_)) => "Running".to_string(),
-                        (SessionType::Shell, SessionState::Waiting) => "Ready".to_string(),
-                        (_, state) => state.display_name().to_string(),
-                    };
+                    let state_display = super::session_state_display(info, now);
 
                     let t = theme();
-                    let short_tag = session.info.session_type.short_tag();
+                    let short_tag = info.session_type.short_tag();
 
-                    // Build attention badge
-                    let (badge, badge_color) = if needs_attention {
-                        match &session.info.state {
-                            SessionState::Waiting => ("● ", Color::Green),
-                            SessionState::Idle => ("● ", Color::Yellow),
-                            _ => ("  ", Color::White),
-                        }
-                    } else {
-                        ("  ", Color::White)
-                    };
+                    let (badge, badge_color) = super::attention_badge(info, needs_attention);
 
-                    let content = Line::from(vec![
+                    // What the session wants, or failing that what it last said.
+                    // The reason is the more useful of the two, so it wins.
+                    let trailer = info
+                        .attention
+                        .as_ref()
+                        .map(|reason| reason.summary())
+                        .or_else(|| info.last_message.clone());
+
+                    let mut spans = vec![
                         Span::raw(prefix),
                         Span::styled(badge, Style::default().fg(badge_color)),
                         Span::styled(format!("{} ", short_tag), t.muted_style()),
-                        Span::raw(format!(
-                            "{}: {} [{}]",
-                            i + 1,
-                            session.info.name,
-                            state_display
-                        )),
-                    ]);
+                        Span::raw(format!("{}: {} [{}]", i + 1, info.name, state_display)),
+                    ];
+                    if let Some(trailer) = trailer {
+                        spans.push(Span::styled(format!(" — {}", trailer), t.muted_style()));
+                    }
+                    let content = Line::from(spans);
 
-                    let style = selection_style(selected, session.info.state.color());
+                    let style = selection_style(selected, info.state.color());
 
                     ListItem::new(content).style(style)
                 })
@@ -190,7 +178,7 @@ pub fn render_branch_detail(
             let timer_hint = format_focus_timer_hint(state.focus_timer.is_some());
             let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
             let base = format!(
-                "n: new AI | s: shell | d: delete | {}k: shortcuts | {} | ↑/↓: navigate | Enter: open | Esc/q: back",
+                "n: new AI | s: shell | d: delete | {}k: shortcuts | {} | ↑/↓: navigate | Enter: open/resume | Esc/q: back",
                 shortcuts_hint, timer_hint
             );
             if let Some(hint) = format_attention_hint(sessions, config) {

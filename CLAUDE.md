@@ -42,6 +42,7 @@ PTY Output → Session buffer → TUI render
 - `agent/` - Agent adapters (Claude Code, Codex, Shell) with hook setup
 - `session/` - Session lifecycle, PTY management, terminal emulation
 - `hooks/` - HTTP server for agent callbacks
+- `transcript/` - Reads agent transcripts on disk (Codex state, usage for both)
 - `input/` - Input handling by mode (normal, session, dialogs)
 - `tui/` - Terminal UI rendering with ratatui
 - `project/` - Project/branch management and persistence

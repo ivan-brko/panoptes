@@ -5,13 +5,15 @@
 
 pub mod manager;
 pub mod pty;
+pub mod store;
 pub mod vterm;
 
 pub use manager::SessionManager;
 pub use pty::{mouse_event_to_bytes, ExitInfo, PtyHandle};
+pub use store::{sessions_file_path, SessionStore};
 pub use vterm::{VirtualTerminal, DEFAULT_SCROLLBACK_ROWS};
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
@@ -60,24 +62,68 @@ impl SessionType {
     pub fn uses_hooks(&self) -> bool {
         matches!(self, SessionType::ClaudeCode | SessionType::OpenAICodex)
     }
+
+    /// Whether this agent tells Panoptes when the user submits a prompt
+    ///
+    /// Claude Code fires `UserPromptSubmit`, so the start of a turn is
+    /// observed. Codex has no equivalent - its `notify` hook cannot be extended
+    /// without stalling its output pipeline - so a Codex session has to fall
+    /// back to guessing from the Enter keystroke until PAN-3 reads its rollout.
+    pub fn reports_prompt_submission(&self) -> bool {
+        matches!(self, SessionType::ClaudeCode)
+    }
+
+    /// Whether this agent reports individual tool starts and finishes
+    ///
+    /// Claude Code sends `PreToolUse`/`PostToolUse`; Codex writes
+    /// `function_call` / `function_call_output` to its rollout. Both therefore
+    /// populate `in_flight`, and both need the stall watchdog as a backstop for
+    /// a completion that never arrives.
+    ///
+    /// Shell sessions reach `Executing` through foreground-process detection
+    /// and never populate `in_flight`, so an empty set says nothing about them.
+    pub fn reports_tool_use(&self) -> bool {
+        matches!(self, SessionType::ClaudeCode | SessionType::OpenAICodex)
+    }
 }
 
 /// State of a session
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+///
+/// Every variant is a unit variant on purpose. In-flight tool names used to
+/// ride along inside `Executing(String)`, which meant the state changed
+/// identity every time a different tool started and could only ever name one
+/// of several concurrent tools. Tools now live in [`SessionInfo::in_flight`];
+/// this enum answers one question only, "what is this session doing".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum SessionState {
-    /// Session is starting up
+    /// Spawned, but the agent has not reported in yet
     #[default]
     Starting,
-    /// Claude is thinking/processing
+    /// Working, with no tool currently in flight
     Thinking,
-    /// Claude is executing a tool
-    Executing(String),
-    /// Claude is waiting for user input
+    /// One or more tools are in flight (see `in_flight` for which)
+    Executing,
+    /// Blocked on a permission dialog, waiting for the user to approve or deny
+    ///
+    /// Distinct from `Waiting`: both want the user, but this one is holding a
+    /// turn open and cannot make progress, while `Waiting` has finished.
+    AwaitingApproval,
+    /// The turn is over; the agent is waiting for the next prompt
     Waiting,
-    /// Session is idle (no recent activity)
-    Idle,
-    /// Session has exited
+    /// Deliberately killed by Panoptes to reclaim memory, scrollback retained
+    ///
+    /// Defined here so the state model is complete; nothing writes it yet.
+    /// PAN-2 owns the idle sweep that does.
+    Suspended,
+    /// The process died on its own - see `exit_reason` for why
     Exited,
+    /// Session belongs to a previous Panoptes run and can be brought back
+    ///
+    /// Distinct from `Exited`: a session you deliberately closed and one
+    /// orphaned by a crash should not look the same in the list. This state is
+    /// only ever assigned at startup, when reconciling the durable store
+    /// against the (empty) set of running processes.
+    Resumable,
 }
 
 impl SessionState {
@@ -86,10 +132,12 @@ impl SessionState {
         match self {
             SessionState::Starting => "Starting",
             SessionState::Thinking => "Thinking",
-            SessionState::Executing(_) => "Executing",
+            SessionState::Executing => "Executing",
+            SessionState::AwaitingApproval => "Needs approval",
             SessionState::Waiting => "Waiting",
-            SessionState::Idle => "Idle",
+            SessionState::Suspended => "Suspended",
             SessionState::Exited => "Exited",
+            SessionState::Resumable => "Resumable",
         }
     }
 
@@ -99,11 +147,173 @@ impl SessionState {
     }
 
     /// Check if session is in an active state
+    ///
+    /// `AwaitingApproval` is deliberately not active: the process is alive but
+    /// it is blocked on the user, which is the same thing `Waiting` means for
+    /// the purpose of "how many sessions are actually working right now".
     pub fn is_active(&self) -> bool {
         matches!(
             self,
-            SessionState::Starting | SessionState::Thinking | SessionState::Executing(_)
+            SessionState::Starting | SessionState::Thinking | SessionState::Executing
         )
+    }
+
+    /// Whether a live child process is expected to be attached
+    ///
+    /// Polling a session without one reads EOF from a dead PTY, which
+    /// `poll_output` reports as an error and turns into `Exited` - so a
+    /// deliberate teardown would come back as a crash, and a suspended session
+    /// would age into the cleanup path that deletes its stored record.
+    pub fn has_process(&self) -> bool {
+        !matches!(
+            self,
+            SessionState::Suspended | SessionState::Exited | SessionState::Resumable
+        )
+    }
+
+    /// Whether a state reported by an agent should displace this one
+    ///
+    /// Subagents share one `session_id`, so several things are genuinely true
+    /// at once and the events describing them arrive interleaved. Precedence
+    /// resolves the tie in favour of whatever the user can act on:
+    /// `AwaitingApproval` > `Executing` > `Thinking` > `Waiting`.
+    fn precedence(&self) -> u8 {
+        match self {
+            SessionState::AwaitingApproval => 3,
+            SessionState::Executing => 2,
+            SessionState::Thinking => 1,
+            _ => 0,
+        }
+    }
+
+    /// Resolve two concurrently-true states into the one worth showing
+    pub fn most_urgent(self, other: SessionState) -> SessionState {
+        if other.precedence() > self.precedence() {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// Map a stored value onto the current model
+    ///
+    /// Session records outlive the code that wrote them, and a record that
+    /// fails to parse takes the whole `sessions.json` with it into the
+    /// corrupt-file backup path - losing the user's entire recovery index over
+    /// a renamed enum variant. So unknown values degrade instead of failing.
+    fn from_stored(raw: &serde_json::Value) -> Self {
+        match raw {
+            serde_json::Value::String(name) => match name.as_str() {
+                "Starting" => SessionState::Starting,
+                "Thinking" => SessionState::Thinking,
+                "Executing" => SessionState::Executing,
+                "AwaitingApproval" => SessionState::AwaitingApproval,
+                "Waiting" => SessionState::Waiting,
+                "Suspended" => SessionState::Suspended,
+                "Exited" => SessionState::Exited,
+                "Resumable" => SessionState::Resumable,
+                // Legacy. `Idle` never meant "idle" - its only writer was the
+                // stuck-in-Executing watchdog, so it meant "a tool hung". The
+                // process it described is gone by the time anything reads this.
+                "Idle" => SessionState::Waiting,
+                other => {
+                    tracing::warn!(state = %other, "Unknown stored session state, treating as Starting");
+                    SessionState::Starting
+                }
+            },
+            // Legacy: `Executing` used to carry its tool name, serialising as
+            // `{"Executing": "Bash"}`.
+            serde_json::Value::Object(map) if map.contains_key("Executing") => {
+                SessionState::Executing
+            }
+            other => {
+                tracing::warn!(state = %other, "Unrecognised stored session state, treating as Starting");
+                SessionState::Starting
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        Ok(SessionState::from_stored(&raw))
+    }
+}
+
+/// A tool the agent has started but not yet finished
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InFlightTool {
+    /// Tool name as reported by the agent (`Read`, `Bash`, ...)
+    pub name: String,
+    /// When `PreToolUse` announced it, used to detect stalls
+    pub started_at: DateTime<Utc>,
+}
+
+/// Why a session is asking for the user
+///
+/// This replaces a bare `needs_attention: bool`, which could say that a session
+/// wanted you but never why - so every reason had to be treated with the same
+/// urgency, and Claude's periodic idle nag rang the same bell as a permission
+/// prompt blocking real work.
+///
+/// Attention is deliberately *not* redundant with [`SessionState`]. State
+/// describes the process; attention describes the user's queue. A session stays
+/// `AwaitingApproval` after you glance at it and clear the flag, because the
+/// dialog is still open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttentionReason {
+    /// A permission dialog or inline question is blocking the turn
+    Approval {
+        /// The tool awaiting approval, when the agent named one
+        tool: Option<String>,
+    },
+    /// The agent finished its turn and is waiting for the next prompt
+    TurnComplete,
+    /// A tool has been in flight far longer than expected
+    ///
+    /// This is what the old `Idle` state was really flagging.
+    Stalled {
+        /// The tool that stopped reporting
+        tool: String,
+        /// How long it had been running when the watchdog gave up on it
+        secs: i64,
+    },
+    /// The process died unexpectedly
+    Crashed {
+        /// Exit code or signal description
+        reason: String,
+    },
+}
+
+impl AttentionReason {
+    /// Short human-readable description for the session list
+    pub fn summary(&self) -> String {
+        match self {
+            AttentionReason::Approval { tool: Some(tool) } => format!("approve {}", tool),
+            AttentionReason::Approval { tool: None } => "needs approval".to_string(),
+            AttentionReason::TurnComplete => "turn complete".to_string(),
+            AttentionReason::Stalled { tool, secs } => {
+                format!("{} stalled {}m", tool, secs / 60)
+            }
+            AttentionReason::Crashed { reason } => format!("crashed: {}", reason),
+        }
+    }
+
+    /// Badge colour for this reason
+    ///
+    /// Green means "done, your turn"; yellow means "blocked on you"; red means
+    /// something went wrong.
+    pub fn badge_color(&self) -> ratatui::style::Color {
+        use ratatui::style::Color;
+        match self {
+            AttentionReason::TurnComplete => Color::Green,
+            AttentionReason::Approval { .. } | AttentionReason::Stalled { .. } => Color::Yellow,
+            AttentionReason::Crashed { .. } => Color::Red,
+        }
     }
 }
 
@@ -132,9 +342,58 @@ pub struct SessionInfo {
     /// Timestamp when current state was entered (for timeout detection)
     #[serde(default = "Utc::now")]
     pub state_entered_at: DateTime<Utc>,
-    /// Whether this session needs user attention (set on Waiting transition, cleared on view)
+    /// When the agent last did something, or the user last touched this session
+    ///
+    /// Deliberately distinct from `last_activity`, which also moves on raw PTY
+    /// output. A redrawn status line is rendering, not engagement, and using
+    /// `last_activity` as the suspend clock would let a chatty idle prompt keep
+    /// a half-gigabyte process alive indefinitely.
+    #[serde(default = "Utc::now")]
+    pub last_engagement: DateTime<Utc>,
+    /// Why this session wants the user, if it does (cleared when viewed)
     #[serde(default)]
-    pub needs_attention: bool,
+    pub attention: Option<AttentionReason>,
+    /// Tools the agent has started but not yet finished, keyed by `tool_use_id`
+    ///
+    /// Not persisted: it describes work owned by a process that does not
+    /// survive a restart. Keying by the agent's own invocation ID is what makes
+    /// concurrent subagent tools tractable - and what stops an out-of-order
+    /// `PostToolUse` from retiring the wrong tool, since hook deliveries are
+    /// backgrounded and can arrive reversed.
+    #[serde(skip)]
+    pub in_flight: HashMap<String, InFlightTool>,
+    /// The last thing the assistant said, from the most recent `Stop`
+    #[serde(default)]
+    pub last_message: Option<String>,
+    /// Token and rate-limit figures read from the agent's own transcript
+    ///
+    /// Not persisted: it describes a live conversation, and stale numbers shown
+    /// as current are worse than no numbers. Re-seeded when the tailer attaches.
+    #[serde(skip)]
+    pub usage: crate::agent::events::UsageSnapshot,
+    /// Subagents this session appears to be running
+    ///
+    /// Only meaningful for Codex, whose subagents write their own separate
+    /// rollout files and would otherwise leave the parent looking idle. Claude
+    /// subagents share the parent's session and show up in `in_flight` instead.
+    #[serde(skip)]
+    pub subagents: usize,
+    /// Whether this session reattached to a conversation that already existed
+    ///
+    /// Decides where transcript reading starts. A fresh session's transcript
+    /// contains only what this session has just done, so it is read from the
+    /// beginning - otherwise the opening seconds, during which Codex is
+    /// discovered and first watched, would be lost outright. A reattached
+    /// session's file holds a whole prior conversation that must not replay as
+    /// if it were happening now.
+    #[serde(skip)]
+    pub resumed_conversation: bool,
+    /// Whether `name` was generated by Panoptes rather than chosen by the user
+    ///
+    /// Only an auto-generated name may be replaced by the agent's own title;
+    /// a name the user typed is theirs.
+    #[serde(default)]
+    pub auto_named: bool,
     /// Exit reason (if exited due to error)
     #[serde(default)]
     pub exit_reason: Option<String>,
@@ -156,9 +415,118 @@ pub struct SessionInfo {
     /// Whether to automatically close this session after its command finishes
     #[serde(default)]
     pub auto_close_after_command: bool,
+    /// The agent's own conversation ID, used to resume this session after a restart.
+    ///
+    /// For Claude Code this equals `id` - Panoptes dictates the conversation UUID
+    /// via `--session-id` rather than discovering it. For Codex it is resolved
+    /// from the rollout file, since Codex has no equivalent flag. Always `None`
+    /// for shell sessions, which have no conversation to resume.
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
 }
 
 impl SessionInfo {
+    /// Why this session cannot be brought back, if it cannot
+    ///
+    /// Returns `None` when the session is resumable. A recovered session can
+    /// become unusable between runs - its worktree may have been deleted, or an
+    /// agent session may have died before ever recording a conversation ID -
+    /// and the reason is worth showing rather than silently hiding the entry.
+    pub fn resume_blocker(&self) -> Option<&'static str> {
+        if !self.working_dir.exists() {
+            return Some("working directory is missing");
+        }
+        // Shells are restored by respawning in the same directory, so they have
+        // no conversation to reattach to and need no ID
+        if self.session_type != SessionType::Shell && self.agent_session_id.is_none() {
+            return Some("no conversation was recorded");
+        }
+        None
+    }
+
+    /// Whether this session can be brought back
+    pub fn is_resumable(&self) -> bool {
+        self.resume_blocker().is_none()
+    }
+
+    /// The tools currently in flight, rendered for the session list
+    ///
+    /// Returns `None` when nothing is running. Repeated tools collapse into
+    /// `Task ×3`, and the order is by start time rather than by `HashMap`
+    /// iteration, which is arbitrary and would reshuffle on every render.
+    pub fn in_flight_summary(&self) -> Option<String> {
+        if self.in_flight.is_empty() {
+            return None;
+        }
+
+        let mut grouped: Vec<(&str, DateTime<Utc>, usize)> = Vec::new();
+        for tool in self.in_flight.values() {
+            match grouped.iter_mut().find(|(name, _, _)| *name == tool.name) {
+                Some(entry) => {
+                    entry.2 += 1;
+                    entry.1 = entry.1.min(tool.started_at);
+                }
+                None => grouped.push((tool.name.as_str(), tool.started_at, 1)),
+            }
+        }
+        grouped.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+
+        let rendered: Vec<String> = grouped
+            .into_iter()
+            .map(|(name, _, count)| {
+                if count > 1 {
+                    format!("{} ×{}", name, count)
+                } else {
+                    name.to_string()
+                }
+            })
+            .collect();
+
+        Some(rendered.join(", "))
+    }
+
+    /// Record a tool the agent has just started
+    pub fn start_tool(&mut self, key: String, name: String, started_at: DateTime<Utc>) {
+        self.in_flight
+            .insert(key, InFlightTool { name, started_at });
+    }
+
+    /// Retire a tool the agent has finished, returning its name if it was tracked
+    pub fn finish_tool(&mut self, key: &str) -> Option<String> {
+        self.in_flight.remove(key).map(|tool| tool.name)
+    }
+
+    /// Adopt the agent's own title for this conversation
+    ///
+    /// Only replaces a name Panoptes generated. A name the user typed is a
+    /// deliberate label and is never overwritten. Returns whether it changed.
+    pub fn adopt_agent_title(&mut self, title: &str) -> bool {
+        let title = title.trim();
+        if title.is_empty() || !self.auto_named || self.name == title {
+            return false;
+        }
+        self.name = title.to_string();
+        true
+    }
+
+    /// Record the assistant's closing message, trimmed to something displayable
+    pub fn set_last_message(&mut self, message: &str) {
+        /// Enough for a session-list hint; the full text lives in the transcript
+        const MAX_LEN: usize = 160;
+
+        let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.is_empty() {
+            return;
+        }
+
+        // Truncate on a character boundary, not a byte one
+        let trimmed = match collapsed.char_indices().nth(MAX_LEN) {
+            Some((idx, _)) => format!("{}…", &collapsed[..idx]),
+            None => collapsed,
+        };
+        self.last_message = Some(trimmed);
+    }
+
     /// Create new session info
     pub fn new(
         name: String,
@@ -178,7 +546,14 @@ impl SessionInfo {
             created_at: now,
             last_activity: now,
             state_entered_at: now,
-            needs_attention: false,
+            last_engagement: now,
+            attention: None,
+            in_flight: HashMap::new(),
+            last_message: None,
+            usage: crate::agent::events::UsageSnapshot::default(),
+            subagents: 0,
+            resumed_conversation: false,
+            auto_named: false,
             exit_reason: None,
             exited_at: None,
             claude_config_id: None,
@@ -186,6 +561,7 @@ impl SessionInfo {
             codex_config_id: None,
             codex_config_name: None,
             auto_close_after_command: false,
+            agent_session_id: None,
         }
     }
 
@@ -612,12 +988,22 @@ impl Session {
 
     /// Write bytes to the PTY
     pub fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.note_user_input();
         self.pty.write(data)
     }
 
     /// Write pasted text to the PTY
     /// Wraps in bracketed paste sequences only if the app has enabled it
     pub fn write_paste(&mut self, text: &str) -> anyhow::Result<()> {
+        // Without bracketed paste the agent sees the text as typing, so an
+        // embedded newline submits it. With it, the newline is inserted
+        // literally and a separate Enter follows, which `send_key` handles.
+        let submits = !self.vterm.bracketed_paste_enabled() && text.contains('\n');
+        if submits {
+            self.guess_turn_started();
+        }
+
+        self.note_user_input();
         if self.vterm.bracketed_paste_enabled() {
             self.pty.write_paste(text)
         } else {
@@ -626,16 +1012,29 @@ impl Session {
     }
 
     /// Send a key event to the PTY
-    /// If Enter is pressed while Waiting, transitions to Thinking state
     pub fn send_key(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
         use crossterm::event::KeyCode;
 
-        // When user presses Enter while waiting, Claude will start processing
-        if key.code == KeyCode::Enter && self.info.state == SessionState::Waiting {
-            self.set_state(SessionState::Thinking);
+        if key.code == KeyCode::Enter {
+            self.guess_turn_started();
         }
 
+        self.note_user_input();
         self.pty.send_key(key)
+    }
+
+    /// Infer that the user just submitted a prompt
+    ///
+    /// Only for agents that do not announce it. This is a guess, and a poor
+    /// one - it fires on an Enter that merely dismissed a menu - so it is used
+    /// only where there is nothing better. Claude Code reports
+    /// `UserPromptSubmit` and is excluded; Codex has no equivalent hook.
+    fn guess_turn_started(&mut self) {
+        let must_guess = self.info.session_type.uses_hooks()
+            && !self.info.session_type.reports_prompt_submission();
+        if must_guess && self.info.state == SessionState::Waiting {
+            self.set_state(SessionState::Thinking);
+        }
     }
 
     /// Check if the session's process is still running
@@ -671,9 +1070,25 @@ impl Session {
         if state == SessionState::Exited && self.info.exited_at.is_none() {
             self.info.exited_at = Some(now);
         }
+        // A dead process owns no running tools
+        if state == SessionState::Exited {
+            self.info.in_flight.clear();
+        }
         self.info.state = state;
         self.info.last_activity = now;
         self.info.state_entered_at = now;
+        self.info.last_engagement = now;
+    }
+
+    /// Note that the user has interacted with this session
+    ///
+    /// Keeps a session the user is typing into out of the suspend sweep -
+    /// killing a process with half a prompt typed into it would lose real work,
+    /// and the agent produces no events at all while that happens.
+    pub fn note_user_input(&mut self) {
+        let now = Utc::now();
+        self.info.last_activity = now;
+        self.info.last_engagement = now;
     }
 
     /// Strip ANSI escape/control sequences from PTY bytes while preserving
@@ -795,23 +1210,232 @@ mod tests {
     fn test_session_state_display() {
         assert_eq!(SessionState::Starting.display_name(), "Starting");
         assert_eq!(SessionState::Thinking.display_name(), "Thinking");
+        assert_eq!(SessionState::Executing.display_name(), "Executing");
         assert_eq!(
-            SessionState::Executing("Read".to_string()).display_name(),
-            "Executing"
+            SessionState::AwaitingApproval.display_name(),
+            "Needs approval"
         );
         assert_eq!(SessionState::Waiting.display_name(), "Waiting");
-        assert_eq!(SessionState::Idle.display_name(), "Idle");
+        assert_eq!(SessionState::Suspended.display_name(), "Suspended");
         assert_eq!(SessionState::Exited.display_name(), "Exited");
+        assert_eq!(SessionState::Resumable.display_name(), "Resumable");
     }
 
     #[test]
     fn test_session_state_is_active() {
         assert!(SessionState::Starting.is_active());
         assert!(SessionState::Thinking.is_active());
-        assert!(SessionState::Executing("test".to_string()).is_active());
+        assert!(SessionState::Executing.is_active());
         assert!(!SessionState::Waiting.is_active());
-        assert!(!SessionState::Idle.is_active());
+        // Blocked on the user is not the same as working
+        assert!(!SessionState::AwaitingApproval.is_active());
+        assert!(!SessionState::Suspended.is_active());
         assert!(!SessionState::Exited.is_active());
+    }
+
+    #[test]
+    fn test_state_precedence_favours_what_the_user_can_act_on() {
+        use SessionState::*;
+
+        // Several subagents are true at once; the actionable one wins
+        assert_eq!(Executing.most_urgent(AwaitingApproval), AwaitingApproval);
+        assert_eq!(AwaitingApproval.most_urgent(Executing), AwaitingApproval);
+        assert_eq!(Thinking.most_urgent(Executing), Executing);
+        assert_eq!(Executing.most_urgent(Thinking), Executing);
+        // Waiting never wins by precedence; only an authoritative event may
+        // demote a session to it
+        assert_eq!(Executing.most_urgent(Waiting), Executing);
+    }
+
+    #[test]
+    fn test_legacy_session_states_still_parse() {
+        // A record that fails to parse takes the whole sessions.json with it
+        // into the corrupt-file backup path, losing the recovery index.
+        let cases = [
+            (r#""Idle""#, SessionState::Waiting),
+            (r#"{"Executing":"Bash"}"#, SessionState::Executing),
+            (r#""Waiting""#, SessionState::Waiting),
+            (r#""Resumable""#, SessionState::Resumable),
+            // Something a future version might write
+            (r#""SomethingNew""#, SessionState::Starting),
+        ];
+
+        for (json, expected) in cases {
+            let parsed: SessionState =
+                serde_json::from_str(json).unwrap_or_else(|e| panic!("{json} failed: {e}"));
+            assert_eq!(parsed, expected, "for {json}");
+        }
+    }
+
+    #[test]
+    fn test_legacy_session_info_loads_intact() {
+        // A record written by the pre-PAN-1 build, including the fields this
+        // ticket removed
+        let json = r#"{
+            "id": "8f0b8e46-1f3a-4c9e-9a1e-2b1c3d4e5f60",
+            "name": "old session",
+            "state": {"Executing": "Bash"},
+            "session_type": "ClaudeCode",
+            "working_dir": "/tmp",
+            "project_id": "8f0b8e46-1f3a-4c9e-9a1e-2b1c3d4e5f61",
+            "branch_id": "8f0b8e46-1f3a-4c9e-9a1e-2b1c3d4e5f62",
+            "created_at": "2026-01-01T00:00:00Z",
+            "last_activity": "2026-01-01T00:00:00Z",
+            "state_entered_at": "2026-01-01T00:00:00Z",
+            "needs_attention": true,
+            "agent_session_id": "8f0b8e46-1f3a-4c9e-9a1e-2b1c3d4e5f60"
+        }"#;
+
+        let info: SessionInfo = serde_json::from_str(json).expect("legacy record must still load");
+        assert_eq!(info.name, "old session");
+        assert_eq!(info.state, SessionState::Executing);
+        // The removed flag is simply ignored; attention is re-derived
+        assert!(info.attention.is_none());
+        assert!(info.in_flight.is_empty());
+        assert!(!info.auto_named);
+    }
+
+    #[test]
+    fn test_in_flight_summary_is_stable_and_grouped() {
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            "/tmp".into(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        assert_eq!(info.in_flight_summary(), None);
+
+        let t0 = Utc::now();
+        info.start_tool("a".into(), "Read".into(), t0);
+        info.start_tool("b".into(), "Grep".into(), t0 + chrono::Duration::seconds(1));
+        info.start_tool("c".into(), "Grep".into(), t0 + chrono::Duration::seconds(2));
+
+        // Ordered by start time, duplicates collapsed - and identical across
+        // repeated calls, which HashMap iteration order alone would not give
+        let first = info.in_flight_summary();
+        assert_eq!(first.as_deref(), Some("Read, Grep ×2"));
+        for _ in 0..10 {
+            assert_eq!(info.in_flight_summary(), first);
+        }
+
+        assert_eq!(info.finish_tool("a"), Some("Read".to_string()));
+        assert_eq!(info.in_flight_summary().as_deref(), Some("Grep ×2"));
+        assert_eq!(info.finish_tool("nonexistent"), None);
+    }
+
+    /// A live session wrapping a harmless long-running child
+    fn test_session(session_type: SessionType) -> Session {
+        let pty = crate::session::pty::PtyHandle::spawn(
+            "sleep",
+            &["60"],
+            std::path::Path::new("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            "/tmp".into(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        info.session_type = session_type;
+        info.state = SessionState::Waiting;
+        Session::new(info, pty, 24, 80)
+    }
+
+    #[test]
+    fn test_paste_that_submits_starts_a_turn_for_agents_that_cannot_report_it() {
+        // Codex has no prompt-submission hook, so a submitted prompt has to be
+        // inferred. Without bracketed paste the embedded newline submits, and
+        // no Enter key event ever arrives to notice it - leaving the session
+        // looking idle for the entire turn, and eligible for suspension.
+        let mut session = test_session(SessionType::OpenAICodex);
+        assert!(!session.vterm.bracketed_paste_enabled());
+
+        session.write_paste("do the thing\n").unwrap();
+        assert_eq!(session.info.state, SessionState::Thinking);
+    }
+
+    #[test]
+    fn test_bracketed_paste_does_not_start_a_turn() {
+        // With bracketed paste the newline is inserted literally; the user
+        // still has to press Enter, which send_key sees.
+        let mut session = test_session(SessionType::OpenAICodex);
+        session.vterm.process(b"\x1b[?2004h");
+        assert!(session.vterm.bracketed_paste_enabled());
+
+        session.write_paste("do the thing\n").unwrap();
+        assert_eq!(session.info.state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn test_paste_never_guesses_for_agents_that_report_prompts() {
+        // Claude Code sends UserPromptSubmit; guessing on top of it would only
+        // add wrong answers.
+        let mut session = test_session(SessionType::ClaudeCode);
+        session.write_paste("do the thing\n").unwrap();
+        assert_eq!(session.info.state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn test_user_input_advances_the_engagement_clock() {
+        let mut session = test_session(SessionType::ClaudeCode);
+        let long_ago = Utc::now() - chrono::Duration::seconds(10_000);
+        session.info.last_engagement = long_ago;
+        session.info.last_activity = long_ago;
+
+        session.write(b"x").unwrap();
+
+        assert!(session.info.last_engagement > long_ago);
+        assert!(session.info.last_activity > long_ago);
+    }
+
+    #[test]
+    fn test_adopt_agent_title() {
+        let mut info = SessionInfo::new(
+            "My name".to_string(),
+            "/tmp".into(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+
+        // A name the user chose is never overwritten
+        assert!(!info.adopt_agent_title("Agent title"));
+        assert_eq!(info.name, "My name");
+
+        info.auto_named = true;
+        assert!(info.adopt_agent_title("Agent title"));
+        assert_eq!(info.name, "Agent title");
+
+        // No-ops
+        assert!(!info.adopt_agent_title("Agent title"));
+        assert!(!info.adopt_agent_title("   "));
+        assert_eq!(info.name, "Agent title");
+    }
+
+    #[test]
+    fn test_set_last_message_collapses_and_truncates_safely() {
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            "/tmp".into(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+
+        info.set_last_message("  Done\n  with   the thing.  ");
+        assert_eq!(info.last_message.as_deref(), Some("Done with the thing."));
+
+        // Whitespace-only input leaves the previous value alone
+        info.set_last_message("   \n  ");
+        assert_eq!(info.last_message.as_deref(), Some("Done with the thing."));
+
+        // Multi-byte characters must not be split mid-character
+        info.set_last_message(&"é".repeat(500));
+        let stored = info.last_message.clone().unwrap();
+        assert!(stored.ends_with('…'));
+        assert_eq!(stored.chars().count(), 161);
     }
 
     #[test]
@@ -828,10 +1452,20 @@ mod tests {
 
     #[test]
     fn test_session_state_serialization() {
-        let state = SessionState::Executing("Bash".to_string());
-        let json = serde_json::to_string(&state).unwrap();
-        let parsed: SessionState = serde_json::from_str(&json).unwrap();
-        assert_eq!(state, parsed);
+        for state in [
+            SessionState::Starting,
+            SessionState::Thinking,
+            SessionState::Executing,
+            SessionState::AwaitingApproval,
+            SessionState::Waiting,
+            SessionState::Suspended,
+            SessionState::Exited,
+            SessionState::Resumable,
+        ] {
+            let json = serde_json::to_string(&state).unwrap();
+            let parsed: SessionState = serde_json::from_str(&json).unwrap();
+            assert_eq!(state, parsed, "round trip failed for {json}");
+        }
     }
 
     #[test]
@@ -906,7 +1540,7 @@ mod tests {
         let branch_id = Uuid::new_v4();
         let mut info = SessionInfo::shell("sh".to_string(), "/tmp".into(), project_id, branch_id);
         info.auto_close_after_command = true;
-        info.state = SessionState::Executing("cargo build".to_string());
+        info.state = SessionState::Executing;
         info.state_entered_at = Utc::now() - chrono::Duration::seconds(10);
         assert!(!info.should_auto_close(3));
     }

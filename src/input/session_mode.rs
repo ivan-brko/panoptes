@@ -64,6 +64,12 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
     // Send key to active session
     if let Some(session_id) = app.state.active_session {
+        // A suspended session has no process to write to. Wake it first, so the
+        // keystroke reaches the relaunched agent instead of vanishing into a
+        // dead PTY.
+        if app.sessions.is_suspended(session_id) && !app.wake_session(session_id)? {
+            return Ok(());
+        }
         if let Some(session) = app.sessions.get_mut(session_id) {
             session.send_key(key)?;
         }
@@ -71,7 +77,7 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         if app
             .sessions
             .get(session_id)
-            .is_some_and(|s| s.info.needs_attention)
+            .is_some_and(|s| s.info.attention.is_some())
         {
             app.sessions.acknowledge_attention(session_id);
             if app.config.notification_method == "title" {
@@ -104,6 +110,12 @@ fn handle_session_mode_esc(app: &mut App, key: KeyEvent) -> Result<()> {
 /// Forward an Esc key press to the active session's PTY
 fn forward_esc_to_pty(app: &mut App) -> Result<()> {
     if let Some(session_id) = app.state.active_session {
+        // Same reason as the ordinary key path: a suspended session has no
+        // process, so the byte would disappear into an orphaned PTY master
+        // and Shift+Esc would be the one keystroke that fails to wake it.
+        if app.sessions.is_suspended(session_id) && !app.wake_session(session_id)? {
+            return Ok(());
+        }
         if let Some(session) = app.sessions.get_mut(session_id) {
             let esc_key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
             session.send_key(esc_key)?;

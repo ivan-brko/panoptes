@@ -23,12 +23,16 @@ scrollback_lines = 10000
 # Seconds before a waiting session shows the yellow "idle" badge
 idle_threshold_secs = 300
 
-# Seconds before an Executing state auto-transitions to Idle
+# Seconds before a tool still in flight is treated as stalled and evicted
 # (handles cases where hook events are missed)
 state_timeout_secs = 300
 
 # Seconds to retain exited sessions before cleanup
 exited_retention_secs = 300
+
+# Seconds a session may sit idle before its agent process is suspended
+# (scrollback is kept; the session wakes when you type into it). 0 disables.
+suspend_after_secs = 7200
 
 # Theme preset: "dark", "light", or "high-contrast"
 theme_preset = "dark"
@@ -36,6 +40,16 @@ theme_preset = "dark"
 # Notification method when sessions need attention
 # Options: "bell" (terminal bell), "title" (update terminal title), "none"
 notification_method = "bell"
+
+# Whether Claude's periodic "you have been idle" notification raises attention
+attention_on_idle = false
+
+# Which attention reasons produce a notification
+[notify_on]
+approval = true       # a permission dialog is blocking a turn
+turn_complete = true  # an agent finished its turn
+stalled = false       # a tool has been in flight far longer than expected
+crashed = true        # a session's process died unexpectedly
 
 # Milliseconds to hold Escape for exiting session mode (deprecated)
 esc_hold_threshold_ms = 400
@@ -123,7 +137,9 @@ When a session has been in the "Waiting" state (waiting for your input) for long
 | Default | `300` (5 minutes) |
 | Type | Integer (seconds) |
 
-Sessions in the "Executing" state that don't receive updates for this long automatically transition to "Idle". This handles cases where hook events might be missed.
+A tool that has been in flight this long without its completion event arriving is treated as stalled: it is dropped from the session's in-flight set and the session is flagged with a `Stalled` attention reason. If nothing else is running the session falls back to "Thinking".
+
+This exists because a `PostToolUse` hook can go missing - dropped on channel overflow, or belonging to a subagent that died - and without it the session would sit in "Executing" forever.
 
 **When to change:** Increase if you have long-running tool executions that should remain in "Executing" state longer.
 
@@ -175,6 +191,92 @@ How Panoptes notifies you when a session needs attention.
 - **none** - No notifications
 
 **When to change:** Use `"title"` if you find the bell annoying; use `"none"` if you don't want interruptions.
+
+---
+
+### suspend_after_secs
+
+| Property | Value |
+|----------|-------|
+| Default | `7200` (2 hours) |
+| Type | Integer (seconds) |
+| Disable with | `0` |
+
+An idle Claude Code process uses roughly 565 MB - about 25x the entire Panoptes
+process. After this long without engagement, the agent's process is killed and
+the session shows as `Suspended`.
+
+The scrollback is kept and stays scrollable, so reading a suspended session
+costs nothing. Typing into one wakes it: the agent is relaunched against the
+same conversation, which takes around two seconds. The on-screen history is not
+restored at that point, though the conversation itself is fully intact.
+
+Shell sessions are never suspended - they have no conversation to come back to,
+and killing one would end a running build or dev server. Neither is a session
+that is working, blocked on a permission dialog, or currently on screen.
+
+**When to change:** Lower it if you keep many sessions open and are short on
+memory; raise it, or set `0`, if you would rather never wait for a wake.
+
+---
+
+### log_agent_events
+
+| Property | Value |
+|----------|-------|
+| Default | `false` |
+| Type | Boolean |
+
+Writes every raw line Panoptes reads from an agent's transcript to
+`~/.panoptes/logs/agent-events/<session-id>.ndjson`.
+
+Turn this on when a session's state looks wrong. The log holds exactly what the
+agent wrote, so what Panoptes concluded can be checked against what it was
+given. Leave it off otherwise - it grows with every tool call.
+
+---
+
+### notify_on
+
+| Property | Value |
+|----------|-------|
+| Default | `approval = true`, `turn_complete = true`, `stalled = false`, `crashed = true` |
+| Type | Table of booleans |
+
+Which reasons for wanting your attention are worth interrupting you for.
+
+Every reason still raises the badge in the session list; these control only the
+notification configured by `notification_method`. The split is deliberate - a
+stalled tool is worth showing in the list but rarely worth a sound, since
+nothing is blocked on you and the watchdog is only guessing.
+
+```toml
+[notify_on]
+approval = true
+turn_complete = true
+stalled = false
+crashed = true
+```
+
+**When to change:** Set `turn_complete = false` if you run many agents at once
+and only want to hear about the ones that are actually blocked on you.
+
+---
+
+### attention_on_idle
+
+| Property | Value |
+|----------|-------|
+| Default | `false` |
+| Type | Boolean |
+
+Claude sends a `Notification` after roughly a minute of an unattended prompt.
+It uses the same event type it uses to say a permission dialog is open, which
+is why Panoptes once treated the two alike and rang for both.
+
+With this off, the idle reminder is ignored entirely: a session you already
+know is waiting does not need to keep telling you. Turn it on if you want the
+reminder back.
 
 ---
 

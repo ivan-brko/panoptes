@@ -117,8 +117,12 @@ pub fn handle_confirming_delete_key(app: &mut App, key: KeyEvent) -> Result<()> 
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             // Confirm deletion
             if let Some(session_id) = app.state.pending_delete_session.take() {
-                // Validate session still exists before deleting
-                if app.sessions.get(session_id).is_none() {
+                // Validate session still exists before deleting. A recovered
+                // session counts: it has no process, but it does have a record
+                // to discard, and this dialog is the only way to clear one.
+                if app.sessions.get(session_id).is_none()
+                    && app.sessions.get_recovered(session_id).is_none()
+                {
                     tracing::warn!(
                         session_id = %session_id,
                         "Session no longer exists when confirming delete"
@@ -153,13 +157,17 @@ pub fn handle_confirming_delete_key(app: &mut App, key: KeyEvent) -> Result<()> 
                     }
                 }
 
-                if let Err(e) = app.sessions.destroy_session(session_id) {
+                // A recovered session has no process to kill - discarding it just
+                // drops its record, so it is no longer offered on next launch
+                if app.sessions.discard_recovered(session_id) {
+                    tracing::info!(session_id = %session_id, "Discarded recovered session");
+                } else if let Err(e) = app.sessions.destroy_session(session_id) {
                     tracing::error!("Failed to destroy session: {}", e);
                 }
 
                 // Adjust selection if needed
                 if let Some(branch_id) = branch_id {
-                    let new_count = app.sessions.sessions_for_branch(branch_id).len();
+                    let new_count = app.sessions.entries_for_branch(branch_id).len();
                     if app.state.selected_session_index >= new_count && new_count > 0 {
                         app.state.selected_session_index = new_count - 1;
                     }
@@ -202,18 +210,22 @@ pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Resu
                     return Ok(());
                 }
 
-                // Destroy all sessions for this branch
+                // Destroy all sessions for this branch, including any recovered
+                // ones - deleting the branch invalidates their working dir too
                 let sessions_to_destroy: Vec<_> = app
                     .sessions
-                    .sessions_for_branch(branch_id)
+                    .entries_for_branch(branch_id)
                     .iter()
-                    .map(|s| s.info.id)
+                    .map(|entry| entry.info.id)
                     .collect();
 
                 for session_id in sessions_to_destroy {
                     // Clear active_session if it was destroyed
                     if app.state.active_session == Some(session_id) {
                         app.state.active_session = None;
+                    }
+                    if app.sessions.discard_recovered(session_id) {
+                        continue;
                     }
                     if let Err(e) = app.sessions.destroy_session(session_id) {
                         tracing::error!("Failed to destroy session: {}", e);
@@ -373,15 +385,20 @@ pub fn handle_confirming_project_delete_key(app: &mut App, key: KeyEvent) -> Res
                 // Destroy all sessions for this project
                 let sessions_to_destroy: Vec<_> = app
                     .sessions
-                    .sessions_for_project(project_id)
+                    .entries_for_project(project_id)
                     .iter()
-                    .map(|s| s.info.id)
+                    .map(|entry| entry.info.id)
                     .collect();
 
                 for session_id in sessions_to_destroy {
                     // Clear active_session if it was destroyed
                     if app.state.active_session == Some(session_id) {
                         app.state.active_session = None;
+                    }
+                    // Recovered sessions have no process; removing the project
+                    // must still drop their records
+                    if app.sessions.discard_recovered(session_id) {
+                        continue;
                     }
                     if let Err(e) = app.sessions.destroy_session(session_id) {
                         tracing::error!("Failed to destroy session: {}", e);

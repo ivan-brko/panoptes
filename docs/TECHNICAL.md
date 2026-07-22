@@ -128,7 +128,7 @@ Panoptes includes a comprehensive logging system for debugging and diagnostics:
 The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 
 - Semantic colors for UI elements (primary, secondary, success, warning, error)
-- State-specific colors for session states (thinking, executing, waiting, idle)
+- State-specific colors for session states (thinking, executing, waiting, awaiting approval, suspended)
 - Reusable style definitions for borders, text, and highlights
 - Easy customization point for future theming support
 
@@ -146,22 +146,85 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 
 ### State Updates (Hooks)
 1. Agent (Claude Code or Codex) executes hook scripts on events
-2. Hook script extracts session_id from environment/JSON stdin
-3. Hook script POSTs event to localhost:9999
-4. Axum server updates session state
-5. SessionManager tracks attention flags
+2. Hook script reads the agent's JSON payload from stdin
+3. Hook script POSTs an envelope to localhost:9999
+4. Axum server forwards it to `SessionManager::handle_hook_event`
+5. SessionManager updates state, the in-flight tool set, and attention
 6. TUI reflects new state on next render
 
-**Claude Code hooks:** Full event types (PreToolUse, PostToolUse, Stop, etc.) providing granular state tracking including Executing(tool) state.
+**Wire format.** The POST body is an envelope: Panoptes' own routing fields at
+the top level, the agent's payload nested verbatim underneath.
 
-**Codex hooks:** Limited to `notify` config firing `agent-turn-complete` events. Maps to Waiting state. No granular tool-use tracking (no Executing state for Codex sessions).
+```json
+{
+  "session_id": "<panoptes session uuid>",
+  "event": "PreToolUse",
+  "timestamp": 1784720912,
+  "payload": { "tool_name": "Bash", "tool_use_id": "toolu_01", "...": "..." }
+}
+```
+
+The payload is nested rather than merged because Claude's own payload carries a
+`session_id` (its conversation UUID) that would otherwise collide with ours. It
+is built by `jq`, never by shell interpolation - a quote or newline in any
+forwarded field would produce malformed JSON and silently cost the event. If
+`jq` is not on PATH the script degrades to the envelope alone and logs a
+warning; state tracking still works, but tool names and notification types are
+lost.
+
+**Claude Code hooks:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Notification`,
+`PermissionRequest`.
+
+`SessionStart` does not only mean "a process came up". Its `source` is one of
+`startup`, `resume`, `clear`, `compact`, `fork` - and `compact` fires on its own
+whenever the context window fills, in the middle of a turn the agent is still
+working on. Only `startup`, `resume`, `clear` and `fork` reset the session to
+`Waiting`; anything else leaves the state alone.
+
+**Codex hooks:** Limited to `notify` config firing `agent-turn-complete`
+events. The notify hook must not read stdin or it stalls Codex's output
+pipeline, so it cannot be extended. Codex state comes from its transcript
+instead - see Reading Agent Transcripts below.
+
+### Session States
+
+| State | Process | Meaning | Set by |
+|-------|---------|---------|--------|
+| `Starting` | alive | spawned, agent hasn't reported in | spawn |
+| `Thinking` | alive | working, nothing in flight | `UserPromptSubmit`, last `PostToolUse` |
+| `Executing` | alive | one or more tools in flight | `PreToolUse`, shell foreground poll |
+| `AwaitingApproval` | alive | blocked on a permission dialog | `PermissionRequest` |
+| `Waiting` | alive | turn over, awaiting a prompt | `Stop`, shell foreground idle |
+| `Suspended` | killed by us | scrollback kept, wakes on interaction | idle sweep |
+| `Exited` | died itself | see `exit_reason` | `check_alive` |
+| `Resumable` | never spawned | loaded from `sessions.json` | `reconcile` at startup |
+
+Shell sessions render `Executing` as "Running" and `Waiting` as "Ready".
+
+Tool names do not live in the state. Subagents share one `session_id`, so
+several tools run at once; they are tracked in `SessionInfo::in_flight`, keyed
+by the agent's `tool_use_id`. Keying by invocation ID also means an out-of-order
+`PostToolUse` retires its own tool rather than whichever ran most recently -
+hook deliveries are backgrounded and can arrive reversed.
+
+Because several states are genuinely true at once, events that announce new
+concurrent work only ever *upgrade* the state, in the order
+`AwaitingApproval > Executing > Thinking`. Events that report a turn is over are
+authoritative and may demote, so a single dropped `PostToolUse` cannot pin a
+session in `Executing`.
 
 ### Attention Flow
-1. Session transitions to "Waiting" state
-2. SessionManager sets `needs_attention` flag
-3. If session is not currently active, terminal bell rings
-4. Session displays attention badge (green or yellow based on idle time)
-5. When user opens session, attention is acknowledged
+
+Attention is separate from state: state describes the process, attention
+describes the user's queue. A session stays `AwaitingApproval` after you glance
+at it and clear the flag, because the dialog is still open.
+
+1. An event raises an `AttentionReason` - `Approval`, `TurnComplete`, `Stalled`, or `Crashed`
+2. The badge appears in every session list, coloured by reason
+3. If `notify_on` allows that reason, and the session is not the one you are looking at, `notification_method` fires
+4. The bell rings only when the reason is new, not on every repeat
+5. When the user opens or types into the session, attention is acknowledged
 
 ## File Locations
 
@@ -169,6 +232,7 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration |
 | `~/.panoptes/projects.json` | Project and branch persistence |
+| `~/.panoptes/sessions.json` | Session index for recovery after a restart |
 | `~/.panoptes/claude_configs.json` | Claude account configurations |
 | `~/.panoptes/codex_configs.json` | Codex account configurations |
 | `~/.panoptes/hooks/` | Hook scripts for Claude Code and Codex |
@@ -207,7 +271,12 @@ Sessions display their configuration name in the header (e.g., `[Work]`) when us
 |---------|---------|-------------|
 | `hook_port` | 9999 | Port for the HTTP hook server |
 | `max_output_lines` | 10,000 | Lines kept in output buffer per session |
-| `idle_threshold_secs` | 300 | Seconds before waiting session shows yellow attention badge |
+| `idle_threshold_secs` | 300 | Seconds before an unattended waiting session resurfaces |
+| `state_timeout_secs` | 300 | Seconds before an in-flight tool is treated as stalled |
+| `suspend_after_secs` | 7200 (2h) | Idle seconds before an agent process is suspended; 0 disables |
+| `log_agent_events` | false | Log raw agent transcript lines for debugging |
+| `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
+| `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
 
 ### Custom Shortcuts
@@ -254,13 +323,170 @@ Sessions are cleaned up automatically when Panoptes exits:
 - PTY handles are closed
 - No orphaned processes are left behind
 
+### Session Recovery
+
+Agent processes do not outlive Panoptes - the PTY closes and the child is
+signalled. The conversation, however, is owned by the agent and already durable:
+Claude Code writes `~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl` and Codex
+writes `~/.codex/sessions/<date>/rollout-<ts>-<uuid>.jsonl`. What Panoptes stores
+in `sessions.json` is the *index* over that data - which conversation belongs to
+which session, plus the working directory, project, branch, and account config
+needed to relaunch it.
+
+- **Claude Code**: Panoptes dictates the conversation UUID with `--session-id`
+  rather than discovering it, so the Panoptes session ID and the Claude session
+  ID are the same value. Resume passes `--resume <uuid>`; `--fork-session` is
+  never used, since forking would mint a new ID and orphan the stored pointer.
+- **Codex**: has no equivalent flag, so its ID is discovered instead. Codex
+  writes a rollout file whose first line is a `session_meta` record carrying the
+  session `id` and the `cwd` it started in; Panoptes matches on that `cwd` plus
+  the session start time. A throttled scan runs only while some Codex session
+  still lacks an ID, so it costs nothing in the steady state. The notify hook
+  cannot be used for this - it must not read stdin, or it stalls Codex's output
+  pipeline and drops keystrokes.
+- **Shell**: has no conversation. Restoring one respawns a fresh shell in the
+  same directory; its scrollback is not recovered.
+
+Records are written on membership change (create, close), not on state change -
+live state describes a process that no longer exists and is discarded at load.
+Quitting Panoptes keeps records so sessions can be resumed; explicitly closing a
+session discards its record.
+
+At startup every record is reconciled to `SessionState::Resumable` and listed
+inertly - nothing is spawned until the user opens it. A record whose working
+directory has been deleted, or which never recorded a conversation ID, is still
+listed but shows why it cannot be brought back.
+
+### Reading Agent Transcripts
+
+Both agents write a complete record of every conversation to disk as it
+happens, and Panoptes knows where because it stores each session's conversation
+ID. Reading those files needs no cooperation from the agent, and for Codex it is
+the only channel there is.
+
+| | Claude Code | Codex CLI |
+|---|---|---|
+| File | `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<uuid>.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
+| Path is | derived from cwd and ID | searched for, since the name embeds a timestamp |
+| Drives state | no - hooks own it | **yes** |
+| Contributes | context usage, model | state, context usage, model, rate limits |
+| Measured flush latency | immediate | under 50ms |
+
+The two tailers have deliberately different jobs. Codex's rollout drives its
+state, which is what brings it to parity with Claude - until this, a Codex
+session could only ever report "my turn ended". Claude's transcript only
+supplements: hooks already report state and arrive sooner, and two producers
+writing the same field would fight over it.
+
+Everything converges on `AgentEvent`, a vocabulary neither agent speaks.
+`SessionManager::apply_agent_event` is the single ingest path; hooks and both
+tailers translate into it, so what an event *means* is decided in exactly one
+place.
+
+**Codex record mapping.** `event_msg` records narrate the session;
+`response_item` records are what the model emitted. Tool starts exist only in
+the second - `event_msg` contains no `*_begin` events at all - so
+`function_call` / `function_call_output` is the begin/end pair, matched on
+`call_id`. Verified across real rollouts: those two appear 1183/1183 times, and
+`task_started` (42) equals `task_complete` (41) plus `turn_aborted` (1).
+`exec_command_end` and `mcp_tool_call_end` describe completions already seen as
+`function_call_output` and are deliberately ignored, or every tool would be
+retired twice.
+
+**Where reading starts.** A session that created its own transcript is read
+from the beginning: everything in the file describes what it has just been
+doing, including the opening seconds during which a Codex conversation is still
+being located. A session reattaching to a conversation that predates it seeks to
+EOF instead, so an old conversation does not replay as if it were happening now,
+and scans backwards once for the most recent usage figures so the display is not
+blank until the next turn. A trailing partial line is held back until its newline arrives,
+as are trailing bytes that stop mid-character; transcripts are routinely read
+mid-write, and decoding a chunk in isolation would corrupt a split character
+permanently. A file that shrinks is re-attached at its new end rather than read
+from a stale offset.
+
+**Threading.** The watcher runs on its own OS thread and is drained with
+`try_recv` each tick, the same shape as hook events. The reads are incremental,
+but a burst of tool output can append a lot at once and parsing that on the
+render thread would show as a stutter.
+
+**Subagents.** Codex subagents write their own separate rollout files, so a
+parent looks completely idle while its children work - the mirror image of
+Claude, whose subagents share the parent's session ID and show up in
+`in_flight`. A child names its parent in `forked_from_id`, so discovery is
+exact. Liveness is not: there is no reliable "this subagent exited" signal, so
+it is inferred from recent writes. That is why the display is a count and not a
+claim, and why a session with subagents is never suspended.
+
+The same `forked_from_id` marker keeps `discover_session_id` from claiming a
+subagent rollout as a session's own conversation - they sit in the same working
+directory with their own fresh timestamps and otherwise match every criterion.
+Note that on a subagent rollout `payload.id` is the subagent's own ID while
+`payload.session_id` is its parent's.
+
+Setting `log_agent_events = true` writes every raw transcript line to
+`~/.panoptes/logs/agent-events/<session>.ndjson`, so the reader's interpretation
+can be checked against its input. Best effort throughout: it must never disturb
+the session it describes.
+
+### Suspending Idle Sessions
+
+An idle Claude Code process measures around 565 MB - roughly 25x the whole
+Panoptes process, which sits at about 23 MB. A handful of forgotten sessions
+therefore dominate memory use while doing nothing at all.
+
+After `suspend_after_secs` of no engagement, the child process is killed and the
+session moves to `Suspended`. The `Session` and its `vt100::Parser` buffer are
+kept, so the scrollback stays readable and scrollable - the buffer lives in
+Panoptes' memory, not the child's. Reading a suspended session is free; only
+interacting with one pays.
+
+Two clocks must agree. `last_engagement` moves when the agent changes state or
+the user types, and deliberately *not* on raw PTY output - a redrawn status line
+is rendering, not engagement, and Claude's once-a-minute idle notification is
+excluded for the same reason. `last_activity` does move on PTY output, and is
+the safety net: Codex reports nothing between the start of a turn and its end,
+so a working Codex session can sit in `Waiting` with a stale `last_engagement`
+while producing output the whole time. Requiring silence too means the worst
+case is a session that fails to suspend rather than one whose work is
+destroyed.
+
+A session is only suspended when all of the following hold. Each clause
+describes work a kill would destroy:
+
+- it is not a shell (no conversation to reattach to, and killing one ends a
+  build, a dev server, or an ssh session)
+- it is in `Waiting` - never `AwaitingApproval`, `Executing` or `Thinking`
+- it is not the session the user is currently viewing
+- it has no `resume_blocker()`; suspending something with no way back is just
+  closing it
+
+Waking spawns a fresh agent through the same `--resume` path a recovered session
+uses, and **discards the terminal buffer at that moment**. Reusing it would have
+the new process draw into a vterm still holding the old cursor position,
+alt-screen flags, modes and thousands of rows of output. Measured wake latency
+is around 2 seconds and does not scale with conversation length: the agent
+renders a compact resumed view rather than replaying the transcript. The
+conversation itself is intact - only the on-screen history is not.
+
+Three paths must exclude suspended sessions, and all three fail silently if
+missed: `poll_outputs` (reading a dead PTY reports as an error and becomes
+`Exited`), `check_alive` (reaping our own kill would notify the user of a
+crash), and `cleanup_exited_sessions` (which calls `forget_session` and deletes
+the record from `sessions.json`, making the session permanently unrecoverable).
+`SessionState::has_process()` is the single predicate they all use.
+
 ## Testing
 
-The project has 335+ unit tests covering:
+The project has 490+ unit tests covering:
 - Configuration loading/saving
 - Session state transitions
 - Output buffer management
-- Hook event parsing
+- Hook event parsing and envelope compatibility
+- Hook script behaviour (executed against a sealed PATH)
+- Session state precedence and legacy-record migration
+- Transcript parsing, tailing, and mid-write robustness
+- Session suspension exclusions
 - PTY operations
 - VTerm ANSI parsing
 - Project/branch management

@@ -27,7 +27,14 @@ pub fn handle_branch_detail_key(
         return Ok(());
     }
 
-    let branch_sessions = app.sessions.sessions_for_branch(branch_id);
+    // Entries mix live sessions with ones recoverable from a previous run, so
+    // the selected index may land on a session that has no process attached
+    let branch_sessions: Vec<(uuid::Uuid, bool)> = app
+        .sessions
+        .entries_for_branch(branch_id)
+        .iter()
+        .map(|entry| (entry.info.id, entry.live))
+        .collect();
     let session_count = branch_sessions.len();
 
     match key.code {
@@ -42,8 +49,27 @@ pub fn handle_branch_detail_key(
         }
         KeyCode::Enter => {
             // Use checked access to handle potential race conditions
-            if let Some(session) = branch_sessions.get(app.state.selected_session_index) {
-                let session_id = session.info.id;
+            if let Some(&(session_id, live)) = branch_sessions.get(app.state.selected_session_index)
+            {
+                // A recovered session has no process yet: bring it back before
+                // opening a view onto it
+                if !live {
+                    match app.resume_recovered_session(session_id) {
+                        Ok(true) => {}
+                        Ok(false) => return Ok(()),
+                        Err(e) => {
+                            tracing::error!(
+                                session_id = %session_id,
+                                error = %e,
+                                "Failed to resume session"
+                            );
+                            // Leave the entry in place so it can be retried or
+                            // discarded, and tell the user why
+                            app.state.error_message = Some(format!("Could not resume: {}", e));
+                            return Ok(());
+                        }
+                    }
+                }
                 app.state.navigate_to_session(session_id);
                 app.tui.enable_mouse_capture();
                 app.sessions.acknowledge_attention(session_id);
@@ -76,8 +102,7 @@ pub fn handle_branch_detail_key(
         }
         KeyCode::Char('d') => {
             // Prompt for confirmation before deleting session (use checked access)
-            if let Some(session) = branch_sessions.get(app.state.selected_session_index) {
-                let session_id = session.info.id;
+            if let Some(&(session_id, _)) = branch_sessions.get(app.state.selected_session_index) {
                 app.state.pending_delete_session = Some(session_id);
                 app.state.input_mode = InputMode::ConfirmingSessionDelete;
             }

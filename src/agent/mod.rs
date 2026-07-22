@@ -7,6 +7,7 @@
 pub mod adapter;
 pub mod claude;
 pub mod codex;
+pub mod events;
 pub mod shell;
 
 pub use adapter::{AgentAdapter, SpawnConfig, SpawnResult};

@@ -210,11 +210,96 @@ pub struct Config {
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: usize,
 
+    /// Seconds a session may sit idle before its agent process is suspended
+    ///
+    /// Suspending kills the child process and keeps the scrollback; the session
+    /// wakes on the next interaction. Set to 0 to disable.
+    #[serde(default = "default_suspend_after")]
+    pub suspend_after_secs: u64,
+
+    /// Whether to log every raw agent transcript line to `~/.panoptes/logs/`
+    ///
+    /// Off by default. Turn it on to diagnose a session whose state looks
+    /// wrong: the log holds exactly what the agent wrote, so the transcript
+    /// reader's interpretation can be checked against its input.
+    #[serde(default)]
+    pub log_agent_events: bool,
+
+    /// Whether Claude's periodic "idle" notification raises attention at all
+    ///
+    /// Claude nags after roughly a minute of an unattended prompt. That is the
+    /// same event type it uses to say a permission dialog is open, which is why
+    /// every notification used to ring. Off by default: a session you already
+    /// know is waiting does not need to keep telling you.
+    #[serde(default)]
+    pub attention_on_idle: bool,
+
+    // Everything below serialises as a TOML table or array-of-tables. TOML has
+    // no way to express a bare key after a table header, so any scalar field
+    // added later must go ABOVE this line or it will be silently swallowed into
+    // whichever table precedes it.
+    /// Which attention reasons ring the terminal bell
+    #[serde(default)]
+    pub notify_on: NotifyOn,
+
     /// Custom shell session shortcuts
     ///
     /// Each shortcut defines a key that spawns a shell session with a predefined command.
     #[serde(default)]
     pub custom_shortcuts: Vec<CustomShortcut>,
+}
+
+/// Which attention reasons are worth interrupting the user for
+///
+/// Every reason still raises the badge in the session list; these control only
+/// the audible/terminal-title notification. The split is deliberate: a stalled
+/// tool is worth showing in the list but is rarely worth a sound, since nothing
+/// is blocked on you and the watchdog is guessing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotifyOn {
+    /// A permission dialog or inline question is blocking a turn
+    #[serde(default = "default_true")]
+    pub approval: bool,
+
+    /// An agent finished its turn
+    #[serde(default = "default_true")]
+    pub turn_complete: bool,
+
+    /// A tool has been in flight far longer than expected
+    #[serde(default)]
+    pub stalled: bool,
+
+    /// A session's process died unexpectedly
+    #[serde(default = "default_true")]
+    pub crashed: bool,
+}
+
+impl Default for NotifyOn {
+    fn default() -> Self {
+        Self {
+            approval: true,
+            turn_complete: true,
+            stalled: false,
+            crashed: true,
+        }
+    }
+}
+
+impl NotifyOn {
+    /// Whether this reason should produce an audible notification
+    pub fn rings(&self, reason: &crate::session::AttentionReason) -> bool {
+        use crate::session::AttentionReason;
+        match reason {
+            AttentionReason::Approval { .. } => self.approval,
+            AttentionReason::TurnComplete => self.turn_complete,
+            AttentionReason::Stalled { .. } => self.stalled,
+            AttentionReason::Crashed { .. } => self.crashed,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_idle_threshold() -> u64 {
@@ -253,6 +338,10 @@ fn default_scrollback_lines() -> usize {
     10_000
 }
 
+fn default_suspend_after() -> u64 {
+    7200 // 2 hours
+}
+
 impl Default for Config {
     fn default() -> Self {
         let base = config_dir();
@@ -270,6 +359,10 @@ impl Default for Config {
             focus_timer_minutes: default_focus_timer_minutes(),
             focus_stats_retention_days: default_focus_stats_retention_days(),
             scrollback_lines: default_scrollback_lines(),
+            suspend_after_secs: default_suspend_after(),
+            log_agent_events: false,
+            attention_on_idle: false,
+            notify_on: NotifyOn::default(),
             custom_shortcuts: Vec::new(),
         }
     }
@@ -370,6 +463,56 @@ pub fn ensure_directories() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_config_survives_a_toml_round_trip() {
+        // TOML has no way to express a bare key after a table header, so a
+        // scalar field declared below `notify_on` would either fail to
+        // serialise or be silently swallowed into it on the way back in.
+        let mut original = Config::default();
+        original.notify_on.turn_complete = false;
+        original.notify_on.stalled = true;
+        original.attention_on_idle = true;
+        original.custom_shortcuts.push(CustomShortcut::new(
+            'v',
+            "VSCode".to_string(),
+            "code . &".to_string(),
+            false,
+        ));
+
+        let text = toml::to_string_pretty(&original).expect("config must serialise");
+        let parsed: Config = toml::from_str(&text).expect("config must round trip");
+
+        assert!(parsed.attention_on_idle);
+        assert!(!parsed.notify_on.turn_complete);
+        assert!(parsed.notify_on.stalled);
+        assert!(parsed.notify_on.approval);
+        assert_eq!(parsed.custom_shortcuts.len(), 1);
+        assert_eq!(parsed.esc_hold_threshold_ms, original.esc_hold_threshold_ms);
+        assert_eq!(parsed.scrollback_lines, original.scrollback_lines);
+    }
+
+    #[test]
+    fn test_config_written_before_notify_settings_still_loads() {
+        // A config file from before these options existed must keep working
+        let legacy = r#"
+hook_port = 9999
+worktrees_dir = "/tmp/wt"
+hooks_dir = "/tmp/hooks"
+max_output_lines = 500
+notification_method = "title"
+"#;
+        let parsed: Config = toml::from_str(legacy).expect("legacy config must load");
+
+        assert_eq!(parsed.max_output_lines, 500);
+        assert_eq!(parsed.notification_method, "title");
+        // Absent sections fall back to the documented defaults
+        assert!(parsed.notify_on.approval);
+        assert!(parsed.notify_on.turn_complete);
+        assert!(!parsed.notify_on.stalled);
+        assert!(parsed.notify_on.crashed);
+        assert!(!parsed.attention_on_idle);
+    }
 
     #[test]
     fn test_default_config() {

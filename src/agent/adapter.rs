@@ -29,6 +29,16 @@ pub struct SpawnConfig {
     pub claude_config_dir: Option<PathBuf>,
     /// Codex home directory (CODEX_HOME). None = use default ~/.codex
     pub codex_home: Option<PathBuf>,
+    /// Agent conversation ID to resume, when relaunching a session recovered
+    /// from a previous Panoptes run. `None` starts a fresh conversation.
+    pub resume: Option<String>,
+}
+
+impl SpawnConfig {
+    /// Whether this spawn is resuming an existing agent conversation
+    pub fn is_resume(&self) -> bool {
+        self.resume.is_some()
+    }
 }
 
 /// Result of spawning an agent
@@ -141,6 +151,7 @@ mod tests {
             cols: 80,
             claude_config_dir: None,
             codex_home: None,
+            resume: None,
         };
         assert_eq!(config.session_name, "test-session");
         assert_eq!(config.initial_prompt, Some("hello".to_string()));
@@ -157,6 +168,7 @@ mod tests {
             cols: 80,
             claude_config_dir: Some(PathBuf::from("/home/user/.claude-work")),
             codex_home: None,
+            resume: None,
         };
         assert_eq!(
             config.claude_config_dir,
