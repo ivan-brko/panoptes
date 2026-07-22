@@ -393,11 +393,16 @@ the second - `event_msg` contains no `*_begin` events at all - so
 `function_call_output` and are deliberately ignored, or every tool would be
 retired twice.
 
-**Attaching.** Tailers seek to EOF, so resuming a session does not replay its
-history as live events, then scan backwards once for the most recent usage
-figures so the display is not blank until the next turn. A trailing partial line
-is held back until its newline arrives; transcripts are routinely read
-mid-write. A file that shrinks is re-attached at its new end rather than read
+**Where reading starts.** A session that created its own transcript is read
+from the beginning: everything in the file describes what it has just been
+doing, including the opening seconds during which a Codex conversation is still
+being located. A session reattaching to a conversation that predates it seeks to
+EOF instead, so an old conversation does not replay as if it were happening now,
+and scans backwards once for the most recent usage figures so the display is not
+blank until the next turn. A trailing partial line is held back until its newline arrives,
+as are trailing bytes that stop mid-character; transcripts are routinely read
+mid-write, and decoding a chunk in isolation would corrupt a split character
+permanently. A file that shrinks is re-attached at its new end rather than read
 from a stale offset.
 
 **Threading.** The watcher runs on its own OS thread and is drained with

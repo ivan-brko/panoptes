@@ -1706,6 +1706,10 @@ impl App {
         let info = self.sessions.get(session_id).map(|s| &s.info);
         let claude_config_id = info.and_then(|i| i.claude_config_id);
         let codex_config_id = info.and_then(|i| i.codex_config_id);
+        // A session that started its own conversation owns everything in the
+        // file, including whatever it did in the seconds before Panoptes
+        // managed to locate it
+        let from_start = info.is_some_and(|i| !i.resumed_conversation);
 
         match session_type {
             SessionType::Shell => None,
@@ -1726,6 +1730,7 @@ impl App {
                     ),
                     codex_sessions_dir: None,
                     conversation_id: None,
+                    from_start,
                 })
             }
 
@@ -1745,6 +1750,7 @@ impl App {
                     path,
                     codex_sessions_dir: Some(codex_home.join("sessions")),
                     conversation_id: Some(conversation_id.to_string()),
+                    from_start,
                 })
             }
         }

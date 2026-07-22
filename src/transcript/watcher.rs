@@ -50,6 +50,13 @@ pub struct WatchTarget {
     pub codex_sessions_dir: Option<PathBuf>,
     /// The conversation ID subagent rollouts would name as their parent
     pub conversation_id: Option<String>,
+    /// Whether to read the file from the beginning rather than from its end
+    ///
+    /// True for a transcript this session wrote itself, where every record
+    /// describes what this session has just been doing. False when reattaching
+    /// to a conversation that predates the session, whose history must not
+    /// replay as if it were happening now.
+    pub from_start: bool,
 }
 
 /// Instructions to the watcher thread
@@ -135,13 +142,19 @@ struct WatcherState {
 
 impl WatcherState {
     fn watch(&mut self, target: WatchTarget, events: &Sender<(SessionId, AgentEvent)>) {
-        let (tailer, seed) = Tailer::attach(target.kind, target.path.clone());
-
-        // Seed the usage display from history so it is not blank until the next
-        // turn happens to mention token counts
-        if let Some(usage) = seed {
-            let _ = events.send((target.session_id, AgentEvent::Usage(usage)));
-        }
+        let tailer = if target.from_start {
+            // Everything already in the file belongs to this session, including
+            // whatever it did while its conversation was still being discovered
+            Tailer::from_start(target.kind, target.path.clone())
+        } else {
+            let (tailer, seed) = Tailer::attach(target.kind, target.path.clone());
+            // Seed the usage display from history so it is not blank until the
+            // next turn happens to mention token counts
+            if let Some(usage) = seed {
+                let _ = events.send((target.session_id, AgentEvent::Usage(usage)));
+            }
+            tailer
+        };
 
         self.watched.insert(
             target.session_id,

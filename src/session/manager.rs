@@ -248,6 +248,9 @@ impl SessionManager {
         info.state = SessionState::Starting;
         info.state_entered_at = Utc::now();
         info.last_activity = Utc::now();
+        // Its transcript holds a whole prior conversation; reading from the
+        // start would replay it as if it were happening now
+        info.resumed_conversation = true;
         if spawn_result.agent_session_id.is_some() {
             info.agent_session_id = spawn_result.agent_session_id;
         }
@@ -1102,6 +1105,7 @@ impl SessionManager {
         info.last_activity = Utc::now();
         info.last_engagement = Utc::now();
         info.in_flight.clear();
+        info.resumed_conversation = true;
         if spawn_result.agent_session_id.is_some() {
             info.agent_session_id = spawn_result.agent_session_id;
         }
@@ -2603,6 +2607,46 @@ mod tests {
             }
             other => panic!("expected Stalled attention, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_stalled_codex_tools_are_evicted_too() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+        manager.get_mut(session_id).unwrap().info.session_type = SessionType::OpenAICodex;
+
+        // Codex now populates in_flight from its rollout, so it needs the same
+        // backstop Claude has: a `function_call` whose `function_call_output`
+        // never arrives would otherwise pin the session in Executing forever -
+        // which also keeps it permanently out of reach of the suspend sweep,
+        // since that only ever considers Waiting sessions.
+        manager.apply_agent_event(
+            session_id,
+            AgentEvent::ToolStarted {
+                key: "c1".to_string(),
+                name: "shell".to_string(),
+            },
+        );
+        manager
+            .get_mut(session_id)
+            .unwrap()
+            .info
+            .in_flight
+            .get_mut("c1")
+            .unwrap()
+            .started_at = Utc::now() - chrono::Duration::seconds(600);
+
+        assert!(manager.check_state_timeouts(300));
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.in_flight.is_empty());
+        assert_eq!(info.state, SessionState::Thinking);
+        assert!(matches!(
+            info.attention,
+            Some(AttentionReason::Stalled { .. })
+        ));
     }
 
     #[test]
