@@ -410,6 +410,10 @@ impl App {
                 self.state.needs_render = true;
             }
 
+            // Whatever the events above flagged, the session filling the screen
+            // is not one the user needs pointing at
+            self.acknowledge_visible_session();
+
             // Check shell session states via foreground detection
             let shell_notifications = self.sessions.check_shell_states(self.state.active_session);
             if !shell_notifications.is_empty() {
@@ -1537,6 +1541,22 @@ impl App {
             }
         }
         true
+    }
+
+    /// Clear the attention flag on the session currently filling the screen
+    ///
+    /// The flag exists to point the user at a session that wants them. The one
+    /// they are already watching cannot be that, so an event arriving while it
+    /// is open must not leave it badged. Only the flag is cleared, never the
+    /// state: a session blocked on a permission dialog still reads as
+    /// `AwaitingApproval`, which is visible on screen anyway.
+    fn acknowledge_visible_session(&mut self) {
+        if self.state.view != View::SessionView {
+            return;
+        }
+        if let Some(session_id) = self.state.active_session {
+            self.sessions.acknowledge_attention(session_id);
+        }
     }
 
     /// Sound the configured notification for a session, unless the user is

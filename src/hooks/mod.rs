@@ -146,17 +146,34 @@ pub enum NotificationKind {
     TaskCompleted,
     /// The agent is asking the user a question inline
     Elicitation,
+    /// Something happened that the user does not have to act on
+    ///
+    /// Reported so the event is recognised rather than falling through to
+    /// [`NotificationKind::Other`], which assumes the user is wanted.
+    Informational,
     /// Anything Claude adds later that we do not recognise
     Other,
 }
 
 impl From<&str> for NotificationKind {
+    /// Classify the `notification_type` field of a Claude `Notification` hook
+    ///
+    /// The values are Claude Code's own, taken from the matcher metadata it
+    /// ships (`fieldToMatch: "notification_type"`). Getting one wrong is not a
+    /// cosmetic mistake: an unrecognised value falls through to `Other`, which
+    /// is treated as "the agent wants you", so it both rings the bell and
+    /// flags the session.
     fn from(s: &str) -> Self {
         match s {
-            "idle" => NotificationKind::Idle,
-            "permission_request" => NotificationKind::PermissionRequest,
-            "task_completed" => NotificationKind::TaskCompleted,
-            "elicitation" => NotificationKind::Elicitation,
+            "idle_prompt" => NotificationKind::Idle,
+            "permission_prompt" => NotificationKind::PermissionRequest,
+            "agent_completed" => NotificationKind::TaskCompleted,
+            // The agent is blocked on the user either way
+            "elicitation_dialog" | "agent_needs_input" => NotificationKind::Elicitation,
+            // The dialog resolved, or a background event the user need not act on
+            "elicitation_complete" | "elicitation_response" | "auth_success" => {
+                NotificationKind::Informational
+            }
             _ => NotificationKind::Other,
         }
     }
@@ -322,20 +339,38 @@ mod tests {
 
     #[test]
     fn test_notification_kind_classification() {
+        // These strings are Claude Code's own, not ours. They come from the
+        // matcher metadata the CLI ships for the Notification event.
         let idle = event(
             r#"{"session_id":"a","event":"Notification","timestamp":1,
-                "payload":{"notification_type":"idle","message":"still there?"}}"#,
+                "payload":{"notification_type":"idle_prompt","message":"still there?"}}"#,
         );
         assert_eq!(idle.notification_kind(), NotificationKind::Idle);
 
         let perm = event(
             r#"{"session_id":"a","event":"Notification","timestamp":1,
-                "payload":{"notification_type":"permission_request"}}"#,
+                "payload":{"notification_type":"permission_prompt"}}"#,
         );
         assert_eq!(
             perm.notification_kind(),
             NotificationKind::PermissionRequest
         );
+
+        for (value, expected) in [
+            ("agent_completed", NotificationKind::TaskCompleted),
+            ("elicitation_dialog", NotificationKind::Elicitation),
+            ("agent_needs_input", NotificationKind::Elicitation),
+            ("elicitation_complete", NotificationKind::Informational),
+            ("elicitation_response", NotificationKind::Informational),
+            ("auth_success", NotificationKind::Informational),
+        ] {
+            let e = event(&format!(
+                r#"{{"session_id":"a","event":"Notification","timestamp":1,
+                    "payload":{{"notification_type":"{}"}}}}"#,
+                value
+            ));
+            assert_eq!(e.notification_kind(), expected, "for {}", value);
+        }
 
         // An unrecognised or absent type must not masquerade as idle
         let unknown =

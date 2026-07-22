@@ -535,9 +535,8 @@ fn render_project_list(
                         parts.push(format!("{} need attention", attention));
                     }
 
-                    let marker = if folder.expanded { "▾" } else { "▸" };
                     (
-                        format!("{} {}/  ({})", marker, folder.name(), parts.join(", ")),
+                        format!("{}/  ({})", folder.name(), parts.join(", ")),
                         active,
                         attention,
                     )
@@ -563,7 +562,16 @@ fn render_project_list(
                 }
             };
 
-            let content = format!("{}{}{}", prefix, indent, label);
+            // The twisty gets its own column, which projects reserve as blank.
+            // Otherwise the marker shifts a folder's name right by its own
+            // width, cancelling out the extra indent level of its children and
+            // leaving parent and child names in the same column.
+            let twisty = match row {
+                TreeRow::Folder(folder) if folder.expanded => "▾ ",
+                TreeRow::Folder(_) => "▸ ",
+                TreeRow::Project(_) => "  ",
+            };
+            let content = format!("{}{}{}{}", prefix, indent, twisty, label);
 
             // Color precedence: attention > active > selected > default
             let style = if selected {
@@ -895,8 +903,9 @@ mod tests {
             let line: String = (0..buffer.area.width)
                 .map(|x| buffer.get(x, y).symbol())
                 .collect();
-            if line.contains(needle) {
-                let col = line.find(needle).unwrap() as u16;
+            if let Some(byte_idx) = line.find(needle) {
+                // Screen column is a character count, not a byte offset
+                let col = line[..byte_idx].chars().count() as u16;
                 return buffer.get(col, y).style();
             }
         }
@@ -935,12 +944,67 @@ mod tests {
 
         // Leading "│" is the list border, so these pin the exact indentation.
         // Row 0 is selected by default, so it carries the "▶ " marker instead
-        // of the two-space prefix - both are two columns wide.
+        // of the two-space prefix - both are two columns wide. The twisty
+        // occupies its own column, which project rows leave blank.
         assert!(contains_line(&lines, "│▶ ▾ Acme/"), "{:?}", lines);
         assert!(contains_line(&lines, "│    ▾ Platform/"), "{:?}", lines);
-        assert!(contains_line(&lines, "│      auth-service"), "{:?}", lines);
-        assert!(contains_line(&lines, "│    api-gateway"), "{:?}", lines);
-        assert!(contains_line(&lines, "│  panoptes"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "│        auth-service"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "│      api-gateway"), "{:?}", lines);
+        assert!(contains_line(&lines, "│    panoptes"), "{:?}", lines);
+    }
+
+    /// Column at which `needle` starts on the row that contains it
+    ///
+    /// Counted in characters, not bytes: the border and twisty glyphs are
+    /// multi-byte, so `str::find` alone would not give a screen column.
+    fn column_of(lines: &[String], needle: &str) -> usize {
+        lines
+            .iter()
+            .find_map(|line| line.find(needle).map(|b| line[..b].chars().count()))
+            .unwrap_or_else(|| panic!("no rendered row contains {:?}", needle))
+    }
+
+    #[test]
+    fn test_children_are_indented_past_their_folder_name() {
+        let store = store_with(&[
+            ("api-gateway", &["Acme"][..]),
+            ("auth-service", &["Acme", "Platform"][..]),
+            ("panoptes", &[][..]),
+        ]);
+        let state = AppState::default();
+
+        let lines = render_to_lines(&state, &store);
+
+        // A project inside a folder must start right of the folder's name,
+        // not level with it
+        assert!(
+            column_of(&lines, "api-gateway") > column_of(&lines, "Acme/"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            column_of(&lines, "auth-service") > column_of(&lines, "Platform/"),
+            "{:?}",
+            lines
+        );
+
+        // Siblings line up regardless of whether they are a folder or a project
+        assert_eq!(
+            column_of(&lines, "Platform/"),
+            column_of(&lines, "api-gateway"),
+            "{:?}",
+            lines
+        );
+        assert_eq!(
+            column_of(&lines, "Acme/"),
+            column_of(&lines, "panoptes"),
+            "{:?}",
+            lines
+        );
     }
 
     #[test]

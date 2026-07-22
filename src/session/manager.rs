@@ -2057,7 +2057,7 @@ mod tests {
             manager.handle_hook_event(&hook(
                 session_id,
                 "Notification",
-                serde_json::json!({"notification_type": "idle"}),
+                serde_json::json!({"notification_type": "idle_prompt"}),
             ));
         }
 
@@ -2348,6 +2348,107 @@ mod tests {
         );
     }
 
+    /// Every `notification_type` Claude Code actually sends must classify to
+    /// something deliberate.
+    ///
+    /// The values are the CLI's own. Panoptes previously matched invented
+    /// spellings ("idle", "permission_request"), so every real notification
+    /// fell through to `Other` - which is treated as "the agent wants you" and
+    /// therefore rang the bell and flagged the session. The repeating
+    /// `idle_prompt`, which fires precisely when the user has *not* replied,
+    /// made a session look like it needed attention when nothing had changed.
+    #[test]
+    fn test_real_claude_notification_types_do_not_all_ring() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        // Silent: informational, or the idle nag with attention_on_idle off
+        for value in [
+            "idle_prompt",
+            "auth_success",
+            "elicitation_complete",
+            "elicitation_response",
+        ] {
+            let session_id = insert_test_session(&mut manager);
+            manager
+                .get_mut(session_id)
+                .unwrap()
+                .set_state(SessionState::Waiting);
+
+            let event = hook(
+                session_id,
+                "Notification",
+                serde_json::json!({ "notification_type": value }),
+            );
+            assert_eq!(
+                manager.handle_hook_event(&event),
+                None,
+                "{} must not ring",
+                value
+            );
+            assert!(
+                manager.get(session_id).unwrap().info.attention.is_none(),
+                "{} must not flag the session",
+                value
+            );
+        }
+
+        // Actionable: the agent is blocked on the user
+        for value in [
+            "permission_prompt",
+            "elicitation_dialog",
+            "agent_needs_input",
+        ] {
+            let session_id = insert_test_session(&mut manager);
+            let event = hook(
+                session_id,
+                "Notification",
+                serde_json::json!({ "notification_type": value }),
+            );
+            assert_eq!(
+                manager.handle_hook_event(&event),
+                Some(session_id),
+                "{} must ring",
+                value
+            );
+        }
+    }
+
+    /// Re-notifying for a reason the user already cleared is what makes an
+    /// idle session ring with nothing new to show.
+    #[test]
+    fn test_repeated_idle_prompts_stay_silent_after_the_user_looks() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        // The agent answers and waits: one ring, which the user acts on
+        let stop = hook(session_id, "Stop", serde_json::json!({}));
+        assert_eq!(manager.handle_hook_event(&stop), Some(session_id));
+        manager.acknowledge_attention(session_id);
+
+        // The user reads it and does not reply. Claude nags every minute.
+        for _ in 0..5 {
+            let idle = hook(
+                session_id,
+                "Notification",
+                serde_json::json!({"notification_type": "idle_prompt"}),
+            );
+            assert_eq!(
+                manager.handle_hook_event(&idle),
+                None,
+                "an idle nag must never ring again"
+            );
+        }
+        assert!(manager.get(session_id).unwrap().info.attention.is_none());
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Waiting
+        );
+    }
+
     #[test]
     fn test_idle_notification_does_not_ring_but_permission_does() {
         let temp_dir = TempDir::new().unwrap();
@@ -2364,7 +2465,7 @@ mod tests {
         let idle = hook(
             session_id,
             "Notification",
-            serde_json::json!({"notification_type": "idle", "message": "still there?"}),
+            serde_json::json!({"notification_type": "idle_prompt", "message": "still there?"}),
         );
         assert_eq!(manager.handle_hook_event(&idle), None);
         let info = &manager.get(session_id).unwrap().info;
@@ -2378,7 +2479,7 @@ mod tests {
         let permission = hook(
             session_id,
             "Notification",
-            serde_json::json!({"notification_type": "permission_request"}),
+            serde_json::json!({"notification_type": "permission_prompt"}),
         );
         assert_eq!(manager.handle_hook_event(&permission), Some(session_id));
         assert_eq!(

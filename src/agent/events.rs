@@ -218,6 +218,7 @@ impl From<NotificationKind> for AgentEvent {
                 AgentEvent::ApprovalRequested { tool: None }
             }
             NotificationKind::TaskCompleted => AgentEvent::TurnCompleted { last_message: None },
+            NotificationKind::Informational => AgentEvent::Ignored,
             // Either a notification type the agent added after this was written,
             // or the degraded path where no payload arrived at all. Both are
             // more likely to want the user than not.

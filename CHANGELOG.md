@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Projects can be grouped into folders in the projects overview, nested up to 3 levels deep (`m` to move, `r` to rename, `d` to ungroup, `Enter`/`←`/`→` to fold).
 
+### Fixed
+- **Every Claude `Notification` hook rang the bell and flagged the session.** The `notification_type` values Panoptes matched (`idle`, `permission_request`, `task_completed`, `elicitation`) were not the ones Claude Code sends (`idle_prompt`, `permission_prompt`, `agent_completed`, `elicitation_dialog`, …), so all of them fell through to the unknown case, which assumes the agent wants you. The worst offender was `idle_prompt`, which fires repeatedly while you have *not* replied — so a session you had already read kept announcing itself with nothing new to show. `auth_success`, `elicitation_complete`, and `elicitation_response` are now classified as informational and stay silent.
+- The session open on screen no longer flags itself as needing attention. An event arriving while you are looking at a session used to leave its badge set until you navigated away and back.
+
 ### Removed
 - **Focus timer and focus statistics.** The `t`, `T`, and `Ctrl+t` shortcuts, the Focus Statistics view, and all focus-interval tracking are gone.
   - The `focus_timer_minutes` and `focus_stats_retention_days` config keys are no longer read. Leaving them in `config.toml` is harmless — unknown keys are ignored.
