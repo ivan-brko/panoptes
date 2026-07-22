@@ -95,7 +95,7 @@ pub fn render_custom_shortcuts_dialog(
     }
 
     // Footer with instructions
-    let footer = Paragraph::new("n: add | d: delete | j/k: navigate | Esc: close")
+    let footer = Paragraph::new("n: add | d: delete | ↑/↓: navigate | Esc: close")
         .style(Style::default().fg(t.text_muted))
         .alignment(Alignment::Center);
     frame.render_widget(footer, footer_area);

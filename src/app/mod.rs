@@ -46,7 +46,7 @@ use crate::tui::views::{
     render_config_delete_dialog, render_config_name_input_dialog, render_config_path_input_dialog,
     render_config_selector, render_custom_shortcut_dialogs, render_help_overlay,
     render_loading_indicator, render_log_viewer, render_project_detail, render_projects_overview,
-    render_session_view, render_timeline,
+    render_session_view,
 };
 use crate::tui::Tui;
 use crate::wizards::worktree::{
@@ -968,7 +968,6 @@ impl App {
                 normal::branch_detail::handle_branch_detail_key(self, key, project_id, branch_id)
             }
             View::SessionView => normal::session_view::handle_session_view_normal_key(self, key),
-            View::ActivityTimeline => normal::timeline::handle_timeline_key(self, key),
             View::LogViewer => normal::log_viewer::handle_log_viewer_key(self, key),
             View::ClaudeConfigs => normal::claude_configs::handle_claude_configs_key(self, key),
             View::CodexConfigs => normal::codex_configs::handle_codex_configs_key(self, key),
@@ -1794,17 +1793,6 @@ impl App {
                         &state.header_notifications,
                     );
                 }
-                View::ActivityTimeline => {
-                    render_timeline(
-                        frame,
-                        area,
-                        state,
-                        sessions,
-                        project_store,
-                        config,
-                        &state.header_notifications,
-                    );
-                }
                 View::LogViewer => {
                     let attention_count =
                         sessions.total_attention_count(config.idle_threshold_secs);
@@ -2089,12 +2077,6 @@ mod tests {
         assert_eq!(branch_view.project_id(), Some(project_id));
         assert_eq!(branch_view.branch_id(), Some(branch_id));
         assert_eq!(branch_view.parent(), Some(View::ProjectDetail(project_id)));
-
-        assert!(View::ActivityTimeline.is_activity_timeline());
-        assert_eq!(
-            View::ActivityTimeline.parent(),
-            Some(View::ProjectsOverview)
-        );
     }
 
     #[test]
@@ -2146,18 +2128,6 @@ mod tests {
     }
 
     #[test]
-    fn test_timeline_navigation() {
-        let mut state = AppState::default();
-
-        state.navigate_to_timeline();
-        assert_eq!(state.view, View::ActivityTimeline);
-        assert_eq!(state.selected_timeline_index, 0);
-
-        state.navigate_back();
-        assert_eq!(state.view, View::ProjectsOverview);
-    }
-
-    #[test]
     fn test_return_from_session_uses_session_context() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config = Config {
@@ -2184,19 +2154,19 @@ mod tests {
             .unwrap();
 
         let mut state = AppState {
-            view: View::ActivityTimeline,
+            view: View::LogViewer,
             ..Default::default()
         };
 
-        // Start from timeline, navigate to session A
+        // Start somewhere unrelated, navigate to session A
         state.navigate_to_session(_session_a);
-        assert_eq!(state.session_return_view, Some(View::ActivityTimeline));
+        assert_eq!(state.session_return_view, Some(View::LogViewer));
 
         // Jump to session B (simulates Space key)
         state.active_session = Some(session_b);
         state.session_return_view = Some(View::SessionView); // This is what causes the bug
 
-        // Return from session - should go to session B's branch detail, NOT ActivityTimeline
+        // Return from session - should go to session B's branch detail, not where we came from
         state.return_from_session(&sessions);
         assert_eq!(state.view, View::BranchDetail(project_b, branch_b));
         assert!(state.active_session.is_none());

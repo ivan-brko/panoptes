@@ -797,14 +797,14 @@ pub fn handle_managing_custom_shortcuts_key(app: &mut App, key: KeyEvent) -> Res
             // Close the dialog
             app.state.input_mode = InputMode::Normal;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             // Navigate down
             if shortcut_count > 0 {
                 app.state.custom_shortcuts_selected =
                     (app.state.custom_shortcuts_selected + 1) % shortcut_count;
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             // Navigate up
             if shortcut_count > 0 {
                 app.state.custom_shortcuts_selected = app

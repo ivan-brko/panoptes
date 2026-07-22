@@ -21,10 +21,10 @@ Named after the hundred-eyed giant of Greek mythology.
 - **Multi-Account Support** - Manage multiple accounts for both Claude Code and Codex CLI, switch between them per-project
 - **Permissions Sync** - Automatically copy Claude Code permissions to new worktrees and migrate unique permissions back before deletion (Codex planned)
 - **Project & Branch Organization** - Sessions organized by git repository and branch. Panoptes automatically creates isolated worktrees so each branch has its own working directory — no manual setup required
+- **Project Folders** - Group related projects into folders, nested up to 3 levels. A collapsed folder still shows how many sessions inside it are active or need you
 - **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Idle
 - **Attention System** - Get notified when sessions need your input, with visual badges and terminal bell alerts
-- **Activity Timeline** - View all sessions sorted by recent activity across all projects
-- **Keyboard-Driven Interface** - Fast navigation with vim-style keys and number shortcuts
+- **Keyboard-Driven Interface** - Arrow-key navigation, number shortcuts, and a `?` overlay listing the keys for whichever view you are in
 - **Shell Sessions** - Run normal shell sessions alongside Claude Code sessions and get notified when commands finish — useful for running tests, builds, or anything you'd rather not route through Claude, while still benefiting from Panoptes' automatic worktree handling
 - **Session Naming** - Name sessions for easy identification ("frontend-auth", "api-refactor")
 
@@ -81,11 +81,13 @@ cargo build --release
 
 | Key | Action |
 |-----|--------|
+| `?` | Show the keys for the current view |
 | `Enter` | Open selected item / Enter session mode |
 | `Esc` | Go back / Exit session mode |
-| `Shift+Esc` | Quick exit from session mode |
+| `Shift+Esc` | Send Escape to the session (from session mode) |
 | `Space` | Jump to next session needing attention |
 | `Tab` | Switch to next session (in session view) |
+| `k` | Manage custom shortcuts |
 | `q` | Quit (with confirmation) |
 
 ### Project Management
@@ -94,9 +96,10 @@ cargo build --release
 |-----|--------|
 | `n` | Add new project / New worktree / New session (context-dependent) |
 | `s` | New shell session (from branch view) |
-| `d` | Delete selected item |
-| `r` | Rename project |
-| `R` | Refresh branches |
+| `d` | Delete selected item (removes a folder when one is selected) |
+| `m` | Move a project or folder into a folder (from homepage) |
+| `r` | Rename project (project view) / Rename folder (homepage) |
+| `R` | Refresh git state / branches |
 | `c` | Claude configs (from homepage) / Set project Claude config |
 | `x` | Codex configs (from homepage) / Set project Codex config |
 
@@ -104,7 +107,6 @@ cargo build --release
 
 | Key | Action |
 |-----|--------|
-| `a` | Open activity timeline |
 | `l` | Open log viewer |
 
 See [Keyboard Reference](docs/KEYBOARD_REFERENCE.md) for the complete list.

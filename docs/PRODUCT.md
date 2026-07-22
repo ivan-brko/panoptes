@@ -33,11 +33,10 @@ Panoptes uses a hierarchical navigation structure:
 
 ```
 Projects Overview
-    └── Project Detail (branches)
-            └── Branch Detail (sessions)
-                    └── Session View (fullscreen)
-
-Activity Timeline (accessible from Overview with 'a')
+    └── Folder (optional, up to 3 levels deep)
+            └── Project Detail (branches)
+                    └── Branch Detail (sessions)
+                            └── Session View (fullscreen)
 ```
 
 Navigate forward with `Enter`, backward with `Esc`. This mental model makes it easy to manage many sessions across multiple codebases.
@@ -81,10 +80,6 @@ Panoptes actively helps you manage your attention across sessions:
   - Yellow dot (`●`) - Session has been waiting past the idle threshold (default 5 minutes)
 - **Needs Attention Section** - The projects overview highlights sessions requiring your input
 - **Auto-Acknowledge** - Opening a session automatically clears its attention flag
-
-### Activity Timeline
-
-Press `a` from the projects overview to see all sessions sorted by recent activity. This view cuts across project/branch boundaries, showing you what's been happening across your entire workspace.
 
 ### Log Viewer
 
@@ -168,6 +163,9 @@ Panoptes helps manage Claude Code's per-project permissions (tool approvals, MCP
 ### Project Management
 
 - Add projects by path with automatic git repository detection
+- Group projects into folders, nested up to 3 levels, so several repos belonging
+  to the same client or product sit together. A collapsed folder still reports
+  how many of its sessions are active or waiting on you
 - Rename projects for better organization (`r` key)
 - Delete projects with confirmation, including cascade deletion of branches and sessions (`d` key)
 - Quick attention navigation with `Space` key to jump to next session needing input
@@ -190,7 +188,6 @@ The current version includes:
 - Git repository and branch organization with worktree support
 - Real-time session state tracking
 - Attention system with notifications and quick navigation
-- Activity timeline view
 - Log viewer for debugging
 - Session scrollback (10,000 lines)
 - Project management (add, rename, delete)

@@ -296,11 +296,7 @@ mod tests {
         };
 
         // Test in various views
-        for view in [
-            View::ProjectsOverview,
-            View::SessionView,
-            View::ActivityTimeline,
-        ] {
+        for view in [View::ProjectsOverview, View::SessionView, View::LogViewer] {
             state.view = view;
             validate_mode_view_consistency(&mut state);
             assert_eq!(state.input_mode, InputMode::Normal);

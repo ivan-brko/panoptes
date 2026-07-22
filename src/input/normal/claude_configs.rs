@@ -20,12 +20,12 @@ pub fn handle_claude_configs_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.state.navigate_back();
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             if config_count > 0 {
                 app.state.select_next(config_count);
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             if config_count > 0 {
                 app.state.select_prev(config_count);
             }

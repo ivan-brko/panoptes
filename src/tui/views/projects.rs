@@ -216,7 +216,7 @@ fn normal_mode_footer(
     };
 
     if !has_projects {
-        return "n: new | a: timeline | c/x: configs | k: shortcuts | q: quit".to_string();
+        return "n: new | c/x: configs | k: shortcuts | q: quit".to_string();
     }
 
     // Which list the keys currently act on
@@ -236,7 +236,7 @@ fn normal_mode_footer(
         )
     } else {
         format!(
-            "Enter: open | n: new | m: move | d: delete | {}a: timeline | c/x: configs | k: shortcuts | q: quit",
+            "Enter: open | n: new | m: move | d: delete | {}c/x: configs | k: shortcuts | q: quit",
             switch_hint
         )
     }

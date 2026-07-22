@@ -7,7 +7,7 @@ Quick answers to common questions. For detailed information, see the linked docu
 - [Getting Started](#getting-started)
 - [Projects & Worktrees](#projects--worktrees)
 - [Sessions](#sessions)
-- [Multiple Claude Accounts](#multiple-claude-accounts)
+- [Multiple Accounts](#multiple-accounts)
 - [Configuration](#configuration)
 - [Permissions Sync](#permissions-sync)
 - [Quick Reference](#quick-reference)
@@ -74,6 +74,24 @@ All worktrees are stored in `~/.panoptes/worktrees/`, organized by project and b
 No. The worktree location is managed by Panoptes and git. Moving worktrees manually will break tracking.
 
 ---
+
+### How do I group related projects together?
+
+Select a project on the homepage, press `m`, and type a folder path such as
+`Acme/Platform`. Folders are created as you name them - there is no separate
+"new folder" step - and can nest up to 3 levels. `Tab` autocompletes against
+folders you already have, and an empty path moves a project back to the top level.
+
+### How do I rename or get rid of a folder?
+
+Select the folder heading and press `r` to rename it, or `d` to remove it. Removing
+a folder never deletes anything: its contents move up one level. Pressing `m` on a
+folder heading moves the whole subtree somewhere else.
+
+### Do I lose the folder layout when I restart?
+
+No. Folders live in `~/.panoptes/projects.json` alongside the projects themselves,
+and which folders you had collapsed is remembered too.
 
 ## Sessions
 
@@ -203,9 +221,8 @@ exited_retention_secs = 60  # 1 minute instead of default 5
 
 ### How do I change the theme?
 
-```toml
-theme_preset = "light"  # Options: "dark", "light", "high-contrast"
-```
+You cannot yet. Only the dark theme is implemented. `theme_preset` is still
+accepted in the config file so older configs keep loading, but it has no effect.
 
 ### Do I need to restart Panoptes after config changes?
 
@@ -253,16 +270,19 @@ The prompts are optional—you can decline each time. There's no global setting 
 
 | Key | Action |
 |-----|--------|
-| `j` / `Down` | Move down |
-| `k` / `Up` | Move up |
-| `1-9` | Select by number |
+| `Down` | Move down |
+| `Up` | Move up |
+| `1-9` | Select by number (not in the project tree) |
 | `PageUp/Down` | Scroll history |
+| `?` | Show the keys for the current view |
+
+Navigation is by arrow key everywhere; there are no vim-style `j`/`k` bindings.
+`k` opens the custom shortcuts manager.
 
 ### View Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `a` | Activity timeline |
 | `c` | Claude configs |
 | `x` | Codex configs |
 | `l` | Log viewer |

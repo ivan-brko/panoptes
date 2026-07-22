@@ -69,7 +69,7 @@
 │  │ - Project    │    │ - InputMode     │   │ Claude Code     │ │
 │  │ - Branch     │    │                 │   │ hooks           │ │
 │  │ - Session    │    │                 │   │                 │ │
-│  │ - Timeline   │    │                 │   │                 │ │
+│  │ - Logs       │    │                 │   │                 │ │
 │  └──────────────┘    └────────┬────────┘   └────────┬────────┘ │
 │         │                     │                     │          │
 │         │            ┌────────┴────────┐            │          │
@@ -267,10 +267,15 @@ Sessions display their configuration name in the header (e.g., `[Work]`) when us
 
 ## Configuration
 
+Every key has a default and the file is optional; unknown keys are ignored.
+See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for the full reference.
+
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `hook_port` | 9999 | Port for the HTTP hook server |
-| `max_output_lines` | 10,000 | Lines kept in output buffer per session |
+| `worktrees_dir` | `~/.panoptes/worktrees` | Where branch worktrees are created |
+| `hooks_dir` | `~/.panoptes/hooks` | Where generated hook scripts are written |
+| `scrollback_lines` | 10,000 | Lines of history retained per session |
 | `idle_threshold_secs` | 300 | Seconds before an unattended waiting session resurfaces |
 | `state_timeout_secs` | 300 | Seconds before an in-flight tool is treated as stalled |
 | `suspend_after_secs` | 7200 (2h) | Idle seconds before an agent process is suspended; 0 disables |
@@ -278,6 +283,9 @@ Sessions display their configuration name in the header (e.g., `[Work]`) when us
 | `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
 | `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
+
+`max_output_lines`, `theme_preset`, and `esc_hold_threshold_ms` are still parsed
+so older config files load, but nothing reads them.
 
 ### Custom Shortcuts
 

@@ -1005,13 +1005,13 @@ pub fn handle_selecting_claude_config_key(app: &mut App, key: KeyEvent) -> Resul
             app.state.creating_session_working_dir = None;
             app.state.setting_project_default_config = None;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             if config_count > 0 {
                 app.state.claude_config_selector_index =
                     (app.state.claude_config_selector_index + 1) % config_count;
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             if config_count > 0 {
                 app.state.claude_config_selector_index = app
                     .state
@@ -1192,10 +1192,10 @@ pub fn handle_selecting_agent_type_key(app: &mut App, key: KeyEvent) -> Result<(
             app.state.creating_session_branch_id = None;
             app.state.creating_session_working_dir = None;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             app.state.agent_type_selector_index = (app.state.agent_type_selector_index + 1) % 2;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             app.state.agent_type_selector_index = app
                 .state
                 .agent_type_selector_index
@@ -1307,13 +1307,13 @@ pub fn handle_selecting_codex_config_key(app: &mut App, key: KeyEvent) -> Result
             app.state.creating_session_working_dir = None;
             app.state.setting_project_default_config = None;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             if config_count > 0 {
                 app.state.codex_config_selector_index =
                     (app.state.codex_config_selector_index + 1) % config_count;
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             if config_count > 0 {
                 app.state.codex_config_selector_index = app
                     .state

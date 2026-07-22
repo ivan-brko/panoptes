@@ -8,8 +8,16 @@ These shortcuts work in most views (except when in Session mode or text input di
 
 | Key | Action |
 |-----|--------|
+| `?` | Show the shortcuts for the current view (`?` or `Esc` closes it) |
+| `Space` | Jump to the next session needing attention |
+| `k` | Open the custom shortcuts manager |
 | `Esc` | Go back / Cancel current action |
 | `q` | Quit (with confirmation in Projects Overview) |
+
+`?`, `Space`, and `k` are handled before the view sees the key, so they behave
+the same everywhere except in Session mode, where keys go to the agent.
+
+Navigation is by arrow key throughout. There are no vim-style `j`/`k` bindings.
 
 ## Projects Overview
 
@@ -19,8 +27,8 @@ The main view showing all projects and sessions.
 
 | Key | Action |
 |-----|--------|
-| `Down` / `j` | Move selection down |
-| `Up` / `k` | Move selection up |
+| `Down` | Move selection down |
+| `Up` | Move selection up |
 | `Tab` | Toggle focus between Projects and Sessions lists |
 | `1-9` | Select session by number (Sessions list only — the project tree is not numbered) |
 | `Enter` | Open selected project or session; expand/collapse selected folder |
@@ -51,7 +59,6 @@ active and attention counts without expanding.
 | Key | Action |
 |-----|--------|
 | `n` | Add new project (opens path input) |
-| `a` | Open activity timeline |
 | `c` | Open Claude configs management |
 | `x` | Open Codex configs management |
 | `l` | Open log viewer |
@@ -67,8 +74,8 @@ Shows branches within a selected project.
 
 | Key | Action |
 |-----|--------|
-| `Down` / `j` | Move selection down |
-| `Up` / `k` | Move selection up |
+| `Down` | Move selection down |
+| `Up` | Move selection up |
 | `1-9` | Select branch by number |
 | `Enter` | Open selected branch |
 | `Esc` | Return to Projects Overview |
@@ -94,8 +101,8 @@ Shows sessions for a specific branch.
 
 | Key | Action |
 |-----|--------|
-| `Down` / `j` | Move selection down |
-| `Up` / `k` | Move selection up |
+| `Down` | Move selection down |
+| `Up` | Move selection up |
 | `Enter` | Open selected session |
 | `Esc` / `q` | Return to Project Detail |
 
@@ -106,6 +113,7 @@ Shows sessions for a specific branch.
 | `n` | Create new AI session (Claude Code or Codex) |
 | `s` | Create new shell session |
 | `d` | Delete selected session (prompts for confirmation) |
+| any other key | Run a matching custom shortcut, if one is bound |
 
 ## Session View (Normal Mode)
 
@@ -145,19 +153,6 @@ Interacting directly with the session (Claude Code, Codex, or shell). Most keys 
 
 **Note:** When scrolled up in history, typing any key (except scroll keys) will automatically scroll back to the live view.
 
-## Activity Timeline
-
-Shows all sessions sorted by recent activity.
-
-### Navigation
-
-| Key | Action |
-|-----|--------|
-| `Down` / `j` | Move selection down |
-| `Up` / `k` | Move selection up |
-| `Enter` | Open selected session |
-| `Esc` / `q` | Return to Projects Overview |
-
 ## Log Viewer
 
 Shows application logs for debugging.
@@ -166,8 +161,8 @@ Shows application logs for debugging.
 
 | Key | Action |
 |-----|--------|
-| `Down` / `j` | Scroll down |
-| `Up` / `k` | Scroll up |
+| `Down` | Scroll down |
+| `Up` | Scroll up |
 | `PageDown` | Page down |
 | `PageUp` | Page up |
 | `g` | Jump to top |
@@ -182,8 +177,8 @@ Manage multiple Claude Code accounts (`c` from Projects Overview) or Codex accou
 
 | Key | Action |
 |-----|--------|
-| `Down` / `j` | Move selection down |
-| `Up` / `k` | Move selection up |
+| `Down` | Move selection down |
+| `Up` | Move selection up |
 | `Esc` / `q` | Return to Projects Overview |
 
 ### Actions
@@ -198,11 +193,13 @@ Manage multiple Claude Code accounts (`c` from Projects Overview) or Codex accou
 
 ### Step 1: Select Branch
 
+Letters typed here go into the filter, so only the arrow keys navigate.
+
 | Key | Action |
 |-----|--------|
 | Type | Filter branches / enter new branch name |
-| `Down` / `j` | Move selection down |
-| `Up` / `k` | Move selection up |
+| `Down` | Move selection down |
+| `Up` | Move selection up |
 | `Enter` | Select branch (or create new) |
 | `Esc` | Cancel |
 
@@ -211,8 +208,8 @@ Manage multiple Claude Code accounts (`c` from Projects Overview) or Codex accou
 | Key | Action |
 |-----|--------|
 | Type | Filter base branches |
-| `Down` / `j` | Move selection down |
-| `Up` / `k` | Move selection up |
+| `Down` | Move selection down |
+| `Up` | Move selection up |
 | `Enter` | Confirm selection |
 | `Esc` | Go back to step 1 |
 

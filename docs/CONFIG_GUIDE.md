@@ -1,6 +1,10 @@
 # Configuration Guide
 
-Panoptes stores its configuration in a TOML file at `~/.panoptes/config.toml`. If the file doesn't exist, Panoptes uses default values.
+Panoptes stores its configuration in a TOML file at `~/.panoptes/config.toml`.
+
+Every setting has a default, and the file itself is optional: if it is missing, or
+only sets some of the keys, Panoptes fills in the rest. Keys it does not
+recognise are ignored, so a config left over from an older version still loads.
 
 ## File Location
 
@@ -14,7 +18,12 @@ Panoptes stores its configuration in a TOML file at `~/.panoptes/config.toml`. I
 # HTTP server port for Claude Code hooks
 hook_port = 9999
 
-# Maximum lines to keep in output buffer per session
+# Where Panoptes creates git worktrees and writes agent hook scripts.
+# Both default to subdirectories of ~/.panoptes/ - set them only to relocate.
+worktrees_dir = "/Users/you/.panoptes/worktrees"
+hooks_dir = "/Users/you/.panoptes/hooks"
+
+# Parsed but unused - scrollback_lines is what bounds session history
 max_output_lines = 10000
 
 # Maximum scrollback lines per session (for terminal history)
@@ -34,7 +43,7 @@ exited_retention_secs = 300
 # (scrollback is kept; the session wakes when you type into it). 0 disables.
 suspend_after_secs = 7200
 
-# Theme preset: "dark", "light", or "high-contrast"
+# Parsed but unused - only the dark theme exists today
 theme_preset = "dark"
 
 # Notification method when sessions need attention
@@ -83,6 +92,36 @@ The port number for the HTTP server that receives Claude Code hook callbacks.
 
 ---
 
+### worktrees_dir
+
+| Property | Value |
+|----------|-------|
+| Default | `~/.panoptes/worktrees` |
+| Type | Absolute path |
+
+Where Panoptes creates git worktrees when you make a branch. Each worktree is a
+full checkout, so this directory grows with the number of branches you keep.
+
+**When to change:** To put worktrees on a different disk, or somewhere your
+editor indexes more happily. Moving it does not relocate existing worktrees.
+
+---
+
+### hooks_dir
+
+| Property | Value |
+|----------|-------|
+| Default | `~/.panoptes/hooks` |
+| Type | Absolute path |
+
+Where Panoptes writes the hook scripts it registers with Claude Code and Codex.
+It rewrites them on startup, so treat this directory as generated.
+
+**When to change:** Rarely. Mainly if `~/.panoptes/` is on a filesystem that
+cannot hold executable scripts.
+
+---
+
 ### max_output_lines
 
 | Property | Value |
@@ -90,9 +129,9 @@ The port number for the HTTP server that receives Claude Code hook callbacks.
 | Default | `10000` |
 | Type | Integer |
 
-Maximum number of lines to keep in the output buffer for each session. Older lines are discarded when this limit is reached.
-
-**When to change:** Increase if you need more scrollback history; decrease if you have memory constraints.
+**Not currently used.** The setting is still parsed so old config files keep
+loading, but nothing reads it. Session history is bounded by
+[`scrollback_lines`](#scrollback_lines) instead.
 
 ---
 
@@ -158,15 +197,11 @@ How long to keep exited sessions before they're removed from the UI. This gives 
 |----------|-------|
 | Default | `"dark"` |
 | Type | String |
-| Options | `"dark"`, `"light"`, `"high-contrast"` |
+| Status | Not implemented |
 
-The color theme for the terminal UI.
-
-- **dark** - Standard dark theme (light text on dark background)
-- **light** - Light theme (dark text on light background)
-- **high-contrast** - High contrast for accessibility
-
-**When to change:** Based on your terminal's background color and personal preference.
+**Not currently used.** Only the dark theme is implemented, and it is always
+applied; setting this has no effect today. The key is still accepted so that
+existing config files keep loading.
 
 ---
 

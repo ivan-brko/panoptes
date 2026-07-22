@@ -138,7 +138,7 @@ pub fn render_log_viewer(
 
     // Footer with navigation help
     let footer_text =
-        "↑/k ↓/j: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | Esc/q: back".to_string();
+        "↑/↓: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | Esc/q: back".to_string();
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::TOP));

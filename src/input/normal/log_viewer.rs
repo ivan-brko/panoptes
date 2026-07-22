@@ -21,14 +21,14 @@ pub fn handle_log_viewer_key(app: &mut App, key: KeyEvent) -> Result<()> {
             // Go back to projects overview
             app.state.view = View::ProjectsOverview;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             // Scroll down (disable auto-scroll)
             app.state.log_viewer_auto_scroll = false;
             if app.state.log_viewer_scroll < entry_count.saturating_sub(1) {
                 app.state.log_viewer_scroll += 1;
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             // Scroll up (disable auto-scroll)
             app.state.log_viewer_auto_scroll = false;
             app.state.log_viewer_scroll = app.state.log_viewer_scroll.saturating_sub(1);

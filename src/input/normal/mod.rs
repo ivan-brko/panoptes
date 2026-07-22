@@ -9,4 +9,3 @@ pub mod log_viewer;
 pub mod project_detail;
 pub mod projects_overview;
 pub mod session_view;
-pub mod timeline;

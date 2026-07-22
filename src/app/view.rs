@@ -17,7 +17,6 @@ pub enum View {
     /// Single session fullscreen view
     SessionView,
     /// All sessions sorted by recent activity
-    ActivityTimeline,
     /// Log viewer showing application logs
     LogViewer,
     /// Claude configurations management
@@ -47,11 +46,6 @@ impl View {
         matches!(self, View::SessionView)
     }
 
-    /// Check if this view is the activity timeline
-    pub fn is_activity_timeline(&self) -> bool {
-        matches!(self, View::ActivityTimeline)
-    }
-
     /// Check if this view is the Claude configs view
     pub fn is_claude_configs(&self) -> bool {
         matches!(self, View::ClaudeConfigs)
@@ -69,7 +63,6 @@ impl View {
             View::ProjectDetail(_) => Some(View::ProjectsOverview),
             View::BranchDetail(project_id, _) => Some(View::ProjectDetail(*project_id)),
             View::SessionView => None, // Handled specially based on context
-            View::ActivityTimeline => Some(View::ProjectsOverview),
             View::LogViewer => Some(View::ProjectsOverview),
             View::ClaudeConfigs => Some(View::ProjectsOverview),
             View::CodexConfigs => Some(View::ProjectsOverview),
@@ -119,7 +112,6 @@ mod tests {
         assert!(!View::BranchDetail(project_id, branch_id).is_session_view());
 
         assert!(View::SessionView.is_session_view());
-        assert!(View::ActivityTimeline.is_activity_timeline());
         assert!(View::ClaudeConfigs.is_claude_configs());
     }
 
@@ -147,10 +139,6 @@ mod tests {
         assert_eq!(View::SessionView.parent(), None);
 
         // Other views -> ProjectsOverview
-        assert_eq!(
-            View::ActivityTimeline.parent(),
-            Some(View::ProjectsOverview)
-        );
         assert_eq!(View::LogViewer.parent(), Some(View::ProjectsOverview));
         assert_eq!(View::ClaudeConfigs.parent(), Some(View::ProjectsOverview));
     }
@@ -170,7 +158,6 @@ mod tests {
             Some(project_id)
         );
         assert_eq!(View::SessionView.project_id(), None);
-        assert_eq!(View::ActivityTimeline.project_id(), None);
     }
 
     #[test]

@@ -148,8 +148,10 @@ pub struct AppState {
     pub selected_branch_index: usize,
     /// Selected index in BranchDetail (session selection)
     pub selected_session_index: usize,
-    /// Selected index in ActivityTimeline
-    pub selected_timeline_index: usize,
+    /// Which session the session view is on, for `Tab` cycling and digit jumps
+    ///
+    /// Indexes `SessionManager::session_order`, not any on-screen list.
+    pub session_cycle_index: usize,
     /// Session being viewed (in session view)
     pub active_session: Option<SessionId>,
     /// Context for returning from session view (which view to go back to)
@@ -324,7 +326,6 @@ impl AppState {
             View::ProjectsOverview => self.selected_project_index,
             View::ProjectDetail(_) => self.selected_branch_index,
             View::BranchDetail(_, _) => self.selected_session_index,
-            View::ActivityTimeline => self.selected_timeline_index,
             View::SessionView => 0,
             View::LogViewer => self.log_viewer_scroll,
             View::ClaudeConfigs => self.claude_configs_selected_index,
@@ -338,7 +339,6 @@ impl AppState {
             View::ProjectsOverview => self.selected_project_index = index,
             View::ProjectDetail(_) => self.selected_branch_index = index,
             View::BranchDetail(_, _) => self.selected_session_index = index,
-            View::ActivityTimeline => self.selected_timeline_index = index,
             View::SessionView => {}
             View::LogViewer => self.log_viewer_scroll = index,
             View::ClaudeConfigs => self.claude_configs_selected_index = index,
@@ -426,12 +426,6 @@ impl AppState {
         self.session_scroll_offset = 0;
         // Auto-activate session mode so keys go directly to PTY
         self.input_mode = InputMode::Session;
-    }
-
-    /// Navigate to activity timeline
-    pub fn navigate_to_timeline(&mut self) {
-        self.view = View::ActivityTimeline;
-        self.selected_timeline_index = 0;
     }
 
     /// Navigate to Claude configs view
@@ -672,14 +666,6 @@ mod tests {
     }
 
     #[test]
-    fn test_navigate_to_timeline() {
-        let mut state = AppState::default();
-        state.navigate_to_timeline();
-        assert_eq!(state.view, View::ActivityTimeline);
-        assert_eq!(state.selected_timeline_index, 0);
-    }
-
-    #[test]
     fn test_navigate_to_claude_configs() {
         let mut state = AppState::default();
         state.navigate_to_claude_configs();
@@ -740,11 +726,6 @@ mod tests {
         state.view = View::BranchDetail(project_id, branch_id);
         state.selected_session_index = 1;
         assert_eq!(state.current_selected_index(), 1);
-
-        // ActivityTimeline
-        state.view = View::ActivityTimeline;
-        state.selected_timeline_index = 4;
-        assert_eq!(state.current_selected_index(), 4);
     }
 
     #[test]

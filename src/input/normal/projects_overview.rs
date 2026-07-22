@@ -27,10 +27,6 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
         KeyCode::Esc | KeyCode::Char('q') => {
             app.state.input_mode = InputMode::ConfirmingQuit;
         }
-        KeyCode::Char('a') => {
-            // Activity timeline
-            app.state.navigate_to_timeline();
-        }
         KeyCode::Char('n') => {
             // Start adding a new project
             app.state.input_mode = InputMode::AddingProject;

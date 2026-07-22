@@ -71,14 +71,9 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
             let count = app.sessions.len();
             if count > 0 {
                 // Clamp current index to valid range before incrementing
-                let current = app
-                    .state
-                    .selected_timeline_index
-                    .min(count.saturating_sub(1));
-                // Use the timeline index for cycling through all sessions
-                app.state.selected_timeline_index = (current + 1) % count;
-                if let Some(session) = app.sessions.get_by_index(app.state.selected_timeline_index)
-                {
+                let current = app.state.session_cycle_index.min(count.saturating_sub(1));
+                app.state.session_cycle_index = (current + 1) % count;
+                if let Some(session) = app.sessions.get_by_index(app.state.session_cycle_index) {
                     let session_id = session.info.id;
                     app.state.active_session = Some(session_id);
                     // Reset scroll offset when switching sessions
@@ -91,7 +86,7 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                 }
             } else {
                 // No sessions - reset index
-                app.state.selected_timeline_index = 0;
+                app.state.session_cycle_index = 0;
             }
         }
         KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -101,7 +96,7 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                 // Use checked access for safety
                 if let Some(session) = app.sessions.get_by_index(target_index) {
                     let session_id = session.info.id;
-                    app.state.selected_timeline_index = target_index;
+                    app.state.session_cycle_index = target_index;
                     app.state.active_session = Some(session_id);
                     // Reset scroll offset when switching sessions
                     session_scroll::reset_for_session_switch(app, session_id);

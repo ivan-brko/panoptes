@@ -54,17 +54,21 @@ impl CustomShortcut {
     }
 }
 
-/// Reserved keys that cannot be used for custom shortcuts in session view
+/// Keys that cannot be bound to a custom shortcut
 ///
-/// These keys are already bound to functionality in session view normal mode:
-/// - q: quit/back
-/// - i: enter session mode (if used)
-/// - g, G: scroll to top/bottom
-/// - k: manage shortcuts (this feature)
+/// Custom shortcuts fire in the session and branch views, so a shortcut sharing
+/// a key with something bound there could never run - the view's own arm
+/// matches first. The list is deliberately a little wider than that, covering
+/// keys bound in neighbouring views too, so a shortcut does not mean one thing
+/// on one screen and something else on the next:
+/// - q: quit/back, in both views
+/// - k: manage shortcuts (this feature), handled globally
+/// - g, G: jump to top/bottom in the log viewer
+/// - x: Codex configurations, from the overview and project views
 /// - 0-9: jump to session by number
-/// - Space: jump to attention
-/// - Esc, Enter, Tab: navigation
-const RESERVED_KEYS: &[char] = &['q', 'i', 'g', 'G', 'k', 'x'];
+///
+/// `Space`, `Esc`, `Enter`, and `Tab` are not chars and cannot be bound at all.
+const RESERVED_KEYS: &[char] = &['q', 'g', 'G', 'k', 'x'];
 const RESERVED_DIGITS: bool = true;
 
 /// Check if a key is reserved and cannot be used for custom shortcuts
@@ -161,15 +165,19 @@ pub fn friendly_io_error_message(e: &std::io::Error, context: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Port for the hook HTTP server
+    #[serde(default = "default_hook_port")]
     pub hook_port: u16,
 
     /// Directory for git worktrees
+    #[serde(default = "default_worktrees_dir")]
     pub worktrees_dir: PathBuf,
 
     /// Directory for hook scripts
+    #[serde(default = "default_hooks_dir")]
     pub hooks_dir: PathBuf,
 
     /// Maximum lines to keep in output buffer per session
+    #[serde(default = "default_max_output_lines")]
     pub max_output_lines: usize,
 
     /// Idle threshold in seconds before session is flagged as needing attention (default: 300 = 5 min)
@@ -293,6 +301,22 @@ fn default_true() -> bool {
     true
 }
 
+fn default_hook_port() -> u16 {
+    9999
+}
+
+fn default_worktrees_dir() -> PathBuf {
+    config_dir().join("worktrees")
+}
+
+fn default_hooks_dir() -> PathBuf {
+    config_dir().join("hooks")
+}
+
+fn default_max_output_lines() -> usize {
+    10_000
+}
+
 fn default_idle_threshold() -> u64 {
     300
 }
@@ -327,12 +351,11 @@ fn default_suspend_after() -> u64 {
 
 impl Default for Config {
     fn default() -> Self {
-        let base = config_dir();
         Self {
-            hook_port: 9999,
-            worktrees_dir: base.join("worktrees"),
-            hooks_dir: base.join("hooks"),
-            max_output_lines: 10_000,
+            hook_port: default_hook_port(),
+            worktrees_dir: default_worktrees_dir(),
+            hooks_dir: default_hooks_dir(),
+            max_output_lines: default_max_output_lines(),
             idle_threshold_secs: default_idle_threshold(),
             state_timeout_secs: default_state_timeout(),
             exited_retention_secs: default_exited_retention(),
@@ -598,6 +621,9 @@ notification_method = "title"
         // Freed when the focus timer was removed
         assert!(!is_reserved_key('t'));
         assert!(!is_reserved_key('T'));
+
+        // Never actually bound: nothing enters session mode with 'i'
+        assert!(!is_reserved_key('i'));
     }
 
     #[test]
