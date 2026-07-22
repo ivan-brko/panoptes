@@ -1551,6 +1551,12 @@ impl App {
         }
         self.last_codex_id_scan = Some(Instant::now());
 
+        // Conversations already spoken for, so that two Codex sessions sharing
+        // a working directory cannot be handed the same rollout. Grows as this
+        // sweep resolves sessions, which is why `pending` is ordered oldest
+        // first: each session claims the rollout it actually created.
+        let mut claimed = self.sessions.claimed_agent_session_ids();
+
         for (session_id, working_dir, created_at) in pending {
             let codex_home = self
                 .sessions
@@ -1560,9 +1566,13 @@ impl App {
                 .and_then(|config| config.codex_home.clone())
                 .unwrap_or_else(default_codex_home);
 
-            if let Some(agent_session_id) =
-                crate::agent::codex::discover_session_id(&codex_home, &working_dir, created_at)
-            {
+            if let Some(agent_session_id) = crate::agent::codex::discover_session_id(
+                &codex_home,
+                &working_dir,
+                created_at,
+                &claimed,
+            ) {
+                claimed.insert(agent_session_id.clone());
                 if self
                     .sessions
                     .set_agent_session_id(session_id, agent_session_id.clone())

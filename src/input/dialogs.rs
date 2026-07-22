@@ -117,8 +117,12 @@ pub fn handle_confirming_delete_key(app: &mut App, key: KeyEvent) -> Result<()> 
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             // Confirm deletion
             if let Some(session_id) = app.state.pending_delete_session.take() {
-                // Validate session still exists before deleting
-                if app.sessions.get(session_id).is_none() {
+                // Validate session still exists before deleting. A recovered
+                // session counts: it has no process, but it does have a record
+                // to discard, and this dialog is the only way to clear one.
+                if app.sessions.get(session_id).is_none()
+                    && app.sessions.get_recovered(session_id).is_none()
+                {
                     tracing::warn!(
                         session_id = %session_id,
                         "Session no longer exists when confirming delete"

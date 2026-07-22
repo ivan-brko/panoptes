@@ -272,8 +272,11 @@ impl SessionManager {
     /// Returns the session ID, its working directory, and when it started -
     /// everything needed to match it against a rollout file. Empty once every
     /// Codex session has an ID, which is the steady state.
+    /// Ordered oldest-first, so that when several sessions share a working
+    /// directory each claims the rollout it actually created.
     pub fn sessions_pending_codex_id(&self) -> Vec<(SessionId, PathBuf, DateTime<Utc>)> {
-        self.sessions
+        let mut pending: Vec<_> = self
+            .sessions
             .values()
             .filter(|session| {
                 session.info.session_type == SessionType::OpenAICodex
@@ -287,6 +290,22 @@ impl SessionManager {
                     session.info.created_at,
                 )
             })
+            .collect();
+        pending.sort_by_key(|(_, _, created_at)| *created_at);
+        pending
+    }
+
+    /// Every agent conversation ID already spoken for
+    ///
+    /// Includes recovered sessions, not just live ones: a conversation waiting
+    /// to be resumed still belongs to that session and must not be handed to a
+    /// different one that happens to share its working directory.
+    pub fn claimed_agent_session_ids(&self) -> std::collections::HashSet<String> {
+        self.sessions
+            .values()
+            .map(|session| &session.info)
+            .chain(self.recovered.values())
+            .filter_map(|info| info.agent_session_id.clone())
             .collect()
     }
 

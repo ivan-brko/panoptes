@@ -21,10 +21,11 @@ const CODEX_NOTIFY_SCRIPT_NAME: &str = "codex-notify.sh";
 /// Disable Codex alternate screen so Panoptes scrollback behaves like Claude sessions.
 const NO_ALT_SCREEN_FLAG: &str = "--no-alt-screen";
 
-/// Clock tolerance when matching a rollout file against a session start time
+/// Clock tolerance when matching a rollout against a session start time
 ///
-/// Guards against the rollout's mtime being marginally earlier than the moment
-/// Panoptes recorded the session as created.
+/// Codex stamps the conversation a moment after Panoptes records the session as
+/// created, so the rollout is normally the later of the two. This absorbs the
+/// rounding and sub-second ordering that can invert them.
 const ROLLOUT_TIME_TOLERANCE_SECS: i64 = 5;
 
 /// Resolve a path for comparison, tolerating symlinks
@@ -49,6 +50,7 @@ pub fn discover_session_id(
     codex_home: &Path,
     working_dir: &Path,
     started_at: chrono::DateTime<chrono::Utc>,
+    claimed: &std::collections::HashSet<String>,
 ) -> Option<String> {
     let sessions_dir = codex_home.join("sessions");
     let target_cwd = canonical_or_original(working_dir);
@@ -56,7 +58,7 @@ pub fn discover_session_id(
 
     // Rollouts are filed under sessions/YYYY/MM/DD, so walk exactly three
     // levels rather than recursing over an unbounded tree
-    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
     for year in read_subdirs(&sessions_dir) {
         for month in read_subdirs(&year) {
             for day in read_subdirs(&month) {
@@ -68,29 +70,42 @@ pub fn discover_session_id(
                     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                         continue;
                     }
-                    let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+                    let Some(meta) = read_session_meta(&path) else {
                         continue;
                     };
-                    let modified_at: chrono::DateTime<chrono::Utc> = modified.into();
-                    if modified_at < cutoff {
+                    if canonical_or_original(&meta.cwd) != target_cwd {
                         continue;
                     }
-                    candidates.push((modified, path));
+                    // The rollout's own creation timestamp, not the file mtime:
+                    // mtime is bumped on every turn, so an older conversation
+                    // being actively used would otherwise look newer than the
+                    // session we are trying to identify
+                    if meta.created_at < cutoff {
+                        continue;
+                    }
+                    // Another Panoptes session already owns this conversation
+                    if claimed.contains(&meta.id) {
+                        continue;
+                    }
+                    candidates.push((meta.created_at, meta.id));
                 }
             }
         }
     }
 
-    // Most recently written first: if a directory somehow holds two matching
-    // rollouts, the newer one is the session we just started
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    // Oldest first. Callers resolve pending sessions in start order, so the
+    // earliest unclaimed rollout created after this session started is its own.
+    // Picking the newest would hand a session the rollout of a *later* session
+    // started in the same directory.
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.into_iter().next().map(|(_, id)| id)
+}
 
-    candidates
-        .into_iter()
-        .find_map(|(_, path)| match read_session_meta(&path) {
-            Some((id, cwd)) if canonical_or_original(&cwd) == target_cwd => Some(id),
-            _ => None,
-        })
+/// The `session_meta` header of a Codex rollout file
+struct RolloutMeta {
+    id: String,
+    cwd: PathBuf,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// List immediate subdirectories, ignoring anything unreadable
@@ -105,11 +120,11 @@ fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Read the `session_meta` header of a rollout file, returning its ID and cwd
+/// Read the `session_meta` header of a rollout file
 ///
 /// Only the first line is read: the rest of a rollout is the conversation, which
 /// can be large and is of no interest here.
-fn read_session_meta(path: &Path) -> Option<(String, PathBuf)> {
+fn read_session_meta(path: &Path) -> Option<RolloutMeta> {
     use std::io::BufRead;
 
     let file = std::fs::File::open(path).ok()?;
@@ -126,7 +141,20 @@ fn read_session_meta(path: &Path) -> Option<(String, PathBuf)> {
     let id = payload.get("id").and_then(|i| i.as_str())?.to_string();
     let cwd = payload.get("cwd").and_then(|c| c.as_str())?;
 
-    Some((id, PathBuf::from(cwd)))
+    // Codex records the timestamp on the payload and again on the envelope;
+    // either identifies when the conversation began
+    let created_at = payload
+        .get("timestamp")
+        .or_else(|| value.get("timestamp"))
+        .and_then(|t| t.as_str())
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))?;
+
+    Some(RolloutMeta {
+        id,
+        cwd: PathBuf::from(cwd),
+        created_at,
+    })
 }
 
 /// OpenAI Codex CLI adapter for spawning and managing Codex sessions
@@ -451,10 +479,23 @@ exit 0
     /// Panoptes runs Codex in inline mode (no alternate screen) so PTY scrollback
     /// remains usable from the session view, matching Claude behavior.
     fn build_args(&self, spawn_config: &SpawnConfig) -> Vec<String> {
-        let mut args = self.default_args();
+        let mut args = Vec::new();
+
+        // Resuming is a subcommand, not a flag: `codex resume [OPTIONS]
+        // [SESSION_ID] [PROMPT]`. It has to lead the argument list.
+        if spawn_config.resume.is_some() {
+            args.push("resume".to_string());
+        }
+
+        args.extend(self.default_args());
 
         if !args.iter().any(|arg| arg == NO_ALT_SCREEN_FLAG) {
             args.push(NO_ALT_SCREEN_FLAG.to_string());
+        }
+
+        // Positional arguments follow the options, session ID before prompt
+        if let Some(ref resume) = spawn_config.resume {
+            args.push(resume.clone());
         }
 
         if let Some(ref prompt) = spawn_config.initial_prompt {
@@ -668,6 +709,66 @@ mod tests {
         assert!(script.contains("curl"));
         // Should silently exit for non-Panoptes instances
         assert!(script.contains("if [ -z \"$SESSION_ID\" ]; then exit 0; fi"));
+    }
+
+    fn resume_spawn_config(resume: Option<&str>) -> SpawnConfig {
+        SpawnConfig {
+            session_id: Uuid::new_v4(),
+            session_name: "test".to_string(),
+            working_dir: PathBuf::from("/tmp"),
+            initial_prompt: None,
+            rows: 24,
+            cols: 80,
+            claude_config_dir: None,
+            codex_home: None,
+            resume: resume.map(|r| r.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_resume_uses_the_resume_subcommand_with_the_session_id() {
+        let adapter = CodexAdapter::new();
+        let args = adapter.build_args(&resume_spawn_config(Some("019aa0c9-conversation")));
+
+        // Without this, "resuming" silently starts a brand-new conversation
+        assert_eq!(
+            args.first().map(|s| s.as_str()),
+            Some("resume"),
+            "resume is a subcommand and must lead: {args:?}"
+        );
+        assert!(
+            args.contains(&"019aa0c9-conversation".to_string()),
+            "the conversation ID must actually be passed: {args:?}"
+        );
+        // `codex resume [OPTIONS] [SESSION_ID]` - options precede the positional
+        let id_at = args
+            .iter()
+            .position(|a| a == "019aa0c9-conversation")
+            .unwrap();
+        let flag_at = args.iter().position(|a| a == NO_ALT_SCREEN_FLAG).unwrap();
+        assert!(flag_at < id_at, "options must precede SESSION_ID: {args:?}");
+    }
+
+    #[test]
+    fn test_fresh_spawn_does_not_use_the_resume_subcommand() {
+        let adapter = CodexAdapter::new();
+        let args = adapter.build_args(&resume_spawn_config(None));
+
+        assert!(!args.contains(&"resume".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn test_resume_still_passes_an_initial_prompt_last() {
+        let adapter = CodexAdapter::new();
+        let mut spawn_config = resume_spawn_config(Some("conv-id"));
+        spawn_config.initial_prompt = Some("carry on".to_string());
+
+        let args = adapter.build_args(&spawn_config);
+
+        // `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`
+        let id_at = args.iter().position(|a| a == "conv-id").unwrap();
+        let prompt_at = args.iter().position(|a| a == "carry on").unwrap();
+        assert!(id_at < prompt_at, "prompt must follow SESSION_ID: {args:?}");
     }
 
     #[test]
@@ -956,18 +1057,30 @@ notify = ["bash", "__LEGACY__", 42]
 
     /// Write a rollout file the way Codex does: `session_meta` on line one,
     /// conversation after it.
-    fn write_rollout(codex_home: &Path, date: (&str, &str, &str), id: &str, cwd: &Path) -> PathBuf {
+    /// `created_at` is the conversation's own timestamp, which is what
+    /// discovery matches on - deliberately independent of the file's mtime.
+    fn write_rollout(
+        codex_home: &Path,
+        id: &str,
+        cwd: &Path,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> PathBuf {
         let dir = codex_home
             .join("sessions")
-            .join(date.0)
-            .join(date.1)
-            .join(date.2);
+            .join(created_at.format("%Y").to_string())
+            .join(created_at.format("%m").to_string())
+            .join(created_at.format("%d").to_string());
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("rollout-2026-01-01T00-00-00-{}.jsonl", id));
+        let path = dir.join(format!("rollout-{}-{}.jsonl", created_at.timestamp(), id));
         let meta = serde_json::json!({
-            "timestamp": "2026-01-01T00:00:00.000Z",
+            "timestamp": created_at.to_rfc3339(),
             "type": "session_meta",
-            "payload": { "id": id, "cwd": cwd.to_string_lossy(), "originator": "codex_cli_rs" }
+            "payload": {
+                "id": id,
+                "timestamp": created_at.to_rfc3339(),
+                "cwd": cwd.to_string_lossy(),
+                "originator": "codex_cli_rs"
+            }
         });
         std::fs::write(&path, format!("{}\n{{\"type\":\"message\"}}\n", meta)).unwrap();
         path
@@ -977,18 +1090,22 @@ notify = ["bash", "__LEGACY__", 42]
         chrono::Utc::now() - chrono::Duration::hours(1)
     }
 
+    fn nothing_claimed() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
     #[test]
     fn test_discovers_session_id_from_rollout() {
         let home = TempDir::new().unwrap();
         let cwd = TempDir::new().unwrap();
         write_rollout(
             home.path(),
-            ("2026", "01", "01"),
             "019aa0c9-8dea-7611-89d1-9d94731a6a6d",
             cwd.path(),
+            an_hour_ago(),
         );
 
-        let found = discover_session_id(home.path(), cwd.path(), an_hour_ago());
+        let found = discover_session_id(home.path(), cwd.path(), an_hour_ago(), &nothing_claimed());
 
         assert_eq!(
             found.as_deref(),
@@ -1001,28 +1118,92 @@ notify = ["bash", "__LEGACY__", 42]
         let home = TempDir::new().unwrap();
         let ours = TempDir::new().unwrap();
         let theirs = TempDir::new().unwrap();
-        write_rollout(home.path(), ("2026", "01", "01"), "not-ours", theirs.path());
+        write_rollout(home.path(), "not-ours", theirs.path(), an_hour_ago());
 
         // Another Codex session running concurrently elsewhere must not be
         // mistaken for this one
-        assert!(discover_session_id(home.path(), ours.path(), an_hour_ago()).is_none());
+        assert!(
+            discover_session_id(home.path(), ours.path(), an_hour_ago(), &nothing_claimed())
+                .is_none()
+        );
     }
 
     #[test]
-    fn test_ignores_rollouts_written_before_the_session_started() {
+    fn test_ignores_rollouts_created_before_the_session_started() {
         let home = TempDir::new().unwrap();
         let cwd = TempDir::new().unwrap();
         write_rollout(
             home.path(),
-            ("2025", "09", "18"),
             "older-session",
             cwd.path(),
+            chrono::Utc::now() - chrono::Duration::days(30),
         );
 
         // A previous session in the same directory would otherwise be adopted,
         // silently pointing this session at the wrong conversation
-        let started_in_the_future = chrono::Utc::now() + chrono::Duration::hours(1);
-        assert!(discover_session_id(home.path(), cwd.path(), started_in_the_future).is_none());
+        assert!(
+            discover_session_id(home.path(), cwd.path(), an_hour_ago(), &nothing_claimed())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_never_returns_a_conversation_another_session_already_owns() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        write_rollout(home.path(), "already-taken", cwd.path(), an_hour_ago());
+
+        // Two Codex sessions on the same branch share a working directory. The
+        // first to resolve owns that conversation; the second must not be
+        // handed the same one.
+        let claimed = std::collections::HashSet::from(["already-taken".to_string()]);
+        assert!(discover_session_id(home.path(), cwd.path(), an_hour_ago(), &claimed).is_none());
+    }
+
+    #[test]
+    fn test_two_sessions_in_one_directory_get_their_own_conversations() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let first_started = chrono::Utc::now() - chrono::Duration::minutes(10);
+        let second_started = chrono::Utc::now() - chrono::Duration::minutes(5);
+        write_rollout(home.path(), "first", cwd.path(), first_started);
+        write_rollout(home.path(), "second", cwd.path(), second_started);
+
+        // Resolved oldest-first, accumulating claims as the caller does
+        let mut claimed = nothing_claimed();
+        let a =
+            discover_session_id(home.path(), cwd.path(), first_started, &claimed).expect("first");
+        claimed.insert(a.clone());
+        let b =
+            discover_session_id(home.path(), cwd.path(), second_started, &claimed).expect("second");
+
+        assert_eq!(a, "first");
+        assert_eq!(b, "second");
+    }
+
+    #[test]
+    fn test_matches_on_conversation_time_not_file_mtime() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        // An old conversation still being actively used: Codex appends turns to
+        // it, so its mtime is newer than a session that started a moment ago.
+        // Matching on mtime would hand this session the wrong conversation.
+        let old = write_rollout(
+            home.path(),
+            "old-but-recently-touched",
+            cwd.path(),
+            chrono::Utc::now() - chrono::Duration::days(3),
+        );
+        std::fs::write(
+            &old,
+            std::fs::read_to_string(&old).unwrap() + "{\"type\":\"message\"}\n",
+        )
+        .unwrap();
+
+        assert!(
+            discover_session_id(home.path(), cwd.path(), an_hour_ago(), &nothing_claimed())
+                .is_none()
+        );
     }
 
     #[test]
@@ -1032,7 +1213,10 @@ notify = ["bash", "__LEGACY__", 42]
         std::fs::create_dir_all(home.path().join("sessions")).unwrap();
 
         // The normal state for the first moments of a session
-        assert!(discover_session_id(home.path(), cwd.path(), an_hour_ago()).is_none());
+        assert!(
+            discover_session_id(home.path(), cwd.path(), an_hour_ago(), &nothing_claimed())
+                .is_none()
+        );
     }
 
     #[test]
@@ -1040,7 +1224,10 @@ notify = ["bash", "__LEGACY__", 42]
         let home = TempDir::new().unwrap();
         let cwd = TempDir::new().unwrap();
 
-        assert!(discover_session_id(home.path(), cwd.path(), an_hour_ago()).is_none());
+        assert!(
+            discover_session_id(home.path(), cwd.path(), an_hour_ago(), &nothing_claimed())
+                .is_none()
+        );
     }
 
     #[test]
@@ -1051,16 +1238,12 @@ notify = ["bash", "__LEGACY__", 42]
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("rollout-broken.jsonl"), "not json at all\n").unwrap();
         std::fs::write(dir.join("rollout-empty.jsonl"), "").unwrap();
-        write_rollout(
-            home.path(),
-            ("2026", "01", "01"),
-            "the-good-one",
-            cwd.path(),
-        );
+        write_rollout(home.path(), "the-good-one", cwd.path(), an_hour_ago());
 
         // One corrupt file must not hide a valid one
         assert_eq!(
-            discover_session_id(home.path(), cwd.path(), an_hour_ago()).as_deref(),
+            discover_session_id(home.path(), cwd.path(), an_hour_ago(), &nothing_claimed())
+                .as_deref(),
             Some("the-good-one")
         );
     }
@@ -1075,15 +1258,10 @@ notify = ["bash", "__LEGACY__", 42]
 
         // Codex records the resolved path; Panoptes may hold the symlinked one.
         // This is the /tmp -> /private/tmp case on macOS.
-        write_rollout(
-            home.path(),
-            ("2026", "01", "01"),
-            "via-symlink",
-            real.path(),
-        );
+        write_rollout(home.path(), "via-symlink", real.path(), an_hour_ago());
 
         assert_eq!(
-            discover_session_id(home.path(), &link, an_hour_ago()).as_deref(),
+            discover_session_id(home.path(), &link, an_hour_ago(), &nothing_claimed()).as_deref(),
             Some("via-symlink")
         );
     }
@@ -1096,6 +1274,9 @@ notify = ["bash", "__LEGACY__", 42]
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.txt"), "irrelevant\n").unwrap();
 
-        assert!(discover_session_id(home.path(), cwd.path(), an_hour_ago()).is_none());
+        assert!(
+            discover_session_id(home.path(), cwd.path(), an_hour_ago(), &nothing_claimed())
+                .is_none()
+        );
     }
 }
