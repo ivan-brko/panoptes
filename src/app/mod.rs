@@ -439,6 +439,16 @@ impl App {
                 }
             }
 
+            // Suspend agent sessions left idle, reclaiming their memory. Runs
+            // before cleanup so a session suspended this tick is already
+            // excluded from the Exited path that would delete its record.
+            let suspended = self
+                .sessions
+                .suspend_idle_sessions(self.config.suspend_after_secs, self.state.active_session);
+            if !suspended.is_empty() {
+                self.state.needs_render = true;
+            }
+
             // Clean up old exited sessions to prevent memory growth
             let cleaned_up = self
                 .sessions
@@ -688,6 +698,9 @@ impl App {
             InputMode::Session => {
                 // Send pasted text to PTY (wrapped in brackets if app enabled it)
                 if let Some(session_id) = self.state.active_session {
+                    if self.sessions.is_suspended(session_id) && !self.wake_session(session_id)? {
+                        return Ok(());
+                    }
                     if let Some(session) = self.sessions.get_mut(session_id) {
                         session.write_paste(text)?;
                     }
@@ -887,6 +900,13 @@ impl App {
         mouse: MouseEvent,
         is_codex_session: bool,
     ) -> Result<bool> {
+        // A suspended session has no PTY to forward to. Deliberately does not
+        // wake it either: scrolling back through a suspended session is the
+        // point, and a stray click should not relaunch an agent.
+        if self.sessions.is_suspended(session_id) {
+            return Ok(false);
+        }
+
         let mouse_enabled = self.sessions.get(session_id).is_some_and(|session| {
             session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None
         });
@@ -1606,28 +1626,8 @@ impl App {
         // Read the config IDs before borrowing the stores
         let claude_config_id = info.claude_config_id;
         let codex_config_id = info.codex_config_id;
-
-        let claude_config_dir = claude_config_id
-            .and_then(|id| self.claude_config_store.get(id))
-            .and_then(|config| config.config_dir.clone());
-        let codex_home = codex_config_id
-            .and_then(|id| self.codex_config_store.get(id))
-            .and_then(|config| config.codex_home.clone());
-
-        // A config the user has since deleted is worth saying out loud: the
-        // session will come back on the default account, which may be wrong
-        if claude_config_id.is_some() && claude_config_dir.is_none() {
-            tracing::warn!(
-                session_id = %session_id,
-                "Claude config for this session no longer exists; resuming on the default account"
-            );
-        }
-        if codex_config_id.is_some() && codex_home.is_none() {
-            tracing::warn!(
-                session_id = %session_id,
-                "Codex config for this session no longer exists; resuming on the default account"
-            );
-        }
+        let (claude_config_dir, codex_home) =
+            self.resolve_agent_config_dirs(session_id, claude_config_id, codex_config_id);
 
         let size = self.tui.size()?;
         let frame_config = FrameConfig::default();
@@ -1646,6 +1646,89 @@ impl App {
         )?;
 
         Ok(true)
+    }
+
+    /// Relaunch the agent of a session Panoptes suspended
+    ///
+    /// Returns `Ok(false)` when the session could not be brought back - its
+    /// worktree deleted, its conversation gone - having told the user why. The
+    /// caller must then not go on to write to a PTY that is not there.
+    pub(crate) fn wake_session(&mut self, session_id: crate::session::SessionId) -> Result<bool> {
+        let Some(session) = self.sessions.get(session_id) else {
+            return Ok(false);
+        };
+        if session.info.state != crate::session::SessionState::Suspended {
+            return Ok(true);
+        }
+
+        let claude_config_id = session.info.claude_config_id;
+        let codex_config_id = session.info.codex_config_id;
+        let (claude_config_dir, codex_home) =
+            self.resolve_agent_config_dirs(session_id, claude_config_id, codex_config_id);
+
+        let size = self.tui.size()?;
+        let frame_config = FrameConfig::default();
+        let layout = FrameLayout::calculate(
+            ratatui::prelude::Rect::new(0, 0, size.width, size.height),
+            &frame_config,
+        );
+        let (rows, cols) = layout.pty_size();
+
+        match self.sessions.wake_session(
+            session_id,
+            rows as usize,
+            cols as usize,
+            claude_config_dir,
+            codex_home,
+        ) {
+            Ok(()) => {
+                self.state.needs_render = true;
+                Ok(true)
+            }
+            Err(e) => {
+                // Same treatment a recovered session gets: say why rather than
+                // failing obscurely, and leave the session suspended
+                tracing::warn!(session_id = %session_id, error = %e, "Failed to wake session");
+                self.state
+                    .header_notifications
+                    .push(format!("Could not wake session: {}", e));
+                self.state.needs_render = true;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Resolve the account config directories a session should run under
+    ///
+    /// A config the user has since deleted is worth saying out loud: the
+    /// session will come back on the default account, which may be wrong.
+    fn resolve_agent_config_dirs(
+        &self,
+        session_id: crate::session::SessionId,
+        claude_config_id: Option<crate::claude_config::ClaudeConfigId>,
+        codex_config_id: Option<crate::codex_config::CodexConfigId>,
+    ) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+        let claude_config_dir = claude_config_id
+            .and_then(|id| self.claude_config_store.get(id))
+            .and_then(|config| config.config_dir.clone());
+        let codex_home = codex_config_id
+            .and_then(|id| self.codex_config_store.get(id))
+            .and_then(|config| config.codex_home.clone());
+
+        if claude_config_id.is_some() && claude_config_dir.is_none() {
+            tracing::warn!(
+                session_id = %session_id,
+                "Claude config for this session no longer exists; resuming on the default account"
+            );
+        }
+        if codex_config_id.is_some() && codex_home.is_none() {
+            tracing::warn!(
+                session_id = %session_id,
+                "Codex config for this session no longer exists; resuming on the default account"
+            );
+        }
+
+        (claude_config_dir, codex_home)
     }
 
     /// Refresh git state for all projects

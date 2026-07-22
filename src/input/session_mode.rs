@@ -64,6 +64,12 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
     // Send key to active session
     if let Some(session_id) = app.state.active_session {
+        // A suspended session has no process to write to. Wake it first, so the
+        // keystroke reaches the relaunched agent instead of vanishing into a
+        // dead PTY.
+        if app.sessions.is_suspended(session_id) && !app.wake_session(session_id)? {
+            return Ok(());
+        }
         if let Some(session) = app.sessions.get_mut(session_id) {
             session.send_key(key)?;
         }

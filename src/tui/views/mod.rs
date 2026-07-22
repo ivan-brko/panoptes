@@ -69,6 +69,17 @@ pub fn session_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
             Some(reason) => format!("Unavailable - {}", reason),
             None => "Resumable".to_string(),
         },
+        // Says why the process is gone, rather than leaving it looking hung
+        (_, SessionState::Suspended) => {
+            let mins = now
+                .signed_duration_since(info.last_engagement)
+                .num_minutes();
+            if mins >= 60 {
+                format!("Suspended - idle {}h", mins / 60)
+            } else {
+                "Suspended".to_string()
+            }
+        }
         (SessionType::Shell, SessionState::Executing) => "Running".to_string(),
         (SessionType::Shell, SessionState::Waiting) => "Ready".to_string(),
         // Name what is actually running. Several tools run at once whenever

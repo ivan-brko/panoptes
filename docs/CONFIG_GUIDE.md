@@ -30,6 +30,10 @@ state_timeout_secs = 300
 # Seconds to retain exited sessions before cleanup
 exited_retention_secs = 300
 
+# Seconds a session may sit idle before its agent process is suspended
+# (scrollback is kept; the session wakes when you type into it). 0 disables.
+suspend_after_secs = 7200
+
 # Theme preset: "dark", "light", or "high-contrast"
 theme_preset = "dark"
 
@@ -187,6 +191,32 @@ How Panoptes notifies you when a session needs attention.
 - **none** - No notifications
 
 **When to change:** Use `"title"` if you find the bell annoying; use `"none"` if you don't want interruptions.
+
+---
+
+### suspend_after_secs
+
+| Property | Value |
+|----------|-------|
+| Default | `7200` (2 hours) |
+| Type | Integer (seconds) |
+| Disable with | `0` |
+
+An idle Claude Code process uses roughly 565 MB - about 25x the entire Panoptes
+process. After this long without engagement, the agent's process is killed and
+the session shows as `Suspended`.
+
+The scrollback is kept and stays scrollable, so reading a suspended session
+costs nothing. Typing into one wakes it: the agent is relaunched against the
+same conversation, which takes around two seconds. The on-screen history is not
+restored at that point, though the conversation itself is fully intact.
+
+Shell sessions are never suspended - they have no conversation to come back to,
+and killing one would end a running build or dev server. Neither is a session
+that is working, blocked on a permission dialog, or currently on screen.
+
+**When to change:** Lower it if you keep many sessions open and are short on
+memory; raise it, or set `0`, if you would rather never wait for a wake.
 
 ---
 

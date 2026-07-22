@@ -333,17 +333,6 @@ impl SessionManager {
         true
     }
 
-    /// Write a session's record to the durable index
-    ///
-    /// Called on membership changes rather than state changes: identity and
-    /// context are what survive a restart, whereas live state (Thinking,
-    /// Executing) is meaningless once the process is gone. Hook events fire on
-    /// every tool call, so persisting state would mean writing to disk
-    /// constantly for data that gets discarded on load anyway.
-    ///
-    /// Failure to persist never fails the operation that triggered it - losing
-    /// the ability to recover a session later is strictly better than refusing
-    /// to create it now.
     /// Record whether a session's name was generated rather than chosen
     ///
     /// Only a generated name may later be replaced by the agent's own title -
@@ -356,6 +345,17 @@ impl SessionManager {
         self.persist_session(session_id);
     }
 
+    /// Write a session's record to the durable index
+    ///
+    /// Called on membership changes rather than state changes: identity and
+    /// context are what survive a restart, whereas live state (Thinking,
+    /// Executing) is meaningless once the process is gone. Hook events fire on
+    /// every tool call, so persisting state would mean writing to disk
+    /// constantly for data that gets discarded on load anyway.
+    ///
+    /// Failure to persist never fails the operation that triggered it - losing
+    /// the ability to recover a session later is strictly better than refusing
+    /// to create it now.
     fn persist_session(&mut self, session_id: SessionId) {
         let Some(session) = self.sessions.get(&session_id) else {
             return;
@@ -748,6 +748,12 @@ impl SessionManager {
             if excluded == Some(session_id) {
                 continue;
             }
+            // Reading a suspended session's PTY returns an error, which
+            // `poll_output` turns into `Exited` - and an Exited session ages
+            // into the cleanup path that deletes its stored record.
+            if !session.info.state.has_process() {
+                continue;
+            }
             let mut had_output = false;
             // Drain ALL available PTY data before returning
             while session.poll_output() {
@@ -767,7 +773,10 @@ impl SessionManager {
     pub fn check_alive(&mut self) -> Vec<(SessionId, String, String)> {
         let mut crashed_sessions = Vec::new();
         for session in self.sessions.values_mut() {
-            if session.info.state != SessionState::Exited {
+            // We killed suspended sessions on purpose. Reaping one here would
+            // report the signal as a crash and move it to Exited, from where
+            // cleanup would delete its record and lose the conversation.
+            if session.info.state.has_process() {
                 // Check exit status to detect crashes vs normal termination
                 if let Some(exit_info) = session.exit_status() {
                     let reason = exit_info.format_reason();
@@ -822,9 +831,7 @@ impl SessionManager {
             // Shells reach Executing via foreground detection and Codex never
             // reaches it at all; neither populates `in_flight`, so an empty set
             // says nothing about them.
-            if !session.info.session_type.reports_tool_use()
-                || session.info.state == SessionState::Exited
-            {
+            if !session.info.session_type.reports_tool_use() || !session.info.state.has_process() {
                 continue;
             }
 
@@ -887,7 +894,7 @@ impl SessionManager {
             if session.info.session_type != SessionType::Shell {
                 continue;
             }
-            if session.info.state == SessionState::Exited {
+            if !session.info.state.has_process() {
                 continue;
             }
 
@@ -910,6 +917,188 @@ impl SessionManager {
         }
 
         needs_notification
+    }
+
+    /// Whether this session may be put to sleep right now
+    ///
+    /// Every clause here is load-bearing; each one describes work that a kill
+    /// would destroy.
+    fn may_suspend(
+        info: &SessionInfo,
+        active: Option<SessionId>,
+        now: DateTime<Utc>,
+        idle_secs: u64,
+    ) -> bool {
+        // A shell has no conversation to come back to. Killing one destroys
+        // real work - a running build, a dev server, an ssh session - and it
+        // costs single-digit megabytes anyway, so there is nothing to gain.
+        if info.session_type == SessionType::Shell {
+            return false;
+        }
+
+        // Only a finished turn is safe. `AwaitingApproval` is holding a dialog
+        // open, `Executing` has tools in flight, `Thinking` is mid-answer.
+        if info.state != SessionState::Waiting {
+            return false;
+        }
+
+        // Never pull the session out from under the user
+        if active == Some(info.id) {
+            return false;
+        }
+
+        // Suspending something that cannot be resumed is just closing it. If
+        // the conversation ID was never recorded, or the working directory has
+        // gone, there is no way back.
+        if info.resume_blocker().is_some() {
+            return false;
+        }
+
+        now.signed_duration_since(info.last_engagement)
+            .num_seconds()
+            >= idle_secs as i64
+    }
+
+    /// Kill the child processes of agent sessions left idle past the threshold
+    ///
+    /// The `Session` and its terminal buffer are kept, so the scrollback stays
+    /// readable; only the process goes. An idle Claude Code process measures
+    /// around 565 MB, roughly 25x the entire Panoptes process, so a handful of
+    /// forgotten sessions dominate memory use while doing nothing.
+    ///
+    /// `idle_secs` of 0 disables the sweep. Returns the sessions suspended.
+    pub fn suspend_idle_sessions(
+        &mut self,
+        idle_secs: u64,
+        active: Option<SessionId>,
+    ) -> Vec<SessionId> {
+        if idle_secs == 0 {
+            return Vec::new();
+        }
+
+        let now = Utc::now();
+        let mut suspended = Vec::new();
+
+        for session in self.sessions.values_mut() {
+            if !Self::may_suspend(&session.info, active, now, idle_secs) {
+                continue;
+            }
+
+            if let Err(e) = session.kill() {
+                // Leave the state alone: a session we failed to kill still has
+                // a process, and calling it Suspended would strand it outside
+                // every path that polls or reaps.
+                tracing::warn!(
+                    session_id = %session.info.id,
+                    error = %e,
+                    "Failed to suspend session; leaving it running"
+                );
+                continue;
+            }
+
+            tracing::info!(
+                session_id = %session.info.id,
+                session_name = %session.info.name,
+                "Suspended idle session to reclaim memory"
+            );
+            session.set_state(SessionState::Suspended);
+            suspended.push(session.info.id);
+        }
+
+        suspended
+    }
+
+    /// Whether a session is suspended and can be brought back
+    pub fn is_suspended(&self, session_id: SessionId) -> bool {
+        self.sessions
+            .get(&session_id)
+            .is_some_and(|session| session.info.state == SessionState::Suspended)
+    }
+
+    /// Relaunch a suspended session's agent, reattaching to its conversation
+    ///
+    /// The terminal buffer is deliberately discarded here rather than reused.
+    /// The relaunched agent would otherwise start drawing into a vterm that
+    /// still holds the previous process's cursor position, alt-screen flags,
+    /// modes and thousands of rows of output. Redrawing from scratch costs
+    /// exactly what opening a recovered session costs today, and only the
+    /// moment of waking pays it - reading a suspended session stays free.
+    ///
+    /// On failure the session is left suspended so the user can retry; a failed
+    /// wake must not strand the session in a state with no process and no way
+    /// back.
+    pub fn wake_session(
+        &mut self,
+        session_id: SessionId,
+        rows: usize,
+        cols: usize,
+        claude_config_dir: Option<PathBuf>,
+        codex_home: Option<PathBuf>,
+    ) -> Result<()> {
+        let info = {
+            let session = self
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| anyhow!("No session with ID {}", session_id))?;
+            if session.info.state != SessionState::Suspended {
+                return Ok(());
+            }
+            session.info.clone()
+        };
+
+        if let Some(reason) = info.resume_blocker() {
+            return Err(anyhow!("Cannot wake '{}': {}", info.name, reason));
+        }
+
+        let agent_type = match info.session_type {
+            SessionType::ClaudeCode => AgentType::ClaudeCode,
+            SessionType::OpenAICodex => AgentType::OpenAICodex,
+            SessionType::Shell => AgentType::Shell,
+        };
+
+        let spawn_config = SpawnConfig {
+            session_id,
+            session_name: info.name.clone(),
+            working_dir: info.working_dir.clone(),
+            initial_prompt: None,
+            rows: rows as u16,
+            cols: cols as u16,
+            claude_config_dir,
+            codex_home,
+            resume: info.agent_session_id.clone(),
+        };
+
+        // Spawn before touching the existing entry, so a failure leaves the
+        // suspended session exactly as it was
+        let adapter = agent_type.create_adapter();
+        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
+
+        let mut info = info;
+        info.state = SessionState::Starting;
+        info.state_entered_at = Utc::now();
+        info.last_activity = Utc::now();
+        info.last_engagement = Utc::now();
+        info.in_flight.clear();
+        if spawn_result.agent_session_id.is_some() {
+            info.agent_session_id = spawn_result.agent_session_id;
+        }
+
+        let session = Session::with_scrollback(
+            info,
+            spawn_result.pty,
+            rows,
+            cols,
+            self.config.scrollback_lines,
+        );
+
+        // Replaces the suspended entry; its position in `session_order` is
+        // keyed by ID and so is untouched
+        self.sessions.insert(session_id, session);
+        self.persist_session(session_id);
+
+        tracing::info!(session_id = %session_id, "Woke suspended session");
+
+        Ok(())
     }
 
     /// Clean up exited sessions that have been exited longer than retention_secs
@@ -975,7 +1164,17 @@ impl SessionManager {
         };
 
         let now = Utc::now();
-        session.info.last_activity = now;
+
+        // An idle reminder is the agent reporting that nothing has happened, so
+        // it must not count as something happening. Treating it as activity
+        // would let the once-a-minute nag hold `last_activity` permanently
+        // fresh, and neither the idle badge nor the suspend sweep would ever
+        // fire on the sessions they exist for.
+        let is_idle_nag = event.event_type() == HookEventType::Notification
+            && event.notification_kind() == NotificationKind::Idle;
+        if !is_idle_nag {
+            session.info.last_activity = now;
+        }
 
         // How an event wants to move the session.
         //
@@ -1599,6 +1798,286 @@ mod tests {
         manager.sessions.insert(session_id, session);
         manager.session_order.push(session_id);
         session_id
+    }
+
+    /// A session eligible for suspension: idle, resumable, turn finished
+    fn insert_suspendable_session(manager: &mut SessionManager) -> SessionId {
+        let session_id = insert_test_session(manager);
+        let session = manager.get_mut(session_id).unwrap();
+        session.info.agent_session_id = Some(session_id.to_string());
+        session.set_state(SessionState::Waiting);
+        session.info.last_engagement = Utc::now() - chrono::Duration::seconds(10_000);
+        manager.persist_session(session_id);
+        session_id
+    }
+
+    #[test]
+    fn test_suspend_kills_the_process_but_keeps_the_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        // Something worth keeping in the scrollback
+        manager
+            .get_mut(session_id)
+            .unwrap()
+            .vterm
+            .process(b"important output\r\n");
+
+        assert_eq!(
+            manager.suspend_idle_sessions(7200, None),
+            vec![session_id],
+            "an idle resumable session should suspend"
+        );
+
+        let session = manager.get_mut(session_id).unwrap();
+        assert_eq!(session.info.state, SessionState::Suspended);
+        assert!(!session.is_alive(), "the child process should be gone");
+
+        // The whole point: the buffer lives in Panoptes, not the child
+        let visible = manager.get(session_id).unwrap().visible_lines(24);
+        assert!(
+            visible.iter().any(|line| line.contains("important output")),
+            "scrollback must survive suspension, got {visible:?}"
+        );
+
+        // And the record survives, so the session can still be resumed after a
+        // restart
+        assert!(manager.store().get(session_id).is_some());
+    }
+
+    #[test]
+    fn test_suspending_is_not_reported_as_a_crash() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        manager.suspend_idle_sessions(7200, None);
+
+        // We killed it on purpose. Reaping it here would notify the user of a
+        // crash and move it to Exited, from where cleanup deletes its record.
+        assert!(
+            manager.check_alive().is_empty(),
+            "a deliberate kill must not surface as a crash"
+        );
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Suspended
+        );
+    }
+
+    #[test]
+    fn test_suspended_session_is_not_polled_into_exited() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        manager.suspend_idle_sessions(7200, None);
+
+        // Reading a dead PTY errors, and poll_output turns an error into Exited
+        for _ in 0..5 {
+            manager.poll_outputs();
+        }
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Suspended
+        );
+    }
+
+    #[test]
+    fn test_suspended_session_is_never_cleaned_up() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        manager.suspend_idle_sessions(7200, None);
+
+        // cleanup_exited_sessions calls forget_session, which deletes the
+        // record from sessions.json - permanently unrecoverable
+        assert_eq!(manager.cleanup_exited_sessions(0), 0);
+        assert!(manager.get(session_id).is_some());
+        assert!(manager.store().get(session_id).is_some());
+    }
+
+    #[test]
+    fn test_suspend_exclusions() {
+        let temp_dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let idle = 7200;
+
+        let mut base = SessionInfo::new(
+            "s".to_string(),
+            temp_dir.path().to_path_buf(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        base.agent_session_id = Some(base.id.to_string());
+        base.state = SessionState::Waiting;
+        base.last_engagement = now - chrono::Duration::seconds(10_000);
+        assert!(
+            SessionManager::may_suspend(&base, None, now, idle),
+            "the baseline case must be suspendable or this test proves nothing"
+        );
+
+        // A shell has no conversation, and killing one destroys a build, a dev
+        // server or an ssh session
+        let mut shell = base.clone();
+        shell.session_type = SessionType::Shell;
+        assert!(!SessionManager::may_suspend(&shell, None, now, idle));
+
+        // Killing these destroys work in progress
+        for state in [
+            SessionState::AwaitingApproval,
+            SessionState::Executing,
+            SessionState::Thinking,
+            SessionState::Starting,
+            SessionState::Suspended,
+            SessionState::Exited,
+        ] {
+            let mut busy = base.clone();
+            busy.state = state;
+            assert!(
+                !SessionManager::may_suspend(&busy, None, now, idle),
+                "must not suspend a session in {state:?}"
+            );
+        }
+
+        // Never pull the session out from under the user
+        assert!(!SessionManager::may_suspend(
+            &base,
+            Some(base.id),
+            now,
+            idle
+        ));
+
+        // Suspending something with no way back is just closing it
+        let mut no_conversation = base.clone();
+        no_conversation.agent_session_id = None;
+        assert!(!SessionManager::may_suspend(
+            &no_conversation,
+            None,
+            now,
+            idle
+        ));
+
+        let mut gone = base.clone();
+        gone.working_dir = temp_dir.path().join("deleted");
+        assert!(!SessionManager::may_suspend(&gone, None, now, idle));
+
+        // Not idle yet
+        let mut fresh = base.clone();
+        fresh.last_engagement = now;
+        assert!(!SessionManager::may_suspend(&fresh, None, now, idle));
+    }
+
+    #[test]
+    fn test_suspend_can_be_disabled() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        assert!(manager.suspend_idle_sessions(0, None).is_empty());
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Waiting
+        );
+    }
+
+    #[test]
+    fn test_idle_nag_does_not_hold_a_session_awake() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        // Claude nags about once a minute for an unattended prompt. Counting
+        // that as activity would keep the suspend clock permanently reset, and
+        // the sweep would never fire on exactly the sessions it exists for.
+        for _ in 0..3 {
+            manager.handle_hook_event(&hook(
+                session_id,
+                "Notification",
+                serde_json::json!({"notification_type": "idle"}),
+            ));
+        }
+
+        assert_eq!(manager.suspend_idle_sessions(7200, None), vec![session_id]);
+    }
+
+    #[test]
+    fn test_pty_output_does_not_hold_a_session_awake() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        // A redrawn status line is rendering, not engagement
+        let session = manager.get_mut(session_id).unwrap();
+        session.info.last_activity = Utc::now();
+
+        assert_eq!(manager.suspend_idle_sessions(7200, None), vec![session_id]);
+    }
+
+    #[test]
+    fn test_user_input_keeps_a_session_awake() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        // Half a prompt typed into the box produces no agent events at all;
+        // suspending here would throw it away
+        manager.get_mut(session_id).unwrap().note_user_input();
+
+        assert!(manager.suspend_idle_sessions(7200, None).is_empty());
+    }
+
+    #[test]
+    fn test_waking_a_session_whose_directory_is_gone_reports_why() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+        manager.suspend_idle_sessions(7200, None);
+
+        manager.get_mut(session_id).unwrap().info.working_dir =
+            temp_dir.path().join("deleted-worktree");
+
+        let err = manager
+            .wake_session(session_id, 24, 80, None, None)
+            .expect_err("waking into a missing directory must fail");
+        assert!(
+            err.to_string().contains("working directory is missing"),
+            "got: {err}"
+        );
+
+        // Left suspended so the user can fix it and retry, not stranded
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Suspended
+        );
+    }
+
+    #[test]
+    fn test_waking_a_live_session_is_a_no_op() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        assert!(!manager.is_suspended(session_id));
+        manager
+            .wake_session(session_id, 24, 80, None, None)
+            .unwrap();
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Waiting
+        );
     }
 
     #[test]

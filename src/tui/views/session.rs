@@ -131,7 +131,8 @@ pub fn render_session_view(
             }
         })
         .unwrap_or(false);
-    let help_text = build_footer_text(state, is_scrolled, sessions, config);
+    let suspended = session.is_some_and(|s| s.info.state == SessionState::Suspended);
+    let help_text = build_footer_text(state, is_scrolled, suspended, sessions, config);
 
     let footer = Paragraph::new(help_text)
         .style(t.muted_style())
@@ -199,9 +200,23 @@ fn build_header_breadcrumb(
 fn build_footer_text(
     state: &AppState,
     is_scrolled: bool,
+    suspended: bool,
     sessions: &SessionManager,
     config: &Config,
 ) -> String {
+    // Say what a suspended session is before saying what to do with it: the
+    // scrollback still reads as a live session, so without this the missing
+    // process looks like a hang rather than a deliberate saving.
+    if suspended {
+        return match state.input_mode {
+            InputMode::Session => {
+                "Suspended to save memory | Type to wake | PgUp: scroll history".to_string()
+            }
+            _ => "Suspended to save memory | Enter: activate, then type to wake | \u{2191}\u{2193}/PgUp/Dn: scroll"
+                .to_string(),
+        };
+    }
+
     match state.input_mode {
         InputMode::Session => {
             if is_scrolled {

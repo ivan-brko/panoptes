@@ -197,7 +197,7 @@ Enter keystroke.
 | `Executing` | alive | one or more tools in flight | `PreToolUse`, shell foreground poll |
 | `AwaitingApproval` | alive | blocked on a permission dialog | `PermissionRequest` |
 | `Waiting` | alive | turn over, awaiting a prompt | `Stop`, shell foreground idle |
-| `Suspended` | killed by us | scrollback kept, wakes on interaction | not yet written |
+| `Suspended` | killed by us | scrollback kept, wakes on interaction | idle sweep |
 | `Exited` | died itself | see `exit_reason` | `check_alive` |
 | `Resumable` | never spawned | loaded from `sessions.json` | `reconcile` at startup |
 
@@ -274,6 +274,7 @@ Sessions display their configuration name in the header (e.g., `[Work]`) when us
 | `max_output_lines` | 10,000 | Lines kept in output buffer per session |
 | `idle_threshold_secs` | 300 | Seconds before an unattended waiting session resurfaces |
 | `state_timeout_secs` | 300 | Seconds before an in-flight tool is treated as stalled |
+| `suspend_after_secs` | 7200 (2h) | Idle seconds before an agent process is suspended; 0 disables |
 | `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
 | `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
@@ -355,6 +356,48 @@ At startup every record is reconciled to `SessionState::Resumable` and listed
 inertly - nothing is spawned until the user opens it. A record whose working
 directory has been deleted, or which never recorded a conversation ID, is still
 listed but shows why it cannot be brought back.
+
+### Suspending Idle Sessions
+
+An idle Claude Code process measures around 565 MB - roughly 25x the whole
+Panoptes process, which sits at about 23 MB. A handful of forgotten sessions
+therefore dominate memory use while doing nothing at all.
+
+After `suspend_after_secs` of no engagement, the child process is killed and the
+session moves to `Suspended`. The `Session` and its `vt100::Parser` buffer are
+kept, so the scrollback stays readable and scrollable - the buffer lives in
+Panoptes' memory, not the child's. Reading a suspended session is free; only
+interacting with one pays.
+
+The clock is `last_engagement`, which moves when the agent changes state or the
+user types, and deliberately *not* on raw PTY output. A redrawn status line is
+rendering, not engagement. Claude's once-a-minute idle notification is excluded
+for the same reason - counting it would reset the clock forever.
+
+A session is only suspended when all of the following hold. Each clause
+describes work a kill would destroy:
+
+- it is not a shell (no conversation to reattach to, and killing one ends a
+  build, a dev server, or an ssh session)
+- it is in `Waiting` - never `AwaitingApproval`, `Executing` or `Thinking`
+- it is not the session the user is currently viewing
+- it has no `resume_blocker()`; suspending something with no way back is just
+  closing it
+
+Waking spawns a fresh agent through the same `--resume` path a recovered session
+uses, and **discards the terminal buffer at that moment**. Reusing it would have
+the new process draw into a vterm still holding the old cursor position,
+alt-screen flags, modes and thousands of rows of output. Measured wake latency
+is around 2 seconds and does not scale with conversation length: the agent
+renders a compact resumed view rather than replaying the transcript. The
+conversation itself is intact - only the on-screen history is not.
+
+Three paths must exclude suspended sessions, and all three fail silently if
+missed: `poll_outputs` (reading a dead PTY reports as an error and becomes
+`Exited`), `check_alive` (reaping our own kill would notify the user of a
+crash), and `cleanup_exited_sessions` (which calls `forget_session` and deletes
+the record from `sessions.json`, making the session permanently unrecoverable).
+`SessionState::has_process()` is the single predicate they all use.
 
 ## Testing
 

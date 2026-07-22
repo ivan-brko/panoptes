@@ -210,6 +210,13 @@ pub struct Config {
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: usize,
 
+    /// Seconds a session may sit idle before its agent process is suspended
+    ///
+    /// Suspending kills the child process and keeps the scrollback; the session
+    /// wakes on the next interaction. Set to 0 to disable.
+    #[serde(default = "default_suspend_after")]
+    pub suspend_after_secs: u64,
+
     /// Whether Claude's periodic "idle" notification raises attention at all
     ///
     /// Claude nags after roughly a minute of an unattended prompt. That is the
@@ -323,6 +330,10 @@ fn default_scrollback_lines() -> usize {
     10_000
 }
 
+fn default_suspend_after() -> u64 {
+    7200 // 2 hours
+}
+
 impl Default for Config {
     fn default() -> Self {
         let base = config_dir();
@@ -340,6 +351,7 @@ impl Default for Config {
             focus_timer_minutes: default_focus_timer_minutes(),
             focus_stats_retention_days: default_focus_stats_retention_days(),
             scrollback_lines: default_scrollback_lines(),
+            suspend_after_secs: default_suspend_after(),
             attention_on_idle: false,
             notify_on: NotifyOn::default(),
             custom_shortcuts: Vec::new(),

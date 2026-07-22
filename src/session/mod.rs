@@ -155,6 +155,19 @@ impl SessionState {
         )
     }
 
+    /// Whether a live child process is expected to be attached
+    ///
+    /// Polling a session without one reads EOF from a dead PTY, which
+    /// `poll_output` reports as an error and turns into `Exited` - so a
+    /// deliberate teardown would come back as a crash, and a suspended session
+    /// would age into the cleanup path that deletes its stored record.
+    pub fn has_process(&self) -> bool {
+        !matches!(
+            self,
+            SessionState::Suspended | SessionState::Exited | SessionState::Resumable
+        )
+    }
+
     /// Whether a state reported by an agent should displace this one
     ///
     /// Subagents share one `session_id`, so several things are genuinely true
@@ -326,6 +339,14 @@ pub struct SessionInfo {
     /// Timestamp when current state was entered (for timeout detection)
     #[serde(default = "Utc::now")]
     pub state_entered_at: DateTime<Utc>,
+    /// When the agent last did something, or the user last touched this session
+    ///
+    /// Deliberately distinct from `last_activity`, which also moves on raw PTY
+    /// output. A redrawn status line is rendering, not engagement, and using
+    /// `last_activity` as the suspend clock would let a chatty idle prompt keep
+    /// a half-gigabyte process alive indefinitely.
+    #[serde(default = "Utc::now")]
+    pub last_engagement: DateTime<Utc>,
     /// Why this session wants the user, if it does (cleared when viewed)
     #[serde(default)]
     pub attention: Option<AttentionReason>,
@@ -499,6 +520,7 @@ impl SessionInfo {
             created_at: now,
             last_activity: now,
             state_entered_at: now,
+            last_engagement: now,
             attention: None,
             in_flight: HashMap::new(),
             last_message: None,
@@ -937,12 +959,14 @@ impl Session {
 
     /// Write bytes to the PTY
     pub fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.note_user_input();
         self.pty.write(data)
     }
 
     /// Write pasted text to the PTY
     /// Wraps in bracketed paste sequences only if the app has enabled it
     pub fn write_paste(&mut self, text: &str) -> anyhow::Result<()> {
+        self.note_user_input();
         if self.vterm.bracketed_paste_enabled() {
             self.pty.write_paste(text)
         } else {
@@ -966,6 +990,7 @@ impl Session {
             self.set_state(SessionState::Thinking);
         }
 
+        self.note_user_input();
         self.pty.send_key(key)
     }
 
@@ -1009,6 +1034,18 @@ impl Session {
         self.info.state = state;
         self.info.last_activity = now;
         self.info.state_entered_at = now;
+        self.info.last_engagement = now;
+    }
+
+    /// Note that the user has interacted with this session
+    ///
+    /// Keeps a session the user is typing into out of the suspend sweep -
+    /// killing a process with half a prompt typed into it would lose real work,
+    /// and the agent produces no events at all while that happens.
+    pub fn note_user_input(&mut self) {
+        let now = Utc::now();
+        self.info.last_activity = now;
+        self.info.last_engagement = now;
     }
 
     /// Strip ANSI escape/control sequences from PTY bytes while preserving
