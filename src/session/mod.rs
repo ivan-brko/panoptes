@@ -966,6 +966,14 @@ impl Session {
     /// Write pasted text to the PTY
     /// Wraps in bracketed paste sequences only if the app has enabled it
     pub fn write_paste(&mut self, text: &str) -> anyhow::Result<()> {
+        // Without bracketed paste the agent sees the text as typing, so an
+        // embedded newline submits it. With it, the newline is inserted
+        // literally and a separate Enter follows, which `send_key` handles.
+        let submits = !self.vterm.bracketed_paste_enabled() && text.contains('\n');
+        if submits {
+            self.guess_turn_started();
+        }
+
         self.note_user_input();
         if self.vterm.bracketed_paste_enabled() {
             self.pty.write_paste(text)
@@ -975,23 +983,29 @@ impl Session {
     }
 
     /// Send a key event to the PTY
-    ///
-    /// For agents that do not announce prompt submission, an Enter pressed
-    /// while `Waiting` is taken as the start of a turn. This is a guess, and a
-    /// bad one - it misses pasted prompts and fires on an Enter that only
-    /// dismissed a menu - so it is used only where there is nothing better.
-    /// Claude Code reports `UserPromptSubmit` and is excluded.
     pub fn send_key(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
         use crossterm::event::KeyCode;
 
-        let must_guess = self.info.session_type.uses_hooks()
-            && !self.info.session_type.reports_prompt_submission();
-        if must_guess && key.code == KeyCode::Enter && self.info.state == SessionState::Waiting {
-            self.set_state(SessionState::Thinking);
+        if key.code == KeyCode::Enter {
+            self.guess_turn_started();
         }
 
         self.note_user_input();
         self.pty.send_key(key)
+    }
+
+    /// Infer that the user just submitted a prompt
+    ///
+    /// Only for agents that do not announce it. This is a guess, and a poor
+    /// one - it fires on an Enter that merely dismissed a menu - so it is used
+    /// only where there is nothing better. Claude Code reports
+    /// `UserPromptSubmit` and is excluded; Codex has no equivalent hook.
+    fn guess_turn_started(&mut self) {
+        let must_guess = self.info.session_type.uses_hooks()
+            && !self.info.session_type.reports_prompt_submission();
+        if must_guess && self.info.state == SessionState::Waiting {
+            self.set_state(SessionState::Thinking);
+        }
     }
 
     /// Check if the session's process is still running
@@ -1278,6 +1292,75 @@ mod tests {
         assert_eq!(info.finish_tool("a"), Some("Read".to_string()));
         assert_eq!(info.in_flight_summary().as_deref(), Some("Grep ×2"));
         assert_eq!(info.finish_tool("nonexistent"), None);
+    }
+
+    /// A live session wrapping a harmless long-running child
+    fn test_session(session_type: SessionType) -> Session {
+        let pty = crate::session::pty::PtyHandle::spawn(
+            "sleep",
+            &["60"],
+            std::path::Path::new("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            "/tmp".into(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        info.session_type = session_type;
+        info.state = SessionState::Waiting;
+        Session::new(info, pty, 24, 80)
+    }
+
+    #[test]
+    fn test_paste_that_submits_starts_a_turn_for_agents_that_cannot_report_it() {
+        // Codex has no prompt-submission hook, so a submitted prompt has to be
+        // inferred. Without bracketed paste the embedded newline submits, and
+        // no Enter key event ever arrives to notice it - leaving the session
+        // looking idle for the entire turn, and eligible for suspension.
+        let mut session = test_session(SessionType::OpenAICodex);
+        assert!(!session.vterm.bracketed_paste_enabled());
+
+        session.write_paste("do the thing\n").unwrap();
+        assert_eq!(session.info.state, SessionState::Thinking);
+    }
+
+    #[test]
+    fn test_bracketed_paste_does_not_start_a_turn() {
+        // With bracketed paste the newline is inserted literally; the user
+        // still has to press Enter, which send_key sees.
+        let mut session = test_session(SessionType::OpenAICodex);
+        session.vterm.process(b"\x1b[?2004h");
+        assert!(session.vterm.bracketed_paste_enabled());
+
+        session.write_paste("do the thing\n").unwrap();
+        assert_eq!(session.info.state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn test_paste_never_guesses_for_agents_that_report_prompts() {
+        // Claude Code sends UserPromptSubmit; guessing on top of it would only
+        // add wrong answers.
+        let mut session = test_session(SessionType::ClaudeCode);
+        session.write_paste("do the thing\n").unwrap();
+        assert_eq!(session.info.state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn test_user_input_advances_the_engagement_clock() {
+        let mut session = test_session(SessionType::ClaudeCode);
+        let long_ago = Utc::now() - chrono::Duration::seconds(10_000);
+        session.info.last_engagement = long_ago;
+        session.info.last_activity = long_ago;
+
+        session.write(b"x").unwrap();
+
+        assert!(session.info.last_engagement > long_ago);
+        assert!(session.info.last_activity > long_ago);
     }
 
     #[test]

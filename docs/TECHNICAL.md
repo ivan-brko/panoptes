@@ -369,10 +369,15 @@ kept, so the scrollback stays readable and scrollable - the buffer lives in
 Panoptes' memory, not the child's. Reading a suspended session is free; only
 interacting with one pays.
 
-The clock is `last_engagement`, which moves when the agent changes state or the
-user types, and deliberately *not* on raw PTY output. A redrawn status line is
-rendering, not engagement. Claude's once-a-minute idle notification is excluded
-for the same reason - counting it would reset the clock forever.
+Two clocks must agree. `last_engagement` moves when the agent changes state or
+the user types, and deliberately *not* on raw PTY output - a redrawn status line
+is rendering, not engagement, and Claude's once-a-minute idle notification is
+excluded for the same reason. `last_activity` does move on PTY output, and is
+the safety net: Codex reports nothing between the start of a turn and its end,
+so a working Codex session can sit in `Waiting` with a stale `last_engagement`
+while producing output the whole time. Requiring silence too means the worst
+case is a session that fails to suspend rather than one whose work is
+destroyed.
 
 A session is only suspended when all of the following hold. Each clause
 describes work a kill would destroy:

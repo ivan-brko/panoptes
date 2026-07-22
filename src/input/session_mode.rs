@@ -110,6 +110,12 @@ fn handle_session_mode_esc(app: &mut App, key: KeyEvent) -> Result<()> {
 /// Forward an Esc key press to the active session's PTY
 fn forward_esc_to_pty(app: &mut App) -> Result<()> {
     if let Some(session_id) = app.state.active_session {
+        // Same reason as the ordinary key path: a suspended session has no
+        // process, so the byte would disappear into an orphaned PTY master
+        // and Shift+Esc would be the one keystroke that fails to wake it.
+        if app.sessions.is_suspended(session_id) && !app.wake_session(session_id)? {
+            return Ok(());
+        }
         if let Some(session) = app.sessions.get_mut(session_id) {
             let esc_key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
             session.send_key(esc_key)?;

@@ -954,9 +954,24 @@ impl SessionManager {
             return false;
         }
 
+        // Both clocks must agree, and they answer different questions.
+        //
+        // `last_engagement` is the honest one: it moves when the agent changes
+        // state or the user types, and ignores redraws, so a chatty idle prompt
+        // cannot hold a session awake forever.
+        //
+        // `last_activity` also moves on raw PTY output, and is the safety net.
+        // Codex reports nothing at all between the start of a turn and its end,
+        // so a Codex session that is genuinely working can sit in `Waiting`
+        // with a stale `last_engagement` while producing output the whole time.
+        // Killing it there would discard a turn in progress. Requiring silence
+        // too means the worst case is a session that fails to suspend, rather
+        // than one whose work is destroyed.
+        let idle_secs = idle_secs as i64;
         now.signed_duration_since(info.last_engagement)
             .num_seconds()
-            >= idle_secs as i64
+            >= idle_secs
+            && now.signed_duration_since(info.last_activity).num_seconds() >= idle_secs
     }
 
     /// Kill the child processes of agent sessions left idle past the threshold
@@ -1806,7 +1821,9 @@ mod tests {
         let session = manager.get_mut(session_id).unwrap();
         session.info.agent_session_id = Some(session_id.to_string());
         session.set_state(SessionState::Waiting);
-        session.info.last_engagement = Utc::now() - chrono::Duration::seconds(10_000);
+        let long_ago = Utc::now() - chrono::Duration::seconds(10_000);
+        session.info.last_engagement = long_ago;
+        session.info.last_activity = long_ago;
         manager.persist_session(session_id);
         session_id
     }
@@ -1918,6 +1935,7 @@ mod tests {
         base.agent_session_id = Some(base.id.to_string());
         base.state = SessionState::Waiting;
         base.last_engagement = now - chrono::Duration::seconds(10_000);
+        base.last_activity = now - chrono::Duration::seconds(10_000);
         assert!(
             SessionManager::may_suspend(&base, None, now, idle),
             "the baseline case must be suspendable or this test proves nothing"
@@ -2010,17 +2028,23 @@ mod tests {
     }
 
     #[test]
-    fn test_pty_output_does_not_hold_a_session_awake() {
+    fn test_a_session_still_producing_output_is_not_suspended() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
         let session_id = insert_suspendable_session(&mut manager);
 
-        // A redrawn status line is rendering, not engagement
-        let session = manager.get_mut(session_id).unwrap();
-        session.info.last_activity = Utc::now();
+        // Codex reports nothing between the start of a turn and its end, so a
+        // Codex session that is genuinely working sits in Waiting the whole
+        // time - only its PTY output betrays that it is busy. Killing it here
+        // would throw away a turn in progress.
+        manager.get_mut(session_id).unwrap().info.session_type = SessionType::OpenAICodex;
+        manager.get_mut(session_id).unwrap().info.last_activity = Utc::now();
 
-        assert_eq!(manager.suspend_idle_sessions(7200, None), vec![session_id]);
+        assert!(
+            manager.suspend_idle_sessions(7200, None).is_empty(),
+            "a session still producing output must not be suspended"
+        );
     }
 
     #[test]
