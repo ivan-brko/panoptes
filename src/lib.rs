@@ -16,5 +16,6 @@ pub mod logging;
 pub mod path_complete;
 pub mod project;
 pub mod session;
+pub mod transcript;
 pub mod tui;
 pub mod wizards;

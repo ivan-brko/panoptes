@@ -73,6 +73,15 @@ pub fn discover_session_id(
                     let Some(meta) = read_session_meta(&path) else {
                         continue;
                     };
+                    // A subagent gets its own rollout, in the same working
+                    // directory and with its own fresh timestamp, so it matches
+                    // every other criterion here and would be claimed as if it
+                    // were the session's own conversation. Resuming that
+                    // pointer would reattach to a subagent rather than the
+                    // conversation the user was having.
+                    if meta.is_subagent {
+                        continue;
+                    }
                     if canonical_or_original(&meta.cwd) != target_cwd {
                         continue;
                     }
@@ -106,6 +115,46 @@ struct RolloutMeta {
     id: String,
     cwd: PathBuf,
     created_at: chrono::DateTime<chrono::Utc>,
+    /// Whether this rollout belongs to a subagent rather than a session
+    is_subagent: bool,
+}
+
+/// Locate the rollout file holding a known Codex conversation
+///
+/// Needed to tail a conversation whose ID is already known, which is the
+/// reverse of `discover_session_id`. Returns `None` before Codex has written
+/// the file, which is normal for the first moments of a session.
+pub fn rollout_path(codex_home: &Path, conversation_id: &str) -> Option<PathBuf> {
+    let sessions_dir = codex_home.join("sessions");
+
+    for year in read_subdirs(&sessions_dir) {
+        for month in read_subdirs(&year) {
+            for day in read_subdirs(&month) {
+                let Ok(entries) = std::fs::read_dir(&day) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    // The filename embeds the conversation UUID, so most files
+                    // can be dismissed without opening them
+                    let names_it = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|name| name.contains(conversation_id));
+                    if !names_it {
+                        continue;
+                    }
+                    if read_session_meta(&path).is_some_and(|meta| meta.id == conversation_id) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// List immediate subdirectories, ignoring anything unreadable
@@ -154,6 +203,7 @@ fn read_session_meta(path: &Path) -> Option<RolloutMeta> {
         id,
         cwd: PathBuf::from(cwd),
         created_at,
+        is_subagent: crate::transcript::codex::is_subagent_meta(payload),
     })
 }
 
@@ -1084,6 +1134,95 @@ notify = ["bash", "__LEGACY__", 42]
         });
         std::fs::write(&path, format!("{}\n{{\"type\":\"message\"}}\n", meta)).unwrap();
         path
+    }
+
+    /// Write a rollout that belongs to a subagent of `parent`
+    fn write_subagent_rollout(
+        codex_home: &Path,
+        id: &str,
+        parent: &str,
+        cwd: &Path,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> PathBuf {
+        let dir = codex_home
+            .join("sessions")
+            .join(created_at.format("%Y").to_string())
+            .join(created_at.format("%m").to_string())
+            .join(created_at.format("%d").to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-{}-{}.jsonl", created_at.timestamp(), id));
+        let meta = serde_json::json!({
+            "timestamp": created_at.to_rfc3339(),
+            "type": "session_meta",
+            "payload": {
+                // On a subagent rollout `id` is the subagent's own, while
+                // `session_id` is the parent's - a trap for anything reading
+                // these files without being explicit about which it wants
+                "id": id,
+                "session_id": parent,
+                "forked_from_id": parent,
+                "timestamp": created_at.to_rfc3339(),
+                "cwd": cwd.to_string_lossy(),
+                "source": {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}
+            }
+        });
+        std::fs::write(&path, format!("{}\n", meta)).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_never_claims_a_subagent_rollout() {
+        // A real case from this machine: a subagent rollout sitting in a
+        // Panoptes worktree, with its own fresh timestamp, matching every
+        // criterion the discovery used. Claiming it would point the session at
+        // a subagent instead of the conversation the user was having.
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let started = an_hour_ago();
+
+        write_subagent_rollout(
+            home.path(),
+            "subagent-id",
+            "parent-id",
+            cwd.path(),
+            started + chrono::Duration::minutes(1),
+        );
+
+        assert_eq!(
+            discover_session_id(home.path(), cwd.path(), started, &nothing_claimed()),
+            None,
+            "a subagent rollout must never be claimed as a session's conversation"
+        );
+
+        // The parent's own rollout is still found, even though it is older -
+        // the subagent must not shadow it
+        write_rollout(
+            home.path(),
+            "parent-id",
+            cwd.path(),
+            started + chrono::Duration::seconds(30),
+        );
+        assert_eq!(
+            discover_session_id(home.path(), cwd.path(), started, &nothing_claimed()).as_deref(),
+            Some("parent-id")
+        );
+    }
+
+    #[test]
+    fn test_rollout_path_finds_a_known_conversation() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let written = write_rollout(home.path(), "wanted-id", cwd.path(), an_hour_ago());
+        write_rollout(home.path(), "other-id", cwd.path(), an_hour_ago());
+
+        assert_eq!(rollout_path(home.path(), "wanted-id"), Some(written));
+        assert_eq!(rollout_path(home.path(), "no-such-id"), None);
+    }
+
+    #[test]
+    fn test_rollout_path_tolerates_a_missing_sessions_directory() {
+        let home = TempDir::new().unwrap();
+        assert_eq!(rollout_path(home.path(), "anything"), None);
     }
 
     fn an_hour_ago() -> chrono::DateTime<chrono::Utc> {

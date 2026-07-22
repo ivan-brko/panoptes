@@ -62,6 +62,21 @@ pub use timeline::render_timeline;
 /// Agent vocabulary is translated for shell sessions, which have no notion of
 /// thinking: they are `Running` or `Ready`.
 pub fn session_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
+    let base = base_state_display(info, now);
+
+    // Codex subagents run in their own processes and write their own rollouts,
+    // so a parent with three children working looks completely idle without
+    // this. The count is inferred from recent writes and will sometimes be
+    // stale, which is why it is a count rather than a claim about what they
+    // are doing.
+    match info.subagents {
+        0 => base,
+        1 => format!("{} · 1 subagent", base),
+        n => format!("{} · {} subagents", base, n),
+    }
+}
+
+fn base_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
     match (info.session_type, info.state) {
         // A recovered session that cannot come back says why, rather than
         // offering an action that will fail

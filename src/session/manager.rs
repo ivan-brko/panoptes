@@ -11,6 +11,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 
 use crate::agent::adapter::SpawnConfig;
+use crate::agent::events::AgentEvent;
 use crate::agent::AgentType;
 use crate::claude_config::ClaudeConfigId;
 use crate::config::Config;
@@ -954,6 +955,13 @@ impl SessionManager {
             return false;
         }
 
+        // Codex subagents are children of this process. The parent shows as
+        // Waiting the whole time they work, so without this the one case that
+        // most looks idle is the one where killing it destroys the most.
+        if info.subagents > 0 {
+            return false;
+        }
+
         // Both clocks must agree, and they answer different questions.
         //
         // `last_engagement` is the honest one: it moves when the agent changes
@@ -1149,6 +1157,62 @@ impl SessionManager {
         count
     }
 
+    /// Translate a Claude Code hook into the canonical vocabulary
+    ///
+    /// Hooks are Claude's way of describing itself. Keeping that translation
+    /// here, rather than in the state machine, is what lets Codex's transcript
+    /// feed the same machine without either agent's vocabulary leaking into it.
+    fn translate_hook(event: &HookEvent) -> AgentEvent {
+        match event.event_type() {
+            HookEventType::SessionStart => {
+                // `SessionStart` does not only mean "a process came up". Claude
+                // also fires it for `clear`, `fork` and - crucially - `compact`,
+                // which happens on its own whenever the context window fills up,
+                // in the middle of a turn the agent is still working on.
+                match event.session_start_source() {
+                    Some("startup") | Some("resume") | Some("clear") | Some("fork") => {
+                        AgentEvent::SessionReset {
+                            title: event.session_title().map(str::to_string),
+                        }
+                    }
+                    // Mid-turn compaction, or a source added after this was
+                    // written. Leave the state alone rather than guess wrong.
+                    _ => AgentEvent::ContextCompacted,
+                }
+            }
+            HookEventType::SessionEnd => AgentEvent::SessionEnding,
+            HookEventType::UserPromptSubmit => AgentEvent::TurnStarted {
+                title: event.session_title().map(str::to_string),
+            },
+            HookEventType::PreToolUse => AgentEvent::ToolStarted {
+                key: event.tool_key(),
+                name: event.tool_name().unwrap_or("unknown").to_string(),
+            },
+            HookEventType::PostToolUse | HookEventType::PostToolUseFailure => {
+                AgentEvent::ToolFinished {
+                    key: event.tool_key(),
+                }
+            }
+            HookEventType::Stop => AgentEvent::TurnCompleted {
+                last_message: event.last_assistant_message().map(str::to_string),
+            },
+            HookEventType::PermissionRequest => AgentEvent::ApprovalRequested {
+                tool: event.tool_name().map(str::to_string),
+            },
+            HookEventType::Notification => match event.notification_kind() {
+                // Carry the tool through where the payload named one; the
+                // generic mapping cannot know it
+                NotificationKind::PermissionRequest => AgentEvent::ApprovalRequested {
+                    tool: event.tool_name().map(str::to_string),
+                },
+                kind => AgentEvent::from(kind),
+            },
+            // Codex CLI's only hook: the agent is done and wants input
+            HookEventType::AgentTurnComplete => AgentEvent::TurnCompleted { last_message: None },
+            HookEventType::Unknown => AgentEvent::Ignored,
+        }
+    }
+
     /// Handle a hook event and update session state accordingly
     ///
     /// Returns the session ID if the event raised a new, bell-worthy reason to
@@ -1156,7 +1220,6 @@ impl SessionManager {
     /// decision - it also knows whether the user is already looking at the
     /// session and whether the terminal has focus.
     pub fn handle_hook_event(&mut self, event: &HookEvent) -> Option<SessionId> {
-        // Try to parse session_id as UUID
         let session_id = match event.session_id.parse::<SessionId>() {
             Ok(id) => id,
             Err(_) => {
@@ -1165,42 +1228,59 @@ impl SessionManager {
             }
         };
 
+        self.apply_agent_event(session_id, Self::translate_hook(event))
+    }
+
+    /// Apply a canonical agent event to a session
+    ///
+    /// The single ingest path. Claude's hooks and both transcript tailers all
+    /// arrive here, so what an event *means* is decided in exactly one place.
+    ///
+    /// Returns the session ID if this raised a new, bell-worthy reason to look
+    /// at the session.
+    pub fn apply_agent_event(
+        &mut self,
+        session_id: SessionId,
+        event: AgentEvent,
+    ) -> Option<SessionId> {
         // Read config before taking the session borrow
         let notify_on = self.config.notify_on.clone();
         let attention_on_idle = self.config.attention_on_idle;
 
-        // Find the session
         let session = match self.sessions.get_mut(&session_id) {
             Some(s) => s,
             None => {
-                tracing::debug!("Hook event for unknown session: {}", session_id);
+                tracing::debug!("Agent event for unknown session: {}", session_id);
                 return None;
             }
         };
 
         let now = Utc::now();
 
-        // An idle reminder is the agent reporting that nothing has happened, so
-        // it must not count as something happening. Treating it as activity
-        // would let the once-a-minute nag hold `last_activity` permanently
-        // fresh, and neither the idle badge nor the suspend sweep would ever
-        // fire on the sessions they exist for.
-        let is_idle_nag = event.event_type() == HookEventType::Notification
-            && event.notification_kind() == NotificationKind::Idle;
-        if !is_idle_nag {
+        // Two events must not count as activity, or they would hold
+        // `last_activity` permanently fresh and neither the idle badge nor the
+        // suspend sweep would ever fire on the sessions they exist for:
+        //
+        // - `IdleReminder` is the agent reporting that nothing has happened.
+        // - `Subagents` is Panoptes' own periodic observation, not the agent
+        //   doing anything.
+        let is_activity = !matches!(
+            event,
+            AgentEvent::IdleReminder | AgentEvent::Subagents { .. }
+        );
+        if is_activity {
             session.info.last_activity = now;
         }
 
         // How an event wants to move the session.
         //
         // `Authoritative` overwrites. `AtLeast` only upgrades, per
-        // `SessionState::most_urgent` - subagents share one session_id, so
-        // several states are genuinely true at once and the events describing
-        // them interleave. An event announcing new concurrent work must not be
-        // able to un-report a permission dialog someone else is blocked on,
-        // while an event reporting the turn is over must be able to demote,
-        // or a single dropped `PostToolUse` would pin the session in
-        // `Executing` until the watchdog noticed.
+        // `SessionState::most_urgent` - subagents share one session, so several
+        // states are genuinely true at once and the events describing them
+        // interleave. An event announcing new concurrent work must not be able
+        // to un-report a permission dialog someone else is blocked on, while an
+        // event reporting the turn is over must be able to demote, or a single
+        // dropped tool completion would pin the session in `Executing`.
         enum Move {
             Authoritative(SessionState),
             AtLeast(SessionState),
@@ -1210,82 +1290,53 @@ impl SessionManager {
         let mut attention: Option<AttentionReason> = None;
         let mut clear_attention = false;
 
-        let movement = match event.event_type() {
-            HookEventType::SessionStart => {
-                if let Some(title) = event.session_title() {
-                    session.info.adopt_agent_title(title);
+        let movement = match event {
+            AgentEvent::SessionReset { title } => {
+                if let Some(title) = title {
+                    session.info.adopt_agent_title(&title);
                 }
-                // `SessionStart` does not only mean "a process came up". Claude
-                // also fires it for `clear`, `fork` and - crucially - `compact`,
-                // which happens on its own whenever the context window fills up,
-                // in the middle of a turn the agent is still working on. Forcing
-                // Waiting there would report a busy session as finished and
-                // eventually badge it as unattended.
-                match event.session_start_source() {
-                    // Genuine starts and user-driven conversation resets: the
-                    // agent is up and has not been asked anything yet
-                    Some("startup") | Some("resume") | Some("clear") | Some("fork") => {
-                        session.info.in_flight.clear();
-                        clear_attention = true;
-                        Move::Authoritative(SessionState::Waiting)
-                    }
-                    // Mid-turn compaction, or a source added after this was
-                    // written. Leave the state alone rather than guess wrong.
-                    other => {
-                        tracing::debug!(
-                            session_id = %session_id,
-                            source = ?other,
-                            "SessionStart mid-conversation, leaving state unchanged"
-                        );
-                        Move::Unchanged
-                    }
-                }
+                session.info.in_flight.clear();
+                clear_attention = true;
+                // The agent is up but has not been asked anything yet
+                Move::Authoritative(SessionState::Waiting)
             }
 
-            HookEventType::SessionEnd => {
+            AgentEvent::ContextCompacted => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "Conversation compacted mid-turn; leaving state unchanged"
+                );
+                Move::Unchanged
+            }
+
+            AgentEvent::SessionEnding => {
                 // The process is on its way out but has not gone yet. Leave the
                 // Exited transition to `check_alive`, which is the only place
                 // that can tell a clean exit from a crash; just stop claiming
                 // that tools are still running.
-                tracing::debug!(
-                    session_id = %session_id,
-                    reason = ?event.end_reason(),
-                    "Agent session ended"
-                );
                 session.info.in_flight.clear();
                 Move::Unchanged
             }
 
-            HookEventType::UserPromptSubmit => {
-                if let Some(title) = event.session_title() {
-                    session.info.adopt_agent_title(title);
+            AgentEvent::TurnStarted { title } => {
+                if let Some(title) = title {
+                    session.info.adopt_agent_title(&title);
                 }
-                // A prompt is a clean turn boundary: anything still marked
-                // in flight from the previous turn is stale, and the user is
+                // A prompt is a clean turn boundary: anything still marked in
+                // flight from the previous turn is stale, and the user is
                 // demonstrably present so nothing needs flagging for them.
                 session.info.in_flight.clear();
                 clear_attention = true;
                 Move::Authoritative(SessionState::Thinking)
             }
 
-            HookEventType::PreToolUse => {
-                let name = event.tool_name().unwrap_or("unknown").to_string();
-                session.info.start_tool(event.tool_key(), name, now);
+            AgentEvent::ToolStarted { key, name } => {
+                session.info.start_tool(key, name, now);
                 Move::AtLeast(SessionState::Executing)
             }
 
-            HookEventType::PostToolUse | HookEventType::PostToolUseFailure => {
-                let finished = session.info.finish_tool(&event.tool_key());
-
-                if event.event_type() == HookEventType::PostToolUseFailure && !event.is_interrupt()
-                {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        tool = ?event.tool_name(),
-                        "Tool failed"
-                    );
-                }
-
+            AgentEvent::ToolFinished { key } => {
+                session.info.finish_tool(&key);
                 if session.info.in_flight.is_empty() {
                     // Nothing left running. Demote out of Executing, but do not
                     // stomp on a permission dialog raised meanwhile.
@@ -1294,14 +1345,13 @@ impl SessionManager {
                         _ => Move::Authoritative(SessionState::Thinking),
                     }
                 } else {
-                    let _ = finished;
                     Move::AtLeast(SessionState::Executing)
                 }
             }
 
-            HookEventType::Stop => {
-                if let Some(message) = event.last_assistant_message() {
-                    session.info.set_last_message(message);
+            AgentEvent::TurnCompleted { last_message } => {
+                if let Some(message) = last_message {
+                    session.info.set_last_message(&message);
                 }
                 // End of turn: whatever was still marked in flight never
                 // reported back and is not running any more.
@@ -1310,54 +1360,37 @@ impl SessionManager {
                 Move::Authoritative(SessionState::Waiting)
             }
 
-            HookEventType::PermissionRequest => {
-                attention = Some(AttentionReason::Approval {
-                    tool: event.tool_name().map(str::to_string),
-                });
-                Move::AtLeast(SessionState::AwaitingApproval)
-            }
-
-            HookEventType::Notification => match event.notification_kind() {
-                // Claude's periodic "you have been idle" nag. It arrives as the
-                // same event type as a blocking permission prompt, which is why
-                // every notification used to ring the bell.
-                NotificationKind::Idle => {
-                    if attention_on_idle {
-                        attention = Some(AttentionReason::TurnComplete);
-                    }
-                    Move::Unchanged
-                }
-                NotificationKind::PermissionRequest | NotificationKind::Elicitation => {
-                    attention = Some(AttentionReason::Approval {
-                        tool: event.tool_name().map(str::to_string),
-                    });
-                    Move::AtLeast(SessionState::AwaitingApproval)
-                }
-                NotificationKind::TaskCompleted => {
-                    attention = Some(AttentionReason::TurnComplete);
-                    Move::Authoritative(SessionState::Waiting)
-                }
-                // Either a notification type Claude added after this was
-                // written, or the no-jq degraded path where no payload arrived
-                // at all. Both are more likely to want the user than not, so
-                // this falls back to the old always-notify behaviour.
-                NotificationKind::Other => {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        "Unclassified notification, treating as actionable"
-                    );
-                    attention = Some(AttentionReason::Approval { tool: None });
-                    Move::AtLeast(SessionState::AwaitingApproval)
-                }
-            },
-
-            HookEventType::AgentTurnComplete => {
-                // Codex CLI's only signal: the agent is done and wants input
-                attention = Some(AttentionReason::TurnComplete);
+            AgentEvent::TurnAborted => {
+                // The user interrupted it themselves, so they already know -
+                // flagging it for their attention would be telling them what
+                // they just did.
+                session.info.in_flight.clear();
                 Move::Authoritative(SessionState::Waiting)
             }
 
-            HookEventType::Unknown => Move::Unchanged,
+            AgentEvent::ApprovalRequested { tool } => {
+                attention = Some(AttentionReason::Approval { tool });
+                Move::AtLeast(SessionState::AwaitingApproval)
+            }
+
+            AgentEvent::IdleReminder => {
+                if attention_on_idle {
+                    attention = Some(AttentionReason::TurnComplete);
+                }
+                Move::Unchanged
+            }
+
+            AgentEvent::Usage(usage) => {
+                session.info.usage.merge(usage);
+                Move::Unchanged
+            }
+
+            AgentEvent::Subagents { active } => {
+                session.info.subagents = active;
+                Move::Unchanged
+            }
+
+            AgentEvent::Ignored => Move::Unchanged,
         };
 
         match movement {
@@ -2105,6 +2138,155 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_transcript_drives_a_full_turn() {
+        use crate::transcript::{Tailer, TranscriptKind};
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+        manager.get_mut(session_id).unwrap().info.session_type = SessionType::OpenAICodex;
+        manager
+            .get_mut(session_id)
+            .unwrap()
+            .set_state(SessionState::Waiting);
+
+        // The exact record sequence a real Codex turn writes, in order
+        let rollout = temp_dir.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            [
+                r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1"}}"#,
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"model":"gpt-5-codex","model_context_window":272000,"total_token_usage":{"total_tokens":3000}}}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1"}}"#,
+                r#"{"type":"event_msg","payload":{"type":"agent_message"}}"#,
+                r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"pong"}}"#,
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let mut tailer = Tailer::from_start(TranscriptKind::Codex, rollout);
+        let (events, _) = tailer.poll();
+
+        // Feed them through one at a time, checking the state as it goes -
+        // Codex used to be able to report only "my turn ended"
+        let mut states = Vec::new();
+        for event in events {
+            manager.apply_agent_event(session_id, event);
+            states.push(manager.get(session_id).unwrap().info.state);
+        }
+
+        assert_eq!(
+            states,
+            vec![
+                SessionState::Thinking,  // task_started
+                SessionState::Executing, // function_call
+                SessionState::Executing, // token_count changes nothing
+                SessionState::Thinking,  // function_call_output, nothing left
+                SessionState::Waiting,   // task_complete
+            ]
+        );
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.attention, Some(AttentionReason::TurnComplete));
+        assert_eq!(info.last_message.as_deref(), Some("pong"));
+        assert_eq!(info.usage.model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(
+            info.usage.context_percent(),
+            Some(3000.0 / 272_000.0 * 100.0)
+        );
+        assert!(info.in_flight.is_empty());
+    }
+
+    #[test]
+    fn test_interrupted_codex_turn_does_not_stay_stuck() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        manager.apply_agent_event(session_id, AgentEvent::TurnStarted { title: None });
+        manager.apply_agent_event(
+            session_id,
+            AgentEvent::ToolStarted {
+                key: "c1".to_string(),
+                name: "shell".to_string(),
+            },
+        );
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Executing
+        );
+
+        // The user pressed Esc. No completion for the running tool will ever
+        // arrive, so without handling this the session sits in Executing until
+        // the stall watchdog notices.
+        manager.apply_agent_event(session_id, AgentEvent::TurnAborted);
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Waiting);
+        assert!(info.in_flight.is_empty());
+        assert!(
+            info.attention.is_none(),
+            "the user interrupted it themselves; telling them about it is noise"
+        );
+    }
+
+    #[test]
+    fn test_subagent_count_is_recorded_and_blocks_suspension() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager);
+
+        manager.apply_agent_event(session_id, AgentEvent::Subagents { active: 3 });
+        assert_eq!(manager.get(session_id).unwrap().info.subagents, 3);
+
+        // A Codex parent sits in Waiting the whole time its subagents work, so
+        // this is the case that looks most idle and costs most to kill
+        assert!(manager.suspend_idle_sessions(7200, None).is_empty());
+
+        manager.apply_agent_event(session_id, AgentEvent::Subagents { active: 0 });
+        assert_eq!(manager.suspend_idle_sessions(7200, None), vec![session_id]);
+    }
+
+    #[test]
+    fn test_claude_usage_events_never_disturb_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        manager.apply_agent_event(session_id, AgentEvent::TurnStarted { title: None });
+        manager.apply_agent_event(
+            session_id,
+            AgentEvent::ToolStarted {
+                key: "t1".to_string(),
+                name: "Read".to_string(),
+            },
+        );
+
+        // Hooks own Claude's state. The transcript arrives later and must only
+        // ever add figures, or the two producers fight over the same field.
+        manager.apply_agent_event(
+            session_id,
+            AgentEvent::Usage(crate::agent::events::UsageSnapshot {
+                model: Some("claude-opus-4-8".to_string()),
+                total_tokens: Some(1234),
+                ..Default::default()
+            }),
+        );
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Executing);
+        assert_eq!(info.in_flight.len(), 1);
+        assert_eq!(info.usage.total_tokens, Some(1234));
+    }
+
+    #[test]
     fn test_permission_request_raises_approval_and_rings_once() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
@@ -2455,7 +2637,7 @@ mod tests {
         let titled = hook(
             session_id,
             "SessionStart",
-            serde_json::json!({"session_title": "Fixing the login bug"}),
+            serde_json::json!({"source": "startup", "session_title": "Fixing the login bug"}),
         );
 
         // A name the user typed is theirs

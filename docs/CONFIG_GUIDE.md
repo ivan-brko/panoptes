@@ -220,6 +220,22 @@ memory; raise it, or set `0`, if you would rather never wait for a wake.
 
 ---
 
+### log_agent_events
+
+| Property | Value |
+|----------|-------|
+| Default | `false` |
+| Type | Boolean |
+
+Writes every raw line Panoptes reads from an agent's transcript to
+`~/.panoptes/logs/agent-events/<session-id>.ndjson`.
+
+Turn this on when a session's state looks wrong. The log holds exactly what the
+agent wrote, so what Panoptes concluded can be checked against what it was
+given. Leave it off otherwise - it grows with every tool call.
+
+---
+
 ### notify_on
 
 | Property | Value |

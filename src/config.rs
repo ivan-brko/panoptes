@@ -217,6 +217,14 @@ pub struct Config {
     #[serde(default = "default_suspend_after")]
     pub suspend_after_secs: u64,
 
+    /// Whether to log every raw agent transcript line to `~/.panoptes/logs/`
+    ///
+    /// Off by default. Turn it on to diagnose a session whose state looks
+    /// wrong: the log holds exactly what the agent wrote, so the transcript
+    /// reader's interpretation can be checked against its input.
+    #[serde(default)]
+    pub log_agent_events: bool,
+
     /// Whether Claude's periodic "idle" notification raises attention at all
     ///
     /// Claude nags after roughly a minute of an unattended prompt. That is the
@@ -352,6 +360,7 @@ impl Default for Config {
             focus_stats_retention_days: default_focus_stats_retention_days(),
             scrollback_lines: default_scrollback_lines(),
             suspend_after_secs: default_suspend_after(),
+            log_agent_events: false,
             attention_on_idle: false,
             notify_on: NotifyOn::default(),
             custom_shortcuts: Vec::new(),

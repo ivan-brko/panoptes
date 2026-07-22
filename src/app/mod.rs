@@ -19,6 +19,8 @@ pub use view::View;
 // Re-exports from wizards (for backwards compatibility)
 pub use crate::wizards::worktree::{BranchRef, BranchRefType, WorktreeCreationType};
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +39,7 @@ use crate::hooks::{
 use crate::logging::{LogBuffer, LogFileInfo};
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionId, SessionManager, SessionType};
+use crate::transcript::{TranscriptKind, TranscriptWatcher, WatchTarget};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::views::{
     render_agent_type_selector, render_branch_detail, render_claude_configs,
@@ -96,6 +99,25 @@ pub struct App {
     mouse_debug_enabled: bool,
     /// When the Codex rollout directory was last scanned for conversation IDs
     last_codex_id_scan: Option<Instant>,
+    /// Background reader of agent transcripts
+    transcripts: TranscriptWatcher,
+    /// Which transcript each session is currently being followed at
+    watched_transcripts: HashMap<SessionId, PathBuf>,
+    /// When transcript watching was last reconciled against live sessions
+    last_transcript_sync: Option<Instant>,
+}
+
+/// How often to reconcile transcript watching against the live session list
+///
+/// Only decides how quickly a *new* session starts being followed; the watcher
+/// thread polls the files themselves far more often.
+const TRANSCRIPT_SYNC_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The default `CLAUDE_CONFIG_DIR`, used when a session ran on the default account
+fn default_claude_config_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".claude")
 }
 
 /// How often to scan for Codex rollout files while any session lacks an ID
@@ -156,6 +178,16 @@ impl App {
         // Create session manager
         let sessions = SessionManager::new(config.clone());
 
+        // Start reading agent transcripts. Runs on its own thread: the reads
+        // are incremental, but a burst of tool output can append a lot at once
+        // and parsing that on the render thread would show as a stutter.
+        let transcripts = TranscriptWatcher::spawn();
+        transcripts.set_debug_log_dir(
+            config
+                .log_agent_events
+                .then(|| crate::config::logs_dir().join("agent-events")),
+        );
+
         // Create TUI
         let tui = Tui::new()?;
 
@@ -187,6 +219,9 @@ impl App {
             log_file_info,
             mouse_debug_enabled,
             last_codex_id_scan: None,
+            transcripts,
+            watched_transcripts: HashMap::new(),
+            last_transcript_sync: None,
         })
     }
 
@@ -384,6 +419,14 @@ impl App {
             // file appears; no-ops once every session has one
             self.resolve_pending_codex_session_ids();
 
+            // Follow each session's transcript. For Codex this is the only
+            // source of state at all; for Claude it adds usage figures the
+            // hooks do not carry.
+            self.sync_transcript_watchers();
+            if self.process_transcript_events() {
+                self.state.needs_render = true;
+            }
+
             // Check for sessions stuck in Executing state too long
             let had_timeout_changes = self
                 .sessions
@@ -566,24 +609,7 @@ impl App {
             );
             // handle_hook_event returns Some(session_id) if notification should be sent
             if let Some(session_id) = self.sessions.handle_hook_event(event) {
-                let is_active_session = self.state.active_session == Some(session_id);
-                // Send notification if: (a) not the active session, or
-                // (b) active session but terminal is unfocused (user Cmd+Tabbed away).
-                // Only check terminal focus when focus events are supported —
-                // otherwise we can't distinguish "unfocused" from "terminal doesn't report focus".
-                let terminal_unfocused =
-                    self.state.focus_events_supported && !self.state.terminal_focused;
-                if !is_active_session || terminal_unfocused {
-                    let session_name = self
-                        .sessions
-                        .get(session_id)
-                        .map(|s| s.info.name.as_str())
-                        .unwrap_or("Session");
-                    SessionManager::send_notification(
-                        &self.config.notification_method,
-                        session_name,
-                    );
-                }
+                self.notify_session_needs_attention(session_id);
             }
         }
         true
@@ -1604,6 +1630,157 @@ impl App {
                     );
                 }
             }
+        }
+    }
+
+    /// Keep transcript watching in step with the live session list
+    ///
+    /// Sessions appear, get their conversation ID resolved, and go away, and
+    /// each of those changes what should be followed. Reconciling on a timer
+    /// rather than hooking every lifecycle path means a session cannot be
+    /// created down some route that forgot to register it.
+    pub(crate) fn sync_transcript_watchers(&mut self) {
+        if let Some(last) = self.last_transcript_sync {
+            if last.elapsed() < TRANSCRIPT_SYNC_INTERVAL {
+                return;
+            }
+        }
+        self.last_transcript_sync = Some(Instant::now());
+
+        let live: Vec<(SessionId, SessionType, PathBuf, Option<String>)> = self
+            .sessions
+            .iter()
+            .map(|(&id, session)| {
+                (
+                    id,
+                    session.info.session_type,
+                    session.info.working_dir.clone(),
+                    session.info.agent_session_id.clone(),
+                )
+            })
+            .collect();
+
+        let mut still_here = Vec::new();
+
+        for (session_id, session_type, working_dir, conversation_id) in live {
+            still_here.push(session_id);
+
+            // A shell has no conversation, and a session whose ID has not been
+            // resolved yet has no file to point at. Both resolve themselves.
+            let Some(conversation_id) = conversation_id else {
+                continue;
+            };
+            let Some(target) =
+                self.watch_target(session_id, session_type, &working_dir, &conversation_id)
+            else {
+                continue;
+            };
+
+            // Re-watching the same file would re-attach at EOF and skip
+            // anything written since, so only act on a genuine change
+            if self.watched_transcripts.get(&session_id) == Some(&target.path) {
+                continue;
+            }
+            self.watched_transcripts
+                .insert(session_id, target.path.clone());
+            self.transcripts.watch(target);
+        }
+
+        self.watched_transcripts.retain(|session_id, _| {
+            let kept = still_here.contains(session_id);
+            if !kept {
+                self.transcripts.forget(*session_id);
+            }
+            kept
+        });
+    }
+
+    /// Work out which file to follow for a session, if there is one
+    fn watch_target(
+        &self,
+        session_id: SessionId,
+        session_type: SessionType,
+        working_dir: &std::path::Path,
+        conversation_id: &str,
+    ) -> Option<WatchTarget> {
+        let info = self.sessions.get(session_id).map(|s| &s.info);
+        let claude_config_id = info.and_then(|i| i.claude_config_id);
+        let codex_config_id = info.and_then(|i| i.codex_config_id);
+
+        match session_type {
+            SessionType::Shell => None,
+
+            SessionType::ClaudeCode => {
+                let config_dir = claude_config_id
+                    .and_then(|id| self.claude_config_store.get(id))
+                    .and_then(|config| config.config_dir.clone())
+                    .unwrap_or_else(default_claude_config_dir);
+
+                Some(WatchTarget {
+                    session_id,
+                    kind: TranscriptKind::Claude,
+                    path: crate::transcript::claude::transcript_path(
+                        &config_dir,
+                        working_dir,
+                        conversation_id,
+                    ),
+                    codex_sessions_dir: None,
+                    conversation_id: None,
+                })
+            }
+
+            SessionType::OpenAICodex => {
+                let codex_home = codex_config_id
+                    .and_then(|id| self.codex_config_store.get(id))
+                    .and_then(|config| config.codex_home.clone())
+                    .unwrap_or_else(default_codex_home);
+
+                // Codex names its rollouts by timestamp as well as ID, so
+                // unlike Claude the path has to be found rather than derived
+                let path = crate::agent::codex::rollout_path(&codex_home, conversation_id)?;
+
+                Some(WatchTarget {
+                    session_id,
+                    kind: TranscriptKind::Codex,
+                    path,
+                    codex_sessions_dir: Some(codex_home.join("sessions")),
+                    conversation_id: Some(conversation_id.to_string()),
+                })
+            }
+        }
+    }
+
+    /// Apply everything the transcript watcher has observed
+    fn process_transcript_events(&mut self) -> bool {
+        let events = self.transcripts.drain();
+        if events.is_empty() {
+            return false;
+        }
+
+        for (session_id, event) in events {
+            if let Some(session_id) = self.sessions.apply_agent_event(session_id, event) {
+                self.notify_session_needs_attention(session_id);
+            }
+        }
+        true
+    }
+
+    /// Sound the configured notification for a session, unless the user is
+    /// already looking at it
+    fn notify_session_needs_attention(&self, session_id: SessionId) {
+        let is_active_session = self.state.active_session == Some(session_id);
+        // Notify if: (a) not the active session, or (b) active session but the
+        // terminal is unfocused (user Cmd+Tabbed away). Only check terminal
+        // focus when focus events are supported - otherwise "unfocused" cannot
+        // be told apart from "terminal doesn't report focus".
+        let terminal_unfocused = self.state.focus_events_supported && !self.state.terminal_focused;
+        if !is_active_session || terminal_unfocused {
+            let session_name = self
+                .sessions
+                .get(session_id)
+                .map(|s| s.info.name.as_str())
+                .unwrap_or("Session");
+            SessionManager::send_notification(&self.config.notification_method, session_name);
         }
     }
 

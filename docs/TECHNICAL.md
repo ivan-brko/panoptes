@@ -183,10 +183,9 @@ working on. Only `startup`, `resume`, `clear` and `fork` reset the session to
 `Waiting`; anything else leaves the state alone.
 
 **Codex hooks:** Limited to `notify` config firing `agent-turn-complete`
-events. Maps to Waiting state. No granular tool-use tracking - the notify hook
-must not read stdin or it stalls Codex's output pipeline, so it cannot be
-extended. A Codex session therefore still infers the start of a turn from the
-Enter keystroke.
+events. The notify hook must not read stdin or it stalls Codex's output
+pipeline, so it cannot be extended. Codex state comes from its transcript
+instead - see Reading Agent Transcripts below.
 
 ### Session States
 
@@ -275,6 +274,7 @@ Sessions display their configuration name in the header (e.g., `[Work]`) when us
 | `idle_threshold_secs` | 300 | Seconds before an unattended waiting session resurfaces |
 | `state_timeout_secs` | 300 | Seconds before an in-flight tool is treated as stalled |
 | `suspend_after_secs` | 7200 (2h) | Idle seconds before an agent process is suspended; 0 disables |
+| `log_agent_events` | false | Log raw agent transcript lines for debugging |
 | `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
 | `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
@@ -357,6 +357,73 @@ inertly - nothing is spawned until the user opens it. A record whose working
 directory has been deleted, or which never recorded a conversation ID, is still
 listed but shows why it cannot be brought back.
 
+### Reading Agent Transcripts
+
+Both agents write a complete record of every conversation to disk as it
+happens, and Panoptes knows where because it stores each session's conversation
+ID. Reading those files needs no cooperation from the agent, and for Codex it is
+the only channel there is.
+
+| | Claude Code | Codex CLI |
+|---|---|---|
+| File | `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<uuid>.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
+| Path is | derived from cwd and ID | searched for, since the name embeds a timestamp |
+| Drives state | no - hooks own it | **yes** |
+| Contributes | context usage, model | state, context usage, model, rate limits |
+| Measured flush latency | immediate | under 50ms |
+
+The two tailers have deliberately different jobs. Codex's rollout drives its
+state, which is what brings it to parity with Claude - until this, a Codex
+session could only ever report "my turn ended". Claude's transcript only
+supplements: hooks already report state and arrive sooner, and two producers
+writing the same field would fight over it.
+
+Everything converges on `AgentEvent`, a vocabulary neither agent speaks.
+`SessionManager::apply_agent_event` is the single ingest path; hooks and both
+tailers translate into it, so what an event *means* is decided in exactly one
+place.
+
+**Codex record mapping.** `event_msg` records narrate the session;
+`response_item` records are what the model emitted. Tool starts exist only in
+the second - `event_msg` contains no `*_begin` events at all - so
+`function_call` / `function_call_output` is the begin/end pair, matched on
+`call_id`. Verified across real rollouts: those two appear 1183/1183 times, and
+`task_started` (42) equals `task_complete` (41) plus `turn_aborted` (1).
+`exec_command_end` and `mcp_tool_call_end` describe completions already seen as
+`function_call_output` and are deliberately ignored, or every tool would be
+retired twice.
+
+**Attaching.** Tailers seek to EOF, so resuming a session does not replay its
+history as live events, then scan backwards once for the most recent usage
+figures so the display is not blank until the next turn. A trailing partial line
+is held back until its newline arrives; transcripts are routinely read
+mid-write. A file that shrinks is re-attached at its new end rather than read
+from a stale offset.
+
+**Threading.** The watcher runs on its own OS thread and is drained with
+`try_recv` each tick, the same shape as hook events. The reads are incremental,
+but a burst of tool output can append a lot at once and parsing that on the
+render thread would show as a stutter.
+
+**Subagents.** Codex subagents write their own separate rollout files, so a
+parent looks completely idle while its children work - the mirror image of
+Claude, whose subagents share the parent's session ID and show up in
+`in_flight`. A child names its parent in `forked_from_id`, so discovery is
+exact. Liveness is not: there is no reliable "this subagent exited" signal, so
+it is inferred from recent writes. That is why the display is a count and not a
+claim, and why a session with subagents is never suspended.
+
+The same `forked_from_id` marker keeps `discover_session_id` from claiming a
+subagent rollout as a session's own conversation - they sit in the same working
+directory with their own fresh timestamps and otherwise match every criterion.
+Note that on a subagent rollout `payload.id` is the subagent's own ID while
+`payload.session_id` is its parent's.
+
+Setting `log_agent_events = true` writes every raw transcript line to
+`~/.panoptes/logs/agent-events/<session>.ndjson`, so the reader's interpretation
+can be checked against its input. Best effort throughout: it must never disturb
+the session it describes.
+
 ### Suspending Idle Sessions
 
 An idle Claude Code process measures around 565 MB - roughly 25x the whole
@@ -406,13 +473,15 @@ the record from `sessions.json`, making the session permanently unrecoverable).
 
 ## Testing
 
-The project has 435+ unit tests covering:
+The project has 490+ unit tests covering:
 - Configuration loading/saving
 - Session state transitions
 - Output buffer management
 - Hook event parsing and envelope compatibility
 - Hook script behaviour (executed against a sealed PATH)
 - Session state precedence and legacy-record migration
+- Transcript parsing, tailing, and mid-write robustness
+- Session suspension exclusions
 - PTY operations
 - VTerm ANSI parsing
 - Project/branch management

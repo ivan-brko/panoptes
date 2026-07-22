@@ -180,12 +180,28 @@ fn build_header_breadcrumb(
             .push(project_name)
             .push(branch_name)
             .push(&session.info.name);
+        // Token and rate-limit figures read from the agent's own transcript.
+        // Absent until the tailer has something to report, and absent for
+        // shells, which have no conversation to measure.
+        let usage_display = session
+            .info
+            .usage
+            .summary()
+            .map(|summary| format!(" · {}", summary))
+            .unwrap_or_default();
+        let subagent_display = match session.info.subagents {
+            0 => String::new(),
+            1 => " · 1 subagent".to_string(),
+            n => format!(" · {} subagents", n),
+        };
         let suffix = format!(
-            "{} - {}{}{} {}",
+            "{} - {}{}{}{}{} {}",
             session.info.session_type.short_tag(),
             session.info.state.display_name(),
             exit_info,
             config_display,
+            subagent_display,
+            usage_display,
             mode_indicator
         );
         (breadcrumb, suffix)
