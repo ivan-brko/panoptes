@@ -217,7 +217,7 @@ async fn hook_handler(
     debug!(
         session_id = %event.session_id,
         event = %event.event,
-        tool = ?event.tool,
+        tool = ?event.tool_name(),
         "Received hook event"
     );
 
@@ -251,8 +251,8 @@ mod tests {
         HookEvent {
             session_id: "test-session".to_string(),
             event: "PreToolUse".to_string(),
-            tool: Some("Bash".to_string()),
             timestamp: 1704067200,
+            payload: serde_json::json!({"tool_name": "Bash"}),
         }
     }
 

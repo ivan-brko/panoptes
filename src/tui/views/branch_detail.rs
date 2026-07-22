@@ -10,7 +10,7 @@ use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::focus_timing::FocusTimer;
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::{SessionManager, SessionState, SessionType};
+use crate::session::{SessionManager, SessionType};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
@@ -124,45 +124,31 @@ pub fn render_branch_detail(
                     // Check if session needs attention
                     let needs_attention = sessions.session_needs_attention(info, idle_threshold);
 
-                    // Build state display with idle duration if applicable
-                    // Shell sessions show simpler state (Running/Ready instead of Thinking/Executing)
-                    let state_display = match (&info.session_type, &info.state) {
-                        // A recovered session that cannot come back says why,
-                        // rather than offering an action that will fail
-                        (_, SessionState::Resumable) => match info.resume_blocker() {
-                            Some(reason) => format!("Unavailable - {}", reason),
-                            None => "Resumable".to_string(),
-                        },
-                        (_, SessionState::Idle) => {
-                            let duration = now.signed_duration_since(info.last_activity);
-                            let mins = duration.num_minutes();
-                            format!("Idle - {}m", mins)
-                        }
-                        (SessionType::Shell, SessionState::Executing(_)) => "Running".to_string(),
-                        (SessionType::Shell, SessionState::Waiting) => "Ready".to_string(),
-                        (_, state) => state.display_name().to_string(),
-                    };
+                    let state_display = super::session_state_display(info, now);
 
                     let t = theme();
                     let short_tag = info.session_type.short_tag();
 
-                    // Build attention badge
-                    let (badge, badge_color) = if needs_attention {
-                        match &info.state {
-                            SessionState::Waiting => ("● ", Color::Green),
-                            SessionState::Idle => ("● ", Color::Yellow),
-                            _ => ("  ", Color::White),
-                        }
-                    } else {
-                        ("  ", Color::White)
-                    };
+                    let (badge, badge_color) = super::attention_badge(info, needs_attention);
 
-                    let content = Line::from(vec![
+                    // What the session wants, or failing that what it last said.
+                    // The reason is the more useful of the two, so it wins.
+                    let trailer = info
+                        .attention
+                        .as_ref()
+                        .map(|reason| reason.summary())
+                        .or_else(|| info.last_message.clone());
+
+                    let mut spans = vec![
                         Span::raw(prefix),
                         Span::styled(badge, Style::default().fg(badge_color)),
                         Span::styled(format!("{} ", short_tag), t.muted_style()),
                         Span::raw(format!("{}: {} [{}]", i + 1, info.name, state_display)),
-                    ]);
+                    ];
+                    if let Some(trailer) = trailer {
+                        spans.push(Span::styled(format!(" — {}", trailer), t.muted_style()));
+                    }
+                    let content = Line::from(spans);
 
                     let style = selection_style(selected, info.state.color());
 

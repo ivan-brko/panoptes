@@ -71,7 +71,7 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         if app
             .sessions
             .get(session_id)
-            .is_some_and(|s| s.info.needs_attention)
+            .is_some_and(|s| s.info.attention.is_some())
         {
             app.sessions.acknowledge_attention(session_id);
             if app.config.notification_method == "title" {

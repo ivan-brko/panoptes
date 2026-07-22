@@ -2,9 +2,12 @@
 //!
 //! Each view in the application has its own module for rendering logic.
 
+use chrono::{DateTime, Utc};
+use ratatui::style::Color;
+
 use crate::config::{Config, CustomShortcut};
 use crate::focus_timing::FocusTimer;
-use crate::session::SessionManager;
+use crate::session::{SessionInfo, SessionManager, SessionState, SessionType};
 
 mod branch_detail;
 mod claude_configs;
@@ -50,6 +53,58 @@ pub use project_detail::{render_project_delete_confirmation, render_project_deta
 pub use projects::render_projects_overview;
 pub use session::render_session_view;
 pub use timeline::render_timeline;
+
+/// How a session's state should read in a list
+///
+/// Shared by every view that lists sessions, so a session cannot describe
+/// itself differently depending on which screen you are looking at.
+///
+/// Agent vocabulary is translated for shell sessions, which have no notion of
+/// thinking: they are `Running` or `Ready`.
+pub fn session_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
+    match (info.session_type, info.state) {
+        // A recovered session that cannot come back says why, rather than
+        // offering an action that will fail
+        (_, SessionState::Resumable) => match info.resume_blocker() {
+            Some(reason) => format!("Unavailable - {}", reason),
+            None => "Resumable".to_string(),
+        },
+        (SessionType::Shell, SessionState::Executing) => "Running".to_string(),
+        (SessionType::Shell, SessionState::Waiting) => "Ready".to_string(),
+        // Name what is actually running. Several tools run at once whenever
+        // subagents are involved, which is why this is a set and not a name.
+        (_, SessionState::Executing) => match info.in_flight_summary() {
+            Some(tools) => format!("Executing: {}", tools),
+            None => "Executing".to_string(),
+        },
+        // A finished turn nobody has come back to is worth aging visibly
+        (_, SessionState::Waiting) => {
+            let mins = now.signed_duration_since(info.last_activity).num_minutes();
+            if mins >= 1 {
+                format!("Waiting - {}m", mins)
+            } else {
+                "Waiting".to_string()
+            }
+        }
+        (_, state) => state.display_name().to_string(),
+    }
+}
+
+/// Badge marking a session that wants the user, and its colour
+///
+/// `needs_attention` comes from `SessionManager::session_needs_attention`,
+/// which also covers the time-based case where a session has simply been left
+/// sitting; that has no explicit reason attached and reads as a plain
+/// turn-complete.
+pub fn attention_badge(info: &SessionInfo, needs_attention: bool) -> (&'static str, Color) {
+    if !needs_attention {
+        return ("  ", Color::White);
+    }
+    match &info.attention {
+        Some(reason) => ("● ", reason.badge_color()),
+        None => ("● ", Color::Green),
+    }
+}
 
 /// Format the attention hint for the footer showing the next session needing attention.
 /// Returns None if no sessions need attention.

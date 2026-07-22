@@ -14,12 +14,14 @@ use crate::agent::adapter::SpawnConfig;
 use crate::agent::AgentType;
 use crate::claude_config::ClaudeConfigId;
 use crate::config::Config;
-use crate::hooks::{HookEvent, HookEventType};
+use crate::hooks::{HookEvent, HookEventType, NotificationKind};
 use crate::project::{BranchId, ProjectId};
 
 use crate::codex_config::CodexConfigId;
 
-use super::{Session, SessionId, SessionInfo, SessionState, SessionStore, SessionType};
+use super::{
+    AttentionReason, Session, SessionId, SessionInfo, SessionState, SessionStore, SessionType,
+};
 
 /// Manages multiple Claude Code sessions
 pub struct SessionManager {
@@ -95,7 +97,8 @@ impl SessionManager {
                 info.state = SessionState::Resumable;
                 info.state_entered_at = Utc::now();
                 // Belonged to a process that is gone; re-derived once resumed
-                info.needs_attention = false;
+                info.attention = None;
+                info.in_flight.clear();
                 info.exit_reason = None;
                 info.exited_at = None;
                 (info.id, info)
@@ -341,6 +344,18 @@ impl SessionManager {
     /// Failure to persist never fails the operation that triggered it - losing
     /// the ability to recover a session later is strictly better than refusing
     /// to create it now.
+    /// Record whether a session's name was generated rather than chosen
+    ///
+    /// Only a generated name may later be replaced by the agent's own title -
+    /// see `SessionInfo::adopt_agent_title`. Callers know this because they
+    /// know whether the user left the name field blank; the manager does not.
+    pub fn set_auto_named(&mut self, session_id: SessionId, auto_named: bool) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.info.auto_named = auto_named;
+        }
+        self.persist_session(session_id);
+    }
+
     fn persist_session(&mut self, session_id: SessionId) {
         let Some(session) = self.sessions.get(&session_id) else {
             return;
@@ -773,6 +788,9 @@ impl SessionManager {
                             "Session exited abnormally"
                         );
                         session.info.exit_reason = Some(reason.clone());
+                        session.info.attention = Some(AttentionReason::Crashed {
+                            reason: reason.clone(),
+                        });
                         // Collect crashed sessions for notification
                         crashed_sessions.push((session.info.id, session.info.name.clone(), reason));
                     }
@@ -783,28 +801,64 @@ impl SessionManager {
         crashed_sessions
     }
 
-    /// Check for sessions stuck in Executing state too long
-    /// Transitions them to Idle state if they've been Executing longer than timeout_secs
-    /// Returns true if any session state changed
+    /// Evict tools that have been in flight far longer than expected
+    ///
+    /// A tool whose `PostToolUse` never arrives - because the hook was dropped,
+    /// the subagent died, or the tool genuinely hung - would otherwise pin the
+    /// session in `Executing` forever. Evicting it lets the session fall back to
+    /// `Thinking` (or `Waiting`, once the turn ends) on its own, and raises
+    /// `Stalled` so the list can say why.
+    ///
+    /// This is what the old `Idle` state was doing. `Idle` claimed the session
+    /// had gone quiet when what had actually happened was that one tool stopped
+    /// reporting, which is a different thing and deserved a different name.
+    ///
+    /// Returns true if any session changed.
     pub fn check_state_timeouts(&mut self, timeout_secs: u64) -> bool {
         let now = Utc::now();
         let mut changed = false;
 
         for session in self.sessions.values_mut() {
-            if let SessionState::Executing(_) = &session.info.state {
-                let elapsed = now
-                    .signed_duration_since(session.info.state_entered_at)
-                    .num_seconds();
-                if elapsed > timeout_secs as i64 {
-                    tracing::warn!(
-                        session_id = %session.info.id,
-                        session_name = %session.info.name,
-                        elapsed_secs = elapsed,
-                        "Session stuck in Executing state, transitioning to Idle"
-                    );
-                    session.set_state(SessionState::Idle);
-                    changed = true;
-                }
+            // Shells reach Executing via foreground detection and Codex never
+            // reaches it at all; neither populates `in_flight`, so an empty set
+            // says nothing about them.
+            if !session.info.session_type.reports_tool_use()
+                || session.info.state == SessionState::Exited
+            {
+                continue;
+            }
+
+            let stale: Vec<(String, String, i64)> = session
+                .info
+                .in_flight
+                .iter()
+                .filter_map(|(key, tool)| {
+                    let elapsed = now.signed_duration_since(tool.started_at).num_seconds();
+                    (elapsed > timeout_secs as i64)
+                        .then(|| (key.clone(), tool.name.clone(), elapsed))
+                })
+                .collect();
+
+            for (key, name, elapsed) in stale {
+                tracing::warn!(
+                    session_id = %session.info.id,
+                    session_name = %session.info.name,
+                    tool = %name,
+                    elapsed_secs = elapsed,
+                    "Tool stalled, evicting from in-flight set"
+                );
+                session.info.in_flight.remove(&key);
+                session.info.attention = Some(AttentionReason::Stalled {
+                    tool: name,
+                    secs: elapsed,
+                });
+                changed = true;
+            }
+
+            // Nothing left running means the session was never really executing
+            if session.info.state == SessionState::Executing && session.info.in_flight.is_empty() {
+                session.set_state(SessionState::Thinking);
+                changed = true;
             }
         }
         changed
@@ -838,18 +892,18 @@ impl SessionManager {
             }
 
             let is_busy = session.pty.is_foreground_busy();
-            let current_is_executing = matches!(session.info.state, SessionState::Executing(_));
+            let current_is_executing = session.info.state == SessionState::Executing;
 
             if is_busy && !current_is_executing {
                 // Transition to Executing
-                session.set_state(SessionState::Executing("command".to_string()));
+                session.set_state(SessionState::Executing);
             } else if !is_busy && current_is_executing {
                 // Transition to Waiting - command finished
                 session.set_state(SessionState::Waiting);
-                // Only set needs_attention and add to notification list if not the active session
+                // Only raise attention and notify if not the active session
                 let is_active = active_session == Some(session.info.id);
                 if !is_active {
-                    session.info.needs_attention = true;
+                    session.info.attention = Some(AttentionReason::TurnComplete);
                     needs_notification.push(session.info.id);
                 }
             }
@@ -892,11 +946,11 @@ impl SessionManager {
     }
 
     /// Handle a hook event and update session state accordingly
-    /// Returns the session ID if notification should be sent (session entered Waiting state)
     ///
-    /// The `active_session` parameter indicates which session the user is currently viewing.
-    /// If the session entering Waiting state is the active session, `needs_attention` will
-    /// not be set and `None` will be returned (no notification needed).
+    /// Returns the session ID if the event raised a new, bell-worthy reason to
+    /// look at this session. Whether the bell actually sounds is the caller's
+    /// decision - it also knows whether the user is already looking at the
+    /// session and whether the terminal has focus.
     pub fn handle_hook_event(&mut self, event: &HookEvent) -> Option<SessionId> {
         // Try to parse session_id as UUID
         let session_id = match event.session_id.parse::<SessionId>() {
@@ -907,6 +961,10 @@ impl SessionManager {
             }
         };
 
+        // Read config before taking the session borrow
+        let notify_on = self.config.notify_on.clone();
+        let attention_on_idle = self.config.attention_on_idle;
+
         // Find the session
         let session = match self.sessions.get_mut(&session_id) {
             Some(s) => s,
@@ -916,64 +974,179 @@ impl SessionManager {
             }
         };
 
-        // Capture old state to check for transition to Waiting
-        let old_state = session.info.state.clone();
+        let now = Utc::now();
+        session.info.last_activity = now;
 
-        // Update state based on event type
-        // Note: Any hook event means Claude Code is running (no longer Starting)
-        let new_state = match event.event_type() {
+        // How an event wants to move the session.
+        //
+        // `Authoritative` overwrites. `AtLeast` only upgrades, per
+        // `SessionState::most_urgent` - subagents share one session_id, so
+        // several states are genuinely true at once and the events describing
+        // them interleave. An event announcing new concurrent work must not be
+        // able to un-report a permission dialog someone else is blocked on,
+        // while an event reporting the turn is over must be able to demote,
+        // or a single dropped `PostToolUse` would pin the session in
+        // `Executing` until the watchdog noticed.
+        enum Move {
+            Authoritative(SessionState),
+            AtLeast(SessionState),
+            Unchanged,
+        }
+
+        let mut attention: Option<AttentionReason> = None;
+        let mut clear_attention = false;
+
+        let movement = match event.event_type() {
             HookEventType::SessionStart => {
-                // SessionStart just confirms Claude is running, transition to Waiting
-                SessionState::Waiting
+                if let Some(title) = event.session_title() {
+                    session.info.adopt_agent_title(title);
+                }
+                // The agent is up but has not been asked anything yet
+                Move::Authoritative(SessionState::Waiting)
             }
+
+            HookEventType::SessionEnd => {
+                // The process is on its way out but has not gone yet. Leave the
+                // Exited transition to `check_alive`, which is the only place
+                // that can tell a clean exit from a crash; just stop claiming
+                // that tools are still running.
+                tracing::debug!(
+                    session_id = %session_id,
+                    reason = ?event.end_reason(),
+                    "Agent session ended"
+                );
+                session.info.in_flight.clear();
+                Move::Unchanged
+            }
+
+            HookEventType::UserPromptSubmit => {
+                if let Some(title) = event.session_title() {
+                    session.info.adopt_agent_title(title);
+                }
+                // A prompt is a clean turn boundary: anything still marked
+                // in flight from the previous turn is stale, and the user is
+                // demonstrably present so nothing needs flagging for them.
+                session.info.in_flight.clear();
+                clear_attention = true;
+                Move::Authoritative(SessionState::Thinking)
+            }
+
             HookEventType::PreToolUse => {
-                let tool = event.tool.clone().unwrap_or_else(|| "unknown".to_string());
-                SessionState::Executing(tool)
+                let name = event.tool_name().unwrap_or("unknown").to_string();
+                session.info.start_tool(event.tool_key(), name, now);
+                Move::AtLeast(SessionState::Executing)
             }
-            HookEventType::PostToolUse => SessionState::Thinking,
-            HookEventType::Stop => SessionState::Waiting,
-            HookEventType::Notification => {
-                // Notification usually means waiting for user (e.g., permission prompt)
-                SessionState::Waiting
+
+            HookEventType::PostToolUse | HookEventType::PostToolUseFailure => {
+                let finished = session.info.finish_tool(&event.tool_key());
+
+                if event.event_type() == HookEventType::PostToolUseFailure && !event.is_interrupt()
+                {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        tool = ?event.tool_name(),
+                        "Tool failed"
+                    );
+                }
+
+                if session.info.in_flight.is_empty() {
+                    // Nothing left running. Demote out of Executing, but do not
+                    // stomp on a permission dialog raised meanwhile.
+                    match session.info.state {
+                        SessionState::AwaitingApproval => Move::Unchanged,
+                        _ => Move::Authoritative(SessionState::Thinking),
+                    }
+                } else {
+                    let _ = finished;
+                    Move::AtLeast(SessionState::Executing)
+                }
             }
+
+            HookEventType::Stop => {
+                if let Some(message) = event.last_assistant_message() {
+                    session.info.set_last_message(message);
+                }
+                // End of turn: whatever was still marked in flight never
+                // reported back and is not running any more.
+                session.info.in_flight.clear();
+                attention = Some(AttentionReason::TurnComplete);
+                Move::Authoritative(SessionState::Waiting)
+            }
+
             HookEventType::PermissionRequest => {
-                // Permission dialog is showing - session needs user input
-                SessionState::Waiting
+                attention = Some(AttentionReason::Approval {
+                    tool: event.tool_name().map(str::to_string),
+                });
+                Move::AtLeast(SessionState::AwaitingApproval)
             }
+
+            HookEventType::Notification => match event.notification_kind() {
+                // Claude's periodic "you have been idle" nag. It arrives as the
+                // same event type as a blocking permission prompt, which is why
+                // every notification used to ring the bell.
+                NotificationKind::Idle => {
+                    if attention_on_idle {
+                        attention = Some(AttentionReason::TurnComplete);
+                    }
+                    Move::Unchanged
+                }
+                NotificationKind::PermissionRequest | NotificationKind::Elicitation => {
+                    attention = Some(AttentionReason::Approval {
+                        tool: event.tool_name().map(str::to_string),
+                    });
+                    Move::AtLeast(SessionState::AwaitingApproval)
+                }
+                NotificationKind::TaskCompleted => {
+                    attention = Some(AttentionReason::TurnComplete);
+                    Move::Authoritative(SessionState::Waiting)
+                }
+                // Either a notification type Claude added after this was
+                // written, or the no-jq degraded path where no payload arrived
+                // at all. Both are more likely to want the user than not, so
+                // this falls back to the old always-notify behaviour.
+                NotificationKind::Other => {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "Unclassified notification, treating as actionable"
+                    );
+                    attention = Some(AttentionReason::Approval { tool: None });
+                    Move::AtLeast(SessionState::AwaitingApproval)
+                }
+            },
+
             HookEventType::AgentTurnComplete => {
-                // Codex CLI agent turn complete - agent is waiting for user input
-                SessionState::Waiting
+                // Codex CLI's only signal: the agent is done and wants input
+                attention = Some(AttentionReason::TurnComplete);
+                Move::Authoritative(SessionState::Waiting)
             }
-            HookEventType::Unknown => {
-                // For unknown events, just update last_activity
-                session.info.last_activity = Utc::now();
-                return None;
-            }
+
+            HookEventType::Unknown => Move::Unchanged,
         };
 
-        session.set_state(new_state.clone());
-
-        // PermissionRequest/Notification always need attention regardless of state transition.
-        // Other events only set attention on non-Waiting → Waiting transition.
-        // Bell only rings on false → true transition to avoid duplicate notifications.
-        let always_needs_attention = matches!(
-            event.event_type(),
-            HookEventType::PermissionRequest | HookEventType::Notification
-        );
-
-        if always_needs_attention
-            || (new_state == SessionState::Waiting && old_state != SessionState::Waiting)
-        {
-            if session.info.needs_attention {
-                // Already flagged — don't re-notify
-                None
-            } else {
-                session.info.needs_attention = true;
-                Some(session_id)
+        match movement {
+            Move::Authoritative(state) => session.set_state(state),
+            Move::AtLeast(state) => {
+                let resolved = session.info.state.most_urgent(state);
+                if resolved != session.info.state {
+                    session.set_state(resolved);
+                }
             }
-        } else {
-            None
+            Move::Unchanged => {}
         }
+
+        if clear_attention {
+            session.info.attention = None;
+        }
+
+        let reason = attention?;
+
+        // Ring only when the reason is new. Re-notifying for a flag the user
+        // has already seen is what makes notifications easy to ignore.
+        let is_new = session.info.attention.as_ref() != Some(&reason);
+        let rings = is_new && notify_on.rings(&reason);
+        session.info.attention = Some(reason);
+
+        rings.then_some(session_id)
     }
 
     /// Send a notification based on the configured method
@@ -1017,9 +1190,12 @@ impl SessionManager {
     }
 
     /// Clear the attention flag for a session (called when user views it)
+    ///
+    /// Only the queue entry is cleared, never the state. A session you have
+    /// looked at is still `AwaitingApproval` if its dialog is still open.
     pub fn acknowledge_attention(&mut self, session_id: SessionId) {
         if let Some(session) = self.sessions.get_mut(&session_id) {
-            session.info.needs_attention = false;
+            session.info.attention = None;
         }
     }
 
@@ -1131,23 +1307,28 @@ impl SessionManager {
             .count()
     }
 
-    /// Check if a session needs attention (needs_attention flag set, or Idle beyond threshold)
+    /// Check if a session needs attention
     ///
-    /// The `needs_attention` flag is decoupled from state because subagents share a
-    /// session_id — one subagent can be waiting for input while another is actively
-    /// working, so the session may be in Thinking/Executing state while still needing
-    /// attention. The flag is set only by hook events (not PTY output transitions),
-    /// since hook events like PermissionRequest and Notification explicitly signal
-    /// that user interaction is required.
+    /// Attention is decoupled from state because subagents share a session_id -
+    /// one subagent can be waiting for input while another is actively working,
+    /// so the session may be in Thinking/Executing state while still needing
+    /// attention. It is set only by hook events and by the crash and stall
+    /// watchdogs, never by PTY output, since only those explicitly signal that
+    /// user interaction is required.
+    ///
+    /// A session left sitting in `Waiting` past the idle threshold also counts,
+    /// even after its `TurnComplete` was acknowledged: something you noticed and
+    /// then forgot about for five minutes is worth resurfacing.
+    ///
     /// Takes `SessionInfo` rather than `Session` so that list views can call it
     /// for recovered sessions too, which have no process attached.
     pub fn session_needs_attention(&self, info: &SessionInfo, idle_threshold_secs: u64) -> bool {
         // Sticky flag: set by hook events requiring user attention, cleared on acknowledgment
-        if info.needs_attention {
+        if info.attention.is_some() {
             return true;
         }
-        // Idle beyond threshold always needs attention (time-based)
-        if info.state == SessionState::Idle {
+        // A live session sitting unattended past the threshold resurfaces
+        if info.state == SessionState::Waiting {
             let idle_duration = Utc::now().signed_duration_since(info.last_activity);
             return idle_duration.num_seconds() > idle_threshold_secs as i64;
         }
@@ -1162,9 +1343,9 @@ impl SessionManager {
             .filter(|s| self.session_needs_attention(&s.info, idle_threshold_secs))
             .collect();
 
-        // Sort: sessions with needs_attention flag first, then by last_activity (oldest first)
+        // Sort: sessions with an explicit reason first, then by last_activity (oldest first)
         sessions.sort_by(|a, b| {
-            match (a.info.needs_attention, b.info.needs_attention) {
+            match (a.info.attention.is_some(), b.info.attention.is_some()) {
                 (true, true) | (false, false) => {
                     // Same priority: sort by oldest activity first
                     a.info.last_activity.cmp(&b.info.last_activity)
@@ -1294,19 +1475,27 @@ mod tests {
         assert_eq!(manager.len(), 0);
     }
 
+    /// Build a hook event addressed at a session, with an arbitrary payload
+    fn hook(session_id: SessionId, event: &str, payload: serde_json::Value) -> HookEvent {
+        HookEvent {
+            session_id: session_id.to_string(),
+            event: event.to_string(),
+            timestamp: 100,
+            payload,
+        }
+    }
+
     #[test]
     fn test_handle_hook_event_pre_tool_use() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
 
-        // We can't easily create a real session without spawning a process,
-        // so we'll test the event parsing logic indirectly
         let event = HookEvent {
             session_id: "not-a-valid-uuid".to_string(),
             event: "PreToolUse".to_string(),
-            tool: Some("Bash".to_string()),
             timestamp: 1234567890,
+            payload: serde_json::json!({"tool_name": "Bash"}),
         };
 
         // Should not panic with invalid session ID
@@ -1316,29 +1505,23 @@ mod tests {
     #[test]
     fn test_handle_hook_event_types() {
         // Test that event type parsing works correctly
-        let event = HookEvent {
-            session_id: "test".to_string(),
-            event: "PreToolUse".to_string(),
-            tool: Some("Read".to_string()),
-            timestamp: 123,
-        };
-        assert_eq!(event.event_type(), HookEventType::PreToolUse);
-
-        let event = HookEvent {
-            session_id: "test".to_string(),
-            event: "PostToolUse".to_string(),
-            tool: None,
-            timestamp: 123,
-        };
-        assert_eq!(event.event_type(), HookEventType::PostToolUse);
-
-        let event = HookEvent {
-            session_id: "test".to_string(),
-            event: "Stop".to_string(),
-            tool: None,
-            timestamp: 123,
-        };
-        assert_eq!(event.event_type(), HookEventType::Stop);
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            hook(id, "PreToolUse", serde_json::Value::Null).event_type(),
+            HookEventType::PreToolUse
+        );
+        assert_eq!(
+            hook(id, "PostToolUse", serde_json::Value::Null).event_type(),
+            HookEventType::PostToolUse
+        );
+        assert_eq!(
+            hook(id, "Stop", serde_json::Value::Null).event_type(),
+            HookEventType::Stop
+        );
+        assert_eq!(
+            hook(id, "UserPromptSubmit", serde_json::Value::Null).event_type(),
+            HookEventType::UserPromptSubmit
+        );
     }
 
     #[test]
@@ -1396,116 +1579,418 @@ mod tests {
     }
 
     #[test]
-    fn test_permission_request_sets_needs_attention_while_waiting() {
+    fn test_permission_request_raises_approval_and_rings_once() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
         let session_id = insert_test_session(&mut manager);
 
-        // Put session into Waiting state (simulating a Stop event already processed)
         manager
             .get_mut(session_id)
             .unwrap()
             .set_state(SessionState::Waiting);
-        assert!(!manager.get(session_id).unwrap().info.needs_attention);
+        assert!(manager.get(session_id).unwrap().info.attention.is_none());
 
-        // PermissionRequest while already Waiting should set needs_attention and ring bell
-        let event = HookEvent {
-            session_id: session_id.to_string(),
-            event: "PermissionRequest".to_string(),
-            tool: None,
-            timestamp: 100,
-        };
-        let result = manager.handle_hook_event(&event);
+        let event = hook(
+            session_id,
+            "PermissionRequest",
+            serde_json::json!({"tool_name": "Bash"}),
+        );
         assert_eq!(
-            result,
+            manager.handle_hook_event(&event),
             Some(session_id),
             "First PermissionRequest should ring bell"
         );
-        assert!(manager.get(session_id).unwrap().info.needs_attention);
-
-        // Second PermissionRequest while already flagged should NOT ring bell
-        let event2 = HookEvent {
-            session_id: session_id.to_string(),
-            event: "PermissionRequest".to_string(),
-            tool: None,
-            timestamp: 200,
-        };
-        let result2 = manager.handle_hook_event(&event2);
+        let info = &manager.get(session_id).unwrap().info;
         assert_eq!(
-            result2, None,
+            info.attention,
+            Some(AttentionReason::Approval {
+                tool: Some("Bash".to_string())
+            })
+        );
+        assert_eq!(
+            info.state,
+            SessionState::AwaitingApproval,
+            "a blocked dialog must not look like a finished turn"
+        );
+
+        // Same reason again: already flagged, so no second bell
+        assert_eq!(
+            manager.handle_hook_event(&event),
+            None,
             "Duplicate PermissionRequest should not ring bell"
         );
-        assert!(manager.get(session_id).unwrap().info.needs_attention);
+        assert!(manager.get(session_id).unwrap().info.attention.is_some());
 
-        // After acknowledgment, a third PermissionRequest should ring bell again
+        // Acknowledging clears the queue entry but not the state - the dialog
+        // is still open
         manager.acknowledge_attention(session_id);
-        assert!(!manager.get(session_id).unwrap().info.needs_attention);
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.attention.is_none());
+        assert_eq!(info.state, SessionState::AwaitingApproval);
 
-        let event3 = HookEvent {
-            session_id: session_id.to_string(),
-            event: "PermissionRequest".to_string(),
-            tool: None,
-            timestamp: 300,
-        };
-        let result3 = manager.handle_hook_event(&event3);
         assert_eq!(
-            result3,
+            manager.handle_hook_event(&event),
             Some(session_id),
             "PermissionRequest after ack should ring bell"
         );
-        assert!(manager.get(session_id).unwrap().info.needs_attention);
     }
 
     #[test]
-    fn test_notification_sets_needs_attention_while_waiting() {
+    fn test_idle_notification_does_not_ring_but_permission_does() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
         let session_id = insert_test_session(&mut manager);
 
-        // Put session into Waiting state
         manager
             .get_mut(session_id)
             .unwrap()
             .set_state(SessionState::Waiting);
 
-        // Notification while already Waiting should set needs_attention
-        let event = HookEvent {
-            session_id: session_id.to_string(),
-            event: "Notification".to_string(),
-            tool: None,
-            timestamp: 100,
-        };
-        let result = manager.handle_hook_event(&event);
-        assert_eq!(result, Some(session_id));
-        assert!(manager.get(session_id).unwrap().info.needs_attention);
+        // Claude's periodic idle nag: not actionable, must stay silent
+        let idle = hook(
+            session_id,
+            "Notification",
+            serde_json::json!({"notification_type": "idle", "message": "still there?"}),
+        );
+        assert_eq!(manager.handle_hook_event(&idle), None);
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(
+            info.attention.is_none(),
+            "idle nag must not raise attention"
+        );
+        assert_eq!(info.state, SessionState::Waiting);
+
+        // The same event type carrying a permission request must ring
+        let permission = hook(
+            session_id,
+            "Notification",
+            serde_json::json!({"notification_type": "permission_request"}),
+        );
+        assert_eq!(manager.handle_hook_event(&permission), Some(session_id));
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::AwaitingApproval
+        );
     }
 
     #[test]
-    fn test_stop_while_already_waiting_does_not_set_attention() {
+    fn test_turn_with_no_tools_thinks_then_waits() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
         let session_id = insert_test_session(&mut manager);
 
-        // Put session into Waiting state
-        manager
-            .get_mut(session_id)
-            .unwrap()
-            .set_state(SessionState::Waiting);
+        // A prompt submitted any way at all - typed, pasted, or passed on the
+        // command line - reports itself. No keystroke is involved.
+        let submit = hook(
+            session_id,
+            "UserPromptSubmit",
+            serde_json::json!({"prompt": "hello"}),
+        );
+        assert_eq!(manager.handle_hook_event(&submit), None);
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Thinking
+        );
 
-        // Stop event while already Waiting should NOT set needs_attention
-        // (Waiting → Waiting is not a non-Waiting → Waiting transition)
-        let event = HookEvent {
-            session_id: session_id.to_string(),
-            event: "Stop".to_string(),
-            tool: None,
-            timestamp: 100,
-        };
-        let result = manager.handle_hook_event(&event);
-        assert_eq!(result, None);
-        assert!(!manager.get(session_id).unwrap().info.needs_attention);
+        // The agent answers without calling a tool
+        let stop = hook(
+            session_id,
+            "Stop",
+            serde_json::json!({"last_assistant_message": "Hi there."}),
+        );
+        assert_eq!(manager.handle_hook_event(&stop), Some(session_id));
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Waiting);
+        assert_eq!(info.attention, Some(AttentionReason::TurnComplete));
+        assert_eq!(info.last_message.as_deref(), Some("Hi there."));
+    }
+
+    #[test]
+    fn test_concurrent_tools_render_as_a_set() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        // Subagents share one session_id, so several tools are genuinely in
+        // flight at once and their events interleave.
+        for (id, name) in [("t1", "Read"), ("t2", "Grep"), ("t3", "Grep")] {
+            manager.handle_hook_event(&hook(
+                session_id,
+                "PreToolUse",
+                serde_json::json!({"tool_name": name, "tool_use_id": id}),
+            ));
+        }
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Executing);
+        assert_eq!(info.in_flight.len(), 3);
+        assert_eq!(info.in_flight_summary().as_deref(), Some("Read, Grep ×2"));
+
+        // Retiring one leaves the others running rather than clearing the state
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PostToolUse",
+            serde_json::json!({"tool_name": "Read", "tool_use_id": "t1"}),
+        ));
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Executing);
+        assert_eq!(info.in_flight_summary().as_deref(), Some("Grep ×2"));
+
+        // Only when the last one finishes does the session fall back
+        for id in ["t2", "t3"] {
+            manager.handle_hook_event(&hook(
+                session_id,
+                "PostToolUse",
+                serde_json::json!({"tool_name": "Grep", "tool_use_id": id}),
+            ));
+        }
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Thinking);
+        assert!(info.in_flight.is_empty());
+    }
+
+    #[test]
+    fn test_post_tool_use_retires_the_right_tool_when_reordered() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Read", "tool_use_id": "t1"}),
+        ));
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t2"}),
+        ));
+
+        // Hook deliveries are backgrounded and timestamped to the second, so
+        // the second tool's completion can land first. Keying by tool_use_id
+        // means it retires its own entry rather than the most recent one.
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PostToolUse",
+            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t2"}),
+        ));
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.in_flight_summary().as_deref(), Some("Read"));
+        assert_eq!(info.state, SessionState::Executing);
+    }
+
+    #[test]
+    fn test_permission_request_survives_concurrent_tool_traffic() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Read", "tool_use_id": "t1"}),
+        ));
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PermissionRequest",
+            serde_json::json!({"tool_name": "Bash"}),
+        ));
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::AwaitingApproval
+        );
+
+        // Another subagent's tool starting must not un-report the open dialog
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Grep", "tool_use_id": "t2"}),
+        ));
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::AwaitingApproval,
+            "AwaitingApproval outranks Executing"
+        );
+
+        // Nor must the last tool finishing
+        for id in ["t1", "t2"] {
+            manager.handle_hook_event(&hook(
+                session_id,
+                "PostToolUse",
+                serde_json::json!({"tool_use_id": id}),
+            ));
+        }
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::AwaitingApproval
+        );
+
+        // Only the end of the turn resolves it
+        manager.handle_hook_event(&hook(session_id, "Stop", serde_json::json!({})));
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Waiting
+        );
+    }
+
+    #[test]
+    fn test_stop_clears_leaked_in_flight_tools() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        // A PreToolUse whose PostToolUse never arrives - dropped hook, dead
+        // subagent - would otherwise pin the session in Executing forever
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"}),
+        ));
+        manager.handle_hook_event(&hook(session_id, "Stop", serde_json::json!({})));
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.in_flight.is_empty());
+        assert_eq!(info.state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn test_stalled_tool_is_evicted_and_flagged() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"}),
+        ));
+
+        // Backdate the tool past the timeout
+        let info = &mut manager.get_mut(session_id).unwrap().info;
+        info.in_flight.get_mut("t1").unwrap().started_at =
+            Utc::now() - chrono::Duration::seconds(600);
+
+        assert!(manager.check_state_timeouts(300));
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.in_flight.is_empty(), "stalled tool should be evicted");
+        assert_eq!(
+            info.state,
+            SessionState::Thinking,
+            "with nothing running the session is no longer Executing"
+        );
+        match &info.attention {
+            Some(AttentionReason::Stalled { tool, secs }) => {
+                assert_eq!(tool, "Bash");
+                assert!(*secs >= 600);
+            }
+            other => panic!("expected Stalled attention, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_watchdog_ignores_sessions_that_do_not_report_tools() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        // A shell reaches Executing through foreground detection and never
+        // populates in_flight, so an empty set must not demote it
+        {
+            let session = manager.get_mut(session_id).unwrap();
+            session.info.session_type = SessionType::Shell;
+            session.set_state(SessionState::Executing);
+        }
+
+        assert!(!manager.check_state_timeouts(300));
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Executing
+        );
+    }
+
+    #[test]
+    fn test_agent_title_replaces_only_generated_names() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        let titled = hook(
+            session_id,
+            "SessionStart",
+            serde_json::json!({"session_title": "Fixing the login bug"}),
+        );
+
+        // A name the user typed is theirs
+        manager.handle_hook_event(&titled);
+        assert_eq!(manager.get(session_id).unwrap().info.name, "test-session");
+
+        // A name Panoptes generated is not
+        manager.get_mut(session_id).unwrap().info.auto_named = true;
+        manager.handle_hook_event(&titled);
+        assert_eq!(
+            manager.get(session_id).unwrap().info.name,
+            "Fixing the login bug"
+        );
+    }
+
+    #[test]
+    fn test_user_prompt_clears_stale_attention() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        manager.handle_hook_event(&hook(session_id, "Stop", serde_json::json!({})));
+        assert!(manager.get(session_id).unwrap().info.attention.is_some());
+
+        // The user is demonstrably present; nothing needs flagging for them
+        manager.handle_hook_event(&hook(session_id, "UserPromptSubmit", serde_json::json!({})));
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.attention.is_none());
+        assert_eq!(info.state, SessionState::Thinking);
+    }
+
+    #[test]
+    fn test_notification_without_payload_still_notifies() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        // The no-jq degraded path delivers an envelope with no payload. An
+        // unclassifiable notification should fall back to notifying rather
+        // than silently swallowing a possible permission prompt.
+        let bare = hook(session_id, "Notification", serde_json::Value::Null);
+        assert_eq!(manager.handle_hook_event(&bare), Some(session_id));
+        assert_eq!(
+            manager.get(session_id).unwrap().info.attention,
+            Some(AttentionReason::Approval { tool: None })
+        );
+    }
+
+    #[test]
+    fn test_stalled_does_not_ring_by_default() {
+        let config = Config::default();
+        assert!(config
+            .notify_on
+            .rings(&AttentionReason::Approval { tool: None }));
+        assert!(config.notify_on.rings(&AttentionReason::TurnComplete));
+        assert!(!config.notify_on.rings(&AttentionReason::Stalled {
+            tool: "Bash".to_string(),
+            secs: 600
+        }));
     }
 
     #[test]
@@ -1556,9 +2041,9 @@ mod tests {
         let mut session = Session::new(info, pty, 24, 80);
 
         // Manually set the session to Executing state to simulate a command running
-        session.set_state(SessionState::Executing("test-command".to_string()));
+        session.set_state(SessionState::Executing);
         assert_eq!(session.info.session_type, SessionType::Shell);
-        assert!(!session.info.needs_attention);
+        assert!(session.info.attention.is_none());
 
         manager.sessions.insert(session_id, session);
         manager.session_order.push(session_id);
@@ -1579,8 +2064,8 @@ mod tests {
         // Verify needs_attention is set
         let session = manager.get(session_id).unwrap();
         assert!(
-            session.info.needs_attention,
-            "needs_attention should be true after command completion"
+            session.info.attention.is_some(),
+            "attention should be raised after command completion"
         );
         assert_eq!(
             session.info.state,
@@ -1744,7 +2229,7 @@ mod tests {
         // The previous run crashed mid-turn with an unread notification
         let store = store_with_record(&temp_dir, |info| {
             info.state = SessionState::Thinking;
-            info.needs_attention = true;
+            info.attention = Some(AttentionReason::TurnComplete);
             info.exit_reason = Some("killed".to_string());
             info.exited_at = Some(Utc::now());
         });
@@ -1753,7 +2238,7 @@ mod tests {
         let recovered = manager.recovered().next().unwrap();
         // None of this describes anything that still exists
         assert_eq!(recovered.state, SessionState::Resumable);
-        assert!(!recovered.needs_attention);
+        assert!(recovered.attention.is_none());
         assert!(recovered.exit_reason.is_none());
         assert!(recovered.exited_at.is_none());
     }

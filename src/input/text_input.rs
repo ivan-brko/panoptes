@@ -194,7 +194,10 @@ fn create_shell_session(app: &mut App) -> Result<()> {
 
 /// Create a session without Claude config
 fn create_session_without_config(app: &mut App) -> Result<()> {
-    let name = if app.state.new_session_name.is_empty() {
+    // A blank name means Panoptes made one up, which the agent's own title may
+    // later replace; a name the user typed is theirs and is never overwritten.
+    let auto_named = app.state.new_session_name.is_empty();
+    let name = if auto_named {
         format!("Session {}", app.sessions.len() + 1)
     } else {
         std::mem::take(&mut app.state.new_session_name)
@@ -237,6 +240,7 @@ fn create_session_without_config(app: &mut App) -> Result<()> {
     ) {
         Ok(session_id) => {
             tracing::info!("Created session: {} ({})", name, session_id);
+            app.sessions.set_auto_named(session_id, auto_named);
 
             if !project_id.is_nil() {
                 if let Some(project) = app.project_store.get_project_mut(project_id) {
@@ -812,7 +816,10 @@ fn create_session_with_config(
     app: &mut App,
     config: crate::claude_config::ClaudeConfig,
 ) -> Result<()> {
-    let name = if app.state.new_session_name.is_empty() {
+    // A blank name means Panoptes made one up, which the agent's own title may
+    // later replace; a name the user typed is theirs and is never overwritten.
+    let auto_named = app.state.new_session_name.is_empty();
+    let name = if auto_named {
         format!("Session {}", app.sessions.len() + 1)
     } else {
         std::mem::take(&mut app.state.new_session_name)
@@ -859,6 +866,7 @@ fn create_session_with_config(
     ) {
         Ok(session_id) => {
             tracing::info!("Created session: {} with config: {}", name, config.name);
+            app.sessions.set_auto_named(session_id, auto_named);
 
             if !project_id.is_nil() {
                 if let Some(project) = app.project_store.get_project_mut(project_id) {
@@ -1107,7 +1115,10 @@ pub fn handle_selecting_codex_config_key(app: &mut App, key: KeyEvent) -> Result
 
 /// Create a Codex session without config
 fn create_codex_session_without_config(app: &mut App) -> Result<()> {
-    let name = if app.state.new_session_name.is_empty() {
+    // A blank name means Panoptes made one up, which the agent's own title may
+    // later replace; a name the user typed is theirs and is never overwritten.
+    let auto_named = app.state.new_session_name.is_empty();
+    let name = if auto_named {
         format!("Codex {}", app.sessions.len() + 1)
     } else {
         std::mem::take(&mut app.state.new_session_name)
@@ -1150,6 +1161,7 @@ fn create_codex_session_without_config(app: &mut App) -> Result<()> {
     ) {
         Ok(session_id) => {
             tracing::info!("Created Codex session: {} ({})", name, session_id);
+            app.sessions.set_auto_named(session_id, auto_named);
 
             if !project_id.is_nil() {
                 if let Some(project) = app.project_store.get_project_mut(project_id) {
@@ -1185,7 +1197,10 @@ fn create_codex_session_with_config(
     app: &mut App,
     config: crate::codex_config::CodexConfig,
 ) -> Result<()> {
-    let name = if app.state.new_session_name.is_empty() {
+    // A blank name means Panoptes made one up, which the agent's own title may
+    // later replace; a name the user typed is theirs and is never overwritten.
+    let auto_named = app.state.new_session_name.is_empty();
+    let name = if auto_named {
         format!("Codex {}", app.sessions.len() + 1)
     } else {
         std::mem::take(&mut app.state.new_session_name)
@@ -1235,6 +1250,7 @@ fn create_codex_session_with_config(
                 name,
                 config.name
             );
+            app.sessions.set_auto_named(session_id, auto_named);
 
             if !project_id.is_nil() {
                 if let Some(project) = app.project_store.get_project_mut(project_id) {

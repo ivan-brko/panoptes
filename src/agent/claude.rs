@@ -17,10 +17,22 @@ use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
 /// Base hook script filename (shared across all sessions)
 const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
 
-/// Hook event types that Claude Code supports (using the type-safe enum)
+/// Hook event types Panoptes registers with Claude Code
+///
+/// `UserPromptSubmit` is what makes `Thinking` an observation instead of a
+/// guess about keystrokes, and `SessionStart`/`SessionEnd` bracket the process
+/// so its lifecycle does not have to be inferred from PTY output alone.
+///
+/// Claude offers more hooks than this (`PreCompact`, `PostCompact`,
+/// `SubagentStop`); they are left unregistered rather than registered and
+/// ignored, since an event nothing consumes is just cost.
 const HOOK_EVENTS: &[HookEventType] = &[
+    HookEventType::SessionStart,
+    HookEventType::SessionEnd,
+    HookEventType::UserPromptSubmit,
     HookEventType::PreToolUse,
     HookEventType::PostToolUse,
+    HookEventType::PostToolUseFailure,
     HookEventType::Stop,
     HookEventType::Notification,
     HookEventType::PermissionRequest,
@@ -52,6 +64,8 @@ impl ClaudeCodeAdapter {
 
     /// Install the shared hook script and create symlinks for each event type
     fn install_hook_script(config: &Config) -> Result<HashMap<String, PathBuf>> {
+        Self::warn_if_jq_missing();
+
         let script_path = Self::hook_script_path(config);
 
         // Ensure hooks directory exists
@@ -99,35 +113,59 @@ impl ClaudeCodeAdapter {
     }
 
     /// Generate the hook script content
+    ///
+    /// Claude pipes the hook payload as JSON on stdin. The script wraps it in
+    /// an envelope carrying the Panoptes session ID and the event name, then
+    /// POSTs the result.
+    ///
+    /// The payload is forwarded verbatim rather than picked apart here. Shell
+    /// string interpolation cannot build JSON safely - the previous version
+    /// substituted an extracted tool name straight into a here-doc, so the
+    /// first quote or newline in any field produced malformed JSON and the
+    /// event was silently lost. `jq` already does this correctly, so the script
+    /// hands it the whole document and lets Panoptes decide what it needs.
     fn generate_hook_script(port: u16) -> String {
         format!(
             r#"#!/bin/bash
 # Panoptes hook script for Claude Code
-# This script receives JSON from Claude Code on stdin and forwards relevant events to Panoptes
+# Receives the hook payload as JSON on stdin and forwards it to Panoptes,
+# wrapped in an envelope identifying the session and the event.
 
 # Read session ID from environment
 SESSION_ID="${{PANOPTES_SESSION_ID:-unknown}}"
 
-# Read JSON from stdin
-read -r json_input
-
-# Extract event type (the script name indicates the hook type)
+# The script name says which hook fired: every event is a symlink to this file
 hook_name="$(basename "$0" .sh)"
 
-# Extract tool_name if present (for tool-related hooks)
-tool_name=""
-if command -v jq &> /dev/null; then
-    tool_name=$(echo "$json_input" | jq -r '.tool_name // .tool // empty' 2>/dev/null || echo "")
+# Read the whole document. `read -r` would stop at the first newline, which is
+# fine for compact JSON but silently truncates anything pretty-printed.
+json_input="$(cat)"
+
+# Anything non-numeric here - an unset PATH, a date that is not on it - would
+# produce `"timestamp":` and cost us the whole event, which is the exact class
+# of failure this script exists to avoid.
+timestamp="$(date +%s 2>/dev/null)"
+case "$timestamp" in
+    '' | *[!0-9]*) timestamp=0 ;;
+esac
+
+payload=""
+if command -v jq > /dev/null 2>&1 && [ -n "$json_input" ]; then
+    payload="$(printf '%s' "$json_input" | jq -c \
+        --arg sid "$SESSION_ID" \
+        --arg ev "$hook_name" \
+        --argjson ts "$timestamp" \
+        '{{session_id: $sid, event: $ev, timestamp: $ts, payload: .}}' 2>/dev/null)"
 fi
 
-# Get current timestamp
-timestamp=$(date +%s)
-
-# Build the payload
-payload=$(cat <<EOF
-{{"session_id": "$SESSION_ID", "event": "$hook_name", "tool": "$tool_name", "timestamp": $timestamp}}
-EOF
-)
+# Degraded path: without jq the agent payload cannot be embedded safely, so
+# send the envelope alone. State still tracks correctly from the event name;
+# only payload-derived detail (tool names, notification_type) goes missing.
+# Interpolation is safe here because both values are ours: a UUID from the
+# environment and the basename of a symlink we created.
+if [ -z "$payload" ]; then
+    payload="{{\"session_id\":\"$SESSION_ID\",\"event\":\"$hook_name\",\"timestamp\":$timestamp}}"
+fi
 
 # Send to Panoptes hook server (fire and forget, don't block Claude Code)
 curl -s -X POST "http://127.0.0.1:{port}/hook" \
@@ -141,6 +179,29 @@ curl -s -X POST "http://127.0.0.1:{port}/hook" \
 exit 0
 "#
         )
+    }
+
+    /// Warn once if `jq` is missing
+    ///
+    /// `jq` is not a hard requirement - the hook script degrades to an
+    /// envelope-only payload without it - but the degradation is invisible from
+    /// the UI, so it is worth saying out loud rather than leaving the user to
+    /// wonder why tool names never appear.
+    fn warn_if_jq_missing() {
+        use std::sync::Once;
+        static WARNED: Once = Once::new();
+
+        WARNED.call_once(|| {
+            let found = std::env::var_os("PATH")
+                .map(|path| std::env::split_paths(&path).any(|dir| dir.join("jq").is_file()))
+                .unwrap_or(false);
+            if !found {
+                tracing::warn!(
+                    "jq was not found on PATH; Claude hook events will carry no tool names \
+                     or notification detail. Install jq for full session state tracking."
+                );
+            }
+        });
     }
 
     /// Create the session-specific settings file
@@ -527,6 +588,175 @@ mod tests {
         assert!(script.contains("PANOPTES_SESSION_ID"));
         assert!(script.contains("http://127.0.0.1:9999/hook"));
         assert!(script.contains("curl"));
+        // The payload must be built by jq, never by shell interpolation
+        assert!(script.contains("jq -c"));
+        assert!(!script.contains("<<EOF"));
+    }
+
+    /// Locate a binary the hook script shells out to
+    #[cfg(unix)]
+    fn which(name: &str) -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| panic!("{} must exist to test the hook script", name))
+    }
+
+    /// Run the generated hook script and capture what it would have POSTed.
+    ///
+    /// The script runs against a sealed PATH containing only a fake `curl`
+    /// (which writes its `-d` argument to a file) and the handful of binaries
+    /// the script genuinely needs. `with_jq` decides whether `jq` is among
+    /// them, which is how the degraded path gets exercised deterministically
+    /// rather than depending on where jq happens to live on the host.
+    #[cfg(unix)]
+    fn run_hook_script(event: &str, stdin: &str, with_jq: bool) -> String {
+        use std::process::{Command, Stdio};
+
+        let temp = TempDir::new().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let capture = temp.path().join("captured.json");
+
+        let mut needed = vec!["basename", "date", "cat"];
+        if with_jq {
+            needed.push("jq");
+        }
+        for tool in needed {
+            std::os::unix::fs::symlink(which(tool), bin.join(tool)).unwrap();
+        }
+
+        let fake_curl = format!(
+            "#!/bin/bash\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-d\" ]; then printf '%s' \"$2\" > {}; fi\n  shift\ndone\nexit 0\n",
+            capture.display()
+        );
+        let curl_path = bin.join("curl");
+        std::fs::write(&curl_path, fake_curl).unwrap();
+        std::fs::set_permissions(&curl_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The script derives the event name from its own filename
+        let script_path = temp.path().join(format!("{}.sh", event));
+        std::fs::write(&script_path, ClaudeCodeAdapter::generate_hook_script(9999)).unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut child = Command::new(&script_path)
+            .env("PATH", bin.display().to_string())
+            .env(
+                "PANOPTES_SESSION_ID",
+                "11111111-2222-3333-4444-555555555555",
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("hook script should be executable");
+        std::io::Write::write_all(child.stdin.as_mut().unwrap(), stdin.as_bytes()).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+
+        // curl is backgrounded, so the script exits before it has written
+        for _ in 0..200 {
+            if let Ok(body) = std::fs::read_to_string(&capture) {
+                if !body.is_empty() {
+                    return body;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!(
+            "hook script never posted a payload (capture={}, exists={})",
+            capture.display(),
+            capture.exists()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_hook_script_survives_quotes_and_newlines_in_payload() {
+        // The exact defect this replaced: the old script interpolated an
+        // extracted tool name into a here-doc, so any quote or newline in a
+        // field produced malformed JSON and the event was silently dropped.
+        let hostile = serde_json::json!({
+            "session_id": "claude-own-id",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "toolu_01",
+            "tool_input": {
+                "command": "echo \"hi\" && printf 'a\nb'",
+                "description": "quotes \" backslashes \\ and {braces}"
+            }
+        })
+        .to_string();
+
+        let posted = run_hook_script("PreToolUse", &hostile, true);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&posted).expect("posted body must be valid JSON");
+
+        // Panoptes' own routing fields, not Claude's
+        assert_eq!(parsed["session_id"], "11111111-2222-3333-4444-555555555555");
+        assert_eq!(parsed["event"], "PreToolUse");
+        assert!(parsed["timestamp"].is_i64());
+
+        // Claude's payload arrives intact, nested so its own session_id cannot
+        // collide with ours
+        assert_eq!(parsed["payload"]["session_id"], "claude-own-id");
+        assert_eq!(parsed["payload"]["tool_name"], "Bash");
+        assert_eq!(parsed["payload"]["tool_use_id"], "toolu_01");
+        assert_eq!(
+            parsed["payload"]["tool_input"]["command"],
+            "echo \"hi\" && printf 'a\nb'"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_hook_script_reads_multiline_json() {
+        // `read -r` would have stopped at the first newline
+        let pretty = "{\n  \"tool_name\": \"Read\",\n  \"tool_use_id\": \"toolu_02\"\n}";
+        let posted = run_hook_script("PostToolUse", pretty, true);
+        let parsed: serde_json::Value = serde_json::from_str(&posted).unwrap();
+
+        assert_eq!(parsed["payload"]["tool_use_id"], "toolu_02");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_hook_script_degrades_without_jq() {
+        // With no jq the agent payload cannot be embedded safely. The envelope
+        // must still be valid JSON so state tracking keeps working.
+        let posted = run_hook_script("Stop", r#"{"last_assistant_message":"do\"ne"}"#, false);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&posted).expect("degraded body must still be valid JSON");
+
+        assert_eq!(parsed["session_id"], "11111111-2222-3333-4444-555555555555");
+        assert_eq!(parsed["event"], "Stop");
+        assert!(
+            parsed.get("payload").is_none(),
+            "no payload is better than a corrupt one"
+        );
+    }
+
+    #[test]
+    fn test_registered_hook_events_cover_the_state_model() {
+        // Each of these feeds a transition the state model depends on; losing
+        // one silently degrades state tracking rather than failing loudly.
+        for required in [
+            HookEventType::SessionStart,
+            HookEventType::SessionEnd,
+            HookEventType::UserPromptSubmit,
+            HookEventType::PreToolUse,
+            HookEventType::PostToolUse,
+            HookEventType::PostToolUseFailure,
+            HookEventType::Stop,
+            HookEventType::Notification,
+            HookEventType::PermissionRequest,
+        ] {
+            assert!(
+                HOOK_EVENTS.contains(&required),
+                "{} must be registered",
+                required
+            );
+        }
     }
 
     #[test]

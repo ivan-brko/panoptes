@@ -128,7 +128,7 @@ Panoptes includes a comprehensive logging system for debugging and diagnostics:
 The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 
 - Semantic colors for UI elements (primary, secondary, success, warning, error)
-- State-specific colors for session states (thinking, executing, waiting, idle)
+- State-specific colors for session states (thinking, executing, waiting, awaiting approval, suspended)
 - Reusable style definitions for borders, text, and highlights
 - Easy customization point for future theming support
 
@@ -146,22 +146,80 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 
 ### State Updates (Hooks)
 1. Agent (Claude Code or Codex) executes hook scripts on events
-2. Hook script extracts session_id from environment/JSON stdin
-3. Hook script POSTs event to localhost:9999
-4. Axum server updates session state
-5. SessionManager tracks attention flags
+2. Hook script reads the agent's JSON payload from stdin
+3. Hook script POSTs an envelope to localhost:9999
+4. Axum server forwards it to `SessionManager::handle_hook_event`
+5. SessionManager updates state, the in-flight tool set, and attention
 6. TUI reflects new state on next render
 
-**Claude Code hooks:** Full event types (PreToolUse, PostToolUse, Stop, etc.) providing granular state tracking including Executing(tool) state.
+**Wire format.** The POST body is an envelope: Panoptes' own routing fields at
+the top level, the agent's payload nested verbatim underneath.
 
-**Codex hooks:** Limited to `notify` config firing `agent-turn-complete` events. Maps to Waiting state. No granular tool-use tracking (no Executing state for Codex sessions).
+```json
+{
+  "session_id": "<panoptes session uuid>",
+  "event": "PreToolUse",
+  "timestamp": 1784720912,
+  "payload": { "tool_name": "Bash", "tool_use_id": "toolu_01", "...": "..." }
+}
+```
+
+The payload is nested rather than merged because Claude's own payload carries a
+`session_id` (its conversation UUID) that would otherwise collide with ours. It
+is built by `jq`, never by shell interpolation - a quote or newline in any
+forwarded field would produce malformed JSON and silently cost the event. If
+`jq` is not on PATH the script degrades to the envelope alone and logs a
+warning; state tracking still works, but tool names and notification types are
+lost.
+
+**Claude Code hooks:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Notification`,
+`PermissionRequest`.
+
+**Codex hooks:** Limited to `notify` config firing `agent-turn-complete`
+events. Maps to Waiting state. No granular tool-use tracking - the notify hook
+must not read stdin or it stalls Codex's output pipeline, so it cannot be
+extended. A Codex session therefore still infers the start of a turn from the
+Enter keystroke.
+
+### Session States
+
+| State | Process | Meaning | Set by |
+|-------|---------|---------|--------|
+| `Starting` | alive | spawned, agent hasn't reported in | spawn |
+| `Thinking` | alive | working, nothing in flight | `UserPromptSubmit`, last `PostToolUse` |
+| `Executing` | alive | one or more tools in flight | `PreToolUse`, shell foreground poll |
+| `AwaitingApproval` | alive | blocked on a permission dialog | `PermissionRequest` |
+| `Waiting` | alive | turn over, awaiting a prompt | `Stop`, shell foreground idle |
+| `Suspended` | killed by us | scrollback kept, wakes on interaction | not yet written |
+| `Exited` | died itself | see `exit_reason` | `check_alive` |
+| `Resumable` | never spawned | loaded from `sessions.json` | `reconcile` at startup |
+
+Shell sessions render `Executing` as "Running" and `Waiting` as "Ready".
+
+Tool names do not live in the state. Subagents share one `session_id`, so
+several tools run at once; they are tracked in `SessionInfo::in_flight`, keyed
+by the agent's `tool_use_id`. Keying by invocation ID also means an out-of-order
+`PostToolUse` retires its own tool rather than whichever ran most recently -
+hook deliveries are backgrounded and can arrive reversed.
+
+Because several states are genuinely true at once, events that announce new
+concurrent work only ever *upgrade* the state, in the order
+`AwaitingApproval > Executing > Thinking`. Events that report a turn is over are
+authoritative and may demote, so a single dropped `PostToolUse` cannot pin a
+session in `Executing`.
 
 ### Attention Flow
-1. Session transitions to "Waiting" state
-2. SessionManager sets `needs_attention` flag
-3. If session is not currently active, terminal bell rings
-4. Session displays attention badge (green or yellow based on idle time)
-5. When user opens session, attention is acknowledged
+
+Attention is separate from state: state describes the process, attention
+describes the user's queue. A session stays `AwaitingApproval` after you glance
+at it and clear the flag, because the dialog is still open.
+
+1. An event raises an `AttentionReason` - `Approval`, `TurnComplete`, `Stalled`, or `Crashed`
+2. The badge appears in every session list, coloured by reason
+3. If `notify_on` allows that reason, and the session is not the one you are looking at, `notification_method` fires
+4. The bell rings only when the reason is new, not on every repeat
+5. When the user opens or types into the session, attention is acknowledged
 
 ## File Locations
 
@@ -208,7 +266,10 @@ Sessions display their configuration name in the header (e.g., `[Work]`) when us
 |---------|---------|-------------|
 | `hook_port` | 9999 | Port for the HTTP hook server |
 | `max_output_lines` | 10,000 | Lines kept in output buffer per session |
-| `idle_threshold_secs` | 300 | Seconds before waiting session shows yellow attention badge |
+| `idle_threshold_secs` | 300 | Seconds before an unattended waiting session resurfaces |
+| `state_timeout_secs` | 300 | Seconds before an in-flight tool is treated as stalled |
+| `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
+| `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
 
 ### Custom Shortcuts
@@ -291,11 +352,13 @@ listed but shows why it cannot be brought back.
 
 ## Testing
 
-The project has 335+ unit tests covering:
+The project has 435+ unit tests covering:
 - Configuration loading/saving
 - Session state transitions
 - Output buffer management
-- Hook event parsing
+- Hook event parsing and envelope compatibility
+- Hook script behaviour (executed against a sealed PATH)
+- Session state precedence and legacy-record migration
 - PTY operations
 - VTerm ANSI parsing
 - Project/branch management

@@ -18,8 +18,10 @@ pub struct Theme {
     pub state_executing: Color,
     /// Claude is waiting for user input
     pub state_waiting: Color,
-    /// Session is idle (no recent activity)
-    pub state_idle: Color,
+    /// Session is blocked on a permission dialog
+    pub state_awaiting_approval: Color,
+    /// Session was suspended by Panoptes to reclaim memory
+    pub state_suspended: Color,
     /// Session has exited
     pub state_exited: Color,
     /// Session is recoverable from a previous Panoptes run
@@ -85,7 +87,9 @@ impl Theme {
             state_thinking: Color::Yellow,
             state_executing: Color::Cyan,
             state_waiting: Color::Green,
-            state_idle: Color::DarkGray,
+            // Distinct from thinking's plain Yellow: this one is on you
+            state_awaiting_approval: Color::LightYellow,
+            state_suspended: Color::DarkGray,
             state_exited: Color::Red,
             // Magenta is unused by the live states, so a recoverable session
             // reads as its own category rather than a variant of "dead"
@@ -126,9 +130,10 @@ impl Theme {
         match state {
             SessionState::Starting => self.state_starting,
             SessionState::Thinking => self.state_thinking,
-            SessionState::Executing(_) => self.state_executing,
+            SessionState::Executing => self.state_executing,
+            SessionState::AwaitingApproval => self.state_awaiting_approval,
             SessionState::Waiting => self.state_waiting,
-            SessionState::Idle => self.state_idle,
+            SessionState::Suspended => self.state_suspended,
             SessionState::Exited => self.state_exited,
             SessionState::Resumable => self.state_resumable,
         }
@@ -221,7 +226,7 @@ mod tests {
             Color::Yellow
         );
         assert_eq!(
-            theme.session_state_color(&SessionState::Executing("Bash".to_string())),
+            theme.session_state_color(&SessionState::Executing),
             Color::Cyan
         );
         assert_eq!(
@@ -229,8 +234,8 @@ mod tests {
             Color::Green
         );
         assert_eq!(
-            theme.session_state_color(&SessionState::Idle),
-            Color::DarkGray
+            theme.session_state_color(&SessionState::AwaitingApproval),
+            Color::LightYellow
         );
         assert_eq!(theme.session_state_color(&SessionState::Exited), Color::Red);
     }

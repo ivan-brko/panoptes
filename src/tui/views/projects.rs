@@ -11,7 +11,7 @@ use crate::app::{AppState, HomepageFocus, InputMode};
 use crate::config::Config;
 use crate::focus_timing::FocusTimer;
 use crate::project::ProjectStore;
-use crate::session::{Session, SessionManager, SessionState};
+use crate::session::{Session, SessionManager};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
@@ -227,15 +227,8 @@ fn render_attention_section(
                 .map(|b| b.name.as_str())
                 .unwrap_or("?");
 
-            let (badge_color, state_text) = match &session.info.state {
-                SessionState::Waiting => (t.attention_waiting, "[Waiting]".to_string()),
-                SessionState::Idle => {
-                    let duration = now.signed_duration_since(session.info.last_activity);
-                    let mins = duration.num_minutes();
-                    (t.attention_idle, format!("[Idle - {}m]", mins))
-                }
-                _ => (t.text, format!("[{}]", session.info.state.display_name())),
-            };
+            let (_, badge_color) = super::attention_badge(&session.info, true);
+            let state_text = format!("[{}]", super::session_state_display(&session.info, now));
 
             let content = Line::from(vec![
                 Span::styled("● ", Style::default().fg(badge_color)),
@@ -564,26 +557,8 @@ fn render_quick_sessions(
                 .map(|b| b.name.as_str())
                 .unwrap_or("?");
 
-            // Build the state display with idle duration if applicable
-            let state_display = match &info.state {
-                SessionState::Idle => {
-                    let duration = now.signed_duration_since(info.last_activity);
-                    let mins = duration.num_minutes();
-                    format!("Idle - {}m", mins)
-                }
-                state => state.display_name().to_string(),
-            };
-
-            // Build content with attention badge
-            let (badge, badge_color) = if needs_attention {
-                match &info.state {
-                    SessionState::Waiting => ("● ", t.attention_waiting),
-                    SessionState::Idle => ("● ", t.attention_idle),
-                    _ => ("  ", t.text),
-                }
-            } else {
-                ("  ", t.text)
-            };
+            let state_display = super::session_state_display(info, now);
+            let (badge, badge_color) = super::attention_badge(info, needs_attention);
 
             // Format: project / branch / session [state]
             let content = Line::from(vec![

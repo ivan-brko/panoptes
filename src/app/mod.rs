@@ -552,7 +552,7 @@ impl App {
                 "Hook event: session={}, event={}, tool={:?}",
                 event.session_id,
                 event.event,
-                event.tool
+                event.tool_name()
             );
             // handle_hook_event returns Some(session_id) if notification should be sent
             if let Some(session_id) = self.sessions.handle_hook_event(event) {
