@@ -48,7 +48,6 @@ struct DualWriter {
 impl Write for DualWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // Write to file with failure tracking
-        let mut write_failed = false;
         if let Ok(mut file) = self.file.lock() {
             let write_result = file.write_all(buf).and_then(|_| file.flush());
             match write_result {
@@ -58,7 +57,6 @@ impl Write for DualWriter {
                     WARNING_EMITTED.store(false, Ordering::Relaxed);
                 }
                 Err(e) => {
-                    write_failed = true;
                     let count = FAILURE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                     // Emit warning to stderr after threshold (only once until recovery)
                     if count == FAILURE_THRESHOLD && !WARNING_EMITTED.swap(true, Ordering::Relaxed)
@@ -72,7 +70,6 @@ impl Write for DualWriter {
                 }
             }
         } else {
-            write_failed = true;
             let count = FAILURE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
             if count == FAILURE_THRESHOLD && !WARNING_EMITTED.swap(true, Ordering::Relaxed) {
                 eprintln!(
@@ -94,14 +91,9 @@ impl Write for DualWriter {
             }
         }
 
-        // Return success to avoid breaking the logging pipeline
-        // The log entries are stored in the buffer even if file write fails
-        if write_failed {
-            // Return Ok anyway to not break tracing - logs are still in buffer
-            Ok(buf.len())
-        } else {
-            Ok(buf.len())
-        }
+        // Return success even if the file write failed, to avoid breaking the
+        // logging pipeline - the entries are still in the in-memory buffer
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

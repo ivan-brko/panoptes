@@ -135,7 +135,6 @@ Configuration is stored in `~/.panoptes/config.toml`:
 
 ```toml
 hook_port = 9999                # HTTP server port for Claude Code hooks
-idle_threshold_secs = 300       # Seconds before session shows attention badge
 notification_method = "bell"    # "bell", "title", or "none"
 ```
 

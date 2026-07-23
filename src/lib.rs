@@ -3,6 +3,7 @@
 //! This library provides the core functionality for the Panoptes application.
 
 pub mod agent;
+pub mod agent_profiles;
 pub mod app;
 pub mod claude_config;
 pub mod claude_json;
@@ -13,6 +14,7 @@ pub mod hooks;
 pub mod input;
 pub mod logging;
 pub mod path_complete;
+pub mod persistence;
 pub mod project;
 pub mod session;
 pub mod transcript;

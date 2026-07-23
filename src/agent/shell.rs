@@ -5,12 +5,11 @@
 //! foreground process detection to track execution state.
 
 use crate::config::Config;
-use crate::session::PtyHandle;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
+use super::adapter::{AgentAdapter, SpawnConfig};
 
 /// Shell adapter for spawning generic bash/zsh sessions
 pub struct ShellAdapter {
@@ -86,28 +85,13 @@ impl AgentAdapter for ShellAdapter {
         Ok(vec![])
     }
 
-    fn spawn(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<SpawnResult> {
-        // Generate environment
-        let env = self.generate_env(config, spawn_config);
+    fn build_args(&self, _spawn_config: &SpawnConfig) -> Vec<String> {
+        // A shell takes no prompt and resumes nothing; just start it interactive
+        self.default_args()
+    }
 
-        // Build arguments
-        let args = self.default_args();
-        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-        // Spawn the shell process
-        let pty = PtyHandle::spawn(
-            self.command(),
-            &args_refs,
-            &spawn_config.working_dir,
-            env,
-            spawn_config.rows,
-            spawn_config.cols,
-        )?;
-
-        Ok(SpawnResult {
-            pty,
-            agent_session_id: None,
-        })
+    fn agent_session_id(&self, _spawn_config: &SpawnConfig) -> Option<String> {
+        None
     }
 }
 

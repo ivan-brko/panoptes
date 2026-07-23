@@ -56,9 +56,33 @@ const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
 /// Maximum time to retry writes before giving up
-const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+///
+/// Writes happen on the UI thread, so every millisecond spent retrying is a
+/// millisecond the event loop is frozen. The bound is a tradeoff: long enough
+/// to ride out a momentarily full kernel buffer (a healthy child drains it
+/// within a few milliseconds), short enough that a wedged child that stopped
+/// reading its PTY cannot freeze the UI for more than a barely perceptible
+/// beat. On timeout the write fails with [`PtyWriteTimedOut`], which callers
+/// degrade (drop the write with a warning) rather than crash on.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 /// Delay between retry attempts when buffer is full
 const WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// A PTY write gave up because the kernel buffer stayed full.
+///
+/// This means the child process has stopped reading its terminal (wedged, or
+/// stopped without draining). Callers can downcast to this type to distinguish
+/// "child not consuming input" from real I/O failures and degrade gracefully.
+#[derive(Debug, thiserror::Error)]
+#[error("timed out writing to PTY after {timeout:?} ({written} of {total} bytes written)")]
+pub struct PtyWriteTimedOut {
+    /// How long we retried before giving up
+    pub timeout: std::time::Duration,
+    /// Bytes successfully written before the buffer filled
+    pub written: usize,
+    /// Total bytes requested
+    pub total: usize,
+}
 
 /// Handle to a PTY with spawned process
 pub struct PtyHandle {
@@ -146,19 +170,19 @@ impl PtyHandle {
     /// Write all bytes with retry logic for non-blocking PTY
     ///
     /// Handles WouldBlock (EAGAIN) errors by retrying with small delays.
-    /// Times out after WRITE_TIMEOUT to avoid infinite loops.
+    /// Times out after [`WRITE_TIMEOUT`] (see its doc comment for the
+    /// UI-thread blocking tradeoff) with a downcastable [`PtyWriteTimedOut`].
     fn write_all_with_retry(&mut self, data: &[u8]) -> Result<()> {
         let mut written = 0;
         let start = std::time::Instant::now();
 
         while written < data.len() {
             if start.elapsed() > WRITE_TIMEOUT {
-                anyhow::bail!(
-                    "Timed out writing to PTY after {:?} ({} of {} bytes written)",
-                    WRITE_TIMEOUT,
+                return Err(anyhow::Error::new(PtyWriteTimedOut {
+                    timeout: WRITE_TIMEOUT,
                     written,
-                    data.len()
-                );
+                    total: data.len(),
+                }));
             }
 
             match self.writer.write(&data[written..]) {
@@ -265,8 +289,12 @@ impl PtyHandle {
                     signal,
                 })
             }
-            Err(_) => {
+            Err(e) => {
                 // Error checking status - treat as exited abnormally
+                tracing::warn!(
+                    error = %e,
+                    "Failed to check PTY child exit status; reporting exit code 255"
+                );
                 Some(ExitInfo {
                     code: 255,
                     success: false,
@@ -533,6 +561,23 @@ mod tests {
         assert_eq!(bytes, "é".as_bytes());
     }
 
+    /// Poll a PTY until its accumulated output contains `needle` or the
+    /// deadline expires. Returns everything read.
+    fn read_until_contains(pty: &mut PtyHandle, needle: &str) -> Vec<u8> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut output = Vec::new();
+        while std::time::Instant::now() < deadline {
+            if let Ok(Some(data)) = pty.try_read() {
+                output.extend(data);
+            }
+            if String::from_utf8_lossy(&output).contains(needle) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        output
+    }
+
     #[test]
     fn test_pty_spawn_and_read() {
         // Spawn `echo hello` and verify we can read the output
@@ -546,29 +591,13 @@ mod tests {
         )
         .expect("Failed to spawn PTY");
 
-        // Wait for process to complete and output to be available
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Read output
-        let mut output = Vec::new();
-        for _ in 0..10 {
-            match pty.try_read() {
-                Ok(Some(data)) => output.extend(data),
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-
+        let output = read_until_contains(&mut pty, "hello");
         let output_str = String::from_utf8_lossy(&output);
         assert!(
             output_str.contains("hello"),
             "Expected 'hello' in output, got: {:?}",
             output_str
         );
-
-        // Wait a bit more and check if process exited (echo should be fast)
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        // Note: We don't strictly assert exit since timing can be flaky in CI
     }
 
     // ExitInfo tests
@@ -632,19 +661,8 @@ mod tests {
         // Write some data
         pty.write(b"hello pty\n").expect("Failed to write");
 
-        // Wait for echo
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
         // Read output (cat echoes back what we write)
-        let mut output = Vec::new();
-        loop {
-            match pty.try_read() {
-                Ok(Some(data)) => output.extend(data),
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-
+        let output = read_until_contains(&mut pty, "hello pty");
         let output_str = String::from_utf8_lossy(&output);
         assert!(
             output_str.contains("hello pty"),
@@ -724,11 +742,12 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_pty_is_foreground_busy_shell_idle() {
-        // Spawn a shell that's just sitting idle
+    fn test_pty_is_foreground_busy_lone_process_is_not_busy() {
+        // A lone process is its own foreground process group: fg pgid and the
+        // child's pgid coincide, so nothing "other than the shell" is running.
         let pty = PtyHandle::spawn(
-            "bash",
-            &["-c", "sleep 0.5"],
+            "sleep",
+            &["5"],
             std::path::Path::new("/tmp"),
             HashMap::new(),
             24,
@@ -736,13 +755,47 @@ mod tests {
         )
         .expect("Failed to spawn PTY");
 
-        // Give the shell time to start
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !pty.is_foreground_busy(),
+            "a lone process must not be reported as a busy foreground child"
+        );
+    }
 
-        // Shell running sleep should show as busy
-        // Note: This test is somewhat timing-dependent
-        let busy = pty.is_foreground_busy();
-        // We just verify it doesn't crash - the actual result depends on timing
-        let _ = busy;
+    #[test]
+    #[cfg(unix)]
+    fn test_pty_is_foreground_busy_interactive_shell_running_command() {
+        // An interactive shell with job control puts a launched command into
+        // its own foreground process group, which is exactly what
+        // is_foreground_busy detects.
+        let mut pty = PtyHandle::spawn(
+            "bash",
+            &["--norc", "--noprofile", "-i"],
+            std::path::Path::new("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .expect("Failed to spawn PTY");
+
+        pty.write(b"sleep 5\n").expect("Failed to write command");
+
+        // Poll until the command lands in the foreground
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut busy = false;
+        while std::time::Instant::now() < deadline {
+            // Keep draining output so the PTY buffer cannot fill
+            let _ = pty.try_read();
+            if pty.is_foreground_busy() {
+                busy = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            busy,
+            "a command launched by an interactive shell must be seen as foreground-busy"
+        );
+
+        pty.kill().expect("Failed to kill");
     }
 }

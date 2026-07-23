@@ -106,6 +106,70 @@ mod tests {
         assert!(wrong_prefix.exists());
     }
 
+    /// Backdate a file's modification time by the given number of days
+    fn age_file(path: &Path, days: u64) {
+        let old_time = SystemTime::now() - Duration::from_secs(days * 24 * 60 * 60);
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_cleanup_deletes_old_logs_and_keeps_recent_ones() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Two log files older than the retention period
+        let old_log = temp_dir.path().join("panoptes-2020-01-01_00-00-00.log");
+        let older_log = temp_dir.path().join("panoptes-2019-06-15_12-00-00.log");
+        // A recent log file and an old non-log file that must both survive
+        let recent_log = temp_dir.path().join("panoptes-2026-01-21_14-30-45.log");
+        let old_other = temp_dir.path().join("notes.txt");
+
+        for path in [&old_log, &older_log, &recent_log, &old_other] {
+            File::create(path).unwrap().write_all(b"test").unwrap();
+        }
+        age_file(&old_log, DEFAULT_RETENTION_DAYS + 1);
+        age_file(&older_log, DEFAULT_RETENTION_DAYS + 30);
+        age_file(&old_other, DEFAULT_RETENTION_DAYS + 30);
+
+        let count = cleanup_old_logs(temp_dir.path()).unwrap();
+        assert_eq!(count, 2);
+
+        assert!(!old_log.exists());
+        assert!(!older_log.exists());
+        assert!(recent_log.exists());
+        assert!(old_other.exists(), "non-log files must never be deleted");
+    }
+
+    #[test]
+    fn test_cleanup_with_custom_retention() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let two_days_old = temp_dir.path().join("panoptes-two-days.log");
+        File::create(&two_days_old)
+            .unwrap()
+            .write_all(b"test")
+            .unwrap();
+        age_file(&two_days_old, 2);
+
+        // A 3-day retention keeps it...
+        assert_eq!(
+            cleanup_old_logs_with_retention(temp_dir.path(), 3).unwrap(),
+            0
+        );
+        assert!(two_days_old.exists());
+
+        // ...a 1-day retention deletes it.
+        assert_eq!(
+            cleanup_old_logs_with_retention(temp_dir.path(), 1).unwrap(),
+            1
+        );
+        assert!(!two_days_old.exists());
+    }
+
     #[test]
     fn test_cleanup_keeps_recent_files() {
         let temp_dir = TempDir::new().unwrap();

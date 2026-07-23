@@ -4,7 +4,7 @@
 //! Uses FrameLayout for pre-calculated areas and separate border/content rendering.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{AppState, InputMode};
 use crate::config::Config;
@@ -15,7 +15,7 @@ use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{format_attention_hint, format_custom_shortcuts_hint};
+use crate::tui::views::{footer_with_attention, format_custom_shortcuts_hint, render_footer};
 
 /// Render the session view
 pub fn render_session_view(
@@ -29,7 +29,7 @@ pub fn render_session_view(
 ) {
     let t = theme();
     let session = state.active_session.and_then(|id| sessions.get(id));
-    let attention_count = sessions.total_attention_count(config.idle_threshold_secs);
+    let attention_count = sessions.total_attention_count();
 
     // Pre-calculate layout using FrameLayout
     let frame_config = FrameConfig {
@@ -130,11 +130,7 @@ pub fn render_session_view(
         .unwrap_or(false);
     let suspended = session.is_some_and(|s| s.info.state == SessionState::Suspended);
     let help_text = build_footer_text(state, is_scrolled, suspended, sessions, config);
-
-    let footer = Paragraph::new(help_text)
-        .style(t.muted_style())
-        .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, layout.footer);
+    render_footer(frame, layout.footer, &help_text);
 }
 
 /// Build breadcrumb and suffix for the session header
@@ -249,11 +245,39 @@ fn build_footer_text(
                 "{}{}Enter: activate | Tab: next | k:shortcuts | \u{2191}\u{2193}/PgUp/Dn: scroll",
                 scroll_hint, shortcuts_hint
             );
-            if let Some(hint) = format_attention_hint(sessions, config) {
-                format!("{} | {}", hint, base)
-            } else {
-                base
-            }
+            footer_with_attention(base, sessions)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::store::SessionStore;
+    use crate::tui::views::test_util::{contains_line, render_to_lines};
+
+    #[test]
+    fn test_missing_session_renders_placeholder() {
+        let state = AppState::default();
+        let config = Config::default();
+        let sessions = SessionManager::with_store(config.clone(), SessionStore::new());
+        let store = ProjectStore::new();
+        let header_notifications = HeaderNotificationManager::default();
+
+        let lines = render_to_lines(80, 24, |frame| {
+            render_session_view(
+                frame,
+                frame.size(),
+                &state,
+                &sessions,
+                &store,
+                &config,
+                &header_notifications,
+            )
+        });
+
+        assert!(contains_line(&lines, "Session not found"), "{:?}", lines);
+        assert!(contains_line(&lines, "Panoptes > ? > ? > ?"), "{:?}", lines);
+        assert!(contains_line(&lines, "Enter: activate"), "{:?}", lines);
     }
 }

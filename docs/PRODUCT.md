@@ -75,11 +75,12 @@ Through agent hook systems, Panoptes knows exactly what each session is doing at
 Panoptes actively helps you manage your attention across sessions:
 
 - **Terminal Bell** - When a session transitions to "Waiting" state, a terminal bell sounds to alert you (unless you're already viewing that session)
-- **Visual Badges** - Sessions that need attention display colored indicators:
-  - Green dot (`●`) - Session just started needing attention
-  - Yellow dot (`●`) - Session has been waiting past the idle threshold (default 5 minutes)
+- **Visual Badges** - Sessions that need attention display a coloured dot saying why:
+  - Green dot (`●`) - The turn finished; the agent is waiting for your next prompt
+  - Yellow dot (`●`) - Blocked on a permission dialog, or a tool that stopped reporting
+  - Red dot (`●`) - The agent process died
 - **Needs Attention Section** - The projects overview highlights sessions requiring your input
-- **Auto-Acknowledge** - Opening a session automatically clears its attention flag
+- **Auto-Acknowledge** - Opening a session clears its attention flag, and nothing re-raises it until something new happens
 
 ### Log Viewer
 

@@ -8,7 +8,24 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use crate::app::{AppState, InputMode};
 use crate::config::{reserved_keys_display, Config};
 use crate::tui::theme::theme;
+use crate::tui::widgets::dialog::{
+    centered_rect, render_dialog, yes_no_line, DialogSize, DialogSpec,
+};
 use crate::tui::widgets::selection::{selection_prefix, selection_style_with_accent};
+
+/// Width of the wider dialogs (management, command, auto-close)
+const WIDE: DialogSize = DialogSize::Percent {
+    pct: 60,
+    min: 40,
+    max: 60,
+};
+
+/// Width of the narrower input dialogs (key, name)
+const NARROW: DialogSize = DialogSize::Percent {
+    pct: 50,
+    min: 35,
+    max: 50,
+};
 
 /// Render the custom shortcuts management dialog
 pub fn render_custom_shortcuts_dialog(
@@ -19,12 +36,16 @@ pub fn render_custom_shortcuts_dialog(
 ) {
     let t = theme();
 
-    // Calculate centered dialog (60% width max 60 chars, 50% height max 20 lines)
-    let width = (area.width * 60 / 100).clamp(40, 60);
-    let height = (area.height * 50 / 100).clamp(10, 20);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
+    // Centered dialog (60% width max 60 chars, 50% height max 20 lines)
+    let dialog_area = centered_rect(
+        area,
+        WIDE,
+        DialogSize::Percent {
+            pct: 50,
+            min: 10,
+            max: 20,
+        },
+    );
 
     // Clear background
     frame.render_widget(Clear, dialog_area);
@@ -105,16 +126,6 @@ pub fn render_custom_shortcuts_dialog(
 pub fn render_add_shortcut_key_dialog(frame: &mut Frame, area: Rect, state: &AppState) {
     let t = theme();
 
-    // Calculate centered dialog
-    let width = (area.width * 50 / 100).clamp(35, 50);
-    let height = 10;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
-
-    // Clear background
-    frame.render_widget(Clear, dialog_area);
-
     // Build content
     let mut lines = vec![
         Line::from(""),
@@ -144,29 +155,23 @@ pub fn render_add_shortcut_key_dialog(frame: &mut Frame, area: Rect, state: &App
         Style::default().fg(t.text_muted),
     )));
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent))
-            .title(" Add Custom Shortcut "),
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: " Add Custom Shortcut ",
+            border_color: t.accent,
+            alignment: Alignment::Center,
+            width: NARROW,
+            height: DialogSize::Fixed(10),
+        },
+        lines,
     );
-
-    frame.render_widget(paragraph, dialog_area);
 }
 
 /// Render the add shortcut name input dialog
 pub fn render_add_shortcut_name_dialog(frame: &mut Frame, area: Rect, state: &AppState) {
     let t = theme();
-
-    // Calculate centered dialog
-    let width = (area.width * 50 / 100).clamp(35, 50);
-    let height = 10;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
-
-    // Clear background
-    frame.render_widget(Clear, dialog_area);
 
     let key_display = state
         .new_shortcut_key
@@ -198,29 +203,23 @@ pub fn render_add_shortcut_name_dialog(frame: &mut Frame, area: Rect, state: &Ap
         )),
     ];
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent))
-            .title(" Add Custom Shortcut "),
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: " Add Custom Shortcut ",
+            border_color: t.accent,
+            alignment: Alignment::Center,
+            width: NARROW,
+            height: DialogSize::Fixed(10),
+        },
+        lines,
     );
-
-    frame.render_widget(paragraph, dialog_area);
 }
 
 /// Render the add shortcut command input dialog
 pub fn render_add_shortcut_command_dialog(frame: &mut Frame, area: Rect, state: &AppState) {
     let t = theme();
-
-    // Calculate centered dialog
-    let width = (area.width * 60 / 100).clamp(40, 60);
-    let height = 12;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
-
-    // Clear background
-    frame.render_widget(Clear, dialog_area);
 
     let key_display = state
         .new_shortcut_key
@@ -267,29 +266,23 @@ pub fn render_add_shortcut_command_dialog(frame: &mut Frame, area: Rect, state: 
         Style::default().fg(t.text_muted),
     )));
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent))
-            .title(" Add Custom Shortcut "),
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: " Add Custom Shortcut ",
+            border_color: t.accent,
+            alignment: Alignment::Center,
+            width: WIDE,
+            height: DialogSize::Fixed(12),
+        },
+        lines,
     );
-
-    frame.render_widget(paragraph, dialog_area);
 }
 
 /// Render the add shortcut auto-close toggle dialog
 pub fn render_add_shortcut_auto_close_dialog(frame: &mut Frame, area: Rect, state: &AppState) {
     let t = theme();
-
-    // Calculate centered dialog
-    let width = (area.width * 60 / 100).clamp(40, 60);
-    let height = 12;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
-
-    // Clear background
-    frame.render_widget(Clear, dialog_area);
 
     let key_display = state
         .new_shortcut_key
@@ -299,22 +292,6 @@ pub fn render_add_shortcut_auto_close_dialog(frame: &mut Frame, area: Rect, stat
         "(auto)".to_string()
     } else {
         state.new_shortcut_name.clone()
-    };
-
-    let yes_selected = state.new_shortcut_auto_close;
-    let yes_style = if yes_selected {
-        Style::default()
-            .fg(t.accent)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default().fg(t.text_muted)
-    };
-    let no_style = if !yes_selected {
-        Style::default()
-            .fg(t.accent)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default().fg(t.text_muted)
     };
 
     let lines = vec![
@@ -339,13 +316,7 @@ pub fn render_add_shortcut_auto_close_dialog(frame: &mut Frame, area: Rect, stat
             Style::default().fg(t.text),
         )),
         Line::from(""),
-        Line::from(vec![
-            Span::raw("    "),
-            Span::styled(" Yes ", yes_style),
-            Span::raw("   "),
-            Span::styled(" No ", no_style),
-            Span::raw("    "),
-        ]),
+        yes_no_line(state.new_shortcut_auto_close, ""),
         Line::from(""),
         Line::from(Span::styled(
             "Tab: toggle | y/n: select | Enter: save | Esc: back",
@@ -353,14 +324,18 @@ pub fn render_add_shortcut_auto_close_dialog(frame: &mut Frame, area: Rect, stat
         )),
     ];
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent))
-            .title(" Add Custom Shortcut "),
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: " Add Custom Shortcut ",
+            border_color: t.accent,
+            alignment: Alignment::Center,
+            width: WIDE,
+            height: DialogSize::Fixed(12),
+        },
+        lines,
     );
-
-    frame.render_widget(paragraph, dialog_area);
 }
 
 /// Render the delete shortcut confirmation dialog
@@ -371,16 +346,6 @@ pub fn render_delete_shortcut_confirm_dialog(
     config: &Config,
 ) {
     let t = theme();
-
-    // Calculate centered dialog
-    let width = (area.width * 40 / 100).clamp(30, 45);
-    let height = 8;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
-
-    // Clear background
-    frame.render_widget(Clear, dialog_area);
 
     // Get shortcut info
     let shortcut_info = state
@@ -404,14 +369,22 @@ pub fn render_delete_shortcut_confirm_dialog(
         )),
     ];
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.border_warning))
-            .title(" Confirm Delete "),
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: " Confirm Delete ",
+            border_color: t.border_warning,
+            alignment: Alignment::Center,
+            width: DialogSize::Percent {
+                pct: 40,
+                min: 30,
+                max: 45,
+            },
+            height: DialogSize::Fixed(8),
+        },
+        lines,
     );
-
-    frame.render_widget(paragraph, dialog_area);
 }
 
 /// Render the appropriate custom shortcut dialog based on input mode
@@ -441,5 +414,78 @@ pub fn render_custom_shortcut_dialogs(
             render_delete_shortcut_confirm_dialog(frame, area, state, config);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::views::test_util::{contains_line, render_to_lines};
+
+    fn render_in_mode(mode: InputMode, config: &Config) -> Vec<String> {
+        let state = AppState {
+            input_mode: mode,
+            ..Default::default()
+        };
+        render_to_lines(80, 24, |frame| {
+            render_custom_shortcut_dialogs(frame, frame.size(), &state, config)
+        })
+    }
+
+    #[test]
+    fn test_manage_dialog_empty_state() {
+        let lines = render_in_mode(InputMode::ManagingCustomShortcuts, &Config::default());
+
+        assert!(contains_line(&lines, "Custom Shortcuts"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "No custom shortcuts defined."),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "n: add | d: delete | ↑/↓: navigate | Esc: close"),
+            "{:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_add_key_dialog_shows_reserved_keys() {
+        let lines = render_in_mode(InputMode::AddingCustomShortcutKey, &Config::default());
+
+        assert!(
+            contains_line(&lines, "Press the key for this shortcut:"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "(Reserved:"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_auto_close_dialog_offers_yes_no() {
+        let lines = render_in_mode(InputMode::AddingCustomShortcutAutoClose, &Config::default());
+
+        assert!(
+            contains_line(&lines, "Auto-close after command?"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "Yes"), "{:?}", lines);
+        assert!(contains_line(&lines, "No"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_delete_dialog_asks_for_confirmation() {
+        let lines = render_in_mode(
+            InputMode::ConfirmingCustomShortcutDelete,
+            &Config::default(),
+        );
+
+        assert!(contains_line(&lines, "Delete shortcut?"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "y: confirm | n/Esc: cancel"),
+            "{:?}",
+            lines
+        );
     }
 }

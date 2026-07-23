@@ -148,8 +148,11 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 1. Agent (Claude Code or Codex) executes hook scripts on events
 2. Hook script reads the agent's JSON payload from stdin
 3. Hook script POSTs an envelope to localhost:9999
-4. Axum server forwards it to `SessionManager::handle_hook_event`
-5. SessionManager updates state, the in-flight tool set, and attention
+4. Axum server forwards it to `SessionManager::handle_hook_event`, which
+   translates the hook into an `AgentEvent`
+5. The pure state machine (`session/state_machine.rs`) applies it to the
+   session: state, the in-flight tool set, and attention. It operates on a bare
+   `SessionInfo`, which is what makes every transition unit-testable
 6. TUI reflects new state on next render
 
 **Wire format.** The POST body is an envelope: Panoptes' own routing fields at
@@ -239,9 +242,19 @@ at it and clear the flag, because the dialog is still open.
 | `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
 
+All state files are written through a shared persistence layer
+(`src/persistence.rs`): saves are atomic (written to a sibling temp file, then
+renamed), and a corrupted file is backed up to a timestamped
+`<name>.corrupt.<timestamp>` sibling before starting fresh with defaults and a
+visible warning.
+
 ## Multi-Account Support
 
-Panoptes supports multiple accounts for both Claude Code and Codex CLI:
+Panoptes supports multiple accounts for both Claude Code and Codex CLI. Both
+account stores are aliases of the same generic `ProfileStore`
+(`src/agent_profiles.rs`), and the add/select/delete dialogs share one set of
+input handlers and views (`input/agent_configs.rs`, `tui/views/agent_configs.rs`),
+parameterized by agent kind:
 
 ### Claude Code Accounts
 
@@ -276,7 +289,6 @@ See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for the full reference.
 | `worktrees_dir` | `~/.panoptes/worktrees` | Where branch worktrees are created |
 | `hooks_dir` | `~/.panoptes/hooks` | Where generated hook scripts are written |
 | `scrollback_lines` | 10,000 | Lines of history retained per session |
-| `idle_threshold_secs` | 300 | Seconds before an unattended waiting session resurfaces |
 | `state_timeout_secs` | 300 | Seconds before an in-flight tool is treated as stalled |
 | `suspend_after_secs` | 7200 (2h) | Idle seconds before an agent process is suspended; 0 disables |
 | `log_agent_events` | false | Log raw agent transcript lines for debugging |
@@ -284,8 +296,11 @@ See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for the full reference.
 | `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
 
-`max_output_lines`, `theme_preset`, and `esc_hold_threshold_ms` are still parsed
-so older config files load, but nothing reads them.
+`max_output_lines` and `esc_hold_threshold_ms` are still parsed so older config
+files load, but nothing reads them. `theme_preset` has been removed entirely;
+like any unknown key, it is ignored if left in the file. `notification_method`
+is validated on load: `bell`, `title`, or `none`, with unknown values logging a
+warning and falling back to `bell`.
 
 ### Custom Shortcuts
 
@@ -305,7 +320,7 @@ command = "code . &"
 - Creates shell session using `SessionManager::create_shell_session_with_command()`
 
 **Key validation:**
-- Reserved keys are rejected (q, i, g, G, t, T, k, x, 0-9)
+- Reserved keys are rejected (q, g, G, k, x, 0-9)
 - Duplicate keys are rejected
 - Validation occurs in `config::is_reserved_key()` and `Config::add_shortcut()`
 
@@ -486,7 +501,7 @@ the record from `sessions.json`, making the session permanently unrecoverable).
 
 ## Testing
 
-The project has 490+ unit tests covering:
+The project has 650+ unit tests covering:
 - Configuration loading/saving
 - Session state transitions
 - Output buffer management

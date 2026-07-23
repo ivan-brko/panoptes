@@ -100,34 +100,16 @@ impl HookEvent {
 
     /// What caused a `SessionStart`
     ///
-    /// Claude's schema for this field is
-    /// `"startup" | "resume" | "clear" | "compact" | "fork"`. Only the first
-    /// two mean "a process just came up"; the rest fire in the middle of a
-    /// live conversation, and `compact` fires without the user doing anything
-    /// at all, whenever the context window fills up.
-    pub fn session_start_source(&self) -> Option<&str> {
-        self.str_field("source")
+    /// `None` when the payload carried no `source` at all — the no-`jq`
+    /// degraded path — which callers should treat as cautiously as
+    /// [`SessionStartSource::Other`].
+    pub fn session_start_source(&self) -> Option<SessionStartSource> {
+        self.str_field("source").map(SessionStartSource::from)
     }
 
     /// The last thing the assistant said, from a `Stop` event
     pub fn last_assistant_message(&self) -> Option<&str> {
         self.str_field("last_assistant_message")
-    }
-
-    /// Why the session ended, from a `SessionEnd` event
-    pub fn end_reason(&self) -> Option<&str> {
-        self.str_field("reason")
-    }
-
-    /// Whether a `PostToolUseFailure` was caused by the user interrupting
-    ///
-    /// An interrupt is a normal thing for a user to do, not a fault worth
-    /// flagging, so it is filtered out of stall/failure reporting.
-    pub fn is_interrupt(&self) -> bool {
-        self.payload
-            .get("is_interrupt")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
     }
 }
 
@@ -175,6 +157,65 @@ impl From<&str> for NotificationKind {
                 NotificationKind::Informational
             }
             _ => NotificationKind::Other,
+        }
+    }
+}
+
+/// What caused a Claude `SessionStart` event
+///
+/// `SessionStart` does not only mean "a process came up". `startup` and
+/// `resume` do, but `clear` and `fork` fire inside a live process — and all
+/// four begin a fresh conversation with nothing running and nothing owed to
+/// the user. `compact` is the odd one out: it fires in the *middle* of a turn
+/// the agent is still working on, without the user doing anything at all,
+/// whenever the context window fills up — so it must never be treated as a
+/// conversation boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStartSource {
+    /// A fresh process came up
+    Startup,
+    /// A process came up reattached to an existing conversation
+    Resume,
+    /// The user ran `/clear`, starting a fresh conversation in place
+    Clear,
+    /// The conversation was forked into a new one
+    Fork,
+    /// Automatic context compaction, mid-turn, with no user involvement
+    Compact,
+    /// A source added after this was written
+    Other,
+}
+
+impl SessionStartSource {
+    /// Whether this source begins a fresh conversation
+    ///
+    /// True for everything except `compact`, which interrupts a turn the
+    /// agent is still working on, and unrecognised sources, where guessing
+    /// "fresh" could wrongly report a busy session as idle.
+    pub fn is_fresh_conversation(&self) -> bool {
+        matches!(
+            self,
+            SessionStartSource::Startup
+                | SessionStartSource::Resume
+                | SessionStartSource::Clear
+                | SessionStartSource::Fork
+        )
+    }
+}
+
+impl From<&str> for SessionStartSource {
+    /// Classify the `source` field of a Claude `SessionStart` hook
+    ///
+    /// The values are Claude Code's own schema:
+    /// `"startup" | "resume" | "clear" | "compact" | "fork"`.
+    fn from(s: &str) -> Self {
+        match s {
+            "startup" => SessionStartSource::Startup,
+            "resume" => SessionStartSource::Resume,
+            "clear" => SessionStartSource::Clear,
+            "fork" => SessionStartSource::Fork,
+            "compact" => SessionStartSource::Compact,
+            _ => SessionStartSource::Other,
         }
     }
 }
@@ -379,6 +420,38 @@ mod tests {
     }
 
     #[test]
+    fn test_session_start_source_classification() {
+        // The values are Claude Code's own schema for SessionStart.source
+        for (value, expected, fresh) in [
+            ("startup", SessionStartSource::Startup, true),
+            ("resume", SessionStartSource::Resume, true),
+            ("clear", SessionStartSource::Clear, true),
+            ("fork", SessionStartSource::Fork, true),
+            // Compaction fires mid-turn; treating it as a fresh conversation
+            // would report a busy session as idle
+            ("compact", SessionStartSource::Compact, false),
+            ("something_new", SessionStartSource::Other, false),
+        ] {
+            let e = event(&format!(
+                r#"{{"session_id":"a","event":"SessionStart","timestamp":1,
+                    "payload":{{"source":"{}"}}}}"#,
+                value
+            ));
+            assert_eq!(e.session_start_source(), Some(expected), "for {}", value);
+            assert_eq!(
+                expected.is_fresh_conversation(),
+                fresh,
+                "is_fresh_conversation for {}",
+                value
+            );
+        }
+
+        // The no-jq degraded path delivers no payload at all
+        let bare = event(r#"{"session_id":"a","event":"SessionStart","timestamp":1}"#);
+        assert_eq!(bare.session_start_source(), None);
+    }
+
+    #[test]
     fn test_stop_payload_accessors() {
         let e = event(
             r#"{"session_id":"a","event":"Stop","timestamp":1,
@@ -397,21 +470,6 @@ mod tests {
         );
         assert_eq!(e.tool_name(), None);
         assert_eq!(e.session_title(), None);
-    }
-
-    #[test]
-    fn test_is_interrupt() {
-        let interrupted = event(
-            r#"{"session_id":"a","event":"PostToolUseFailure","timestamp":1,
-                "payload":{"tool_name":"Bash","is_interrupt":true}}"#,
-        );
-        assert!(interrupted.is_interrupt());
-
-        let failed = event(
-            r#"{"session_id":"a","event":"PostToolUseFailure","timestamp":1,
-                "payload":{"tool_name":"Bash","error":"boom"}}"#,
-        );
-        assert!(!failed.is_interrupt());
     }
 
     #[test]

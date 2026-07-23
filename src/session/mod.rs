@@ -5,11 +5,12 @@
 
 pub mod manager;
 pub mod pty;
+pub mod state_machine;
 pub mod store;
 pub mod vterm;
 
-pub use manager::SessionManager;
-pub use pty::{mouse_event_to_bytes, ExitInfo, PtyHandle};
+pub use manager::{AgentAccount, NewSessionSpec, SessionManager};
+pub use pty::{mouse_event_to_bytes, ExitInfo, PtyHandle, PtyWriteTimedOut};
 pub use store::{sessions_file_path, SessionStore};
 pub use vterm::{VirtualTerminal, DEFAULT_SCROLLBACK_ROWS};
 
@@ -67,8 +68,8 @@ impl SessionType {
     ///
     /// Claude Code fires `UserPromptSubmit`, so the start of a turn is
     /// observed. Codex has no equivalent - its `notify` hook cannot be extended
-    /// without stalling its output pipeline - so a Codex session has to fall
-    /// back to guessing from the Enter keystroke until PAN-3 reads its rollout.
+    /// without stalling its output pipeline - so a Codex session falls back to
+    /// guessing from the Enter keystroke until its rollout confirms the turn.
     pub fn reports_prompt_submission(&self) -> bool {
         matches!(self, SessionType::ClaudeCode)
     }
@@ -112,8 +113,8 @@ pub enum SessionState {
     Waiting,
     /// Deliberately killed by Panoptes to reclaim memory, scrollback retained
     ///
-    /// Defined here so the state model is complete; nothing writes it yet.
-    /// PAN-2 owns the idle sweep that does.
+    /// Written by the idle sweep (`SessionManager::suspend_idle_sessions`)
+    /// once a resumable session has sat idle past the configured threshold.
     Suspended,
     /// The process died on its own - see `exit_reason` for why
     Exited,
@@ -449,6 +450,66 @@ impl SessionInfo {
         self.resume_blocker().is_none()
     }
 
+    /// The conversation cursor to hand a relaunched agent, if any
+    ///
+    /// A shell has no conversation to reattach to - it is restored by
+    /// respawning in the same directory - so it never carries a resume cursor.
+    /// Agents reattach via their recorded conversation ID.
+    pub fn resume_cursor(&self) -> Option<String> {
+        match self.session_type {
+            SessionType::Shell => None,
+            _ => self.agent_session_id.clone(),
+        }
+    }
+
+    /// Check if this session needs attention
+    ///
+    /// Attention is decoupled from state because subagents share a session_id -
+    /// one subagent can be waiting for input while another is actively working,
+    /// so the session may be in Thinking/Executing state while still needing
+    /// attention. It is set only by hook events and by the crash and stall
+    /// watchdogs, never by PTY output, since only those explicitly signal that
+    /// user interaction is required.
+    ///
+    /// Deliberately *only* the flag. There used to be a second, time-based rule
+    /// here: a session in `Waiting` whose `last_activity` had gone stale was
+    /// flagged too. That rule dated from when the state was called `Idle` and
+    /// meant "this session has gone abnormally quiet" - a job now done properly
+    /// by `AttentionReason::Stalled`. Renaming the state to `Waiting` silently
+    /// changed what the rule said, because `Waiting` is the normal resting
+    /// state of every healthy session: it made "you finished a turn five
+    /// minutes ago" indistinguishable from "something wants you". Worse, it
+    /// could not be dismissed - `acknowledge_attention` clears the flag, not
+    /// the clock - so opening the session did nothing and the badge came back
+    /// the moment you looked away. It bit Codex hardest, whose sessions write
+    /// nothing to the PTY between turns and so never refresh `last_activity`.
+    ///
+    /// Lives on `SessionInfo` rather than `Session` so that list views can
+    /// call it for recovered sessions too, which have no process attached.
+    pub fn needs_attention(&self) -> bool {
+        self.attention.is_some()
+    }
+
+    /// Update session state, stamping the transition clocks
+    ///
+    /// The pure counterpart of [`Session::set_state`], which delegates here.
+    /// Taking `now` as a parameter keeps the state machine deterministic and
+    /// testable without a live session.
+    pub fn set_state_at(&mut self, state: SessionState, now: DateTime<Utc>) {
+        // Track when session exited for cleanup
+        if state == SessionState::Exited && self.exited_at.is_none() {
+            self.exited_at = Some(now);
+        }
+        // A dead process owns no running tools
+        if state == SessionState::Exited {
+            self.in_flight.clear();
+        }
+        self.state = state;
+        self.last_activity = now;
+        self.state_entered_at = now;
+        self.last_engagement = now;
+    }
+
     /// The tools currently in flight, rendered for the session list
     ///
     /// Returns `None` when nothing is running. Repeated tools collapse into
@@ -730,17 +791,11 @@ impl OutputBuffer {
         self.lines.iter()
     }
 
-    /// Scroll up by n lines (toward older content)
-    pub fn scroll_up(&mut self, n: usize) {
-        let max_scroll = self.lines.len().saturating_sub(1);
-        self.scroll_offset = (self.scroll_offset + n).min(max_scroll);
-    }
-
     /// Scroll up by n lines, clamped for the current viewport height.
     ///
-    /// Unlike `scroll_up`, this stops at the highest full-page position
-    /// (`total_lines - viewport_height`) so the visible page height stays stable
-    /// at the top of history.
+    /// Stops at the highest full-page position (`total_lines -
+    /// viewport_height`) so the visible page height stays stable at the top of
+    /// history.
     pub fn scroll_up_with_viewport(&mut self, n: usize, viewport_height: usize) {
         let effective_height = viewport_height.max(1);
         let max_scroll = self.lines.len().saturating_sub(effective_height);
@@ -755,11 +810,6 @@ impl OutputBuffer {
     /// Scroll to bottom (most recent output)
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
-    }
-
-    /// Scroll to top (oldest output)
-    pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = self.lines.len().saturating_sub(1);
     }
 
     /// Scroll to top for a given viewport height.
@@ -790,6 +840,11 @@ struct CodexFallback {
     partial_output_line: String,
     /// Remainder bytes for incomplete ANSI escape sequences between reads.
     ansi_remainder: Vec<u8>,
+    /// Trailing bytes of a multi-byte UTF-8 character split across PTY reads.
+    ///
+    /// Without this, a character whose bytes straddle two reads would be
+    /// lossy-decoded per chunk and end up as U+FFFD in fallback history.
+    utf8_remainder: Vec<u8>,
 }
 
 impl CodexFallback {
@@ -798,7 +853,77 @@ impl CodexFallback {
             output_buffer: OutputBuffer::new(scrollback_rows),
             partial_output_line: String::new(),
             ansi_remainder: Vec::new(),
+            utf8_remainder: Vec::new(),
         }
+    }
+
+    /// Feed raw PTY bytes into the fallback history: strip ANSI sequences,
+    /// reassemble UTF-8 characters split across reads, and append the plain
+    /// text to the output buffer.
+    fn ingest(&mut self, bytes: &[u8]) {
+        let plain = Session::extract_plain_text_bytes(&mut self.ansi_remainder, bytes);
+        let mut data = std::mem::take(&mut self.utf8_remainder);
+        data.extend_from_slice(&plain);
+
+        if let Err(e) = std::str::from_utf8(&data) {
+            // `error_len() == None` means the data merely ends mid-character
+            // (a multi-byte char split across PTY reads): hold the tail back
+            // until the rest arrives. A genuinely invalid byte (`Some`) is
+            // left in place and becomes U+FFFD, as before. If the held-back
+            // tail never completes, the next chunk fails validation at that
+            // spot with `Some` and it degrades to U+FFFD then.
+            if e.error_len().is_none() {
+                self.utf8_remainder = data.split_off(e.valid_up_to());
+            }
+        }
+
+        self.output_buffer
+            .push_bytes(&data, &mut self.partial_output_line);
+    }
+}
+
+/// Responds to DSR (Device Status Report) queries from the child process.
+///
+/// Some programs (e.g. Codex CLI) send `\x1b[6n` at startup to query cursor
+/// position and crash if no CPR response arrives in time. A query can be
+/// split across PTY reads, so a rolling tail of the previous read is kept to
+/// match sequences that straddle a chunk boundary.
+#[derive(Debug, Default)]
+struct DsrResponder {
+    /// Rolling tail (last 3 bytes) of previously seen output.
+    tail: Vec<u8>,
+}
+
+impl DsrResponder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Scan `bytes` (prefixed with the tail of the previous read) for DSR
+    /// queries. Returns the CPR response bytes to write back to the child,
+    /// one response per query, or `None` if no query was seen.
+    ///
+    /// `cursor` is the current (row, col) cursor position, 0-based; the CPR
+    /// reply is 1-based.
+    fn respond(&mut self, bytes: &[u8], cursor: (u16, u16)) -> Option<Vec<u8>> {
+        let mut combined = Vec::with_capacity(self.tail.len() + bytes.len());
+        combined.extend_from_slice(&self.tail);
+        combined.extend_from_slice(bytes);
+
+        let dsr_count = combined.windows(4).filter(|w| *w == b"\x1b[6n").count();
+
+        // Keep the last 3 bytes: long enough to complete a split "\x1b[6n",
+        // short enough that an already-matched query (4 bytes) can never be
+        // counted twice.
+        let keep_from = combined.len().saturating_sub(3);
+        self.tail = combined[keep_from..].to_vec();
+
+        if dsr_count == 0 {
+            return None;
+        }
+        let (row, col) = cursor;
+        let response = format!("\x1b[{};{}R", row + 1, col + 1);
+        Some(response.repeat(dsr_count).into_bytes())
     }
 }
 
@@ -813,8 +938,8 @@ pub struct Session {
     /// Codex-only fallback state for cases where terminal-emulator scrollback
     /// is unavailable.
     codex_fallback: Option<CodexFallback>,
-    /// Rolling buffer for detecting DSR sequences across reads
-    dsr_buffer: Vec<u8>,
+    /// Responder for DSR cursor-position queries from the child process.
+    dsr: DsrResponder,
 }
 
 impl Session {
@@ -827,7 +952,7 @@ impl Session {
             pty,
             vterm: VirtualTerminal::new(rows, cols),
             codex_fallback,
-            dsr_buffer: Vec::new(),
+            dsr: DsrResponder::new(),
         }
     }
 
@@ -846,7 +971,7 @@ impl Session {
             pty,
             vterm: VirtualTerminal::with_scrollback(rows, cols, scrollback_rows),
             codex_fallback,
-            dsr_buffer: Vec::new(),
+            dsr: DsrResponder::new(),
         }
     }
 
@@ -856,41 +981,22 @@ impl Session {
         match self.pty.try_read() {
             Ok(Some(bytes)) => {
                 self.vterm.process(&bytes);
+
                 if let Some(fallback) = self.codex_fallback.as_mut() {
-                    let plain =
-                        Self::extract_plain_text_bytes(&mut fallback.ansi_remainder, &bytes);
-                    fallback
-                        .output_buffer
-                        .push_bytes(&plain, &mut fallback.partial_output_line);
+                    fallback.ingest(&bytes);
                 }
 
                 // Respond to DSR (Device Status Report) queries from the child process.
                 // Some programs (e.g. Codex CLI) send \x1b[6n at startup to query cursor
                 // position and crash if no CPR response arrives in time.
-                let mut combined = Vec::with_capacity(self.dsr_buffer.len() + bytes.len());
-                combined.extend_from_slice(&self.dsr_buffer);
-                combined.extend_from_slice(&bytes);
-                let dsr_count = combined.windows(4).filter(|w| *w == b"\x1b[6n").count();
-                if dsr_count > 0 {
-                    let (row, col) = self.vterm.cursor_position();
-                    let response = format!("\x1b[{};{}R", row + 1, col + 1);
-                    for _ in 0..dsr_count {
-                        if let Err(e) = self.pty.write(response.as_bytes()) {
-                            tracing::debug!(error = %e, "Failed to write DSR response");
-                            break;
-                        }
+                let cursor = self.vterm.cursor_position();
+                if let Some(response) = self.dsr.respond(&bytes, cursor) {
+                    if let Err(e) = self.pty.write(&response) {
+                        tracing::debug!(error = %e, "Failed to write DSR response");
                     }
                 }
-                let keep_from = combined.len().saturating_sub(3);
-                self.dsr_buffer = combined[keep_from..].to_vec();
 
-                self.info.last_activity = Utc::now();
-
-                // If we're in Starting state and receiving output, Claude is running
-                // Transition to Waiting (ready for user input)
-                if self.info.state == SessionState::Starting {
-                    self.set_state(SessionState::Waiting);
-                }
+                self.note_output_activity();
 
                 true
             }
@@ -909,11 +1015,6 @@ impl Session {
                 false
             }
         }
-    }
-
-    /// Get visible lines for rendering (plain text)
-    pub fn visible_lines(&self, viewport_height: usize) -> Vec<String> {
-        self.vterm.visible_lines(viewport_height)
     }
 
     /// Get visible styled lines for rendering (with colors)
@@ -938,13 +1039,6 @@ impl Session {
                     .collect()
             })
             .unwrap_or_default()
-    }
-
-    /// Scroll the plain-text fallback history up.
-    pub fn fallback_scroll_up(&mut self, n: usize) {
-        if let Some(fallback) = self.codex_fallback.as_mut() {
-            fallback.output_buffer.scroll_up(n);
-        }
     }
 
     /// Scroll the plain-text fallback history up, clamped for viewport height.
@@ -986,10 +1080,33 @@ impl Session {
             .map_or(0, |fallback| fallback.output_buffer.scroll_offset())
     }
 
+    /// Degrade a full-buffer write timeout to a dropped write.
+    ///
+    /// `write` and `send_key` errors propagate to the event loop, where they
+    /// would exit the app. A child that has wedged and stopped draining its
+    /// PTY must not take the UI down with it: the bytes are dropped with a
+    /// warning instead - a keystroke lost to a session that is not consuming
+    /// input anyway. Any other error still propagates.
+    fn tolerate_full_buffer(&self, result: anyhow::Result<()>) -> anyhow::Result<()> {
+        match result {
+            Err(e) if e.downcast_ref::<PtyWriteTimedOut>().is_some() => {
+                tracing::warn!(
+                    session_id = %self.info.id,
+                    session_name = %self.info.name,
+                    error = %e,
+                    "PTY buffer stayed full; dropping write"
+                );
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
     /// Write bytes to the PTY
     pub fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
         self.note_user_input();
-        self.pty.write(data)
+        let result = self.pty.write(data);
+        self.tolerate_full_buffer(result)
     }
 
     /// Write pasted text to the PTY
@@ -999,28 +1116,36 @@ impl Session {
         // embedded newline submits it. With it, the newline is inserted
         // literally and a separate Enter follows, which `send_key` handles.
         let submits = !self.vterm.bracketed_paste_enabled() && text.contains('\n');
-        if submits {
-            self.guess_turn_started();
-        }
 
         self.note_user_input();
-        if self.vterm.bracketed_paste_enabled() {
+        let result = if self.vterm.bracketed_paste_enabled() {
             self.pty.write_paste(text)
         } else {
             self.pty.write(text.as_bytes())
+        };
+
+        // Only guess a turn once the write actually succeeded; otherwise the
+        // session would show Thinking with nothing submitted. Paste errors are
+        // surfaced to the user by the caller, so they are not degraded here.
+        if result.is_ok() && submits {
+            self.guess_turn_started();
         }
+        result
     }
 
     /// Send a key event to the PTY
     pub fn send_key(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
         use crossterm::event::KeyCode;
 
-        if key.code == KeyCode::Enter {
+        self.note_user_input();
+        let result = self.pty.send_key(key);
+
+        // Only guess a turn once the write actually succeeded; a dropped
+        // Enter never reached the agent.
+        if result.is_ok() && key.code == KeyCode::Enter {
             self.guess_turn_started();
         }
-
-        self.note_user_input();
-        self.pty.send_key(key)
+        self.tolerate_full_buffer(result)
     }
 
     /// Infer that the user just submitted a prompt
@@ -1065,19 +1190,19 @@ impl Session {
 
     /// Update session state
     pub fn set_state(&mut self, state: SessionState) {
-        let now = Utc::now();
-        // Track when session exited for cleanup
-        if state == SessionState::Exited && self.info.exited_at.is_none() {
-            self.info.exited_at = Some(now);
+        self.info.set_state_at(state, Utc::now());
+    }
+
+    /// Bookkeeping for a successful PTY read: bump the activity clock and
+    /// promote a `Starting` session that produced output.
+    fn note_output_activity(&mut self) {
+        self.info.last_activity = Utc::now();
+
+        // If we're in Starting state and receiving output, Claude is running
+        // Transition to Waiting (ready for user input)
+        if self.info.state == SessionState::Starting {
+            self.set_state(SessionState::Waiting);
         }
-        // A dead process owns no running tools
-        if state == SessionState::Exited {
-            self.info.in_flight.clear();
-        }
-        self.info.state = state;
-        self.info.last_activity = now;
-        self.info.state_entered_at = now;
-        self.info.last_engagement = now;
     }
 
     /// Note that the user has interacted with this session
@@ -1093,6 +1218,10 @@ impl Session {
 
     /// Strip ANSI escape/control sequences from PTY bytes while preserving
     /// printable UTF-8-compatible bytes and newlines for fallback history.
+    ///
+    /// A sequence split across PTY reads is stashed in `ansi_remainder` (from
+    /// its ESC onward, together with any bytes after it in this chunk) and
+    /// re-scanned when the next chunk arrives.
     fn extract_plain_text_bytes(ansi_remainder: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
         let mut data = Vec::with_capacity(ansi_remainder.len() + bytes.len());
         data.extend_from_slice(ansi_remainder);
@@ -1104,79 +1233,28 @@ impl Session {
         while i < data.len() {
             if data[i] == 0x1b {
                 let esc_start = i;
-                i += 1;
-                if i >= data.len() {
-                    ansi_remainder.extend_from_slice(&data[esc_start..]);
-                    break;
-                }
-
-                match data[i] {
-                    b'[' => {
-                        i += 1;
-                        let mut complete = false;
-                        while i < data.len() {
-                            let b = data[i];
-                            i += 1;
-                            if (0x40..=0x7e).contains(&b) {
-                                complete = true;
-                                break;
-                            }
-                        }
-                        if !complete {
-                            ansi_remainder.extend_from_slice(&data[esc_start..]);
-                            break;
-                        }
+                let result = if i + 1 >= data.len() {
+                    // Bare ESC at the end of the chunk: introducer not seen yet
+                    SkipResult::Incomplete
+                } else {
+                    match data[i + 1] {
+                        b'[' => skip_csi(&data, i + 2),
+                        b']' => skip_string_seq(&data, i + 2, true),
+                        b'P' | b'X' | b'^' | b'_' => skip_string_seq(&data, i + 2, false),
+                        // Two-byte escape (e.g. ESC 7, ESC =): skip both bytes
+                        _ => SkipResult::Complete(i + 2),
                     }
-                    b']' => {
-                        i += 1;
-                        let mut complete = false;
-                        while i < data.len() {
-                            if data[i] == 0x07 {
-                                i += 1;
-                                complete = true;
-                                break;
-                            }
-                            if data[i] == 0x1b {
-                                if i + 1 < data.len() && data[i + 1] == b'\\' {
-                                    i += 2;
-                                    complete = true;
-                                    break;
-                                }
-                                ansi_remainder.extend_from_slice(&data[esc_start..]);
-                                return out;
-                            }
-                            i += 1;
-                        }
-                        if !complete {
-                            ansi_remainder.extend_from_slice(&data[esc_start..]);
-                            break;
-                        }
+                };
+                match result {
+                    SkipResult::Complete(next) => {
+                        i = next;
+                        continue;
                     }
-                    b'P' | b'X' | b'^' | b'_' => {
-                        i += 1;
-                        let mut complete = false;
-                        while i < data.len() {
-                            if data[i] == 0x1b {
-                                if i + 1 < data.len() && data[i + 1] == b'\\' {
-                                    i += 2;
-                                    complete = true;
-                                    break;
-                                }
-                                ansi_remainder.extend_from_slice(&data[esc_start..]);
-                                return out;
-                            }
-                            i += 1;
-                        }
-                        if !complete {
-                            ansi_remainder.extend_from_slice(&data[esc_start..]);
-                            break;
-                        }
-                    }
-                    _ => {
-                        i += 1;
+                    SkipResult::Incomplete => {
+                        ansi_remainder.extend_from_slice(&data[esc_start..]);
+                        break;
                     }
                 }
-                continue;
             }
 
             let b = data[i];
@@ -1188,6 +1266,51 @@ impl Session {
 
         out
     }
+}
+
+/// Outcome of skipping one escape sequence in `extract_plain_text_bytes`.
+enum SkipResult {
+    /// Sequence fully consumed; scanning resumes at this index.
+    Complete(usize),
+    /// Sequence runs past the end of the chunk; the caller stashes everything
+    /// from its ESC onward and waits for the next read.
+    Incomplete,
+}
+
+/// Skip a CSI sequence body, starting at the byte after `ESC [`.
+///
+/// A CSI sequence ends at its first final byte (0x40..=0x7E).
+fn skip_csi(data: &[u8], mut i: usize) -> SkipResult {
+    while i < data.len() {
+        let b = data[i];
+        i += 1;
+        if (0x40..=0x7e).contains(&b) {
+            return SkipResult::Complete(i);
+        }
+    }
+    SkipResult::Incomplete
+}
+
+/// Skip a string sequence body (OSC, DCS, SOS, PM, APC), starting at the byte
+/// after the two-byte introducer.
+///
+/// All of these are terminated by ST (`ESC \`); OSC (`bel_terminates`) also
+/// accepts BEL. An ESC not (yet) followed by `\` - split across reads, or a
+/// malformed sequence - reports the whole sequence as incomplete.
+fn skip_string_seq(data: &[u8], mut i: usize, bel_terminates: bool) -> SkipResult {
+    while i < data.len() {
+        if bel_terminates && data[i] == 0x07 {
+            return SkipResult::Complete(i + 1);
+        }
+        if data[i] == 0x1b {
+            if i + 1 < data.len() && data[i + 1] == b'\\' {
+                return SkipResult::Complete(i + 2);
+            }
+            return SkipResult::Incomplete;
+        }
+        i += 1;
+    }
+    SkipResult::Incomplete
 }
 
 impl Drop for Session {
@@ -1377,6 +1500,50 @@ mod tests {
         let mut session = test_session(SessionType::ClaudeCode);
         session.write_paste("do the thing\n").unwrap();
         assert_eq!(session.info.state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn test_failed_paste_does_not_start_a_turn() {
+        // If the PTY write fails, the session must not be left showing
+        // Thinking when nothing was submitted; the error surfaces so the app
+        // can tell the user. Writing into a dead child's PTY is the cheapest
+        // deterministic write failure available.
+        let mut session = test_session(SessionType::OpenAICodex);
+        assert!(!session.vterm.bracketed_paste_enabled());
+
+        session.kill().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while session.is_alive() {
+            assert!(std::time::Instant::now() < deadline, "child never died");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let result = session.write_paste("do the thing\n");
+
+        assert!(result.is_err(), "a write into a dead PTY must fail");
+        assert_eq!(session.info.state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn test_full_buffer_write_timeout_is_dropped_not_fatal() {
+        // `write` and `send_key` errors propagate to the event loop and would
+        // exit the app; a child that stopped draining its PTY must degrade to
+        // a dropped write instead. Any other error still propagates, and the
+        // downcast must see through anyhow's context wrapping.
+        let session = test_session(SessionType::ClaudeCode);
+
+        let timeout = anyhow::Error::new(PtyWriteTimedOut {
+            timeout: std::time::Duration::from_millis(50),
+            written: 0,
+            total: 10,
+        })
+        .context("Failed to write paste content");
+        assert!(session.tolerate_full_buffer(Err(timeout)).is_ok());
+
+        let other = anyhow::anyhow!("some real I/O failure");
+        assert!(session.tolerate_full_buffer(Err(other)).is_err());
+
+        assert!(session.tolerate_full_buffer(Ok(())).is_ok());
     }
 
     #[test]
@@ -1617,8 +1784,8 @@ mod tests {
         assert!(buf.is_at_bottom());
         assert_eq!(buf.scroll_offset(), 0);
 
-        // Scroll up
-        buf.scroll_up(5);
+        // Scroll up (1-line viewport: offset can reach the very first line)
+        buf.scroll_up_with_viewport(5, 1);
         assert!(!buf.is_at_bottom());
         assert_eq!(buf.scroll_offset(), 5);
 
@@ -1631,11 +1798,11 @@ mod tests {
         assert!(buf.is_at_bottom());
 
         // Scroll to top
-        buf.scroll_to_top();
+        buf.scroll_to_top_with_viewport(1);
         assert_eq!(buf.scroll_offset(), 19);
 
         // Can't scroll past max
-        buf.scroll_up(100);
+        buf.scroll_up_with_viewport(100, 1);
         assert_eq!(buf.scroll_offset(), 19);
     }
 
@@ -1653,7 +1820,7 @@ mod tests {
         assert_eq!(visible[4], "line 9");
 
         // Scroll up 3 lines
-        buf.scroll_up(3);
+        buf.scroll_up_with_viewport(3, 5);
         let visible = buf.visible_lines(5);
         assert_eq!(visible.len(), 5);
         assert_eq!(visible[0], "line 2");
@@ -1704,7 +1871,7 @@ mod tests {
         let mut buf = OutputBuffer::new(100);
         buf.push("line 1".to_string());
         buf.push("line 2".to_string());
-        buf.scroll_up(1);
+        buf.scroll_up_with_viewport(1, 1);
 
         buf.clear();
         assert!(buf.is_empty());
@@ -1754,5 +1921,137 @@ mod tests {
         let second = Session::extract_plain_text_bytes(&mut ansi_remainder, b"1mdef\x1b[0m");
         assert_eq!(String::from_utf8_lossy(&first), "abc");
         assert_eq!(String::from_utf8_lossy(&second), "def");
+    }
+
+    #[test]
+    fn test_extract_plain_text_bytes_strips_osc_terminated_by_bel() {
+        let mut ansi_remainder = Vec::new();
+        let plain =
+            Session::extract_plain_text_bytes(&mut ansi_remainder, b"a\x1b]0;window title\x07b");
+        assert_eq!(String::from_utf8_lossy(&plain), "ab");
+        assert!(ansi_remainder.is_empty());
+    }
+
+    #[test]
+    fn test_extract_plain_text_bytes_strips_osc_terminated_by_st() {
+        let mut ansi_remainder = Vec::new();
+        let plain =
+            Session::extract_plain_text_bytes(&mut ansi_remainder, b"a\x1b]0;window title\x1b\\b");
+        assert_eq!(String::from_utf8_lossy(&plain), "ab");
+        assert!(ansi_remainder.is_empty());
+    }
+
+    #[test]
+    fn test_extract_plain_text_bytes_strips_dcs_sequence() {
+        let mut ansi_remainder = Vec::new();
+        let plain = Session::extract_plain_text_bytes(&mut ansi_remainder, b"a\x1bP1$r0m\x1b\\b");
+        assert_eq!(String::from_utf8_lossy(&plain), "ab");
+        assert!(ansi_remainder.is_empty());
+    }
+
+    #[test]
+    fn test_extract_plain_text_bytes_handles_split_osc_across_reads() {
+        let mut ansi_remainder = Vec::new();
+        let first = Session::extract_plain_text_bytes(&mut ansi_remainder, b"a\x1b]0;tit");
+        assert_eq!(String::from_utf8_lossy(&first), "a");
+        assert!(!ansi_remainder.is_empty());
+
+        let second = Session::extract_plain_text_bytes(&mut ansi_remainder, b"le\x07b");
+        assert_eq!(String::from_utf8_lossy(&second), "b");
+        assert!(ansi_remainder.is_empty());
+    }
+
+    #[test]
+    fn test_extract_plain_text_bytes_handles_st_split_across_reads() {
+        // The ESC of the ESC-\ terminator lands at the end of one read and
+        // the backslash at the start of the next.
+        let mut ansi_remainder = Vec::new();
+        let first = Session::extract_plain_text_bytes(&mut ansi_remainder, b"a\x1b]0;title\x1b");
+        assert_eq!(String::from_utf8_lossy(&first), "a");
+
+        let second = Session::extract_plain_text_bytes(&mut ansi_remainder, b"\\b");
+        assert_eq!(String::from_utf8_lossy(&second), "b");
+        assert!(ansi_remainder.is_empty());
+    }
+
+    #[test]
+    fn test_dsr_responder_whole_sequence_in_one_read() {
+        let mut dsr = DsrResponder::new();
+        let response = dsr.respond(b"\x1b[6n", (4, 9));
+        // CPR is 1-based
+        assert_eq!(response.as_deref(), Some(b"\x1b[5;10R".as_ref()));
+    }
+
+    #[test]
+    fn test_dsr_responder_sequence_split_across_reads() {
+        let mut dsr = DsrResponder::new();
+        assert_eq!(dsr.respond(b"startup noise\x1b[", (0, 0)), None);
+        let response = dsr.respond(b"6n", (0, 0));
+        assert_eq!(response.as_deref(), Some(b"\x1b[1;1R".as_ref()));
+    }
+
+    #[test]
+    fn test_dsr_responder_ignores_unrelated_escape_sequences() {
+        let mut dsr = DsrResponder::new();
+        assert_eq!(dsr.respond(b"\x1b[31mred\x1b[0m\x1b[6m", (0, 0)), None);
+        // The tail of the previous read must not conjure a match either
+        assert_eq!(dsr.respond(b"more text", (0, 0)), None);
+    }
+
+    #[test]
+    fn test_dsr_responder_does_not_double_count_across_reads() {
+        let mut dsr = DsrResponder::new();
+        // A fully matched query leaves only 3 tail bytes, so it can never be
+        // re-matched by the next read.
+        assert!(dsr.respond(b"\x1b[6n", (0, 0)).is_some());
+        assert_eq!(dsr.respond(b"plain output", (0, 0)), None);
+    }
+
+    #[test]
+    fn test_dsr_responder_multiple_queries_in_one_chunk() {
+        let mut dsr = DsrResponder::new();
+        let response = dsr.respond(b"\x1b[6nabc\x1b[6n", (0, 0));
+        assert_eq!(response.as_deref(), Some(b"\x1b[1;1R\x1b[1;1R".as_ref()));
+    }
+
+    #[test]
+    fn test_codex_fallback_reassembles_two_byte_char_split_across_reads() {
+        // "é" = 0xC3 0xA9, split at its only interior boundary
+        let mut fallback = CodexFallback::new(100);
+        fallback.ingest(b"caf\xc3");
+        assert_eq!(fallback.partial_output_line, "caf");
+        fallback.ingest(b"\xa9!");
+        assert_eq!(fallback.partial_output_line, "café!");
+        assert!(!fallback.partial_output_line.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn test_codex_fallback_reassembles_four_byte_char_split_at_every_boundary() {
+        // "😀" = F0 9F 98 80
+        let emoji = "😀".as_bytes();
+        for split in 1..emoji.len() {
+            let mut fallback = CodexFallback::new(100);
+            fallback.ingest(b"x");
+            fallback.ingest(&emoji[..split]);
+            fallback.ingest(&emoji[split..]);
+            assert_eq!(
+                fallback.partial_output_line, "x😀",
+                "split at byte {split} corrupted the char"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_fallback_genuinely_invalid_bytes_become_replacement_char() {
+        let mut fallback = CodexFallback::new(100);
+        // 0xFF can never start a UTF-8 sequence; it must not be held back
+        fallback.ingest(b"a\xffb");
+        assert_eq!(fallback.partial_output_line, "a\u{FFFD}b");
+
+        // A lead byte followed by a non-continuation byte degrades too
+        let mut fallback = CodexFallback::new(100);
+        fallback.ingest(b"a\xc3");
+        fallback.ingest(b"b");
+        assert_eq!(fallback.partial_output_line, "a\u{FFFD}b");
     }
 }

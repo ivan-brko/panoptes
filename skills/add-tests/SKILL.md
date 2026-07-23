@@ -106,6 +106,41 @@ fn test_event_type_roundtrip() {
 }
 ```
 
+### Testing View Rendering
+
+View render functions have shared helpers in `src/tui/views/test_util.rs`
+(`render_to_lines`, `render_to_buffer`, `buffer_lines`, `contains_line`) that
+draw into a ratatui `TestBackend` and return the screen as text lines:
+
+```rust
+use crate::tui::views::test_util::{contains_line, render_to_lines};
+
+#[test]
+fn test_view_renders_title() {
+    let lines = render_to_lines(80, 24, |frame| {
+        render_my_view(frame, frame.size(), &state /* , ... */);
+    });
+    assert!(contains_line(&lines, "Expected title"));
+}
+```
+
+### Testing Input Handlers
+
+Prefer parts-based handlers that take `&mut AppState` and the stores they
+need instead of a full `App` (which requires a real terminal). See
+`src/input/agent_configs.rs` tests for the pattern. When a handler needs live
+sessions, build a `SessionManager` with `SessionManager::with_store` on a
+temp-dir path — **never** `SessionManager::new`, which touches the real
+`~/.panoptes/sessions.json` — and use `insert_test_session()` (a sleep-backed
+PTY that absorbs writes).
+
+### Testing Persistence
+
+Generic store behavior (atomic save, corruption backup, load fallback) is
+already covered in `src/persistence.rs` and, for profile stores, exercised
+once through `claude_config/store.rs`. Do not re-test it per concrete store;
+only test what is specific to the store (wire format, renamed wrappers).
+
 ## Common Dependencies
 
 Tests often need:

@@ -18,12 +18,12 @@ use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
-use crate::tui::views::format_attention_hint;
 use crate::tui::views::render_project_delete_confirmation;
 use crate::tui::views::render_quit_confirm_dialog;
 use crate::tui::views::Breadcrumb;
+use crate::tui::views::{footer_with_attention, render_footer, status_parts, visible_window};
 use crate::tui::widgets::selection::{
-    selection_prefix, selection_style, selection_style_with_accent,
+    activity_style, selection_prefix, selection_style, selection_style_with_accent,
 };
 
 /// Render the projects overview
@@ -37,9 +37,8 @@ pub fn render_projects_overview(
     config: &Config,
     header_notifications: &HeaderNotificationManager,
 ) {
-    let idle_threshold = config.idle_threshold_secs;
-    let attention_count = sessions.total_attention_count(idle_threshold);
-    let attention_sessions = sessions.sessions_needing_attention(idle_threshold);
+    let attention_count = sessions.total_attention_count();
+    let attention_sessions = sessions.sessions_needing_attention();
     let has_dropped_events = state.dropped_events_count > 0;
     let has_error = state.error_message.is_some();
     let t = theme();
@@ -47,14 +46,9 @@ pub fn render_projects_overview(
     // Build header
     let active_count = sessions.total_active_count();
     let breadcrumb = Breadcrumb::new();
-    let mut status_parts = vec![format!("{} projects", project_store.project_count())];
-    if active_count > 0 {
-        status_parts.push(format!("{} active", active_count));
-    }
-    if attention_count > 0 {
-        status_parts.push(format!("{} need attention", attention_count));
-    }
-    let suffix = format!("({})", status_parts.join(", "));
+    let mut parts = vec![format!("{} projects", project_store.project_count())];
+    parts.extend(status_parts(active_count, attention_count));
+    let suffix = format!("({})", parts.join(", "));
 
     let header = Header::new(breadcrumb)
         .with_suffix(suffix)
@@ -119,7 +113,6 @@ pub fn render_projects_overview(
             content_chunks[chunk_idx],
             &attention_sessions,
             project_store,
-            idle_threshold,
         );
         chunk_idx += 1;
     }
@@ -154,14 +147,7 @@ pub fn render_projects_overview(
             render_folder_remove_confirmation(frame, main_area, state, project_store);
         }
         _ => {
-            render_main_content(
-                frame,
-                main_area,
-                state,
-                project_store,
-                sessions,
-                idle_threshold,
-            );
+            render_main_content(frame, main_area, state, project_store, sessions);
         }
     }
 
@@ -177,19 +163,9 @@ pub fn render_projects_overview(
         InputMode::MovingToFolder => "Tab: complete | Enter: move | Esc: cancel".to_string(),
         InputMode::RenamingFolder => "Enter: rename | Esc: cancel".to_string(),
         InputMode::ConfirmingFolderRemove => "y: remove folder | n/Esc: cancel".to_string(),
-        _ => {
-            let base = normal_mode_footer(state, project_store, sessions);
-            if let Some(hint) = format_attention_hint(sessions, config) {
-                format!("{} | {}", hint, base)
-            } else {
-                base
-            }
-        }
+        _ => footer_with_attention(normal_mode_footer(state, project_store, sessions), sessions),
     };
-    let footer = Paragraph::new(help_text)
-        .style(t.muted_style())
-        .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, areas.footer());
+    render_footer(frame, areas.footer(), &help_text);
 
     // Render quit confirmation dialog as overlay
     if state.input_mode == InputMode::ConfirmingQuit {
@@ -248,7 +224,6 @@ fn render_attention_section(
     area: Rect,
     attention_sessions: &[&Session],
     project_store: &ProjectStore,
-    _idle_threshold_secs: u64,
 ) {
     let t = theme();
     let now = Utc::now();
@@ -298,7 +273,7 @@ fn render_attention_section(
 /// Render the session creation input
 fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState) {
     let t = theme();
-    let input = Paragraph::new(format!("New session name: {}_", state.new_session_name))
+    let input = Paragraph::new(format!("New session name: {}_", state.session_draft.name))
         .style(t.input_style())
         .block(
             Block::default()
@@ -343,23 +318,10 @@ fn render_project_addition(frame: &mut Frame, area: Rect, state: &AppState) {
         let completions = &state.path_completions;
         let selected_idx = state.path_completion_index;
 
-        // Calculate visible range with scroll
+        // Calculate visible range with scroll, keeping the selection in view
         let max_visible = 8;
         let total = completions.len();
-        let (start, end) = if total <= max_visible {
-            (0, total)
-        } else {
-            // Keep selected item visible with some context
-            let half = max_visible / 2;
-            let start = if selected_idx < half {
-                0
-            } else if selected_idx >= total - half {
-                total - max_visible
-            } else {
-                selected_idx - half
-            };
-            (start, start + max_visible)
-        };
+        let (start, end) = visible_window(total, selected_idx, max_visible);
 
         let items: Vec<ListItem> = completions[start..end]
             .iter()
@@ -422,7 +384,6 @@ fn render_main_content(
     state: &AppState,
     project_store: &ProjectStore,
     sessions: &SessionManager,
-    idle_threshold_secs: u64,
 ) {
     let has_projects = project_store.project_count() > 0;
     let has_sessions = !sessions.is_empty();
@@ -455,7 +416,6 @@ fn render_main_content(
             state,
             project_store,
             sessions,
-            idle_threshold_secs,
             projects_focused,
         );
         render_quick_sessions(
@@ -464,7 +424,6 @@ fn render_main_content(
             state,
             project_store,
             sessions,
-            idle_threshold_secs,
             !projects_focused,
         );
     } else if has_projects {
@@ -474,7 +433,6 @@ fn render_main_content(
             state,
             project_store,
             sessions,
-            idle_threshold_secs,
             true, // Always focused when alone
         );
     } else {
@@ -484,7 +442,6 @@ fn render_main_content(
             state,
             project_store,
             sessions,
-            idle_threshold_secs,
             true, // Always focused when alone
         );
     }
@@ -497,7 +454,6 @@ fn render_project_list(
     state: &AppState,
     project_store: &ProjectStore,
     sessions: &SessionManager,
-    idle_threshold_secs: u64,
     focused: bool,
 ) {
     let t = theme();
@@ -524,16 +480,11 @@ fn render_project_list(
                     let attention: usize = folder
                         .descendants
                         .iter()
-                        .map(|id| sessions.attention_count_for_project(*id, idle_threshold_secs))
+                        .map(|id| sessions.attention_count_for_project(*id))
                         .sum();
 
                     let mut parts = vec![project_count_label(folder.descendants.len())];
-                    if active > 0 {
-                        parts.push(format!("{} active", active));
-                    }
-                    if attention > 0 {
-                        parts.push(format!("{} need attention", attention));
-                    }
+                    parts.extend(status_parts(active, attention));
 
                     (
                         format!("{}/  ({})", folder.name(), parts.join(", ")),
@@ -546,8 +497,7 @@ fn render_project_list(
                     let branch_count = project_store.branch_count_for_project(project.id);
                     let session_count = sessions.session_count_for_project(project.id);
                     let active = sessions.active_session_count_for_project(project.id);
-                    let attention =
-                        sessions.attention_count_for_project(project.id, idle_threshold_secs);
+                    let attention = sessions.attention_count_for_project(project.id);
 
                     let branches = branch_count_label(branch_count);
                     let status = if active > 0 {
@@ -573,27 +523,17 @@ fn render_project_list(
             };
             let content = format!("{}{}{}{}", prefix, indent, twisty, label);
 
-            // Color precedence: attention > active > selected > default
-            let style = if selected {
-                if attention_count > 0 {
-                    selection_style(true, t.attention_badge)
-                } else if active_count > 0 {
-                    selection_style(true, t.active)
-                } else {
-                    selection_style_with_accent(true, t)
-                }
-            } else if attention_count > 0 {
-                Style::default().fg(t.attention_badge)
-            } else if active_count > 0 {
-                Style::default().fg(t.active)
-            } else if matches!(row, TreeRow::Folder(_)) {
-                // Folders are structure, not status. Every hue in the theme
-                // already means something about a session, so headings are set
-                // apart by weight and keep the plain text color.
+            // Folders are structure, not status. Every hue in the theme
+            // already means something about a session, so headings are set
+            // apart by weight and keep the plain text color.
+            let fallback = if matches!(row, TreeRow::Folder(_)) {
                 Style::default().fg(t.text).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(t.text)
             };
+
+            // Color precedence: attention > active > selected > default
+            let style = activity_style(selected, attention_count, active_count, fallback, t);
 
             ListItem::new(content).style(style)
         })
@@ -666,19 +606,7 @@ fn render_folder_completions(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let max_visible = 8;
     let total = completions.len();
-    let (start, end) = if total <= max_visible {
-        (0, total)
-    } else {
-        let half = max_visible / 2;
-        let start = if selected_idx < half {
-            0
-        } else if selected_idx >= total - half {
-            total - max_visible
-        } else {
-            selected_idx - half
-        };
-        (start, start + max_visible)
-    };
+    let (start, end) = visible_window(total, selected_idx, max_visible);
 
     let items: Vec<ListItem> = completions[start..end]
         .iter()
@@ -782,7 +710,6 @@ fn render_quick_sessions(
     state: &AppState,
     project_store: &ProjectStore,
     sessions: &SessionManager,
-    idle_threshold_secs: u64,
     focused: bool,
 ) {
     let t = theme();
@@ -800,7 +727,7 @@ fn render_quick_sessions(
             let prefix = selection_prefix(selected);
 
             // Check if session needs attention
-            let needs_attention = sessions.session_needs_attention(info, idle_threshold_secs);
+            let needs_attention = info.needs_attention();
 
             // Get project/branch info
             let project_name = project_store
@@ -854,8 +781,7 @@ mod tests {
     use super::*;
     use crate::project::Project;
     use crate::session::store::SessionStore;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
+    use crate::tui::views::test_util::{buffer_lines, column_of, contains_line, style_of_row_with};
     use std::path::PathBuf;
 
     /// Build a store holding projects at the given folder paths
@@ -879,56 +805,22 @@ mod tests {
         let sessions = SessionManager::with_store(config.clone(), SessionStore::new());
         let header_notifications = HeaderNotificationManager::default();
 
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_projects_overview(
-                    frame,
-                    frame.size(),
-                    state,
-                    project_store,
-                    &sessions,
-                    &config,
-                    &header_notifications,
-                );
-            })
-            .unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    /// Style of the first non-blank cell on the row containing `needle`
-    fn style_of_row_with(buffer: &Buffer, needle: &str) -> Style {
-        for y in 0..buffer.area.height {
-            let line: String = (0..buffer.area.width)
-                .map(|x| buffer.get(x, y).symbol())
-                .collect();
-            if let Some(byte_idx) = line.find(needle) {
-                // Screen column is a character count, not a byte offset
-                let col = line[..byte_idx].chars().count() as u16;
-                return buffer.get(col, y).style();
-            }
-        }
-        panic!("no rendered row contains {:?}", needle);
+        crate::tui::views::test_util::render_to_buffer(80, 24, |frame| {
+            render_projects_overview(
+                frame,
+                frame.size(),
+                state,
+                project_store,
+                &sessions,
+                &config,
+                &header_notifications,
+            );
+        })
     }
 
     /// Render the projects overview and return its lines, trimmed of padding
     fn render_to_lines(state: &AppState, project_store: &ProjectStore) -> Vec<String> {
-        let buffer = render_to_buffer(state, project_store);
-        (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer.get(x, y).symbol())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect()
-    }
-
-    /// Whether any rendered line contains `needle`
-    fn contains_line(lines: &[String], needle: &str) -> bool {
-        lines.iter().any(|line| line.contains(needle))
+        buffer_lines(&render_to_buffer(state, project_store))
     }
 
     #[test]
@@ -955,17 +847,6 @@ mod tests {
         );
         assert!(contains_line(&lines, "│      api-gateway"), "{:?}", lines);
         assert!(contains_line(&lines, "│    panoptes"), "{:?}", lines);
-    }
-
-    /// Column at which `needle` starts on the row that contains it
-    ///
-    /// Counted in characters, not bytes: the border and twisty glyphs are
-    /// multi-byte, so `str::find` alone would not give a screen column.
-    fn column_of(lines: &[String], needle: &str) -> usize {
-        lines
-            .iter()
-            .find_map(|line| line.find(needle).map(|b| line[..b].chars().count()))
-            .unwrap_or_else(|| panic!("no rendered row contains {:?}", needle))
     }
 
     #[test]

@@ -5,12 +5,11 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, ClaudeSettingsCopyState, InputMode, MAX_BRANCH_NAME_LEN};
-use crate::claude_json::ClaudeJsonStore;
-use crate::project::ProjectId;
-use crate::wizards::worktree::{
-    filter_branch_refs, BranchRef, BranchRefType, WorktreeCreationType,
+use crate::app::{
+    cycle_next, cycle_prev, App, ClaudeSettingsCopyState, InputMode, MAX_BRANCH_NAME_LEN,
 };
+use crate::project::ProjectId;
+use crate::wizards::worktree::{filter_branch_refs, BranchRefType, WorktreeCreationType};
 
 // ============================================================================
 // New Worktree Creation Wizard Handlers
@@ -28,11 +27,8 @@ use crate::wizards::worktree::{
 pub fn handle_worktree_select_branch_key(
     app: &mut App,
     key: KeyEvent,
-    project_id: ProjectId,
+    _project_id: ProjectId,
 ) -> Result<()> {
-    // project_id reserved for potential future use
-    let _ = project_id;
-
     if key.kind != KeyEventKind::Press {
         return Ok(());
     }
@@ -105,9 +101,10 @@ pub fn handle_worktree_select_branch_key(
                     app.state.worktree_wizard.search_text.clone();
                 app.state.worktree_wizard.creation_type = WorktreeCreationType::NewBranch;
 
-                // Initialize base branch selection
+                // Initialize base branch selection (empty search = all branches)
                 app.state.worktree_wizard.base_search_text.clear();
                 app.state.worktree_wizard.base_list_index = 0;
+                update_worktree_filtered_base_branches(app);
 
                 // Find and select the default base branch
                 if let Some(idx) = app
@@ -168,75 +165,42 @@ pub fn handle_worktree_select_branch_key(
 pub fn handle_worktree_select_base_key(
     app: &mut App,
     key: KeyEvent,
-    project_id: ProjectId,
+    _project_id: ProjectId,
 ) -> Result<()> {
-    // project_id reserved for potential future use (e.g., setting default base branch)
-    let _ = project_id;
-
     if key.kind != KeyEventKind::Press {
         return Ok(());
     }
-
-    // Filter branches based on base search text
-    let filtered: Vec<BranchRef> = if app.state.worktree_wizard.base_search_text.is_empty() {
-        app.state.worktree_wizard.all_branches.clone()
-    } else {
-        let query = app.state.worktree_wizard.base_search_text.to_lowercase();
-        app.state
-            .worktree_wizard
-            .all_branches
-            .iter()
-            .filter(|b| b.name.to_lowercase().contains(&query))
-            .cloned()
-            .collect()
-    };
-    let filtered_count = filtered.len();
 
     match key.code {
         KeyCode::Esc => {
             // Go back to step 1
             app.state.input_mode = InputMode::WorktreeSelectBranch;
             app.state.worktree_wizard.base_search_text.clear();
+            update_worktree_filtered_base_branches(app);
         }
         KeyCode::Up => {
-            if filtered_count > 0 {
-                // Clamp current index first to handle stale indices
-                let current = app
-                    .state
-                    .worktree_wizard
-                    .base_list_index
-                    .min(filtered_count.saturating_sub(1));
-                app.state.worktree_wizard.base_list_index =
-                    current.checked_sub(1).unwrap_or(filtered_count - 1);
-                // Update selected base branch
-                if let Some(branch) = filtered.get(app.state.worktree_wizard.base_list_index) {
-                    app.state.worktree_wizard.base_branch = Some(branch.clone());
-                }
-            } else {
-                app.state.worktree_wizard.base_list_index = 0;
+            let wizard = &mut app.state.worktree_wizard;
+            wizard.base_list_index =
+                cycle_prev(wizard.base_list_index, wizard.filtered_base_branches.len());
+            // Update selected base branch
+            if let Some(branch) = wizard.filtered_base_branches.get(wizard.base_list_index) {
+                wizard.base_branch = Some(branch.clone());
             }
         }
         KeyCode::Down => {
-            if filtered_count > 0 {
-                // Clamp current index first to handle stale indices
-                let current = app
-                    .state
-                    .worktree_wizard
-                    .base_list_index
-                    .min(filtered_count.saturating_sub(1));
-                app.state.worktree_wizard.base_list_index = (current + 1) % filtered_count;
-                // Update selected base branch
-                if let Some(branch) = filtered.get(app.state.worktree_wizard.base_list_index) {
-                    app.state.worktree_wizard.base_branch = Some(branch.clone());
-                }
-            } else {
-                app.state.worktree_wizard.base_list_index = 0;
+            let wizard = &mut app.state.worktree_wizard;
+            wizard.base_list_index =
+                cycle_next(wizard.base_list_index, wizard.filtered_base_branches.len());
+            // Update selected base branch
+            if let Some(branch) = wizard.filtered_base_branches.get(wizard.base_list_index) {
+                wizard.base_branch = Some(branch.clone());
             }
         }
         KeyCode::Enter => {
             // Confirm base branch selection, go to confirmation
-            if let Some(branch) = filtered.get(app.state.worktree_wizard.base_list_index) {
-                app.state.worktree_wizard.base_branch = Some(branch.clone());
+            let wizard = &mut app.state.worktree_wizard;
+            if let Some(branch) = wizard.filtered_base_branches.get(wizard.base_list_index) {
+                wizard.base_branch = Some(branch.clone());
             }
             app.state.input_mode = InputMode::WorktreeConfirm;
         }
@@ -244,21 +208,7 @@ pub fn handle_worktree_select_base_key(
             app.state.worktree_wizard.base_search_text.pop();
             // Reset index when search changes
             app.state.worktree_wizard.base_list_index = 0;
-            // Clamp to new filtered count
-            let new_filtered_count = if app.state.worktree_wizard.base_search_text.is_empty() {
-                app.state.worktree_wizard.all_branches.len()
-            } else {
-                let query = app.state.worktree_wizard.base_search_text.to_lowercase();
-                app.state
-                    .worktree_wizard
-                    .all_branches
-                    .iter()
-                    .filter(|b| b.name.to_lowercase().contains(&query))
-                    .count()
-            };
-            app.state
-                .worktree_wizard
-                .clamp_base_list_index(new_filtered_count);
+            update_worktree_filtered_base_branches(app);
         }
         KeyCode::Char(c) => {
             // Enforce length limit for base search (same as branch names)
@@ -266,6 +216,7 @@ pub fn handle_worktree_select_base_key(
                 app.state.worktree_wizard.base_search_text.push(c);
                 // Reset index when search changes
                 app.state.worktree_wizard.base_list_index = 0;
+                update_worktree_filtered_base_branches(app);
             }
         }
         _ => {}
@@ -383,177 +334,6 @@ pub fn handle_worktree_confirm_key(
 // Legacy Worktree Handlers (still used for some flows)
 // ============================================================================
 
-/// Handle key when creating worktree (legacy flow)
-///
-/// New flow:
-/// - Type branch name to create NEW branch (leave empty to checkout existing)
-/// - Navigate list to select base branch (for new) or target branch (for checkout)
-/// - Press 's' to set current selection as default base
-pub fn handle_creating_worktree_key(
-    app: &mut App,
-    key: KeyEvent,
-    project_id: ProjectId,
-) -> Result<()> {
-    // Only process key press events (not release/repeat)
-    if key.kind != KeyEventKind::Press {
-        return Ok(());
-    }
-    match key.code {
-        KeyCode::Esc => {
-            // Cancel worktree creation
-            app.state.input_mode = InputMode::Normal;
-            app.state.new_branch_name.clear();
-            app.state.available_branch_refs.clear();
-            app.state.filtered_branch_refs.clear();
-            app.state.selected_base_branch = None;
-            app.state.fetch_error = None;
-        }
-        KeyCode::Up => {
-            // Navigate up (wrapping)
-            let count = app.state.filtered_branch_refs.len();
-            if count > 0 {
-                // Clamp current index first to handle stale indices
-                let current = app
-                    .state
-                    .base_branch_selector_index
-                    .min(count.saturating_sub(1));
-                app.state.base_branch_selector_index = current.checked_sub(1).unwrap_or(count - 1);
-                // Update selected_base_branch when navigating
-                app.state.selected_base_branch = app
-                    .state
-                    .filtered_branch_refs
-                    .get(app.state.base_branch_selector_index)
-                    .cloned();
-            } else {
-                app.state.base_branch_selector_index = 0;
-            }
-        }
-        KeyCode::Down => {
-            // Navigate down (wrapping)
-            let count = app.state.filtered_branch_refs.len();
-            if count > 0 {
-                // Clamp current index first to handle stale indices
-                let current = app
-                    .state
-                    .base_branch_selector_index
-                    .min(count.saturating_sub(1));
-                app.state.base_branch_selector_index = (current + 1) % count;
-                // Update selected_base_branch when navigating
-                app.state.selected_base_branch = app
-                    .state
-                    .filtered_branch_refs
-                    .get(app.state.base_branch_selector_index)
-                    .cloned();
-            } else {
-                app.state.base_branch_selector_index = 0;
-            }
-        }
-        KeyCode::Char('s') if key.modifiers.is_empty() => {
-            // Set current selection as default base branch
-            if let Some(selected) = app
-                .state
-                .filtered_branch_refs
-                .get(app.state.base_branch_selector_index)
-            {
-                let branch_name = selected.name.clone();
-                if let Some(project) = app.project_store.get_project_mut(project_id) {
-                    project.set_default_base_branch(Some(branch_name.clone()));
-                    if let Err(e) = app.project_store.save() {
-                        tracing::error!("Failed to save default base branch: {}", e);
-                        app.state.error_message = Some(format!("Failed to save default: {}", e));
-                    } else {
-                        // Update the is_default_base flags in our list
-                        for branch_ref in &mut app.state.available_branch_refs {
-                            branch_ref.is_default_base = branch_ref.name == branch_name;
-                        }
-                        app.state.filtered_branch_refs = filter_branch_refs(
-                            &app.state.available_branch_refs,
-                            &app.state.new_branch_name,
-                        );
-                        tracing::debug!("Set default base branch to: {}", branch_name);
-                    }
-                }
-            }
-        }
-        KeyCode::Enter => {
-            let branch_name_typed = std::mem::take(&mut app.state.new_branch_name);
-            let selected_idx = app.state.base_branch_selector_index;
-            let selected_branch = app.state.filtered_branch_refs.get(selected_idx).cloned();
-
-            let result: Result<()> = if !branch_name_typed.is_empty() {
-                // Create NEW branch from selected base, then create worktree
-                // Use selected_base_branch which is preserved even when filtered out
-                let base_ref = app
-                    .state
-                    .selected_base_branch
-                    .as_ref()
-                    .map(|b| b.name.clone());
-                app.create_worktree(project_id, &branch_name_typed, true, base_ref.as_deref())
-                    .map(|_| ())
-            } else if let Some(selected) = selected_branch {
-                // Checkout existing branch as worktree (empty name = checkout selected)
-                // For local branches, just create worktree
-                // For remote branches, need to create tracking branch first
-                let branch_name = if selected.ref_type == BranchRefType::Remote {
-                    // Extract branch name from remote ref (e.g., "origin/feature" -> "feature")
-                    selected
-                        .name
-                        .split_once('/')
-                        .map(|(_, b)| b.to_string())
-                        .unwrap_or(selected.name.clone())
-                } else {
-                    selected.name.clone()
-                };
-
-                // For remote branches, we create a new local branch tracking it
-                let create_branch = selected.ref_type == BranchRefType::Remote;
-                let base_ref = if create_branch {
-                    Some(selected.name.as_str())
-                } else {
-                    None
-                };
-
-                app.create_worktree(project_id, &branch_name, create_branch, base_ref)
-                    .map(|_| ())
-            } else {
-                Ok(())
-            };
-
-            if let Err(e) = result {
-                tracing::error!("Failed to create worktree: {}", e);
-                app.state.error_message = Some(format!("Failed to create worktree: {}", e));
-            }
-            app.state.input_mode = InputMode::Normal;
-            app.state.available_branch_refs.clear();
-            app.state.filtered_branch_refs.clear();
-            app.state.selected_base_branch = None;
-            app.state.fetch_error = None;
-        }
-        KeyCode::Backspace => {
-            app.state.new_branch_name.pop();
-            app.state.filtered_branch_refs =
-                filter_branch_refs(&app.state.available_branch_refs, &app.state.new_branch_name);
-            // Find and select the default base branch if exists
-            select_default_base_branch(app);
-        }
-        KeyCode::Char(c) => {
-            // Enforce length limit for branch names
-            if app.state.new_branch_name.len() >= MAX_BRANCH_NAME_LEN {
-                return Ok(());
-            }
-            // Convert space to underscore for branch names
-            let c = if c == ' ' { '_' } else { c };
-            app.state.new_branch_name.push(c);
-            app.state.filtered_branch_refs =
-                filter_branch_refs(&app.state.available_branch_refs, &app.state.new_branch_name);
-            // Find and select the default base branch if exists
-            select_default_base_branch(app);
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 /// Handle key when selecting default base branch (via 'b' in project view)
 pub fn handle_selecting_default_base_key(
     app: &mut App,
@@ -574,30 +354,16 @@ pub fn handle_selecting_default_base_key(
             app.state.fetch_error = None;
         }
         KeyCode::Up => {
-            let count = app.state.filtered_branch_refs.len();
-            if count > 0 {
-                // Clamp current index first to handle stale indices
-                let current = app
-                    .state
-                    .base_branch_selector_index
-                    .min(count.saturating_sub(1));
-                app.state.base_branch_selector_index = current.checked_sub(1).unwrap_or(count - 1);
-            } else {
-                app.state.base_branch_selector_index = 0;
-            }
+            app.state.base_branch_selector_index = cycle_prev(
+                app.state.base_branch_selector_index,
+                app.state.filtered_branch_refs.len(),
+            );
         }
         KeyCode::Down => {
-            let count = app.state.filtered_branch_refs.len();
-            if count > 0 {
-                // Clamp current index first to handle stale indices
-                let current = app
-                    .state
-                    .base_branch_selector_index
-                    .min(count.saturating_sub(1));
-                app.state.base_branch_selector_index = (current + 1) % count;
-            } else {
-                app.state.base_branch_selector_index = 0;
-            }
+            app.state.base_branch_selector_index = cycle_next(
+                app.state.base_branch_selector_index,
+                app.state.filtered_branch_refs.len(),
+            );
         }
         KeyCode::Enter => {
             // Set selected branch as default base
@@ -607,15 +373,7 @@ pub fn handle_selecting_default_base_key(
                 .get(app.state.base_branch_selector_index)
             {
                 let branch_name = selected.name.clone();
-                if let Some(project) = app.project_store.get_project_mut(project_id) {
-                    project.set_default_base_branch(Some(branch_name.clone()));
-                    if let Err(e) = app.project_store.save() {
-                        tracing::error!("Failed to save default base branch: {}", e);
-                        app.state.error_message = Some(format!("Failed to save default: {}", e));
-                    } else {
-                        tracing::debug!("Set default base branch to: {}", branch_name);
-                    }
-                }
+                set_project_default_base(app, project_id, &branch_name);
             }
             app.state.input_mode = InputMode::Normal;
             app.state.available_branch_refs.clear();
@@ -649,6 +407,32 @@ pub fn handle_selecting_default_base_key(
 // Helper Functions
 // ============================================================================
 
+/// Set a project's default base branch and persist it, surfacing failures
+fn set_project_default_base(app: &mut App, project_id: ProjectId, branch_name: &str) {
+    if let Some(project) = app.project_store.get_project_mut(project_id) {
+        project.set_default_base_branch(Some(branch_name.to_string()));
+        if let Err(e) = app.project_store.save() {
+            tracing::error!("Failed to save default base branch: {}", e);
+            app.state.error_message = Some(format!("Failed to save default: {}", e));
+        } else {
+            tracing::debug!("Set default base branch to: {}", branch_name);
+        }
+    }
+}
+
+/// Update the cached base-branch filter (step 2) for the current search text
+///
+/// Mirrors [`update_worktree_filtered_branches`] for step 1: handlers and the
+/// render path both read `filtered_base_branches` instead of re-filtering.
+pub fn update_worktree_filtered_base_branches(app: &mut App) {
+    app.state.worktree_wizard.filtered_base_branches = filter_branch_refs(
+        &app.state.worktree_wizard.all_branches,
+        &app.state.worktree_wizard.base_search_text,
+    );
+    let count = app.state.worktree_wizard.filtered_base_branches.len();
+    app.state.worktree_wizard.clamp_base_list_index(count);
+}
+
 /// Navigate up/down in the worktree branch list, skipping already-tracked branches
 fn worktree_navigate_branches(app: &mut App, direction: i32) {
     let filtered_count = app.state.worktree_wizard.filtered_branches.len();
@@ -664,20 +448,15 @@ fn worktree_navigate_branches(app: &mut App, direction: i32) {
         return;
     }
 
-    // Clamp current index to valid range first
-    let current = app
-        .state
-        .worktree_wizard
-        .list_index
-        .min(total_options.saturating_sub(1));
-    let mut next = current;
+    // cycle_next/cycle_prev clamp a stale index into range before stepping
+    let mut next = app.state.worktree_wizard.list_index;
 
     for _ in 0..total_options {
-        if direction > 0 {
-            next = (next + 1) % total_options;
+        next = if direction > 0 {
+            cycle_next(next, total_options)
         } else {
-            next = next.checked_sub(1).unwrap_or(total_options - 1);
-        }
+            cycle_prev(next, total_options)
+        };
         // The "Create new branch" option (at filtered_count) is always selectable
         if next >= filtered_count {
             app.state.worktree_wizard.list_index = next;
@@ -751,11 +530,9 @@ pub fn update_worktree_filtered_branches(app: &mut App) {
 /// Check if Claude settings should be copied to a new worktree
 ///
 /// Returns Some(ClaudeSettingsCopyState) if the main repo has Claude settings
-/// that should be offered for copying to the new worktree.
-///
-/// This checks both:
-/// - Modern format: `.claude/settings.local.json` in the project directory
-/// - Legacy format: `.claude.json` in the Claude config directory (keyed by path)
+/// that should be offered for copying to the new worktree. The file
+/// inspection itself lives in [`crate::claude_json::check_settings_for_copy`];
+/// this resolves the project's Claude config and packs the dialog state.
 fn check_claude_settings_for_copy(
     app: &App,
     project_id: ProjectId,
@@ -765,111 +542,27 @@ fn check_claude_settings_for_copy(
     let project = app.project_store.get_project(project_id)?;
     let branch = app.project_store.get_branch(branch_id)?;
 
-    // Check modern format (.claude/settings.local.json)
-    let source_local_settings = project
-        .repo_path
-        .join(".claude")
-        .join("settings.local.json");
-    let has_local_settings = source_local_settings.exists();
-
     // Get the Claude config to use (project default or global default)
     let config_id = project
         .default_claude_config
         .or_else(|| app.claude_config_store.get_default_id());
-
     let claude_config = config_id.and_then(|id| app.claude_config_store.get(id));
     let config_dir = claude_config.and_then(|c| c.config_dir.clone());
 
-    // Create store for legacy config directory
-    let store = ClaudeJsonStore::for_config_dir(config_dir.as_deref())?;
-    let main_path = project.repo_path.to_string_lossy().to_string();
-
-    // Check if main repo has any legacy settings configured
-    let has_legacy_settings = store.has_settings(&main_path).ok().unwrap_or(false);
-
-    // Get legacy settings to show a preview (if they exist)
-    let legacy_settings = if has_legacy_settings {
-        store.get_settings(&main_path).ok().flatten()
-    } else {
-        None
-    };
-
-    // Read local settings preview (permissions from modern format)
-    let local_permissions = if has_local_settings {
-        read_local_settings_permissions(&source_local_settings)
-    } else {
-        vec![]
-    };
-
-    // Get legacy tools preview
-    let legacy_tools = legacy_settings
-        .as_ref()
-        .map(|s| s.allowed_tools.clone())
-        .unwrap_or_default();
-    let has_mcp_servers = legacy_settings
-        .as_ref()
-        .map(|s| !s.mcp_servers.is_empty())
-        .unwrap_or(false);
-
-    // Show dialog if EITHER format has settings
-    if !has_local_settings && legacy_tools.is_empty() && !has_mcp_servers {
-        return None;
-    }
-
-    // Combine previews from both sources (deduplicated)
-    let mut combined_preview: Vec<String> = Vec::new();
-    for tool in legacy_tools {
-        if !combined_preview.contains(&tool) {
-            combined_preview.push(tool);
-        }
-    }
-    for perm in local_permissions {
-        if !combined_preview.contains(&perm) {
-            combined_preview.push(perm);
-        }
-    }
+    let check =
+        crate::claude_json::check_settings_for_copy(&project.repo_path, config_dir.as_deref())?;
 
     Some(ClaudeSettingsCopyState {
         source_path: project.repo_path.clone(),
         target_path: branch.working_dir.clone(),
         project_id,
         branch_id,
-        tools_preview: combined_preview,
-        has_mcp_servers,
+        tools_preview: check.tools_preview,
+        has_mcp_servers: check.has_mcp_servers,
         selected_yes: true,
         claude_config_dir: config_dir,
-        has_local_settings,
+        has_local_settings: check.has_local_settings,
     })
-}
-
-/// Read permission strings from a local settings.local.json file for preview
-fn read_local_settings_permissions(path: &std::path::Path) -> Vec<String> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-
-    let mut permissions = Vec::new();
-
-    // Extract permissions.allow array
-    if let Some(perms) = json.get("permissions") {
-        if let Some(allow) = perms.get("allow") {
-            if let Some(arr) = allow.as_array() {
-                for item in arr {
-                    if let Some(s) = item.as_str() {
-                        permissions.push(s.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    permissions
 }
 
 // TODO: Codex permissions sharing

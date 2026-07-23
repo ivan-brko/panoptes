@@ -15,11 +15,9 @@ This guide walks you through creating a selectable list menu in Panoptes with co
 
 A **selectable list menu** is a UI component that displays a list of items where users can navigate with arrow keys and select items with Enter. Examples in Panoptes include:
 
-- **Projects Overview** (`src/tui/views/projects.rs`) - Grid of projects
+- **Projects Overview** (`src/tui/views/projects.rs`) - Tree of folders and projects
 - **Branch Detail** (`src/tui/views/branch_detail.rs`) - List of sessions for a branch
-- **Activity Timeline** (`src/tui/views/timeline.rs`) - All sessions sorted by activity
-- **Focus Stats** (`src/tui/views/focus_stats.rs`) - Focus session history
-- **Claude Configs** (`src/tui/views/claude_configs.rs`) - Claude configuration accounts
+- **Agent Configs** (`src/tui/views/agent_configs.rs`) - Claude/Codex account lists (one view, parameterized by `AgentKind`)
 
 All menus follow a consistent pattern: **arrow prefix (`▶`) + bold text + state/accent colors**, with **NO background highlighting**.
 
@@ -60,8 +58,8 @@ Follow these steps to create a new selectable list menu:
 - [ ] Implement other shortcuts (Delete, New, etc.)
 - [ ] Export from `src/input/normal/mod.rs`
 
-### 6. Input Routing (`src/input/dispatcher.rs`)
-- [ ] Add case to route key events to your handler
+### 6. Input Routing (`src/app/mod.rs`)
+- [ ] Add a `View::MyMenu => ...` arm in `App::handle_normal_mode_key()`
 
 ## State Management
 
@@ -314,63 +312,56 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::app::App;
 
 /// Handle key events in my menu view
-pub fn handle_my_menu_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
+pub fn handle_my_menu_key(app: &mut App, key: KeyEvent) -> anyhow::Result<()> {
     match key.code {
-        // Navigation
-        KeyCode::Up | KeyCode::Char('k') => {
+        // Navigation is by arrow key only - do NOT add vim-style j/k
+        // (k is globally bound to the custom shortcuts manager)
+        KeyCode::Up => {
             let count = get_item_count(app);  // Your logic to get count
             app.state.select_prev_my_menu_item(count);
-            Ok(true)
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             let count = get_item_count(app);
             app.state.select_next_my_menu_item(count);
-            Ok(true)
         }
 
         // Selection
         KeyCode::Enter => {
             let selected_index = app.state.selected_my_menu_index;
             // Handle selection - open detail view, perform action, etc.
-            Ok(true)
         }
 
         // Back navigation
         KeyCode::Esc | KeyCode::Char('q') => {
-            app.state.view = app.state.view.parent();
-            Ok(true)
+            app.state.navigate_back();
         }
 
         // Other actions
         KeyCode::Char('d') => {
             // Delete selected item
-            Ok(true)
         }
         KeyCode::Char('n') => {
             // Create new item
-            Ok(true)
         }
 
-        _ => Ok(false),  // Key not handled
+        _ => {}
     }
+    Ok(())
 }
 ```
 
-### Routing in Dispatcher
+### Routing the View's Keys
 
-In `src/input/dispatcher.rs`, add your view to the dispatch:
+Normal-mode keys are routed by view in `App::handle_normal_mode_key()`
+(`src/app/mod.rs`):
 
 ```rust
-use crate::input::normal::my_menu::handle_my_menu_key;
-
-pub fn handle_normal_mode_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
-    match app.state.view {
-        // ... other views ...
-        View::MyMenu => handle_my_menu_key(app, key),
-        // ...
-    }
-}
+View::MyMenu => normal::my_menu::handle_my_menu_key(self, key),
 ```
+
+(`src/input/dispatcher.rs` routes by *input mode*; it only matters here if
+your menu introduces a new `InputMode`, e.g. a selector overlay - see the
+add-input-mode skill.)
 
 ### Navigation Patterns
 
@@ -380,12 +371,10 @@ pub fn handle_normal_mode_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bo
 KeyCode::Up => {
     let count = items.len();
     app.state.select_prev_my_menu_item(count);
-    Ok(true)
 }
 KeyCode::Down => {
     let count = items.len();
     app.state.select_next_my_menu_item(count);
-    Ok(true)
 }
 ```
 
@@ -400,7 +389,6 @@ KeyCode::Enter => {
         // Or perform action
         perform_action(item);
     }
-    Ok(true)
 }
 ```
 
@@ -412,100 +400,18 @@ app.state.view = View::MyMenu;
 app.state.reset_my_menu_selection();
 ```
 
-## Complete Example: Projects Overview
+## Complete Example: Study the Real Views
 
-Here's an annotated excerpt from the Projects view (`src/tui/views/projects.rs`):
+For a full worked example, read the current code rather than a snapshot here -
+the pattern is exactly what this guide describes:
 
-```rust
-use crate::tui::widgets::selection::{selection_prefix, selection_style, selection_style_with_accent};
-
-fn render_project_list(
-    frame: &mut Frame,
-    area: Rect,
-    projects: &[&Project],
-    selected_index: usize,
-    focused: bool,
-    sessions: &SessionManager,
-    idle_threshold_secs: u64,
-) {
-    let t = theme();
-
-    let items: Vec<ListItem> = projects
-        .iter()
-        .enumerate()
-        .map(|(i, project)| {
-            let selected = i == selected_index && focused;
-            let prefix = selection_prefix(selected);  // "▶ " or "  "
-
-            // Count sessions for state-based coloring
-            let active_count = sessions.active_session_count_for_project(project.id);
-            let attention_count = sessions.attention_count_for_project(project.id, idle_threshold_secs);
-
-            let content = format!("{}{}: {}", prefix, i + 1, project.name);
-
-            // Color precedence: attention > active > accent
-            let style = if selected {
-                if attention_count > 0 {
-                    selection_style(true, t.attention_badge)  // Bold yellow
-                } else if active_count > 0 {
-                    selection_style(true, t.active)  // Bold green
-                } else {
-                    selection_style_with_accent(true, &t)  // Bold cyan
-                }
-            } else if attention_count > 0 {
-                Style::default().fg(t.attention_badge)  // Yellow
-            } else if active_count > 0 {
-                Style::default().fg(t.active)  // Green
-            } else {
-                Style::default().fg(t.text)  // White
-            };
-
-            ListItem::new(content).style(style)
-        })
-        .collect();
-
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!("Projects ({})", projects.len()))
-    );
-
-    frame.render_widget(list, area);
-}
-```
-
-Input handler (`src/input/normal/projects_overview.rs`):
-
-```rust
-pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> anyhow::Result<bool> {
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            let count = app.project_store.project_count();
-            app.state.select_prev_project(count);
-            Ok(true)
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            let count = app.project_store.project_count();
-            app.state.select_next_project(count);
-            Ok(true)
-        }
-        KeyCode::Enter => {
-            let projects = app.project_store.projects_sorted();
-            if let Some(project) = projects.get(app.state.selected_project_index) {
-                app.state.view = View::ProjectDetail(project.id);
-                app.state.reset_branch_selection();
-            }
-            Ok(true)
-        }
-        KeyCode::Char('d') => {
-            // Delete selected project
-            app.state.input_mode = InputMode::ConfirmDeleteProject;
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
-}
-```
+- `src/tui/views/agent_configs.rs` - the simplest list menu (name + path rows,
+  selector overlay), including its render tests
+- `src/tui/views/projects.rs` - a richer example: folder tree rows, state-based
+  coloring with the attention > active > accent precedence, and a second
+  focusable list on the same screen
+- `src/input/normal/projects_overview.rs` - the matching input handler
+  (signature: `pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()>`)
 
 ## Common Patterns
 
@@ -583,7 +489,7 @@ After implementing your menu, verify:
 - [ ] Down arrow moves selection down
 - [ ] Selection wraps from bottom to top
 - [ ] Selection wraps from top to bottom
-- [ ] Vim keys (`j`/`k`) work if implemented
+- [ ] No vim-style `j`/`k` bindings (navigation is arrow-key only; `k` is globally reserved)
 
 ### Behavior
 - [ ] Enter selects/opens the item
@@ -610,14 +516,15 @@ After implementing your menu, verify:
 
 ## Footer Help Text
 
-Don't forget to add/update the footer help text in your render function:
+Don't forget to add/update the footer help text in your render function.
+`ScreenLayout` reserves the footer area; the text is drawn with the shared
+`render_footer` helper from `tui/views/mod.rs`:
 
 ```rust
 // In your render function, after creating the layout:
-let areas = ScreenLayout::new(area)
-    .with_header(header)
-    .with_footer("↑↓: navigate | Enter: select | d: delete | n: new | Esc: back")
-    .render(frame);
+let areas = ScreenLayout::new(area).with_header(header).render(frame);
+// ... render content into areas.content ...
+render_footer(frame, areas.footer, "[↑↓] Navigate  [Enter] Select  [d] Delete  [q] Back");
 ```
 
 **IMPORTANT**: Keep the implementation (in `src/input/`) and documentation (footer) in sync!
@@ -636,7 +543,7 @@ Creating a new selectable list menu involves:
 1. Adding selection state to `AppState`
 2. Creating a render function with selection styling (arrow + bold + color)
 3. Creating an input handler with Up/Down/Enter navigation
-4. Routing input events in the dispatcher
+4. Routing the view's keys in `App::handle_normal_mode_key()`
 5. Using selection helper functions for consistency
 6. **Never using background highlighting**
 

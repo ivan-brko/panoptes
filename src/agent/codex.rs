@@ -8,13 +8,12 @@
 //! critical "session needs attention" transition but no granular tool-use tracking.
 
 use crate::config::Config;
-use crate::session::PtyHandle;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
+use super::adapter::{AgentAdapter, SpawnConfig};
+use crate::transcript::codex::{read_session_meta, rollout_files};
 
 /// Notify hook script filename
 const CODEX_NOTIFY_SCRIPT_NAME: &str = "codex-notify.sh";
@@ -56,50 +55,40 @@ pub fn discover_session_id(
     let target_cwd = canonical_or_original(working_dir);
     let cutoff = started_at - chrono::Duration::seconds(ROLLOUT_TIME_TOLERANCE_SECS);
 
-    // Rollouts are filed under sessions/YYYY/MM/DD, so walk exactly three
-    // levels rather than recursing over an unbounded tree
     let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
-    for year in read_subdirs(&sessions_dir) {
-        for month in read_subdirs(&year) {
-            for day in read_subdirs(&month) {
-                let Ok(entries) = std::fs::read_dir(&day) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    let Some(meta) = read_session_meta(&path) else {
-                        continue;
-                    };
-                    // A subagent gets its own rollout, in the same working
-                    // directory and with its own fresh timestamp, so it matches
-                    // every other criterion here and would be claimed as if it
-                    // were the session's own conversation. Resuming that
-                    // pointer would reattach to a subagent rather than the
-                    // conversation the user was having.
-                    if meta.is_subagent {
-                        continue;
-                    }
-                    if canonical_or_original(&meta.cwd) != target_cwd {
-                        continue;
-                    }
-                    // The rollout's own creation timestamp, not the file mtime:
-                    // mtime is bumped on every turn, so an older conversation
-                    // being actively used would otherwise look newer than the
-                    // session we are trying to identify
-                    if meta.created_at < cutoff {
-                        continue;
-                    }
-                    // Another Panoptes session already owns this conversation
-                    if claimed.contains(&meta.id) {
-                        continue;
-                    }
-                    candidates.push((meta.created_at, meta.id));
-                }
-            }
+    for path in rollout_files(&sessions_dir) {
+        let Some(meta) = read_session_meta(&path) else {
+            continue;
+        };
+        // A subagent gets its own rollout, in the same working directory and
+        // with its own fresh timestamp, so it matches every other criterion
+        // here and would be claimed as if it were the session's own
+        // conversation. Resuming that pointer would reattach to a subagent
+        // rather than the conversation the user was having.
+        if meta.is_subagent {
+            continue;
         }
+        let same_cwd = meta
+            .cwd
+            .is_some_and(|cwd| canonical_or_original(&cwd) == target_cwd);
+        if !same_cwd {
+            continue;
+        }
+        // The rollout's own creation timestamp, not the file mtime: mtime is
+        // bumped on every turn, so an older conversation being actively used
+        // would otherwise look newer than the session we are trying to
+        // identify. A rollout with no timestamp at all cannot be matched.
+        let Some(created_at) = meta.created_at else {
+            continue;
+        };
+        if created_at < cutoff {
+            continue;
+        }
+        // Another Panoptes session already owns this conversation
+        if claimed.contains(&meta.id) {
+            continue;
+        }
+        candidates.push((created_at, meta.id));
     }
 
     // Oldest first. Callers resolve pending sessions in start order, so the
@@ -110,101 +99,39 @@ pub fn discover_session_id(
     candidates.into_iter().next().map(|(_, id)| id)
 }
 
-/// The `session_meta` header of a Codex rollout file
-struct RolloutMeta {
-    id: String,
-    cwd: PathBuf,
-    created_at: chrono::DateTime<chrono::Utc>,
-    /// Whether this rollout belongs to a subagent rather than a session
-    is_subagent: bool,
-}
-
 /// Locate the rollout file holding a known Codex conversation
 ///
 /// Needed to tail a conversation whose ID is already known, which is the
 /// reverse of `discover_session_id`. Returns `None` before Codex has written
 /// the file, which is normal for the first moments of a session.
 pub fn rollout_path(codex_home: &Path, conversation_id: &str) -> Option<PathBuf> {
-    let sessions_dir = codex_home.join("sessions");
-
-    for year in read_subdirs(&sessions_dir) {
-        for month in read_subdirs(&year) {
-            for day in read_subdirs(&month) {
-                let Ok(entries) = std::fs::read_dir(&day) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    // The filename embeds the conversation UUID, so most files
-                    // can be dismissed without opening them
-                    let names_it = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|name| name.contains(conversation_id));
-                    if !names_it {
-                        continue;
-                    }
-                    if read_session_meta(&path).is_some_and(|meta| meta.id == conversation_id) {
-                        return Some(path);
-                    }
-                }
-            }
-        }
-    }
-    None
+    rollout_files(&codex_home.join("sessions"))
+        .into_iter()
+        .find(|path| {
+            // The filename embeds the conversation UUID, so most files can be
+            // dismissed without opening them
+            let names_it = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.contains(conversation_id));
+            names_it && read_session_meta(path).is_some_and(|meta| meta.id == conversation_id)
+        })
 }
 
-/// List immediate subdirectories, ignoring anything unreadable
-fn read_subdirs(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect()
-}
-
-/// Read the `session_meta` header of a rollout file
+/// What installing the Panoptes notify hook into a Codex config requires
 ///
-/// Only the first line is read: the rest of a rollout is the conversation, which
-/// can be large and is of no interest here.
-fn read_session_meta(path: &Path) -> Option<RolloutMeta> {
-    use std::io::BufRead;
-
-    let file = std::fs::File::open(path).ok()?;
-    let mut first_line = String::new();
-    std::io::BufReader::new(file)
-        .read_line(&mut first_line)
-        .ok()?;
-
-    let value: serde_json::Value = serde_json::from_str(&first_line).ok()?;
-    if value.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
-        return None;
-    }
-    let payload = value.get("payload")?;
-    let id = payload.get("id").and_then(|i| i.as_str())?.to_string();
-    let cwd = payload.get("cwd").and_then(|c| c.as_str())?;
-
-    // Codex records the timestamp on the payload and again on the envelope;
-    // either identifies when the conversation began
-    let created_at = payload
-        .get("timestamp")
-        .or_else(|| value.get("timestamp"))
-        .and_then(|t| t.as_str())
-        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-        .map(|t| t.with_timezone(&chrono::Utc))?;
-
-    Some(RolloutMeta {
-        id,
-        cwd: PathBuf::from(cwd),
-        created_at,
-        is_subagent: crate::transcript::codex::is_subagent_meta(payload),
-    })
+/// The pure outcome of [`CodexAdapter::plan_notify`], separated from the
+/// filesystem work of acting on it.
+#[derive(Debug, Clone, PartialEq)]
+enum NotifyPlan {
+    /// `notify` already routes through the Panoptes script — write nothing,
+    /// back nothing up
+    AlreadyConfigured,
+    /// Write this as the new `notify` value (backing up the file first)
+    Set(toml::Value),
+    /// The existing `notify` value has a shape Panoptes cannot chain safely;
+    /// the user has to merge by hand
+    Unsupported,
 }
 
 /// OpenAI Codex CLI adapter for spawning and managing Codex sessions
@@ -234,28 +161,11 @@ impl CodexAdapter {
     /// Install the notify hook script
     fn install_notify_script(config: &Config) -> Result<PathBuf> {
         let script_path = Self::notify_script_path(config);
-
-        // Ensure hooks directory exists
-        std::fs::create_dir_all(&config.hooks_dir).context("Failed to create hooks directory")?;
-
-        // Generate the hook script content
-        let script_content = Self::generate_notify_script(config.hook_port);
-
-        // Write the script
-        std::fs::write(&script_path, &script_content)
-            .context("Failed to write codex notify script")?;
-
-        // Make executable (Unix only)
-        #[cfg(unix)]
-        {
-            let mut perms = std::fs::metadata(&script_path)
-                .context("Failed to get script metadata")?
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms)
-                .context("Failed to set script permissions")?;
-        }
-
+        super::install_executable_script(
+            &script_path,
+            &Self::generate_notify_script(config.hook_port),
+        )
+        .context("Failed to install codex notify script")?;
         Ok(script_path)
     }
 
@@ -296,11 +206,44 @@ exit 0
         )
     }
 
+    /// How to bring a Codex `notify` setting under Panoptes
+    ///
+    /// The pure policy behind [`Self::configure_codex_notify`]: given the
+    /// existing `notify` value (if any), decide what — if anything — should be
+    /// written, without touching the filesystem.
+    fn plan_notify(existing: Option<&toml::Value>, script: &Path) -> NotifyPlan {
+        let panoptes_notify_cmd = vec!["bash".to_string(), script.to_string_lossy().to_string()];
+        let panoptes_notify_value = Self::notify_array_value(&panoptes_notify_cmd);
+
+        match existing {
+            None => NotifyPlan::Set(panoptes_notify_value),
+            Some(existing) if *existing == panoptes_notify_value => {
+                // Already configured exactly as expected.
+                NotifyPlan::AlreadyConfigured
+            }
+            Some(existing) => {
+                let Some(existing_cmd) = Self::parse_notify_command(existing) else {
+                    return NotifyPlan::Unsupported;
+                };
+                if Self::notify_command_mentions_script(&existing_cmd, script) {
+                    // Already chained through Panoptes (or equivalent), avoid
+                    // duplicate wrapping — and avoid rewriting a file that
+                    // needs no change.
+                    NotifyPlan::AlreadyConfigured
+                } else {
+                    let chained_cmd = Self::build_chained_notify_command(script, &existing_cmd);
+                    NotifyPlan::Set(Self::notify_array_value(&chained_cmd))
+                }
+            }
+        }
+    }
+
     /// Configure Codex's config.toml to use the notify hook
     ///
     /// Reads existing config.toml and configures the `notify` key.
     /// If user already has a notify hook, Panoptes chains to it instead of
-    /// overwriting it.
+    /// overwriting it. When the value is already correct, nothing is written
+    /// and no backup is made.
     fn configure_codex_notify(codex_home: &Path, notify_script_path: &Path) -> Result<()> {
         // Ensure codex home directory exists
         std::fs::create_dir_all(codex_home).context("Failed to create CODEX_HOME directory")?;
@@ -327,52 +270,29 @@ exit 0
             .as_table_mut()
             .context("Codex config.toml root is not a table")?;
 
-        let panoptes_notify_cmd = vec![
-            "bash".to_string(),
-            notify_script_path.to_string_lossy().to_string(),
-        ];
-        let panoptes_notify_value = Self::notify_array_value(&panoptes_notify_cmd);
-
-        let mut did_modify = false;
-        match table.get("notify") {
-            None => {
-                table.insert("notify".to_string(), panoptes_notify_value);
-                did_modify = true;
+        let existing = table.get("notify").cloned();
+        match Self::plan_notify(existing.as_ref(), notify_script_path) {
+            NotifyPlan::AlreadyConfigured => return Ok(()),
+            NotifyPlan::Unsupported => {
+                let existing =
+                    existing.context("unsupported notify plan without an existing notify value")?;
+                let merge_script =
+                    Self::write_manual_merge_script(codex_home, &existing, notify_script_path)?;
+                anyhow::bail!(
+                    "Codex config.toml has an unsupported 'notify' value. \
+                     Panoptes cannot install its hook safely. \
+                     Merge Panoptes hook call into your existing notify hook using: {}",
+                    merge_script.display()
+                );
             }
-            Some(existing_notify) if *existing_notify == panoptes_notify_value => {
-                // Already configured exactly as expected.
-            }
-            Some(existing_notify) => {
-                if let Some(existing_cmd) = Self::parse_notify_command(existing_notify) {
-                    if Self::notify_command_mentions_script(&existing_cmd, notify_script_path) {
-                        // Already chained through Panoptes (or equivalent), avoid duplicate wrapping.
-                    } else {
-                        tracing::warn!(
-                            "Codex config.toml already has 'notify' set. Chaining existing hook through Panoptes."
-                        );
-                        let chained_cmd =
-                            Self::build_chained_notify_command(notify_script_path, &existing_cmd);
-                        table.insert("notify".to_string(), Self::notify_array_value(&chained_cmd));
-                        did_modify = true;
-                    }
-                } else {
-                    let merge_script = Self::write_manual_merge_script(
-                        codex_home,
-                        existing_notify,
-                        notify_script_path,
-                    )?;
-                    anyhow::bail!(
-                        "Codex config.toml has an unsupported 'notify' value. \
-                         Panoptes cannot install its hook safely. \
-                         Merge Panoptes hook call into your existing notify hook using: {}",
-                        merge_script.display()
+            NotifyPlan::Set(value) => {
+                if existing.is_some() {
+                    tracing::warn!(
+                        "Codex config.toml already has 'notify' set. Chaining existing hook through Panoptes."
                     );
                 }
+                table.insert("notify".to_string(), value);
             }
-        }
-
-        if !did_modify {
-            return Ok(());
         }
 
         // Create backup before modifying if file exists
@@ -504,56 +424,14 @@ exit 0
 "{panoptes_hook}" "$@" >/dev/null 2>&1 || true
 "#
         );
-        std::fs::write(&merge_script_path, content).with_context(|| {
+        super::install_executable_script(&merge_script_path, &content).with_context(|| {
             format!(
                 "Failed to write merge helper {}",
                 merge_script_path.display()
             )
         })?;
 
-        #[cfg(unix)]
-        {
-            let mut perms = std::fs::metadata(&merge_script_path)
-                .context("Failed to read merge helper metadata")?
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&merge_script_path, perms)
-                .context("Failed to set merge helper permissions")?;
-        }
-
         Ok(merge_script_path)
-    }
-
-    /// Build Codex CLI args with Panoptes defaults.
-    ///
-    /// Panoptes runs Codex in inline mode (no alternate screen) so PTY scrollback
-    /// remains usable from the session view, matching Claude behavior.
-    fn build_args(&self, spawn_config: &SpawnConfig) -> Vec<String> {
-        let mut args = Vec::new();
-
-        // Resuming is a subcommand, not a flag: `codex resume [OPTIONS]
-        // [SESSION_ID] [PROMPT]`. It has to lead the argument list.
-        if spawn_config.resume.is_some() {
-            args.push("resume".to_string());
-        }
-
-        args.extend(self.default_args());
-
-        if !args.iter().any(|arg| arg == NO_ALT_SCREEN_FLAG) {
-            args.push(NO_ALT_SCREEN_FLAG.to_string());
-        }
-
-        // Positional arguments follow the options, session ID before prompt
-        if let Some(ref resume) = spawn_config.resume {
-            args.push(resume.clone());
-        }
-
-        if let Some(ref prompt) = spawn_config.initial_prompt {
-            // Codex CLI takes initial prompt as a positional argument
-            args.push(prompt.clone());
-        }
-
-        args
     }
 }
 
@@ -620,39 +498,50 @@ impl AgentAdapter for CodexAdapter {
         Ok(vec![])
     }
 
-    fn spawn(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<SpawnResult> {
-        // Setup hooks first
-        let _cleanup_paths = self.setup_hooks(config, spawn_config)?;
+    /// Build Codex CLI args with Panoptes defaults.
+    ///
+    /// Panoptes runs Codex in inline mode (no alternate screen) so PTY scrollback
+    /// remains usable from the session view, matching Claude behavior.
+    fn build_args(&self, spawn_config: &SpawnConfig) -> Vec<String> {
+        let mut args = Vec::new();
 
-        // Generate environment
-        let env = self.generate_env(config, spawn_config);
+        // Resuming is a subcommand, not a flag: `codex resume [OPTIONS]
+        // [SESSION_ID] [PROMPT]`. It has to lead the argument list.
+        if spawn_config.resume.is_some() {
+            args.push("resume".to_string());
+        }
 
-        // Build arguments
-        let args = self.build_args(spawn_config);
+        args.extend(self.default_args());
 
-        // Convert args to &str for PtyHandle
-        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        if !args.iter().any(|arg| arg == NO_ALT_SCREEN_FLAG) {
+            args.push(NO_ALT_SCREEN_FLAG.to_string());
+        }
 
-        // Spawn the process with correct terminal dimensions
-        let pty = PtyHandle::spawn(
-            self.command(),
-            &args_refs,
-            &spawn_config.working_dir,
-            env,
-            spawn_config.rows,
-            spawn_config.cols,
-        )?;
+        // Positional arguments follow the options, session ID before prompt
+        if let Some(ref resume) = spawn_config.resume {
+            args.push(resume.clone());
+        }
 
-        Ok(SpawnResult {
-            pty,
-            agent_session_id: None,
-        })
+        if let Some(ref prompt) = spawn_config.initial_prompt {
+            // Codex CLI takes initial prompt as a positional argument
+            args.push(prompt.clone());
+        }
+
+        args
+    }
+
+    /// Codex mints its own conversation ID; it is discovered from the rollout
+    /// after the fact (see [`discover_session_id`])
+    fn agent_session_id(&self, _spawn_config: &SpawnConfig) -> Option<String> {
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -1028,6 +917,103 @@ notify = ["bash", "__LEGACY__", 42]
         let helper_content = std::fs::read_to_string(merge_helper).unwrap();
         assert!(helper_content.contains("/test/codex-notify.sh"));
         assert!(helper_content.contains("notify.sh"));
+    }
+
+    // plan_notify: the pure policy behind configure_codex_notify
+
+    fn panoptes_script() -> PathBuf {
+        PathBuf::from("/test/codex-notify.sh")
+    }
+
+    #[test]
+    fn test_plan_notify_inserts_when_absent() {
+        let plan = CodexAdapter::plan_notify(None, &panoptes_script());
+        let NotifyPlan::Set(value) = plan else {
+            panic!("expected Set, got {plan:?}");
+        };
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr[0].as_str(), Some("bash"));
+        assert_eq!(arr[1].as_str(), Some("/test/codex-notify.sh"));
+    }
+
+    #[test]
+    fn test_plan_notify_exact_match_needs_no_write() {
+        let existing = CodexAdapter::notify_array_value(&[
+            "bash".to_string(),
+            "/test/codex-notify.sh".to_string(),
+        ]);
+        assert_eq!(
+            CodexAdapter::plan_notify(Some(&existing), &panoptes_script()),
+            NotifyPlan::AlreadyConfigured
+        );
+    }
+
+    #[test]
+    fn test_plan_notify_empty_array_is_unsupported() {
+        // An empty argv can neither run nor be chained; guessing would
+        // either drop the user's intent or invent one
+        let existing = toml::Value::Array(vec![]);
+        assert_eq!(
+            CodexAdapter::plan_notify(Some(&existing), &panoptes_script()),
+            NotifyPlan::Unsupported
+        );
+    }
+
+    #[test]
+    fn test_plan_notify_mixed_type_array_is_unsupported() {
+        let existing = toml::Value::Array(vec![
+            toml::Value::String("bash".to_string()),
+            toml::Value::Integer(42),
+        ]);
+        assert_eq!(
+            CodexAdapter::plan_notify(Some(&existing), &panoptes_script()),
+            NotifyPlan::Unsupported
+        );
+    }
+
+    #[test]
+    fn test_plan_notify_chains_a_foreign_hook() {
+        let existing =
+            CodexAdapter::notify_array_value(&["echo".to_string(), "legacy-hook".to_string()]);
+        let plan = CodexAdapter::plan_notify(Some(&existing), &panoptes_script());
+        let NotifyPlan::Set(value) = plan else {
+            panic!("expected Set, got {plan:?}");
+        };
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr[0].as_str(), Some("bash"));
+        assert_eq!(arr[1].as_str(), Some("-lc"));
+        let script = arr[2].as_str().unwrap();
+        assert!(script.contains("/test/codex-notify.sh"));
+        assert!(script.contains("'echo' 'legacy-hook'"));
+    }
+
+    #[test]
+    fn test_plan_notify_is_idempotent_over_its_own_chaining() {
+        // Planning again over the value a previous chain produced must not
+        // wrap it a second time - the exact "no rewrite, no backup" guarantee
+        let existing =
+            CodexAdapter::notify_array_value(&["echo".to_string(), "legacy-hook".to_string()]);
+        let NotifyPlan::Set(chained) =
+            CodexAdapter::plan_notify(Some(&existing), &panoptes_script())
+        else {
+            panic!("first plan should chain");
+        };
+
+        assert_eq!(
+            CodexAdapter::plan_notify(Some(&chained), &panoptes_script()),
+            NotifyPlan::AlreadyConfigured,
+            "a chained value must be recognised, not wrapped again"
+        );
+    }
+
+    #[test]
+    fn test_plan_notify_recognises_a_string_command_mentioning_the_script() {
+        // Codex accepts a shell command string as well as an argv array
+        let existing = toml::Value::String("/test/codex-notify.sh \"$@\"; my-own-hook".to_string());
+        assert_eq!(
+            CodexAdapter::plan_notify(Some(&existing), &panoptes_script()),
+            NotifyPlan::AlreadyConfigured
+        );
     }
 
     #[test]

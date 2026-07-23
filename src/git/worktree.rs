@@ -160,7 +160,9 @@ fn resolve_ref_to_commit<'repo>(
 /// # Arguments
 /// * `repo` - The git repository
 /// * `worktree_name` - Name of the worktree to remove
-/// * `force` - If true, remove even with local modifications
+/// * `force` - If true, also delete the working tree on disk, discarding any
+///   local modifications. If false, the worktree is only pruned from git's
+///   bookkeeping and the directory is left untouched.
 pub fn remove_worktree(repo: &Repository, worktree_name: &str, force: bool) -> Result<()> {
     // Find the worktree
     let worktree = repo
@@ -183,8 +185,9 @@ pub fn remove_worktree(repo: &Repository, worktree_name: &str, force: bool) -> R
         .prune(Some(&mut opts))
         .with_context(|| format!("Failed to prune worktree '{}'", worktree_name))?;
 
-    // Remove the directory if it still exists
-    if worktree_path.exists() {
+    // Only delete the directory when the caller asked for it. Without force,
+    // deleting here would silently destroy uncommitted local modifications.
+    if force && worktree_path.exists() {
         std::fs::remove_dir_all(&worktree_path)
             .with_context(|| format!("Failed to remove worktree directory: {:?}", worktree_path))?;
     }
@@ -316,6 +319,40 @@ mod tests {
         (temp_dir, repo)
     }
 
+    /// Add an empty commit on HEAD, returning its OID
+    fn add_commit(repo: &Repository, message: &str) -> git2::Oid {
+        let sig = repo.signature().unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])
+            .unwrap()
+    }
+
+    /// Create a "base" branch, then advance HEAD past it so tests can tell
+    /// whether a new branch was cut from the base ref or from HEAD.
+    ///
+    /// Returns the OID the base branch points at.
+    fn setup_diverged_base(repo: &Repository) -> git2::Oid {
+        let base_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let base_commit = repo.find_commit(base_oid).unwrap();
+        repo.branch("base", &base_commit, false).unwrap();
+
+        let head_oid = add_commit(repo, "Second commit");
+        assert_ne!(base_oid, head_oid, "HEAD must diverge from base");
+        base_oid
+    }
+
+    /// OID a local branch currently points at
+    fn branch_tip(repo: &Repository, name: &str) -> git2::Oid {
+        repo.find_branch(name, BranchType::Local)
+            .unwrap()
+            .into_reference()
+            .peel_to_commit()
+            .unwrap()
+            .id()
+    }
+
     #[test]
     fn test_list_worktrees_main_only() {
         let (temp_dir, repo) = create_test_repo();
@@ -364,6 +401,108 @@ mod tests {
     }
 
     #[test]
+    fn test_create_worktree_base_ref_local_branch_name() {
+        let (temp_dir, repo) = create_test_repo();
+        let base_oid = setup_diverged_base(&repo);
+        let worktree_dir = temp_dir.path().join("worktrees").join("from-local");
+
+        // Resolved as a local branch (first strategy)
+        create_worktree(&repo, "from-local", &worktree_dir, true, Some("base")).unwrap();
+
+        assert_eq!(branch_tip(&repo, "from-local"), base_oid);
+    }
+
+    #[test]
+    fn test_create_worktree_base_ref_remote_branch_name() {
+        let (temp_dir, repo) = create_test_repo();
+        let base_oid = setup_diverged_base(&repo);
+        // Simulate a remote-tracking branch: a plain ref under refs/remotes/
+        repo.reference("refs/remotes/origin/develop", base_oid, false, "test")
+            .unwrap();
+        let worktree_dir = temp_dir.path().join("worktrees").join("from-remote");
+
+        // Resolved as a remote branch (second strategy)
+        create_worktree(
+            &repo,
+            "from-remote",
+            &worktree_dir,
+            true,
+            Some("origin/develop"),
+        )
+        .unwrap();
+
+        assert_eq!(branch_tip(&repo, "from-remote"), base_oid);
+    }
+
+    #[test]
+    fn test_create_worktree_base_ref_fully_qualified() {
+        let (temp_dir, repo) = create_test_repo();
+        let base_oid = setup_diverged_base(&repo);
+        let worktree_dir = temp_dir.path().join("worktrees").join("from-ref");
+
+        // "refs/heads/base" is not a branch shorthand, so it falls through to
+        // the direct-reference strategy
+        create_worktree(
+            &repo,
+            "from-ref",
+            &worktree_dir,
+            true,
+            Some("refs/heads/base"),
+        )
+        .unwrap();
+
+        assert_eq!(branch_tip(&repo, "from-ref"), base_oid);
+    }
+
+    #[test]
+    fn test_create_worktree_base_ref_commit_sha() {
+        let (temp_dir, repo) = create_test_repo();
+        let base_oid = setup_diverged_base(&repo);
+        let worktree_dir = temp_dir.path().join("worktrees").join("from-sha");
+
+        // A raw SHA is not a branch or a reference; only the revspec strategy
+        // can resolve it
+        create_worktree(
+            &repo,
+            "from-sha",
+            &worktree_dir,
+            true,
+            Some(&base_oid.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(branch_tip(&repo, "from-sha"), base_oid);
+    }
+
+    #[test]
+    fn test_create_worktree_base_ref_unresolvable() {
+        let (temp_dir, repo) = create_test_repo();
+        setup_diverged_base(&repo);
+        let worktree_dir = temp_dir.path().join("worktrees").join("bad-base");
+
+        let err = create_worktree(&repo, "bad-base", &worktree_dir, true, Some("no-such-ref"))
+            .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Could not resolve 'no-such-ref'"),
+            "unexpected error: {msg}"
+        );
+        // Error lists every attempted strategy
+        for strategy in [
+            "local branch",
+            "remote branch",
+            "direct reference",
+            "revspec",
+        ] {
+            assert!(msg.contains(strategy), "missing '{strategy}' in: {msg}");
+        }
+        // No branch or worktree should have been created
+        assert!(repo.find_branch("bad-base", BranchType::Local).is_err());
+        assert!(!worktree_dir.exists());
+    }
+
+    #[test]
     fn test_create_worktree_nonexistent_branch_no_create() {
         let (temp_dir, repo) = create_test_repo();
         let worktree_dir = temp_dir.path().join("worktrees").join("nonexistent");
@@ -388,6 +527,23 @@ mod tests {
         // Verify it's gone
         let worktrees = list_worktrees(&repo).unwrap();
         assert_eq!(worktrees.len(), 1); // Only main remains
+    }
+
+    #[test]
+    fn test_remove_worktree_without_force_preserves_dirty_tree() {
+        let (temp_dir, repo) = create_test_repo();
+        let worktree_dir = temp_dir.path().join("worktrees").join("keep-my-work");
+
+        // Create a worktree and dirty it with an uncommitted local change
+        create_worktree(&repo, "keep-my-work", &worktree_dir, true, None).unwrap();
+        let precious = worktree_dir.join("uncommitted.txt");
+        std::fs::write(&precious, "unsaved work").unwrap();
+
+        // Without force, the tree on disk must survive
+        remove_worktree(&repo, "keep-my-work", false).unwrap();
+
+        assert!(worktree_dir.exists());
+        assert_eq!(std::fs::read_to_string(&precious).unwrap(), "unsaved work");
     }
 
     #[test]

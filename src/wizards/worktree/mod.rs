@@ -6,8 +6,9 @@ mod handlers;
 mod types;
 
 pub use handlers::{
-    handle_creating_worktree_key, handle_selecting_default_base_key, handle_worktree_confirm_key,
+    handle_selecting_default_base_key, handle_worktree_confirm_key,
     handle_worktree_select_base_key, handle_worktree_select_branch_key,
-    update_worktree_filtered_branches, worktree_select_first_selectable,
+    update_worktree_filtered_base_branches, update_worktree_filtered_branches,
+    worktree_select_first_selectable,
 };
 pub use types::{filter_branch_refs, BranchRef, BranchRefType, WorktreeCreationType};

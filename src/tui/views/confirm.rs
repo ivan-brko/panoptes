@@ -3,9 +3,42 @@
 //! Provides a consistent look and feel for all confirmation dialogs in the application.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tui::theme::theme;
+use crate::tui::widgets::dialog::{centered_rect, render_dialog, DialogSize, DialogSpec};
+
+/// The standard confirmation prompt: "Press y to confirm, n or Esc to cancel"
+///
+/// Shared by every confirmation dialog so the key styling (y green, n/Esc
+/// red) cannot drift between them.
+pub(crate) fn confirm_prompt_line() -> Line<'static> {
+    let t = theme();
+    Line::from(vec![
+        Span::styled("Press ", Style::default().fg(t.text)),
+        Span::styled(
+            "y",
+            Style::default()
+                .fg(t.confirm_key)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" to confirm, ", Style::default().fg(t.text)),
+        Span::styled(
+            "n",
+            Style::default()
+                .fg(t.cancel_key)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" or ", Style::default().fg(t.text)),
+        Span::styled(
+            "Esc",
+            Style::default()
+                .fg(t.cancel_key)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" to cancel", Style::default().fg(t.text)),
+    ])
+}
 
 /// Configuration for a confirmation dialog
 pub struct ConfirmDialogConfig<'a> {
@@ -19,6 +52,29 @@ pub struct ConfirmDialogConfig<'a> {
     pub warnings: Vec<String>,
     /// Note lines (displayed in muted gray)
     pub notes: Vec<String>,
+    /// Pre-styled lines rendered after warnings/notes, before the prompt
+    pub body_lines: Vec<Line<'a>>,
+    /// Pre-styled lines rendered after the prompt (e.g. toggles)
+    pub extra_lines: Vec<Line<'a>>,
+    /// When set, render as a centered overlay of this size (cleared
+    /// background) instead of filling the given area
+    pub overlay: Option<(DialogSize, DialogSize)>,
+}
+
+impl<'a> ConfirmDialogConfig<'a> {
+    /// A dialog with the standard header and prompt and nothing else
+    pub fn new(title: &'a str, item_label: &'a str, item_name: &'a str) -> Self {
+        Self {
+            title,
+            item_label,
+            item_name,
+            warnings: Vec::new(),
+            notes: Vec::new(),
+            body_lines: Vec::new(),
+            extra_lines: Vec::new(),
+            overlay: None,
+        }
+    }
 }
 
 /// Render a unified confirmation dialog
@@ -69,34 +125,23 @@ pub fn render_confirm_dialog(frame: &mut Frame, area: Rect, config: ConfirmDialo
         lines.push(Line::from(""));
     }
 
-    // Add some spacing before the prompt
-    if !config.warnings.is_empty() || !config.notes.is_empty() {
-        // Already have spacing from above
-    } else {
-        lines.push(Line::from(""));
-    }
+    // Pre-styled body content (before the prompt)
+    lines.extend(config.body_lines);
 
     // Confirmation prompt with styled keys
-    lines.push(Line::from(vec![
-        Span::styled("Press ", Style::default().fg(t.text)),
-        Span::styled(
-            "y",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" to confirm, ", Style::default().fg(t.text)),
-        Span::styled(
-            "n",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" or ", Style::default().fg(t.text)),
-        Span::styled(
-            "Esc",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" to cancel", Style::default().fg(t.text)),
-    ]));
+    lines.push(confirm_prompt_line());
+
+    // Pre-styled trailing content (after the prompt)
+    lines.extend(config.extra_lines);
+
+    let dialog_area = match config.overlay {
+        Some((width, height)) => {
+            let dialog_area = centered_rect(area, width, height);
+            frame.render_widget(Clear, dialog_area);
+            dialog_area
+        }
+        None => area,
+    };
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
         Block::default()
@@ -105,7 +150,7 @@ pub fn render_confirm_dialog(frame: &mut Frame, area: Rect, config: ConfirmDialo
             .title(config.title),
     );
 
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, dialog_area);
 }
 
 /// Render a quit confirmation dialog
@@ -115,18 +160,6 @@ pub fn render_confirm_dialog(frame: &mut Frame, area: Rect, config: ConfirmDialo
 pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
     let t = theme();
 
-    // Calculate centered dialog area (smaller than delete dialogs)
-    let dialog_width = 40_u16.min(area.width.saturating_sub(4));
-    let dialog_height = 7_u16.min(area.height.saturating_sub(2));
-
-    let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-    let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-
-    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
-
-    // Clear the background
-    frame.render_widget(ratatui::widgets::Clear, dialog_area);
-
     let lines = vec![
         Line::from(""),
         Line::from(vec![Span::styled(
@@ -134,36 +167,21 @@ pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
             Style::default().fg(t.text).add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Press ", Style::default().fg(t.text)),
-            Span::styled(
-                "y",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to confirm, ", Style::default().fg(t.text)),
-            Span::styled(
-                "n",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" or ", Style::default().fg(t.text)),
-            Span::styled(
-                "Esc",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to cancel", Style::default().fg(t.text)),
-        ]),
+        confirm_prompt_line(),
     ];
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.border_warning))
-            .title("Confirm Quit"),
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: "Confirm Quit",
+            border_color: t.border_warning,
+            alignment: Alignment::Center,
+            width: DialogSize::Fixed(40),
+            height: DialogSize::Fixed(7),
+        },
+        lines,
     );
-
-    frame.render_widget(paragraph, dialog_area);
 }
 
 /// Render a loading indicator overlay
@@ -173,18 +191,6 @@ pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
 pub fn render_loading_indicator(frame: &mut Frame, area: Rect, message: &str) {
     let t = theme();
 
-    // Calculate centered dialog area
-    let dialog_width = 50_u16.min(area.width.saturating_sub(4));
-    let dialog_height = 5_u16.min(area.height.saturating_sub(2));
-
-    let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-    let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-
-    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
-
-    // Clear the background
-    frame.render_widget(ratatui::widgets::Clear, dialog_area);
-
     let lines = vec![
         Line::from(""),
         Line::from(vec![Span::styled(
@@ -193,12 +199,132 @@ pub fn render_loading_indicator(frame: &mut Frame, area: Rect, message: &str) {
         )]),
     ];
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent))
-            .title("Please Wait"),
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: "Please Wait",
+            border_color: t.accent,
+            alignment: Alignment::Center,
+            width: DialogSize::Fixed(50),
+            height: DialogSize::Fixed(5),
+        },
+        lines,
     );
+}
 
-    frame.render_widget(paragraph, dialog_area);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::views::test_util::{contains_line, render_to_lines};
+
+    #[test]
+    fn test_confirm_dialog_shows_warnings_notes_and_prompt() {
+        let lines = render_to_lines(70, 20, |frame| {
+            render_confirm_dialog(
+                frame,
+                frame.size(),
+                ConfirmDialogConfig {
+                    warnings: vec!["2 active sessions will be terminated".to_string()],
+                    notes: vec!["Git worktrees on disk will NOT be deleted.".to_string()],
+                    ..ConfirmDialogConfig::new("Confirm Delete", "project", "panoptes")
+                },
+            )
+        });
+
+        assert!(contains_line(&lines, "Confirm Delete"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "Delete project: panoptes?"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "⚠  2 active sessions will be terminated"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Git worktrees on disk will NOT be deleted."),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Press y to confirm, n or Esc to cancel"),
+            "{:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_confirm_dialog_renders_body_and_extra_lines_around_prompt() {
+        let lines = render_to_lines(70, 20, |frame| {
+            render_confirm_dialog(
+                frame,
+                frame.size(),
+                ConfirmDialogConfig {
+                    body_lines: vec![Line::from("body detail"), Line::from("")],
+                    extra_lines: vec![Line::from(""), Line::from("[ ] a toggle")],
+                    ..ConfirmDialogConfig::new("Confirm Delete", "branch", "feature-x")
+                },
+            )
+        });
+
+        assert!(contains_line(&lines, "body detail"), "{:?}", lines);
+        assert!(contains_line(&lines, "[ ] a toggle"), "{:?}", lines);
+
+        // Body renders above the prompt, extras below it
+        let body_row = lines
+            .iter()
+            .position(|l| l.contains("body detail"))
+            .unwrap();
+        let prompt_row = lines
+            .iter()
+            .position(|l| l.contains("Press y to confirm"))
+            .unwrap();
+        let toggle_row = lines.iter().position(|l| l.contains("a toggle")).unwrap();
+        assert!(body_row < prompt_row && prompt_row < toggle_row);
+    }
+
+    #[test]
+    fn test_confirm_dialog_overlay_is_centered_and_cleared() {
+        let lines = render_to_lines(70, 21, |frame| {
+            render_confirm_dialog(
+                frame,
+                frame.size(),
+                ConfirmDialogConfig {
+                    overlay: Some((DialogSize::Fixed(50), DialogSize::Fixed(7))),
+                    ..ConfirmDialogConfig::new("Confirm Delete", "config", "Work")
+                },
+            )
+        });
+
+        assert!(contains_line(&lines, "Delete config: Work?"), "{:?}", lines);
+        // Overlay leaves the rows above the centered dialog empty
+        assert!(lines[0].is_empty(), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_quit_dialog_prompts_for_confirmation() {
+        let lines = render_to_lines(70, 20, |frame| {
+            render_quit_confirm_dialog(frame, frame.size())
+        });
+
+        assert!(contains_line(&lines, "Confirm Quit"), "{:?}", lines);
+        assert!(contains_line(&lines, "Quit Panoptes?"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "Press y to confirm, n or Esc to cancel"),
+            "{:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_loading_indicator_shows_message() {
+        let lines = render_to_lines(70, 20, |frame| {
+            render_loading_indicator(frame, frame.size(), "Creating worktree...")
+        });
+
+        assert!(contains_line(&lines, "Please Wait"), "{:?}", lines);
+        assert!(contains_line(&lines, "Creating worktree..."), "{:?}", lines);
+    }
 }

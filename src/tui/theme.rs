@@ -31,7 +31,6 @@ pub struct Theme {
     /// Primary accent color (headers, titles)
     pub accent: Color,
     /// Secondary accent color
-    pub accent_secondary: Color,
     /// Text color for normal content
     pub text: Color,
     /// Text color for muted/secondary content
@@ -70,6 +69,26 @@ pub struct Theme {
     pub border_focused: Color,
     /// Warning border color
     pub border_warning: Color,
+
+    // === Dialog Keys ===
+    /// Color for the confirming key in prompts (e.g. "y" / "Enter")
+    pub confirm_key: Color,
+    /// Color for the cancelling key in prompts (e.g. "n" / "Esc")
+    pub cancel_key: Color,
+    /// Color for default-item markers (e.g. "★" / "(default)")
+    pub default_marker: Color,
+
+    // === Log Levels ===
+    /// TRACE log level
+    pub log_trace: Color,
+    /// DEBUG log level
+    pub log_debug: Color,
+    /// INFO log level
+    pub log_info: Color,
+    /// WARN log level
+    pub log_warn: Color,
+    /// ERROR log level
+    pub log_error: Color,
 }
 
 impl Default for Theme {
@@ -97,7 +116,6 @@ impl Theme {
 
             // UI elements
             accent: Color::Cyan,
-            accent_secondary: Color::Blue,
             text: Color::White,
             text_muted: Color::DarkGray,
             selected: Color::White,
@@ -121,6 +139,30 @@ impl Theme {
             border: Color::White,
             border_focused: Color::Cyan,
             border_warning: Color::Yellow,
+
+            // Dialog keys
+            confirm_key: Color::Green,
+            cancel_key: Color::Red,
+            default_marker: Color::Yellow,
+
+            // Log levels
+            log_trace: Color::DarkGray,
+            log_debug: Color::Gray,
+            log_info: Color::Blue,
+            log_warn: Color::Yellow,
+            log_error: Color::Red,
+        }
+    }
+
+    /// Get the color for a log level
+    pub fn log_level_color(&self, level: crate::logging::LogLevel) -> Color {
+        use crate::logging::LogLevel;
+        match level {
+            LogLevel::Trace => self.log_trace,
+            LogLevel::Debug => self.log_debug,
+            LogLevel::Info => self.log_info,
+            LogLevel::Warn => self.log_warn,
+            LogLevel::Error => self.log_error,
         }
     }
 

@@ -12,7 +12,7 @@ async fn main() -> Result<()> {
     config::ensure_directories()?;
 
     // Create log buffer for real-time log viewing
-    let log_buffer = Arc::new(LogBuffer::new(10_000, 100));
+    let log_buffer = Arc::new(LogBuffer::new(10_000));
 
     // Initialize file logging BEFORE any tracing calls
     let (log_file_info, _guard) =

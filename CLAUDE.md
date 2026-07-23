@@ -41,11 +41,17 @@ PTY Output → Session buffer → TUI render
 - `app/` - Application orchestration, state, views, input modes
 - `agent/` - Agent adapters (Claude Code, Codex, Shell) with hook setup
 - `session/` - Session lifecycle, PTY management, terminal emulation
+- `session/state_machine.rs` - Pure agent-event state machine (hook event → state transition)
 - `hooks/` - HTTP server for agent callbacks
 - `transcript/` - Reads agent transcripts on disk (Codex state, usage for both)
 - `input/` - Input handling by mode (normal, session, dialogs)
+- `input/agent_configs.rs` - Shared Claude/Codex config input handlers (parameterized by `AgentKind`)
 - `tui/` - Terminal UI rendering with ratatui
+- `tui/views/agent_configs.rs` - Shared Claude/Codex config view rendering
+- `tui/widgets/dialog.rs` - Shared dialog widget (Yes/No buttons, clamped centering)
 - `project/` - Project/branch management, folder tree, and persistence
+- `persistence.rs` - Shared atomic-save / load-with-backup for all state files
+- `agent_profiles.rs` - Generic agent profile store (`ProfileStore<C>`)
 - `claude_config/` - Claude Code multi-account configuration
 - `codex_config/` - Codex CLI multi-account configuration (CODEX_HOME)
 - `config.rs` - Configuration (~/.panoptes/)

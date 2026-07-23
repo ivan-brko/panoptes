@@ -4,10 +4,10 @@
 //! Dismissible with `?` or `Esc`.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::View;
 use crate::tui::theme::theme;
+use crate::tui::widgets::dialog::{render_dialog, DialogSize, DialogSpec};
 
 /// Render the help overlay showing keyboard shortcuts for the current view
 pub fn render_help_overlay(frame: &mut Frame, area: Rect, current_view: &View) {
@@ -16,25 +16,27 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect, current_view: &View) {
     // Get shortcuts for current view
     let (title, content) = get_shortcuts_for_view(current_view);
 
-    // Calculate centered dialog (70% width max 70 chars, 60% height max 25 lines)
-    let width = (area.width * 70 / 100).clamp(40, 70);
-    let height = (area.height * 60 / 100).clamp(10, 25);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog_area = Rect::new(x, y, width, height);
-
-    // Clear background
-    frame.render_widget(Clear, dialog_area);
-
-    // Render content
-    let paragraph = Paragraph::new(content).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent))
-            .title(format!(" {} ", title)),
+    // Centered dialog (70% width max 70 chars, 60% height max 25 lines)
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: &format!(" {} ", title),
+            border_color: t.accent,
+            alignment: Alignment::Left,
+            width: DialogSize::Percent {
+                pct: 70,
+                min: 40,
+                max: 70,
+            },
+            height: DialogSize::Percent {
+                pct: 60,
+                min: 10,
+                max: 25,
+            },
+        },
+        content,
     );
-
-    frame.render_widget(paragraph, dialog_area);
 }
 
 /// Get the title and shortcuts content for a specific view
@@ -266,4 +268,32 @@ fn claude_configs_shortcuts() -> Vec<Line<'static>> {
         empty_line(),
         footer_hint(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::views::test_util::{contains_line, render_to_lines};
+
+    #[test]
+    fn test_overlay_renders_shortcuts_for_each_view() {
+        let views = [
+            (View::ProjectsOverview, "Keyboard Shortcuts - Projects"),
+            (View::SessionView, "Keyboard Shortcuts - Session"),
+            (View::LogViewer, "Keyboard Shortcuts - Logs"),
+            (View::ClaudeConfigs, "Keyboard Shortcuts - Claude Configs"),
+            (View::CodexConfigs, "Keyboard Shortcuts - Codex Configs"),
+        ];
+
+        for (view, title) in views {
+            let lines = render_to_lines(80, 30, |frame| {
+                render_help_overlay(frame, frame.size(), &view)
+            });
+
+            // Long lists clip at the dialog height, so assert on the title
+            // and a section header near the top rather than the footer
+            assert!(contains_line(&lines, title), "{:?}", lines);
+            assert!(contains_line(&lines, "Navigation"), "{:?}", lines);
+        }
+    }
 }

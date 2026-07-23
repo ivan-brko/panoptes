@@ -4,7 +4,7 @@
 //! through a channel to the main application.
 
 use anyhow::Result;
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, routing::post, Router};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -210,10 +210,23 @@ pub async fn start(port: u16, sender: HookEventSender) -> Result<ServerHandle> {
 /// POST /hook handler
 ///
 /// Receives hook events from Claude Code and forwards them to the event channel.
-async fn hook_handler(
-    State(state): State<HookHandlerState>,
-    Json(event): Json<HookEvent>,
-) -> StatusCode {
+///
+/// Takes the raw body rather than an extractor-parsed `Json<HookEvent>` so a
+/// malformed body is logged before the 400: an event silently rejected by the
+/// extractor used to vanish without a trace.
+async fn hook_handler(State(state): State<HookHandlerState>, body: String) -> StatusCode {
+    let event: HookEvent = match serde_json::from_str(&body) {
+        Ok(event) => event,
+        Err(e) => {
+            warn!(
+                error = %e,
+                body = %body.chars().take(200).collect::<String>(),
+                "Rejecting malformed hook event body"
+            );
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
     debug!(
         session_id = %event.session_id,
         event = %event.event,
@@ -327,7 +340,7 @@ mod tests {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        // Axum returns 400 Bad Request for JSON syntax errors
+        // The handler rejects JSON syntax errors with 400 Bad Request
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -349,7 +362,38 @@ mod tests {
             .unwrap();
 
         let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_hook_handler_channel_full_returns_ok_and_counts_drop() {
+        // Buffer of one, already full: the next event has nowhere to go
+        let (sender, _receiver) = create_channel(1);
+        sender.try_send(create_test_event()).unwrap();
+
+        let dropped = Arc::new(DroppedEventsCounter::new());
+        let state = HookHandlerState {
+            sender,
+            dropped_events: Arc::clone(&dropped),
+        };
+
+        let app = Router::new()
+            .route("/hook", post(hook_handler))
+            .with_state(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/hook")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"session_id":"overflow","event":"Stop","timestamp":1}"#,
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        // Claude Code must not be blocked by a full channel
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(dropped.get(), 1);
     }
 
     #[tokio::test]

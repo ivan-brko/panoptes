@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, ClaudeSettingsMigrateState, InputMode, View};
 use crate::claude_json::ClaudeJsonStore;
+use crate::input::agent_configs::{open_config_selector, AgentKind};
 
 /// Handle key in project detail view (normal mode)
 pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -30,19 +31,10 @@ pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.state.input_mode = InputMode::ConfirmingQuit;
         }
         KeyCode::Down => {
-            if branch_count > 0 {
-                app.state.selected_branch_index =
-                    (app.state.selected_branch_index + 1) % branch_count;
-            }
+            app.state.select_next(branch_count);
         }
         KeyCode::Up => {
-            if branch_count > 0 {
-                app.state.selected_branch_index = app
-                    .state
-                    .selected_branch_index
-                    .checked_sub(1)
-                    .unwrap_or(branch_count - 1);
-            }
+            app.state.select_prev(branch_count);
         }
         KeyCode::Enter => {
             // Open selected branch
@@ -53,7 +45,10 @@ pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Char('n') => {
             // Start creating a new worktree (new wizard flow)
-            app.start_worktree_wizard(project_id);
+            if let Err(e) = app.start_worktree_wizard(project_id) {
+                tracing::error!("Failed to start worktree wizard: {:#}", e);
+                app.state.error_message = Some(format!("{:#}", e));
+            }
         }
         KeyCode::Char('b') => {
             // Set default base branch
@@ -112,86 +107,40 @@ pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Char('c') => {
             // Set default Claude config for this project
-            let config_count = app.claude_config_store.count();
-            if config_count > 0 {
-                app.state.available_claude_configs = app
-                    .claude_config_store
-                    .configs_sorted()
-                    .iter()
-                    .cloned()
-                    .cloned()
-                    .collect();
-
-                // Pre-select current project default or global default
-                let project_default = app
-                    .project_store
-                    .get_project(project_id)
-                    .and_then(|p| p.default_claude_config);
-                let global_default = app.claude_config_store.get_default_id();
-                let preferred_id = project_default.or(global_default);
-
-                app.state.claude_config_selector_index = app
-                    .state
-                    .available_claude_configs
-                    .iter()
-                    .position(|c| Some(c.id) == preferred_id)
-                    .unwrap_or(0);
-
-                app.state.setting_project_default_config = Some(project_id);
-                app.state.show_claude_config_selector = true;
-                app.state.input_mode = InputMode::SelectingClaudeConfig;
-            } else {
-                app.state
-                    .header_notifications
-                    .push("No Claude configs defined. Press 'c' from homepage.");
-            }
+            start_project_default_config_selection(app, project_id, AgentKind::Claude);
         }
         KeyCode::Char('x') => {
             // Set default Codex config for this project
-            let config_count = app.codex_config_store.count();
-            if config_count > 0 {
-                app.state.available_codex_configs = app
-                    .codex_config_store
-                    .configs_sorted()
-                    .iter()
-                    .cloned()
-                    .cloned()
-                    .collect();
-
-                // Pre-select current project default or global default
-                let project_default = app
-                    .project_store
-                    .get_project(project_id)
-                    .and_then(|p| p.default_codex_config);
-                let global_default = app.codex_config_store.get_default_id();
-                let preferred_id = project_default.or(global_default);
-
-                app.state.codex_config_selector_index = app
-                    .state
-                    .available_codex_configs
-                    .iter()
-                    .position(|c| Some(c.id) == preferred_id)
-                    .unwrap_or(0);
-
-                app.state.setting_project_default_config = Some(project_id);
-                app.state.show_codex_config_selector = true;
-                app.state.input_mode = InputMode::SelectingCodexConfig;
-            } else {
-                app.state
-                    .header_notifications
-                    .push("No Codex configs defined. Press 'x' from homepage.");
-            }
+            start_project_default_config_selection(app, project_id, AgentKind::Codex);
         }
         KeyCode::Char(c) if c.is_ascii_digit() => {
             if let Some(num) = c.to_digit(10) {
-                if num > 0 && (num as usize) <= branch_count {
-                    app.state.selected_branch_index = (num as usize) - 1;
-                }
+                app.state.select_by_number(num as usize, branch_count);
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Open the config selector to pick a project's default Claude/Codex config
+///
+/// Shows a hint instead when no configs of that kind exist yet.
+fn start_project_default_config_selection(
+    app: &mut App,
+    project_id: crate::project::ProjectId,
+    kind: AgentKind,
+) {
+    let config_count = match kind {
+        AgentKind::Claude => app.claude_config_store.count(),
+        AgentKind::Codex => app.codex_config_store.count(),
+    };
+    if config_count > 0 {
+        app.state.setting_project_default_config = Some(project_id);
+        open_config_selector(app, kind, Some(project_id));
+    } else {
+        app.state.header_notifications.push(kind.no_configs_hint());
+    }
 }
 
 /// Check if Claude settings should be migrated before worktree deletion

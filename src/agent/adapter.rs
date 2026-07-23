@@ -34,13 +34,6 @@ pub struct SpawnConfig {
     pub resume: Option<String>,
 }
 
-impl SpawnConfig {
-    /// Whether this spawn is resuming an existing agent conversation
-    pub fn is_resume(&self) -> bool {
-        self.resume.is_some()
-    }
-}
-
 /// Result of spawning an agent
 pub struct SpawnResult {
     /// PTY handle for I/O with the agent
@@ -82,8 +75,47 @@ pub trait AgentAdapter: Send + Sync {
     /// A list of paths that were created and should be cleaned up when the session ends.
     fn setup_hooks(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<Vec<PathBuf>>;
 
+    /// Build the complete argument list for a spawn
+    ///
+    /// The one genuinely agent-specific part of spawning: how a resume, an
+    /// initial prompt and the default arguments combine into a command line.
+    fn build_args(&self, spawn_config: &SpawnConfig) -> Vec<String>;
+
+    /// The agent-native conversation ID this spawn will use, if known upfront
+    ///
+    /// `Some` only when the agent lets Panoptes dictate the ID (Claude, via
+    /// `--session-id`). Agents that mint their own (Codex) return `None` and
+    /// have it discovered later.
+    fn agent_session_id(&self, spawn_config: &SpawnConfig) -> Option<String>;
+
     /// Spawn the agent in a PTY
-    fn spawn(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<SpawnResult>;
+    ///
+    /// The lifecycle is the same for every agent — set up hooks, build the
+    /// environment and arguments, hand them to the PTY — so it lives here
+    /// once; adapters supply only the varying parts above.
+    fn spawn(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<SpawnResult> {
+        // Setup hooks first
+        let _cleanup_paths = self.setup_hooks(config, spawn_config)?;
+
+        let env = self.generate_env(config, spawn_config);
+        let args = self.build_args(spawn_config);
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        // Spawn the process with correct terminal dimensions
+        let pty = PtyHandle::spawn(
+            self.command(),
+            &args_refs,
+            &spawn_config.working_dir,
+            env,
+            spawn_config.rows,
+            spawn_config.cols,
+        )?;
+
+        Ok(SpawnResult {
+            pty,
+            agent_session_id: self.agent_session_id(spawn_config),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +156,14 @@ mod tests {
             _spawn_config: &SpawnConfig,
         ) -> Result<Vec<PathBuf>> {
             Ok(vec![])
+        }
+
+        fn build_args(&self, _spawn_config: &SpawnConfig) -> Vec<String> {
+            self.default_args()
+        }
+
+        fn agent_session_id(&self, _spawn_config: &SpawnConfig) -> Option<String> {
+            None
         }
 
         fn spawn(&self, _config: &Config, _spawn_config: &SpawnConfig) -> Result<SpawnResult> {

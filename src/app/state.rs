@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::claude_config::{ClaudeConfig, ClaudeConfigId};
+use crate::claude_config::ClaudeConfig;
 use crate::project::{BranchId, ProjectId};
 use crate::session::{SessionId, SessionManager};
 use crate::tui::HeaderNotificationManager;
@@ -56,6 +56,89 @@ pub struct ClaudeSettingsMigrateState {
 use super::input_mode::InputMode;
 use super::view::View;
 
+/// Advance a wrap-around list selection, tolerating stale indices
+///
+/// The index is clamped into `0..count` before stepping, so a selection left
+/// pointing past the end of a list that shrank wraps predictably instead of
+/// jumping. Returns 0 when the list is empty.
+pub fn cycle_next(index: usize, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    (index.min(count - 1) + 1) % count
+}
+
+/// Step a wrap-around list selection backwards, tolerating stale indices
+///
+/// See [`cycle_next`] for the stale-index handling. Returns 0 when the list
+/// is empty.
+pub fn cycle_prev(index: usize, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    index.min(count - 1).checked_sub(1).unwrap_or(count - 1)
+}
+
+/// Draft state for an agent config being created (name step, then path step)
+///
+/// Claude and Codex configs are created through the same two-step dialog and
+/// never at the same time, so one draft serves both flows; the current
+/// [`InputMode`] carries which agent it is for.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigDraft {
+    /// Config name being typed (step 1)
+    pub name: String,
+    /// Config directory path being typed (step 2; empty = agent default dir)
+    pub path: String,
+}
+
+impl ConfigDraft {
+    /// Clear the draft (config creation cancelled or completed)
+    pub fn reset(&mut self) {
+        self.name.clear();
+        self.path.clear();
+    }
+}
+
+/// Draft state for a session being created
+///
+/// Filled in by the view that starts session creation (name typed by the
+/// user, project/branch/working-dir context from the selected branch), then
+/// consumed by the create flow via [`SessionDraft::take`].
+#[derive(Debug, Clone, Default)]
+pub struct SessionDraft {
+    /// Session name being typed (empty = auto-generate one)
+    pub name: String,
+    /// Project the session belongs to (None = unassociated)
+    pub project_id: Option<ProjectId>,
+    /// Branch the session belongs to (None = unassociated)
+    pub branch_id: Option<BranchId>,
+    /// Directory the session starts in (None = current directory)
+    pub working_dir: Option<PathBuf>,
+}
+
+impl SessionDraft {
+    /// Start a draft for a session under the given project/branch
+    pub fn for_branch(project_id: ProjectId, branch_id: BranchId, working_dir: PathBuf) -> Self {
+        Self {
+            name: String::new(),
+            project_id: Some(project_id),
+            branch_id: Some(branch_id),
+            working_dir: Some(working_dir),
+        }
+    }
+
+    /// Clear the draft (session creation cancelled)
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Consume the draft, leaving an empty one behind
+    pub fn take(&mut self) -> Self {
+        std::mem::take(self)
+    }
+}
+
 /// What a pending folder move applies to
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FolderMoveTarget {
@@ -98,6 +181,9 @@ pub struct WorktreeWizardState {
     pub base_branch: Option<BranchRef>,
     /// Search text in WorktreeSelectBase step
     pub base_search_text: String,
+    /// Base branches matching `base_search_text` (mirrors `filtered_branches`
+    /// for step 1); kept in step so handlers and render share one filter pass
+    pub filtered_base_branches: Vec<BranchRef>,
     /// Selected index in base branch list (step 2)
     pub base_list_index: usize,
     /// Type of worktree creation being performed
@@ -156,14 +242,8 @@ pub struct AppState {
     pub active_session: Option<SessionId>,
     /// Context for returning from session view (which view to go back to)
     pub session_return_view: Option<View>,
-    /// Buffer for new session name input
-    pub new_session_name: String,
-    /// Context: project ID for session being created (None = unassociated)
-    pub creating_session_project_id: Option<ProjectId>,
-    /// Context: branch ID for session being created (None = unassociated)
-    pub creating_session_branch_id: Option<BranchId>,
-    /// Context: working directory for session being created
-    pub creating_session_working_dir: Option<PathBuf>,
+    /// Draft for the session being created (name plus project/branch context)
+    pub session_draft: SessionDraft,
     /// Buffer for new project path input
     pub new_project_path: String,
     /// Path completions for autocomplete
@@ -182,8 +262,6 @@ pub struct AppState {
     pub pending_default_branch: String,
     /// Buffer for new branch name input (worktree creation)
     pub new_branch_name: String,
-    /// Selected index in branch selector (0 = "Create new")
-    pub branch_selector_index: usize,
     /// Available branch refs (local and remote) for worktree creation
     pub available_branch_refs: Vec<BranchRef>,
     /// Filtered branch refs matching search query
@@ -252,25 +330,21 @@ pub struct AppState {
     /// Header notification manager for transient header messages
     pub header_notifications: HeaderNotificationManager,
 
+    // --- Agent config state (shared between Claude and Codex flows) ---
+    /// Draft for the config being created (name + path steps, either agent)
+    pub config_draft: ConfigDraft,
+    /// Config pending deletion; the confirming [`InputMode`] says which agent
+    pub pending_delete_agent_config: Option<uuid::Uuid>,
+    /// Selected index in the config selector (either agent)
+    pub config_selector_index: usize,
+    /// Project ID for setting project default config
+    pub setting_project_default_config: Option<ProjectId>,
+
     // --- Claude config state ---
     /// Selected index in Claude configs view
     pub claude_configs_selected_index: usize,
-    /// Claude config pending deletion (for confirmation dialog)
-    pub pending_delete_claude_config: Option<ClaudeConfigId>,
-    /// Buffer for new config name input
-    pub new_claude_config_name: String,
-    /// Buffer for new config path input
-    pub new_claude_config_path: String,
-    /// Claude config being selected for session creation
-    pub creating_session_claude_config: Option<ClaudeConfigId>,
     /// Available Claude configs for selection during session creation
     pub available_claude_configs: Vec<ClaudeConfig>,
-    /// Selected index in Claude config selector
-    pub claude_config_selector_index: usize,
-    /// Whether Claude config selector is showing (overlay during session creation)
-    pub show_claude_config_selector: bool,
-    /// Project ID for setting project default config
-    pub setting_project_default_config: Option<ProjectId>,
 
     // --- Claude settings dialogs ---
     /// Pending Claude settings copy (after worktree creation)
@@ -281,20 +355,8 @@ pub struct AppState {
     // --- Codex config state ---
     /// Selected index in Codex configs view
     pub codex_configs_selected_index: usize,
-    /// Codex config pending deletion (for confirmation dialog)
-    pub pending_delete_codex_config: Option<crate::codex_config::CodexConfigId>,
-    /// Buffer for new Codex config name input
-    pub new_codex_config_name: String,
-    /// Buffer for new Codex config path input
-    pub new_codex_config_path: String,
-    /// Codex config being selected for session creation
-    pub creating_session_codex_config: Option<crate::codex_config::CodexConfigId>,
     /// Available Codex configs for selection during session creation
     pub available_codex_configs: Vec<crate::codex_config::CodexConfig>,
-    /// Selected index in Codex config selector
-    pub codex_config_selector_index: usize,
-    /// Whether Codex config selector is showing (overlay during session creation)
-    pub show_codex_config_selector: bool,
     /// Agent type selector index (0 = Claude Code, 1 = Codex)
     pub agent_type_selector_index: usize,
 
@@ -346,34 +408,16 @@ impl AppState {
         }
     }
 
-    /// Select the next item in the current view
+    /// Select the next item in the current view (stale-safe, wraps around)
     pub fn select_next(&mut self, item_count: usize) {
-        if item_count > 0 {
-            // Clamp current index to valid range first to handle stale indices
-            let current = self
-                .current_selected_index()
-                .min(item_count.saturating_sub(1));
-            let next = (current + 1) % item_count;
-            self.set_current_selected_index(next);
-        } else {
-            // Reset index when collection is empty
-            self.set_current_selected_index(0);
-        }
+        let next = cycle_next(self.current_selected_index(), item_count);
+        self.set_current_selected_index(next);
     }
 
-    /// Select the previous item in the current view
+    /// Select the previous item in the current view (stale-safe, wraps around)
     pub fn select_prev(&mut self, item_count: usize) {
-        if item_count > 0 {
-            // Clamp current index to valid range first to handle stale indices
-            let current = self
-                .current_selected_index()
-                .min(item_count.saturating_sub(1));
-            let prev = current.checked_sub(1).unwrap_or(item_count - 1);
-            self.set_current_selected_index(prev);
-        } else {
-            // Reset index when collection is empty
-            self.set_current_selected_index(0);
-        }
+        let prev = cycle_prev(self.current_selected_index(), item_count);
+        self.set_current_selected_index(prev);
     }
 
     /// Select by number (1-indexed) in the current view
@@ -474,6 +518,63 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Cycle helper tests
+    #[test]
+    fn test_cycle_next_wraps() {
+        assert_eq!(cycle_next(0, 3), 1);
+        assert_eq!(cycle_next(1, 3), 2);
+        assert_eq!(cycle_next(2, 3), 0);
+    }
+
+    #[test]
+    fn test_cycle_prev_wraps() {
+        assert_eq!(cycle_prev(2, 3), 1);
+        assert_eq!(cycle_prev(1, 3), 0);
+        assert_eq!(cycle_prev(0, 3), 2);
+    }
+
+    #[test]
+    fn test_cycle_empty_list() {
+        assert_eq!(cycle_next(5, 0), 0);
+        assert_eq!(cycle_prev(5, 0), 0);
+    }
+
+    #[test]
+    fn test_cycle_stale_index_is_clamped_first() {
+        // Index 10 in a 3-item list: clamp to 2, then step
+        assert_eq!(cycle_next(10, 3), 0);
+        assert_eq!(cycle_prev(10, 3), 1);
+        // Single-item list always lands on 0
+        assert_eq!(cycle_next(7, 1), 0);
+        assert_eq!(cycle_prev(7, 1), 0);
+    }
+
+    // SessionDraft tests
+    #[test]
+    fn test_session_draft_reset_and_take() {
+        let mut draft = SessionDraft::for_branch(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            PathBuf::from("/tmp"),
+        );
+        draft.name = "my session".to_string();
+
+        let taken = draft.take();
+        assert_eq!(taken.name, "my session");
+        assert!(taken.project_id.is_some());
+        assert!(draft.name.is_empty());
+        assert!(draft.project_id.is_none());
+
+        let mut draft2 = SessionDraft::for_branch(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            PathBuf::from("/tmp"),
+        );
+        draft2.reset();
+        assert!(draft2.working_dir.is_none());
+        assert!(draft2.branch_id.is_none());
+    }
 
     // HomepageFocus tests
     #[test]
@@ -663,6 +764,30 @@ mod tests {
         assert_eq!(state.input_mode, InputMode::Session);
         assert_eq!(state.session_return_view, Some(View::ProjectsOverview));
         assert_eq!(state.session_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_return_from_session_falls_back_to_stored_return_view() {
+        // Backed by a temp store so the test never touches the real
+        // ~/.panoptes/sessions.json.
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions = SessionManager::with_store(
+            crate::config::Config::default(),
+            crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        state.navigate_to_branch(project_id, branch_id);
+        state.navigate_to_session(uuid::Uuid::new_v4());
+
+        // Session not in the manager: falls back to the stored return view
+        state.return_from_session(&sessions);
+        assert_eq!(state.view, View::BranchDetail(project_id, branch_id));
+        assert!(state.active_session.is_none());
+        assert!(state.session_return_view.is_none());
     }
 
     #[test]

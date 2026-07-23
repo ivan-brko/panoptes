@@ -18,7 +18,8 @@
 
 use super::{SessionId, SessionInfo};
 use crate::config::config_dir;
-use anyhow::{Context, Result};
+use crate::persistence::{self, LoadOutcome};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,29 +28,6 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoreData {
     sessions: Vec<SessionInfo>,
-}
-
-/// Backup a corrupted file by renaming it with a timestamped extension
-///
-/// Returns the backup path on success
-fn backup_corrupted_file(path: &Path) -> Option<PathBuf> {
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let backup_path = path.with_extension(format!("json.corrupt.{}", timestamp));
-    if let Err(e) = std::fs::rename(path, &backup_path) {
-        tracing::warn!(
-            "Failed to backup corrupted file {} to {}: {}",
-            path.display(),
-            backup_path.display(),
-            e
-        );
-        None
-    } else {
-        tracing::info!(
-            "Corrupted sessions file backed up to {}",
-            backup_path.display()
-        );
-        Some(backup_path)
-    }
 }
 
 /// Store for persisting session metadata
@@ -121,11 +99,6 @@ impl SessionStore {
         self.sessions.is_empty()
     }
 
-    /// Load store from disk
-    pub fn load() -> Result<Self> {
-        Self::load_from(&sessions_file_path())
-    }
-
     /// Load store from disk, returning a warning message if data was corrupted
     ///
     /// A corrupted session store must never prevent startup - the worst case is
@@ -137,93 +110,21 @@ impl SessionStore {
 
     /// Load store from a specific path, returning a warning message if data was corrupted
     pub fn load_from_with_status(path: &Path) -> (Self, Option<String>) {
-        if !path.exists() {
-            return (Self::with_path(path.to_path_buf()), None);
+        match persistence::load_json::<StoreData>(path, "sessions") {
+            LoadOutcome::Absent => (Self::with_path(path.to_path_buf()), None),
+            LoadOutcome::Loaded(data) => (Self::from_data(data, path), None),
+            LoadOutcome::Corrupted { fallback_warning } => {
+                (Self::with_path(path.to_path_buf()), Some(fallback_warning))
+            }
         }
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to read sessions file: {}", e);
-                if let Some(backup_path) = backup_corrupted_file(path) {
-                    let warning = format!(
-                        "Sessions file was unreadable. Backup saved to {}. Starting fresh.",
-                        backup_path.display()
-                    );
-                    return (Self::with_path(path.to_path_buf()), Some(warning));
-                }
-                let warning = format!("Sessions file was unreadable ({}). Starting fresh.", e);
-                return (Self::with_path(path.to_path_buf()), Some(warning));
-            }
-        };
-
-        let data: StoreData = match serde_json::from_str(&content) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("Sessions file is corrupted: {}", e);
-                if let Some(backup_path) = backup_corrupted_file(path) {
-                    let warning = format!(
-                        "Sessions file was corrupted. Backup saved to {}. Starting fresh.",
-                        backup_path.display()
-                    );
-                    return (Self::with_path(path.to_path_buf()), Some(warning));
-                }
-                let warning = format!("Sessions file was corrupted ({}). Starting fresh.", e);
-                return (Self::with_path(path.to_path_buf()), Some(warning));
-            }
-        };
-
-        let sessions = data.sessions.into_iter().map(|s| (s.id, s)).collect();
-
-        (
-            Self {
-                sessions,
-                store_path: path.to_path_buf(),
-            },
-            None,
-        )
     }
 
-    /// Load store from a specific path
-    ///
-    /// If the file is corrupted, this will create a backup and return an error.
-    pub fn load_from(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::with_path(path.to_path_buf()));
-        }
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to read sessions file: {}", e);
-                backup_corrupted_file(path);
-                return Err(anyhow::anyhow!(
-                    "Could not read sessions file ({}). Starting with no recoverable sessions.",
-                    e
-                ));
-            }
-        };
-
-        let data: StoreData = match serde_json::from_str(&content) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("Sessions file is corrupted: {}", e);
-                backup_corrupted_file(path);
-                return Err(anyhow::anyhow!(
-                    "Sessions file is corrupted and could not be parsed ({}). \
-                     A backup has been created. \
-                     Starting with no recoverable sessions.",
-                    e
-                ));
-            }
-        };
-
-        let sessions = data.sessions.into_iter().map(|s| (s.id, s)).collect();
-
-        Ok(Self {
-            sessions,
+    /// Build a store from parsed data
+    fn from_data(data: StoreData, path: &Path) -> Self {
+        Self {
+            sessions: data.sessions.into_iter().map(|s| (s.id, s)).collect(),
             store_path: path.to_path_buf(),
-        })
+        }
     }
 
     /// Save store to disk
@@ -231,67 +132,16 @@ impl SessionStore {
         self.save_to(&self.store_path)
     }
 
-    /// Save store to a specific path
+    /// Save store to a specific path (atomically, via a sibling temp file)
     ///
-    /// Writes to a temporary file and renames it into place. Unlike the project
-    /// store, this file is written while sessions are running, so a crash
-    /// part-way through a write is a realistic scenario - and truncating the
-    /// index is exactly the failure this module exists to prevent.
+    /// This file is written while sessions are running, so a crash part-way
+    /// through a write is a realistic scenario - and truncating the index is
+    /// exactly the failure this module exists to prevent.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        use crate::config::{categorize_io_error, DiskErrorKind};
-
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                let kind = categorize_io_error(&e);
-                match kind {
-                    DiskErrorKind::PermissionDenied => {
-                        anyhow::bail!(
-                            "Permission denied creating directory {:?}. Check file permissions.",
-                            parent
-                        );
-                    }
-                    DiskErrorKind::DiskFull => {
-                        anyhow::bail!("Disk full - cannot create directory {:?}", parent);
-                    }
-                    _ => {
-                        return Err(e).context("Failed to create directory for sessions file");
-                    }
-                }
-            }
-        }
-
         let data = StoreData {
             sessions: self.sessions.values().cloned().collect(),
         };
-
-        let content =
-            serde_json::to_string_pretty(&data).context("Failed to serialize sessions")?;
-
-        let tmp_path = path.with_extension("json.tmp");
-        if let Err(e) = std::fs::write(&tmp_path, &content) {
-            let kind = categorize_io_error(&e);
-            match kind {
-                DiskErrorKind::DiskFull => {
-                    anyhow::bail!(
-                        "Disk full - free space needed to save sessions. Recoverable sessions may be lost."
-                    );
-                }
-                DiskErrorKind::PermissionDenied => {
-                    anyhow::bail!(
-                        "Permission denied writing to {:?}. Check file permissions.",
-                        tmp_path
-                    );
-                }
-                _ => {
-                    return Err(e).context("Failed to write sessions file");
-                }
-            }
-        }
-
-        std::fs::rename(&tmp_path, path).context("Failed to commit sessions file")?;
-
-        Ok(())
+        persistence::save_json_atomic(path, &data, "sessions")
     }
 }
 
@@ -314,6 +164,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let path = dir.path().join("sessions.json");
         (SessionStore::with_path(path), dir)
+    }
+
+    /// Reload a store from disk, asserting the file was not corrupted
+    fn load(path: &Path) -> SessionStore {
+        let (store, warning) = SessionStore::load_from_with_status(path);
+        assert!(
+            warning.is_none(),
+            "store unexpectedly corrupted: {warning:?}"
+        );
+        store
     }
 
     fn sample_session(name: &str) -> SessionInfo {
@@ -382,7 +242,7 @@ mod tests {
         store.upsert(info);
         store.save().unwrap();
 
-        let loaded = SessionStore::load_from(&path).unwrap();
+        let loaded = load(&path);
         let restored = loaded.get(id).expect("session should survive roundtrip");
         assert_eq!(restored.name, "resumable");
         assert_eq!(
@@ -396,7 +256,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sessions.json");
 
-        let store = SessionStore::load_from(&path).unwrap();
+        let store = load(&path);
         assert!(store.is_empty());
 
         let (store, warning) = SessionStore::load_from_with_status(&path);
@@ -455,7 +315,7 @@ mod tests {
         store.upsert(sample_session("second"));
         store.save().unwrap();
 
-        let loaded = SessionStore::load_from(&path).unwrap();
+        let loaded = load(&path);
         assert_eq!(loaded.len(), 1);
         assert!(loaded.get(first_id).is_none());
     }

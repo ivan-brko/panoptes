@@ -149,10 +149,15 @@ If you're in Normal mode (viewing but not interacting), press `Enter` to enter s
 
 Shell sessions show **Running** (command executing) or **Ready** (waiting for input).
 
-### What do the green/yellow attention dots mean?
+### What do the coloured attention dots mean?
 
-- **Green dot (●)**: Session just started needing your attention
-- **Yellow dot (●)**: Session has been waiting longer than the idle threshold (default 5 minutes)
+The colour says *why* the session wants you:
+
+- **Green dot (●)**: The turn finished — the agent is waiting for your next prompt
+- **Yellow dot (●)**: Blocked on you (a permission dialog) or a tool that stopped reporting
+- **Red dot (●)**: The agent process died
+
+A dot always means something happened. Opening the session clears it, and it does not come back on its own.
 
 ### How do I jump to the next session that needs my input?
 
@@ -221,8 +226,9 @@ exited_retention_secs = 60  # 1 minute instead of default 5
 
 ### How do I change the theme?
 
-You cannot yet. Only the dark theme is implemented. `theme_preset` is still
-accepted in the config file so older configs keep loading, but it has no effect.
+You cannot yet. Only the dark theme is implemented. The old `theme_preset`
+config key has been removed; like any unrecognised key, it is ignored if left
+in the file.
 
 ### Do I need to restart Panoptes after config changes?
 

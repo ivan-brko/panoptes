@@ -1,295 +1,54 @@
 //! Claude configuration persistence
 //!
-//! Handles saving and loading Claude configurations to/from disk.
+//! Handles saving and loading Claude configurations to/from disk. The
+//! mechanism lives in [`crate::agent_profiles::ProfileStore`]; this module
+//! binds it to [`ClaudeConfig`] and keeps the Claude-flavoured method names.
 
-use super::{ClaudeConfig, ClaudeConfigId};
-use crate::config::config_dir;
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use super::ClaudeConfig;
+use crate::agent_profiles::{AgentProfile, ProfileStore};
+use std::path::Path;
+use uuid::Uuid;
 
-/// Serializable format for the configuration store
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct StoreData {
-    configs: Vec<ClaudeConfig>,
-    #[serde(default)]
-    default_config_id: Option<ClaudeConfigId>,
-}
+impl AgentProfile for ClaudeConfig {
+    const STORE_FILENAME: &'static str = "claude_configs.json";
+    const LABEL: &'static str = "claude configs";
 
-/// Backup a corrupted file by renaming it with a .backup extension
-fn backup_corrupted_file(path: &Path) {
-    let backup_path = path.with_extension("json.backup");
-    if let Err(e) = std::fs::rename(path, &backup_path) {
-        tracing::warn!(
-            "Failed to backup corrupted file {} to {}: {}",
-            path.display(),
-            backup_path.display(),
-            e
-        );
-    } else {
-        tracing::info!(
-            "Corrupted claude configs file backed up to {}",
-            backup_path.display()
-        );
+    fn id(&self) -> Uuid {
+        self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn home_dir(&self) -> Option<&Path> {
+        self.config_dir.as_deref()
+    }
+
+    fn home_dir_display(&self) -> String {
+        self.config_dir_display()
+    }
+
+    fn new_profile(name: String, home_dir: Option<std::path::PathBuf>) -> Self {
+        Self::new(name, home_dir)
     }
 }
 
 /// Store for persisting Claude configurations
-#[derive(Debug)]
-pub struct ClaudeConfigStore {
-    /// All configurations indexed by ID
-    configs: HashMap<ClaudeConfigId, ClaudeConfig>,
-    /// ID of the default configuration
-    default_config_id: Option<ClaudeConfigId>,
-    /// Path to the claude_configs.json file
-    store_path: PathBuf,
-}
-
-impl Default for ClaudeConfigStore {
-    fn default() -> Self {
-        Self {
-            configs: HashMap::new(),
-            default_config_id: None,
-            store_path: claude_configs_file_path(),
-        }
-    }
-}
+pub type ClaudeConfigStore = ProfileStore<ClaudeConfig>;
 
 impl ClaudeConfigStore {
-    /// Create a new empty store
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create a store with a custom path (for testing)
-    pub fn with_path(path: PathBuf) -> Self {
-        Self {
-            configs: HashMap::new(),
-            default_config_id: None,
-            store_path: path,
-        }
-    }
-
-    /// Get all configurations
-    pub fn configs(&self) -> impl Iterator<Item = &ClaudeConfig> {
-        self.configs.values()
-    }
-
-    /// Get all configurations as a sorted vector (by name)
-    pub fn configs_sorted(&self) -> Vec<&ClaudeConfig> {
-        let mut configs: Vec<_> = self.configs.values().collect();
-        configs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        configs
-    }
-
-    /// Get a configuration by ID
-    pub fn get(&self, id: ClaudeConfigId) -> Option<&ClaudeConfig> {
-        self.configs.get(&id)
-    }
-
-    /// Get a mutable reference to a configuration by ID
-    pub fn get_mut(&mut self, id: ClaudeConfigId) -> Option<&mut ClaudeConfig> {
-        self.configs.get_mut(&id)
-    }
-
-    /// Find a configuration by name
-    pub fn find_by_name(&self, name: &str) -> Option<&ClaudeConfig> {
-        self.configs.values().find(|c| c.name == name)
-    }
-
-    /// Find a configuration by config directory path
-    pub fn find_by_config_dir(&self, path: &Path) -> Option<&ClaudeConfig> {
-        self.configs.values().find(|c| match &c.config_dir {
-            Some(dir) => dir == path,
-            None => false,
-        })
-    }
-
     /// Check if a config directory is already used by another config
     pub fn is_config_dir_used(&self, path: Option<&Path>) -> bool {
-        self.configs.values().any(|c| {
-            match (&c.config_dir, path) {
-                (Some(existing), Some(new)) => existing == new,
-                (None, None) => true, // Default config already exists
-                _ => false,
-            }
-        })
+        self.is_home_dir_used(path)
     }
-
-    /// Add a configuration to the store
-    pub fn add(&mut self, config: ClaudeConfig) {
-        let id = config.id;
-        self.configs.insert(id, config);
-
-        // If this is the first config, make it the default
-        if self.configs.len() == 1 {
-            self.default_config_id = Some(id);
-        }
-    }
-
-    /// Remove a configuration
-    pub fn remove(&mut self, id: ClaudeConfigId) -> Option<ClaudeConfig> {
-        let config = self.configs.remove(&id);
-
-        // If we removed the default, pick a new default
-        if self.default_config_id == Some(id) {
-            self.default_config_id = self.configs.keys().next().copied();
-        }
-
-        config
-    }
-
-    /// Get the default configuration
-    pub fn get_default(&self) -> Option<&ClaudeConfig> {
-        self.default_config_id.and_then(|id| self.configs.get(&id))
-    }
-
-    /// Get the default configuration ID
-    pub fn get_default_id(&self) -> Option<ClaudeConfigId> {
-        self.default_config_id
-    }
-
-    /// Set the default configuration
-    pub fn set_default(&mut self, id: ClaudeConfigId) -> bool {
-        if self.configs.contains_key(&id) {
-            self.default_config_id = Some(id);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Get the number of configurations
-    pub fn count(&self) -> usize {
-        self.configs.len()
-    }
-
-    /// Check if there are any configurations
-    pub fn is_empty(&self) -> bool {
-        self.configs.is_empty()
-    }
-
-    /// Load store from disk
-    pub fn load() -> Result<Self> {
-        Self::load_from(&claude_configs_file_path())
-    }
-
-    /// Load store from a specific path
-    ///
-    /// If the file is corrupted, this will create a backup and return an empty store.
-    pub fn load_from(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::with_path(path.to_path_buf()));
-        }
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to read claude configs file: {}", e);
-                backup_corrupted_file(path);
-                return Err(anyhow::anyhow!(
-                    "Could not read claude configs file ({}). Starting with empty config list.",
-                    e
-                ));
-            }
-        };
-
-        let data: StoreData = match serde_json::from_str(&content) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("Claude configs file is corrupted: {}", e);
-                backup_corrupted_file(path);
-                return Err(anyhow::anyhow!(
-                    "Claude configs file is corrupted and could not be parsed ({}). \
-                     A backup has been created at {}.backup. \
-                     Starting with empty config list.",
-                    e,
-                    path.display()
-                ));
-            }
-        };
-
-        let configs = data.configs.into_iter().map(|c| (c.id, c)).collect();
-
-        Ok(Self {
-            configs,
-            default_config_id: data.default_config_id,
-            store_path: path.to_path_buf(),
-        })
-    }
-
-    /// Save store to disk
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&self.store_path)
-    }
-
-    /// Save store to a specific path
-    pub fn save_to(&self, path: &Path) -> Result<()> {
-        use crate::config::{categorize_io_error, DiskErrorKind};
-
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                let kind = categorize_io_error(&e);
-                match kind {
-                    DiskErrorKind::PermissionDenied => {
-                        anyhow::bail!(
-                            "Permission denied creating directory {:?}. Check file permissions.",
-                            parent
-                        );
-                    }
-                    DiskErrorKind::DiskFull => {
-                        anyhow::bail!("Disk full - cannot create directory {:?}", parent);
-                    }
-                    _ => {
-                        return Err(e)
-                            .context("Failed to create directory for claude configs file");
-                    }
-                }
-            }
-        }
-
-        let data = StoreData {
-            configs: self.configs.values().cloned().collect(),
-            default_config_id: self.default_config_id,
-        };
-
-        let content =
-            serde_json::to_string_pretty(&data).context("Failed to serialize claude configs")?;
-
-        if let Err(e) = std::fs::write(path, &content) {
-            let kind = categorize_io_error(&e);
-            match kind {
-                DiskErrorKind::DiskFull => {
-                    anyhow::bail!(
-                        "Disk full - free space needed to save claude configs. Your changes may not be saved."
-                    );
-                }
-                DiskErrorKind::PermissionDenied => {
-                    anyhow::bail!(
-                        "Permission denied writing to {:?}. Check file permissions.",
-                        path
-                    );
-                }
-                _ => {
-                    return Err(e).context("Failed to write claude configs file");
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Get the path to the claude configs file
-pub fn claude_configs_file_path() -> PathBuf {
-    config_dir().join("claude_configs.json")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude_config::ClaudeConfigId;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -332,6 +91,25 @@ mod tests {
         assert_eq!(store.count(), 1);
         // Default should switch to the other one
         assert_eq!(store.get_default_id(), Some(id2));
+    }
+
+    #[test]
+    fn test_store_remove_default_picks_alphabetically_first_replacement() {
+        let mut store = ClaudeConfigStore::new();
+        let zulu = ClaudeConfig::new("Zulu".to_string(), Some(PathBuf::from("/z")));
+        let alpha = ClaudeConfig::new("Alpha".to_string(), Some(PathBuf::from("/a")));
+        let mike = ClaudeConfig::new("Mike".to_string(), Some(PathBuf::from("/m")));
+        let zulu_id = zulu.id;
+        let alpha_id = alpha.id;
+
+        store.add(zulu);
+        store.add(alpha);
+        store.add(mike);
+        assert_eq!(store.get_default_id(), Some(zulu_id));
+
+        store.remove(zulu_id);
+        // Deterministic: alphabetically first remaining config, not HashMap order
+        assert_eq!(store.get_default_id(), Some(alpha_id));
     }
 
     #[test]
@@ -431,7 +209,8 @@ mod tests {
         store.save().unwrap();
 
         // Load into new store
-        let loaded = ClaudeConfigStore::load_from(&path).unwrap();
+        let (loaded, warning) = ClaudeConfigStore::load_from_with_status(&path);
+        assert!(warning.is_none());
         assert_eq!(loaded.count(), 1);
         assert!(loaded.get(config_id).is_some());
         assert_eq!(loaded.get_default_id(), Some(config_id));
@@ -442,7 +221,83 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("nonexistent.json");
 
-        let store = ClaudeConfigStore::load_from(&path).unwrap();
+        let (store, warning) = ClaudeConfigStore::load_from_with_status(&path);
+        assert!(warning.is_none());
         assert_eq!(store.count(), 0);
+    }
+
+    #[test]
+    fn test_store_load_corrupted_backs_up_and_starts_fresh() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("claude_configs.json");
+        std::fs::write(&path, "{ invalid").unwrap();
+
+        let (store, warning) = ClaudeConfigStore::load_from_with_status(&path);
+
+        assert_eq!(store.count(), 0);
+        assert!(warning.is_some(), "corruption should surface a warning");
+        assert!(!path.exists(), "corrupted file should be renamed away");
+
+        let backups: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("json.corrupt."))
+            .collect();
+        assert_eq!(backups.len(), 1, "expected exactly one timestamped backup");
+    }
+
+    #[test]
+    fn test_store_load_with_stale_default_recovers_deterministically() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("claude_configs.json");
+
+        let id_a = uuid::Uuid::new_v4();
+        let id_b = uuid::Uuid::new_v4();
+        let stale_default = uuid::Uuid::new_v4();
+
+        let file = serde_json::json!({
+            "configs": [
+                { "id": id_b, "name": "Zulu", "config_dir": "/tmp/zulu" },
+                { "id": id_a, "name": "Alpha", "config_dir": "/tmp/alpha" }
+            ],
+            "default_config_id": stale_default
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap()).unwrap();
+
+        let (store, warning) = ClaudeConfigStore::load_from_with_status(&path);
+        assert!(warning.is_none());
+        assert_eq!(store.count(), 2);
+        // Deterministic fallback picks alphabetically first config.
+        assert_eq!(store.get_default_id(), Some(id_a));
+    }
+
+    #[test]
+    fn test_store_load_without_default_sets_fallback_when_configs_exist() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("claude_configs.json");
+
+        let id_a = uuid::Uuid::new_v4();
+        let id_b = uuid::Uuid::new_v4();
+        let file = serde_json::json!({
+            "configs": [
+                { "id": id_b, "name": "Zulu", "config_dir": "/tmp/zulu" },
+                { "id": id_a, "name": "Alpha", "config_dir": "/tmp/alpha" }
+            ]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap()).unwrap();
+
+        let (store, warning) = ClaudeConfigStore::load_from_with_status(&path);
+        assert!(warning.is_none());
+        assert_eq!(store.get_default_id(), Some(id_a));
+    }
+
+    /// The alias must keep accepting the ID type alias downstream code uses.
+    #[test]
+    fn test_id_type_alias_compatibility() {
+        let mut store = ClaudeConfigStore::new();
+        let config = ClaudeConfig::new("Work".to_string(), None);
+        let id: ClaudeConfigId = config.id;
+        store.add(config);
+        assert!(store.get(id).is_some());
     }
 }

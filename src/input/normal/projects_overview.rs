@@ -7,9 +7,8 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, FolderMoveTarget, HomepageFocus, InputMode, View};
+use crate::app::{cycle_next, cycle_prev, App, FolderMoveTarget, HomepageFocus, InputMode, View};
 use crate::project::{self, RowRef};
-use crate::session::{SessionManager, SessionType};
 
 /// Handle key in projects overview (normal mode)
 pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -44,25 +43,19 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
         KeyCode::Down => {
             if projects_focused && row_count > 0 {
                 app.state.selected_project_index =
-                    (app.state.selected_project_index + 1) % row_count;
+                    cycle_next(app.state.selected_project_index, row_count);
             } else if session_count > 0 {
                 app.state.selected_session_index =
-                    (app.state.selected_session_index + 1) % session_count;
+                    cycle_next(app.state.selected_session_index, session_count);
             }
         }
         KeyCode::Up => {
             if projects_focused && row_count > 0 {
-                app.state.selected_project_index = app
-                    .state
-                    .selected_project_index
-                    .checked_sub(1)
-                    .unwrap_or(row_count - 1);
+                app.state.selected_project_index =
+                    cycle_prev(app.state.selected_project_index, row_count);
             } else if session_count > 0 {
-                app.state.selected_session_index = app
-                    .state
-                    .selected_session_index
-                    .checked_sub(1)
-                    .unwrap_or(session_count - 1);
+                app.state.selected_session_index =
+                    cycle_prev(app.state.selected_session_index, session_count);
             }
         }
         KeyCode::Right => {
@@ -229,17 +222,7 @@ fn open_selected_session(app: &mut App) -> Result<()> {
         return Ok(());
     };
     let session_id = session.info.id;
-    let is_codex = session.info.session_type == SessionType::OpenAICodex;
-
-    app.state.navigate_to_session(session_id);
-    if is_codex {
-        app.tui.enable_mouse_capture();
-    }
-    app.sessions.acknowledge_attention(session_id);
-    if app.config.notification_method == "title" {
-        SessionManager::reset_terminal_title();
-    }
-    app.resize_active_session_pty()
+    app.activate_session(session_id)
 }
 
 /// Destroy the session currently selected in the sessions list

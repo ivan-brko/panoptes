@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Custom shell session shortcut
 ///
@@ -88,79 +88,6 @@ pub fn reserved_keys_display() -> String {
     keys.join(", ")
 }
 
-/// Categories of disk errors for user-friendly messages
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiskErrorKind {
-    /// Disk is full or quota exceeded
-    DiskFull,
-    /// Permission denied (read or write)
-    PermissionDenied,
-    /// File or directory not found
-    NotFound,
-    /// Other IO error
-    Other,
-}
-
-impl DiskErrorKind {
-    /// Get a user-friendly message for this error kind
-    pub fn user_message(&self) -> &'static str {
-        match self {
-            DiskErrorKind::DiskFull => "Disk full - free space needed to save",
-            DiskErrorKind::PermissionDenied => "Permission denied writing to ~/.panoptes/",
-            DiskErrorKind::NotFound => "File or directory not found",
-            DiskErrorKind::Other => "Failed to save data",
-        }
-    }
-}
-
-/// Categorize an IO error into a user-friendly category
-pub fn categorize_io_error(e: &std::io::Error) -> DiskErrorKind {
-    use std::io::ErrorKind;
-
-    match e.kind() {
-        // Disk full errors
-        ErrorKind::StorageFull => DiskErrorKind::DiskFull,
-        // On some systems, disk full might appear as WriteZero or Other
-        ErrorKind::WriteZero => DiskErrorKind::DiskFull,
-
-        // Permission errors
-        ErrorKind::PermissionDenied => DiskErrorKind::PermissionDenied,
-
-        // Not found
-        ErrorKind::NotFound => DiskErrorKind::NotFound,
-
-        // Check raw OS error for disk full on Unix
-        _ => {
-            #[cfg(unix)]
-            {
-                if let Some(os_error) = e.raw_os_error() {
-                    // ENOSPC (No space left on device) = 28 on Linux, 28 on macOS
-                    // EDQUOT (Disk quota exceeded) = 122 on Linux, 69 on macOS
-                    if os_error == 28 || os_error == 122 || os_error == 69 {
-                        return DiskErrorKind::DiskFull;
-                    }
-                    // EACCES = 13 on both
-                    if os_error == 13 {
-                        return DiskErrorKind::PermissionDenied;
-                    }
-                }
-            }
-            DiskErrorKind::Other
-        }
-    }
-}
-
-/// Create a user-friendly error message from an IO error
-pub fn friendly_io_error_message(e: &std::io::Error, context: &str) -> String {
-    let kind = categorize_io_error(e);
-    match kind {
-        DiskErrorKind::DiskFull => format!("{}: {}", context, kind.user_message()),
-        DiskErrorKind::PermissionDenied => format!("{}: {}", context, kind.user_message()),
-        DiskErrorKind::NotFound => format!("{}: file or directory not found", context),
-        DiskErrorKind::Other => format!("{}: {}", context, e),
-    }
-}
-
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -180,10 +107,6 @@ pub struct Config {
     #[serde(default = "default_max_output_lines")]
     pub max_output_lines: usize,
 
-    /// Idle threshold in seconds before session is flagged as needing attention (default: 300 = 5 min)
-    #[serde(default = "default_idle_threshold")]
-    pub idle_threshold_secs: u64,
-
     /// State timeout in seconds - Executing states auto-transition to Idle after this (default: 300 = 5 min)
     #[serde(default = "default_state_timeout")]
     pub state_timeout_secs: u64,
@@ -192,13 +115,9 @@ pub struct Config {
     #[serde(default = "default_exited_retention")]
     pub exited_retention_secs: u64,
 
-    /// Theme preset: "dark" (default), "light", or "high-contrast"
-    #[serde(default = "default_theme_preset")]
-    pub theme_preset: String,
-
-    /// Notification method: "bell" (terminal bell), "title" (update terminal title), "none"
-    #[serde(default = "default_notification_method")]
-    pub notification_method: String,
+    /// How to get the user's attention when a session needs it
+    #[serde(default)]
+    pub notification_method: NotificationMethod,
 
     /// Esc hold threshold in milliseconds for exiting session mode (default: 400ms)
     #[serde(default = "default_esc_hold_threshold_ms")]
@@ -246,6 +165,48 @@ pub struct Config {
     /// Each shortcut defines a key that spawns a shell session with a predefined command.
     #[serde(default)]
     pub custom_shortcuts: Vec<CustomShortcut>,
+}
+
+/// How Panoptes gets the user's attention when a session needs it
+///
+/// Serialises as the lowercase strings ("bell", "title", "none") this field
+/// has always used in `config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotificationMethod {
+    /// Ring the terminal bell
+    #[default]
+    Bell,
+    /// Rewrite the terminal title with the session that wants attention
+    Title,
+    /// Stay silent
+    None,
+}
+
+/// Unknown values fall back to `Bell` rather than failing the whole load.
+///
+/// The field predates the enum, so arbitrary hand-typed strings exist in
+/// config files; they always behaved as `bell` (the old string match's
+/// catch-all) and must keep both loading and behaving that way.
+impl<'de> Deserialize<'de> for NotificationMethod {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "bell" => Self::Bell,
+            "title" => Self::Title,
+            "none" => Self::None,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    "Unknown notification_method in config; defaulting to bell"
+                );
+                Self::Bell
+            }
+        })
+    }
 }
 
 /// Which attention reasons are worth interrupting the user for
@@ -317,24 +278,12 @@ fn default_max_output_lines() -> usize {
     10_000
 }
 
-fn default_idle_threshold() -> u64 {
-    300
-}
-
 fn default_state_timeout() -> u64 {
     300 // 5 minutes
 }
 
 fn default_exited_retention() -> u64 {
     300 // 5 minutes
-}
-
-fn default_theme_preset() -> String {
-    "dark".to_string()
-}
-
-fn default_notification_method() -> String {
-    "bell".to_string()
 }
 
 fn default_esc_hold_threshold_ms() -> u64 {
@@ -356,11 +305,9 @@ impl Default for Config {
             worktrees_dir: default_worktrees_dir(),
             hooks_dir: default_hooks_dir(),
             max_output_lines: default_max_output_lines(),
-            idle_threshold_secs: default_idle_threshold(),
             state_timeout_secs: default_state_timeout(),
             exited_retention_secs: default_exited_retention(),
-            theme_preset: default_theme_preset(),
-            notification_method: default_notification_method(),
+            notification_method: NotificationMethod::default(),
             esc_hold_threshold_ms: default_esc_hold_threshold_ms(),
             scrollback_lines: default_scrollback_lines(),
             suspend_after_secs: default_suspend_after(),
@@ -373,23 +320,48 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from file, or return default if not found
-    pub fn load() -> Result<Self> {
-        let path = config_file_path();
-        if path.exists() {
-            let content = std::fs::read_to_string(&path).context("Failed to read config file")?;
-            toml::from_str(&content).context("Failed to parse config file")
-        } else {
-            Ok(Self::default())
+    /// Load configuration from file, returning a warning message if it was corrupted
+    ///
+    /// One bad line in `config.toml` must not abort startup: the broken file
+    /// is backed up with a timestamp, the defaults take over, and the warning
+    /// is surfaced to the user so the hand-edit is not silently discarded.
+    pub fn load_with_status() -> (Self, Option<String>) {
+        Self::load_from_with_status(&config_file_path())
+    }
+
+    /// Load configuration from a specific path, returning a warning message if corrupted
+    fn load_from_with_status(path: &Path) -> (Self, Option<String>) {
+        use crate::persistence::{backup_corrupted_file, load_text, LoadOutcome};
+
+        let content = match load_text(path, "config") {
+            LoadOutcome::Absent => return (Self::default(), None),
+            LoadOutcome::Loaded(content) => content,
+            LoadOutcome::Corrupted { fallback_warning } => {
+                return (Self::default(), Some(fallback_warning))
+            }
+        };
+
+        match toml::from_str(&content) {
+            Ok(config) => (config, None),
+            Err(e) => {
+                tracing::error!("The config file {} is corrupted: {}", path.display(), e);
+                let warning = match backup_corrupted_file(path) {
+                    Some(backup_path) => format!(
+                        "The config file was invalid. Backup saved to {}. Using defaults.",
+                        backup_path.display()
+                    ),
+                    None => format!("The config file was invalid ({}). Using defaults.", e),
+                };
+                (Self::default(), Some(warning))
+            }
         }
     }
 
-    /// Save configuration to file
+    /// Save configuration to file (atomically, via a sibling temp file)
     pub fn save(&self) -> Result<()> {
         let path = config_file_path();
         let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
-        std::fs::write(&path, content).context("Failed to write config file")?;
-        Ok(())
+        crate::persistence::save_text_atomic(&path, &content, "config")
     }
 
     /// Get a custom shortcut by key
@@ -509,7 +481,7 @@ notification_method = "title"
         let parsed: Config = toml::from_str(legacy).expect("legacy config must load");
 
         assert_eq!(parsed.max_output_lines, 500);
-        assert_eq!(parsed.notification_method, "title");
+        assert_eq!(parsed.notification_method, NotificationMethod::Title);
         // Absent sections fall back to the documented defaults
         assert!(parsed.notify_on.approval);
         assert!(parsed.notify_on.turn_complete);
@@ -523,6 +495,76 @@ notification_method = "title"
         let config = Config::default();
         assert_eq!(config.hook_port, 9999);
         assert_eq!(config.max_output_lines, 10_000);
+        assert_eq!(config.notification_method, NotificationMethod::Bell);
+    }
+
+    /// The three documented values parse to their variants; anything else -
+    /// this field predates the enum, so arbitrary hand-typed strings exist in
+    /// config files - falls back to the bell, exactly as the old string match
+    /// treated it. A typo must not fail the whole config load.
+    #[test]
+    fn test_notification_method_parses_known_and_unknown_values() {
+        for (raw, expected) in [
+            ("bell", NotificationMethod::Bell),
+            ("title", NotificationMethod::Title),
+            ("none", NotificationMethod::None),
+            ("gong", NotificationMethod::Bell),
+        ] {
+            let parsed: Config = toml::from_str(&format!("notification_method = \"{raw}\""))
+                .unwrap_or_else(|e| panic!("{raw:?} must load: {e}"));
+            assert_eq!(parsed.notification_method, expected, "for input {raw:?}");
+        }
+    }
+
+    /// The enum must serialise back to the same lowercase strings old config
+    /// files use, so a round trip does not rewrite the field
+    #[test]
+    fn test_notification_method_round_trips() {
+        for method in [
+            NotificationMethod::Bell,
+            NotificationMethod::Title,
+            NotificationMethod::None,
+        ] {
+            let config = Config {
+                notification_method: method,
+                ..Default::default()
+            };
+            let text = toml::to_string(&config).unwrap();
+            let parsed: Config = toml::from_str(&text).unwrap();
+            assert_eq!(parsed.notification_method, method);
+        }
+    }
+
+    #[test]
+    fn test_load_corrupt_toml_backs_up_and_falls_back_to_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "hook_port = not a number\n[[[").unwrap();
+
+        let (config, warning) = Config::load_from_with_status(&path);
+
+        // Falls back to defaults instead of aborting startup
+        assert_eq!(config.hook_port, 9999);
+        assert!(warning.is_some(), "corruption should surface a warning");
+        assert!(!path.exists(), "corrupted file should be renamed away");
+
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("toml.corrupt."))
+            .collect();
+        assert_eq!(backups.len(), 1, "expected exactly one timestamped backup");
+    }
+
+    #[test]
+    fn test_load_missing_config_uses_defaults_without_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let (config, warning) = Config::load_from_with_status(&path);
+
+        assert!(warning.is_none());
+        assert_eq!(config.hook_port, 9999);
     }
 
     #[test]

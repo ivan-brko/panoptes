@@ -17,7 +17,8 @@ use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{
-    format_attention_hint, format_custom_shortcuts_hint, format_custom_shortcuts_list,
+    footer_with_attention, format_custom_shortcuts_hint, format_custom_shortcuts_list,
+    render_footer, status_suffix,
 };
 use crate::tui::widgets::selection::{selection_prefix, selection_style};
 
@@ -34,30 +35,18 @@ pub fn render_branch_detail(
     config: &Config,
     header_notifications: &HeaderNotificationManager,
 ) {
-    let idle_threshold = config.idle_threshold_secs;
     let project = project_store.get_project(project_id);
     let branch = project_store.get_branch(branch_id);
 
     // Build header
-    let attention_count = sessions.attention_count_for_branch(branch_id, idle_threshold);
+    let attention_count = sessions.attention_count_for_branch(branch_id);
     let (breadcrumb, suffix) = match (project, branch) {
         (Some(project), Some(branch)) => {
             let active_count = sessions.active_session_count_for_branch(branch_id);
-
-            let bc = Breadcrumb::new().push(&project.name).push(&branch.name);
-            let mut status_parts = vec![];
-            if active_count > 0 {
-                status_parts.push(format!("{} active", active_count));
-            }
-            if attention_count > 0 {
-                status_parts.push(format!("{} need attention", attention_count));
-            }
-            let suffix = if status_parts.is_empty() {
-                String::new()
-            } else {
-                format!("({})", status_parts.join(", "))
-            };
-            (bc, suffix)
+            (
+                Breadcrumb::new().push(&project.name).push(&branch.name),
+                status_suffix(active_count, attention_count),
+            )
         }
         _ => (Breadcrumb::new().push("?").push("?"), String::new()),
     };
@@ -102,7 +91,7 @@ pub fn render_branch_detail(
                 branch.working_dir.display()
             );
             let empty = Paragraph::new(empty_text)
-                .style(Style::default().fg(Color::DarkGray))
+                .style(theme().muted_style())
                 .block(Block::default().borders(Borders::ALL).title("Sessions"));
             frame.render_widget(empty, areas.content);
         } else {
@@ -118,7 +107,7 @@ pub fn render_branch_detail(
                     let prefix = selection_prefix(selected);
 
                     // Check if session needs attention
-                    let needs_attention = sessions.session_needs_attention(info, idle_threshold);
+                    let needs_attention = info.needs_attention();
 
                     let state_display = super::session_state_display(info, now);
 
@@ -158,7 +147,7 @@ pub fn render_branch_detail(
         }
     } else {
         let error = Paragraph::new("Branch not found")
-            .style(Style::default().fg(Color::Red))
+            .style(Style::default().fg(theme().error_bg))
             .block(Block::default().borders(Borders::ALL).title("Error"));
         frame.render_widget(error, areas.content);
     }
@@ -176,24 +165,17 @@ pub fn render_branch_detail(
                 "n: new AI | s: shell | d: delete | {}k: shortcuts | ↑/↓: navigate | Enter: open/resume | Esc/q: back",
                 shortcuts_hint
             );
-            if let Some(hint) = format_attention_hint(sessions, config) {
-                format!("{} | {}", hint, base)
-            } else {
-                base
-            }
+            footer_with_attention(base, sessions)
         }
     };
-    let footer = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, areas.footer());
+    render_footer(frame, areas.footer(), &help_text);
 }
 
 /// Render the session creation input
 fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState, session_type: &str) {
     let t = theme();
     let title = format!("Create {} Session", session_type);
-    let input = Paragraph::new(format!("New session name: {}_", state.new_session_name))
+    let input = Paragraph::new(format!("New session name: {}_", state.session_draft.name))
         .style(t.input_style())
         .block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(input, area);
@@ -222,11 +204,82 @@ fn render_delete_confirmation(
         .to_string();
 
     let config = ConfirmDialogConfig {
-        title: "Confirm Delete",
-        item_label: "session",
-        item_name: &session_name,
         warnings: vec![warning],
-        notes: vec![],
+        ..ConfirmDialogConfig::new("Confirm Delete", "session", &session_name)
     };
     render_confirm_dialog(frame, area, config);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{Branch, Project, ProjectStore};
+    use crate::session::store::SessionStore;
+    use crate::tui::views::test_util::{contains_line, render_to_lines};
+    use std::path::PathBuf;
+
+    fn store_with_branch() -> (ProjectStore, ProjectId, BranchId) {
+        let mut store = ProjectStore::new();
+        let project = Project::new(
+            "panoptes".to_string(),
+            PathBuf::from("/tmp/panoptes"),
+            "main".to_string(),
+        );
+        let project_id = project.id;
+        store.add_project(project);
+        let branch = Branch::default_for_project(
+            project_id,
+            "main".to_string(),
+            PathBuf::from("/tmp/panoptes"),
+        );
+        let branch_id = branch.id;
+        store.add_branch(branch);
+        (store, project_id, branch_id)
+    }
+
+    #[test]
+    fn test_empty_branch_lists_creation_hints() {
+        let (store, project_id, branch_id) = store_with_branch();
+        let state = AppState::default();
+        let config = Config::default();
+        let sessions = SessionManager::with_store(config.clone(), SessionStore::new());
+        let header_notifications = HeaderNotificationManager::default();
+
+        let lines = render_to_lines(80, 24, |frame| {
+            render_branch_detail(
+                frame,
+                frame.size(),
+                &state,
+                project_id,
+                branch_id,
+                &store,
+                &sessions,
+                &config,
+                &header_notifications,
+            )
+        });
+
+        assert!(
+            contains_line(&lines, "No sessions on this branch yet."),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Press 'n' to create a new agent session."),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Working directory: /tmp/panoptes"),
+            "{:?}",
+            lines
+        );
+        // Breadcrumb and footer
+        assert!(
+            contains_line(&lines, "Panoptes > panoptes > main"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "n: new AI | s: shell"), "{:?}", lines);
+    }
 }

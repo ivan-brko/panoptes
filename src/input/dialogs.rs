@@ -5,81 +5,94 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, InputMode, View};
+use crate::app::{App, AppState, InputMode, View};
+use crate::claude_config::ClaudeConfigStore;
 use crate::claude_json::ClaudeJsonStore;
 use crate::config::{is_reserved_key, CustomShortcut};
+use crate::project::{Branch, ProjectStore};
+use crate::session::SessionManager;
 
 /// Handle key when confirming session deletion
 pub fn handle_confirming_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    confirming_session_delete_key(&mut app.state, &mut app.sessions, key)
+}
+
+/// Session delete confirmation body
+///
+/// Takes the parts of `App` it needs so the flow - which destroys sessions -
+/// can be unit tested against a temp-backed [`SessionManager`].
+pub(crate) fn confirming_session_delete_key(
+    state: &mut AppState,
+    sessions: &mut SessionManager,
+    key: KeyEvent,
+) -> Result<()> {
     if key.kind != KeyEventKind::Press {
         return Ok(());
     }
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             // Confirm deletion
-            if let Some(session_id) = app.state.pending_delete_session.take() {
+            if let Some(session_id) = state.pending_delete_session.take() {
                 // Validate session still exists before deleting. A recovered
                 // session counts: it has no process, but it does have a record
                 // to discard, and this dialog is the only way to clear one.
-                if app.sessions.get(session_id).is_none()
-                    && app.sessions.get_recovered(session_id).is_none()
+                if sessions.get(session_id).is_none()
+                    && sessions.get_recovered(session_id).is_none()
                 {
                     tracing::warn!(
                         session_id = %session_id,
                         "Session no longer exists when confirming delete"
                     );
-                    app.state.input_mode = InputMode::Normal;
+                    state.input_mode = InputMode::Normal;
                     return Ok(());
                 }
 
                 // Get branch_id before destroying (for selection adjustment)
-                let branch_id = app.state.view.branch_id();
-                let project_id = app.state.view.project_id();
-                let was_active = app.state.active_session == Some(session_id);
-                let was_in_session_view = app.state.view == View::SessionView;
+                let branch_id = state.view.branch_id();
+                let project_id = state.view.project_id();
+                let was_active = state.active_session == Some(session_id);
+                let was_in_session_view = state.view == View::SessionView;
 
                 // Clear active_session if it was the destroyed session
                 if was_active {
-                    app.state.active_session = None;
-                    app.state.session_return_view = None;
+                    state.active_session = None;
+                    state.session_return_view = None;
                     // Navigate back from session view if we're there
                     if was_in_session_view {
                         // Navigate to branch detail or project detail or projects overview
                         if let (Some(pid), Some(bid)) = (project_id, branch_id) {
-                            app.state.view = View::BranchDetail(pid, bid);
+                            state.view = View::BranchDetail(pid, bid);
                         } else if let Some(pid) = project_id {
-                            app.state.view = View::ProjectDetail(pid);
+                            state.view = View::ProjectDetail(pid);
                         } else {
-                            app.state.view = View::ProjectsOverview;
+                            state.view = View::ProjectsOverview;
                         }
-                        app.state
-                            .header_notifications
-                            .push("Session ended".to_string());
+                        state.header_notifications.push("Session ended".to_string());
                     }
                 }
 
                 // A recovered session has no process to kill - discarding it just
                 // drops its record, so it is no longer offered on next launch
-                if app.sessions.discard_recovered(session_id) {
+                if sessions.discard_recovered(session_id) {
                     tracing::info!(session_id = %session_id, "Discarded recovered session");
-                } else if let Err(e) = app.sessions.destroy_session(session_id) {
+                } else if let Err(e) = sessions.destroy_session(session_id) {
                     tracing::error!("Failed to destroy session: {}", e);
                 }
 
                 // Adjust selection if needed
                 if let Some(branch_id) = branch_id {
-                    let new_count = app.sessions.entries_for_branch(branch_id).len();
-                    if app.state.selected_session_index >= new_count && new_count > 0 {
-                        app.state.selected_session_index = new_count - 1;
+                    let new_count = sessions.entries_for_branch(branch_id).len();
+                    if state.selected_session_index >= new_count && new_count > 0 {
+                        state.selected_session_index = new_count - 1;
                     }
                 }
             }
-            app.state.input_mode = InputMode::Normal;
+            state.input_mode = InputMode::Normal;
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             // Cancel deletion
-            app.state.pending_delete_session = None;
-            app.state.input_mode = InputMode::Normal;
+            state.pending_delete_session = None;
+            state.input_mode = InputMode::Normal;
         }
         _ => {}
     }
@@ -87,6 +100,11 @@ pub fn handle_confirming_delete_key(app: &mut App, key: KeyEvent) -> Result<()> 
 }
 
 /// Handle key when confirming branch/worktree deletion
+///
+/// The 'y' arm is split into testable phases: [`begin_branch_delete`]
+/// (validate + destroy sessions), the on-disk worktree removal (the only part
+/// needing the full `App`, for the loading overlay), and
+/// [`finish_branch_delete`] (permission cleanup + store removal).
 pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if key.kind != KeyEventKind::Press {
         return Ok(());
@@ -98,170 +116,206 @@ pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Resu
         }
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             // Confirm deletion
-            if let Some(branch_id) = app.state.pending_delete_branch.take() {
-                // Validate branch still exists before deleting
-                let branch_info = app.project_store.get_branch(branch_id).cloned();
-                if branch_info.is_none() {
-                    tracing::warn!(
-                        branch_id = %branch_id,
-                        "Branch no longer exists when confirming delete"
-                    );
-                    app.state.input_mode = InputMode::Normal;
-                    app.state.delete_worktree_on_disk = false;
-                    return Ok(());
-                }
+            let Some(branch) =
+                begin_branch_delete(&mut app.state, &mut app.sessions, &app.project_store)
+            else {
+                return Ok(());
+            };
 
-                // Destroy all sessions for this branch, including any recovered
-                // ones - deleting the branch invalidates their working dir too
-                let sessions_to_destroy: Vec<_> = app
-                    .sessions
-                    .entries_for_branch(branch_id)
-                    .iter()
-                    .map(|entry| entry.info.id)
-                    .collect();
-
-                for session_id in sessions_to_destroy {
-                    // Clear active_session if it was destroyed
-                    if app.state.active_session == Some(session_id) {
-                        app.state.active_session = None;
-                    }
-                    if app.sessions.discard_recovered(session_id) {
-                        continue;
-                    }
-                    if let Err(e) = app.sessions.destroy_session(session_id) {
-                        tracing::error!("Failed to destroy session: {}", e);
-                    }
-                }
-
-                // If user opted to delete worktree on disk
-                if app.state.delete_worktree_on_disk {
-                    if let Some(branch) = &branch_info {
-                        if branch.is_worktree {
-                            // Get the project to access the repo
-                            if let Some(project_id) = app.state.view.project_id() {
-                                // Clone the repo_path to avoid borrow conflicts
-                                let repo_path = app
-                                    .project_store
-                                    .get_project(project_id)
-                                    .map(|p| p.repo_path.clone());
-
-                                if let Some(repo_path) = repo_path {
-                                    // Show loading indicator
-                                    let _ = app.show_loading(&format!(
-                                        "Removing worktree '{}'...",
-                                        branch.name
-                                    ));
-
-                                    match crate::git::GitOps::open(&repo_path) {
-                                        Ok(git) => {
-                                            if let Err(e) = crate::git::worktree::remove_worktree(
-                                                git.repository(),
-                                                &branch.name,
-                                                true,
-                                            ) {
-                                                tracing::error!("Failed to remove worktree: {}", e);
-                                                app.state.error_message = Some(format!(
-                                                    "Failed to remove worktree: {}",
-                                                    e
-                                                ));
-                                            } else {
-                                                tracing::info!(
-                                                    "Removed worktree for branch: {}",
-                                                    branch.name
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("Failed to open git repo: {}", e);
-                                            app.state.error_message =
-                                                Some(format!("Failed to open git repo: {}", e));
-                                        }
-                                    }
-
-                                    app.clear_loading();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Clean up Claude permissions for deleted worktree
-                if let Some(branch) = &branch_info {
-                    if branch.is_worktree {
-                        let worktree_path = branch.working_dir.to_string_lossy().to_string();
-
-                        // Get the Claude config to use (project default or global default)
-                        if let Some(project_id) = app.state.view.project_id() {
-                            let config_dir = app
-                                .project_store
-                                .get_project(project_id)
-                                .and_then(|p| p.default_claude_config)
-                                .or_else(|| app.claude_config_store.get_default_id())
-                                .and_then(|id| app.claude_config_store.get(id))
-                                .and_then(|c| c.config_dir.clone());
-
-                            if let Some(store) =
-                                ClaudeJsonStore::for_config_dir(config_dir.as_deref())
-                            {
-                                match store.remove_settings(&worktree_path) {
-                                    Ok(true) => {
-                                        tracing::info!(
-                                            "Removed Claude permissions for deleted worktree: {}",
-                                            worktree_path
-                                        );
-                                    }
-                                    Ok(false) => {
-                                        tracing::debug!(
-                                            "No Claude permissions found for worktree: {}",
-                                            worktree_path
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to remove Claude permissions for {}: {}",
-                                            worktree_path,
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Remove branch from the store
-                app.project_store.remove_branch(branch_id);
-
-                // Save to disk
-                if let Err(e) = app.project_store.save() {
-                    tracing::error!("Failed to save project store: {}", e);
-                    app.state.error_message = Some(format!("Failed to save project store: {}", e));
-                }
-
-                tracing::info!("Deleted branch: {}", branch_id);
-
-                // Adjust selected index if needed
-                if let Some(project_id) = app.state.view.project_id() {
-                    let new_count = app.project_store.branches_for_project(project_id).len();
-                    if app.state.selected_branch_index >= new_count && new_count > 0 {
-                        app.state.selected_branch_index = new_count - 1;
-                    } else if new_count == 0 {
-                        app.state.selected_branch_index = 0;
-                    }
-                }
+            // If user opted to delete worktree on disk
+            if app.state.delete_worktree_on_disk && branch.is_worktree {
+                app.remove_worktree_on_disk(&branch);
             }
-            app.state.delete_worktree_on_disk = false;
-            app.state.input_mode = InputMode::Normal;
+
+            finish_branch_delete(
+                &mut app.state,
+                &mut app.project_store,
+                &app.claude_config_store,
+                &branch,
+            );
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            // Cancel deletion
-            app.state.pending_delete_branch = None;
-            app.state.delete_worktree_on_disk = false;
-            app.state.input_mode = InputMode::Normal;
+            cancel_branch_delete(&mut app.state);
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Cancel a pending branch deletion, resetting the dialog state
+pub(crate) fn cancel_branch_delete(state: &mut AppState) {
+    state.pending_delete_branch = None;
+    state.delete_worktree_on_disk = false;
+    state.input_mode = InputMode::Normal;
+}
+
+/// First phase of a confirmed branch delete: validate and destroy sessions
+///
+/// Takes the pending branch ID, verifies the branch still exists (resetting
+/// the dialog and returning `None` when it does not - or when nothing was
+/// pending), and destroys every session of the branch, including recovered
+/// ones - deleting the branch invalidates their working dir too.
+pub(crate) fn begin_branch_delete(
+    state: &mut AppState,
+    sessions: &mut SessionManager,
+    project_store: &ProjectStore,
+) -> Option<Branch> {
+    let Some(branch_id) = state.pending_delete_branch.take() else {
+        // Nothing pending - leave the dialog as the original flow did
+        state.delete_worktree_on_disk = false;
+        state.input_mode = InputMode::Normal;
+        return None;
+    };
+
+    // Validate branch still exists before deleting
+    let Some(branch) = project_store.get_branch(branch_id).cloned() else {
+        tracing::warn!(
+            branch_id = %branch_id,
+            "Branch no longer exists when confirming delete"
+        );
+        state.input_mode = InputMode::Normal;
+        state.delete_worktree_on_disk = false;
+        return None;
+    };
+
+    let sessions_to_destroy: Vec<_> = sessions
+        .entries_for_branch(branch_id)
+        .iter()
+        .map(|entry| entry.info.id)
+        .collect();
+
+    for session_id in sessions_to_destroy {
+        // Clear active_session if it was destroyed
+        if state.active_session == Some(session_id) {
+            state.active_session = None;
+        }
+        if sessions.discard_recovered(session_id) {
+            continue;
+        }
+        if let Err(e) = sessions.destroy_session(session_id) {
+            tracing::error!("Failed to destroy session: {}", e);
+        }
+    }
+
+    Some(branch)
+}
+
+/// Final phase of a confirmed branch delete: cleanup and store removal
+///
+/// Cleans up Claude permissions recorded for a deleted worktree, removes the
+/// branch from the store, persists it, and resets the dialog state.
+pub(crate) fn finish_branch_delete(
+    state: &mut AppState,
+    project_store: &mut ProjectStore,
+    claude_config_store: &ClaudeConfigStore,
+    branch: &Branch,
+) {
+    // Clean up Claude permissions for deleted worktree
+    if branch.is_worktree {
+        let worktree_path = branch.working_dir.to_string_lossy().to_string();
+
+        // Get the Claude config to use (project default or global default)
+        if let Some(project_id) = state.view.project_id() {
+            let config_dir = project_store
+                .get_project(project_id)
+                .and_then(|p| p.default_claude_config)
+                .or_else(|| claude_config_store.get_default_id())
+                .and_then(|id| claude_config_store.get(id))
+                .and_then(|c| c.config_dir.clone());
+
+            if let Some(store) = ClaudeJsonStore::for_config_dir(config_dir.as_deref()) {
+                match store.remove_settings(&worktree_path) {
+                    Ok(true) => {
+                        tracing::info!(
+                            "Removed Claude permissions for deleted worktree: {}",
+                            worktree_path
+                        );
+                    }
+                    Ok(false) => {
+                        tracing::debug!(
+                            "No Claude permissions found for worktree: {}",
+                            worktree_path
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to remove Claude permissions for {}: {}",
+                            worktree_path,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove branch from the store
+    project_store.remove_branch(branch.id);
+
+    // Save to disk
+    if let Err(e) = project_store.save() {
+        tracing::error!("Failed to save project store: {}", e);
+        state.error_message = Some(format!("Failed to save project store: {}", e));
+    }
+
+    tracing::info!("Deleted branch: {}", branch.id);
+
+    // Adjust selected index if needed
+    if let Some(project_id) = state.view.project_id() {
+        let new_count = project_store.branches_for_project(project_id).len();
+        if state.selected_branch_index >= new_count && new_count > 0 {
+            state.selected_branch_index = new_count - 1;
+        } else if new_count == 0 {
+            state.selected_branch_index = 0;
+        }
+    }
+
+    state.delete_worktree_on_disk = false;
+    state.input_mode = InputMode::Normal;
+}
+
+impl App {
+    /// Remove a branch's git worktree directory on disk
+    ///
+    /// Best-effort: failures are logged and surfaced as an error message, and
+    /// the branch deletion continues regardless. Lives on `App` for the
+    /// loading overlay shown around the blocking git call.
+    fn remove_worktree_on_disk(&mut self, branch: &Branch) {
+        // Get the project to access the repo
+        let Some(project_id) = self.state.view.project_id() else {
+            return;
+        };
+        // Clone the repo_path to avoid borrow conflicts
+        let Some(repo_path) = self
+            .project_store
+            .get_project(project_id)
+            .map(|p| p.repo_path.clone())
+        else {
+            return;
+        };
+
+        // Show loading indicator
+        self.show_loading(&format!("Removing worktree '{}'...", branch.name));
+
+        match crate::git::GitOps::open(&repo_path) {
+            Ok(git) => {
+                if let Err(e) =
+                    crate::git::worktree::remove_worktree(git.repository(), &branch.name, true)
+                {
+                    tracing::error!("Failed to remove worktree: {}", e);
+                    self.state.error_message = Some(format!("Failed to remove worktree: {}", e));
+                } else {
+                    tracing::info!("Removed worktree for branch: {}", branch.name);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to open git repo: {}", e);
+                self.state.error_message = Some(format!("Failed to open git repo: {}", e));
+            }
+        }
+
+        self.clear_loading();
+    }
 }
 
 /// Handle key when confirming project deletion
@@ -399,75 +453,6 @@ pub fn handle_confirming_quit_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-/// Handle key when confirming Claude config deletion
-pub fn handle_confirming_claude_config_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    if key.kind != KeyEventKind::Press {
-        return Ok(());
-    }
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
-            // Confirm deletion
-            if let Some(config_id) = app.state.pending_delete_claude_config.take() {
-                // Validate config still exists
-                if app.claude_config_store.get(config_id).is_none() {
-                    tracing::warn!(
-                        config_id = %config_id,
-                        "Config no longer exists when confirming delete"
-                    );
-                    app.state.input_mode = InputMode::Normal;
-                    return Ok(());
-                }
-
-                // Clear default_claude_config from any projects using this config
-                let affected_projects: Vec<_> = app
-                    .project_store
-                    .projects()
-                    .filter(|p| p.default_claude_config == Some(config_id))
-                    .map(|p| p.id)
-                    .collect();
-
-                for project_id in affected_projects {
-                    if let Some(project) = app.project_store.get_project_mut(project_id) {
-                        project.default_claude_config = None;
-                    }
-                }
-
-                // Save project store if any projects were affected
-                if let Err(e) = app.project_store.save() {
-                    tracing::error!("Failed to save project store: {}", e);
-                }
-
-                // Remove the config
-                app.claude_config_store.remove(config_id);
-
-                // Save config store
-                if let Err(e) = app.claude_config_store.save() {
-                    tracing::error!("Failed to save claude config store: {}", e);
-                    app.state.error_message = Some(format!("Failed to save: {}", e));
-                }
-
-                tracing::info!("Deleted Claude config: {}", config_id);
-
-                // Adjust selection if needed
-                let new_count = app.claude_config_store.count();
-                if app.state.claude_configs_selected_index >= new_count && new_count > 0 {
-                    app.state.claude_configs_selected_index = new_count - 1;
-                } else if new_count == 0 {
-                    app.state.claude_configs_selected_index = 0;
-                }
-            }
-            app.state.input_mode = InputMode::Normal;
-        }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            // Cancel deletion
-            app.state.pending_delete_claude_config = None;
-            app.state.input_mode = InputMode::Normal;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 /// Handle key when confirming Claude settings copy after worktree creation
 pub fn handle_confirming_claude_settings_copy_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if key.kind != KeyEventKind::Press {
@@ -519,7 +504,7 @@ fn confirm_claude_settings_copy(app: &mut App) {
 
     if let Some(state) = copy_state {
         if state.selected_yes {
-            let _ = app.show_loading("Copying Claude settings...");
+            app.show_loading("Copying Claude settings...");
 
             // Copy modern local settings first (.claude/settings.local.json)
             if state.has_local_settings {
@@ -625,7 +610,7 @@ fn confirm_claude_settings_migrate(app: &mut App) {
         let branch_id = state.branch_id;
 
         if state.selected_yes {
-            let _ = app.show_loading("Migrating permissions...");
+            app.show_loading("Migrating permissions...");
             let mut total_migrated = 0;
 
             // Merge modern local settings first (.claude/settings.local.json)
@@ -708,79 +693,6 @@ fn confirm_claude_settings_migrate(app: &mut App) {
 }
 
 // ============================================================================
-// Codex Config Delete Confirmation Handler
-// ============================================================================
-
-/// Handle key when confirming Codex config deletion
-pub fn handle_confirming_codex_config_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    if key.kind != KeyEventKind::Press {
-        return Ok(());
-    }
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
-            // Confirm deletion
-            if let Some(config_id) = app.state.pending_delete_codex_config.take() {
-                // Validate config still exists
-                if app.codex_config_store.get(config_id).is_none() {
-                    tracing::warn!(
-                        config_id = %config_id,
-                        "Codex config no longer exists when confirming delete"
-                    );
-                    app.state.input_mode = InputMode::Normal;
-                    return Ok(());
-                }
-
-                // Clear default_codex_config from any projects using this config
-                let affected_projects: Vec<_> = app
-                    .project_store
-                    .projects()
-                    .filter(|p| p.default_codex_config == Some(config_id))
-                    .map(|p| p.id)
-                    .collect();
-
-                for project_id in affected_projects {
-                    if let Some(project) = app.project_store.get_project_mut(project_id) {
-                        project.default_codex_config = None;
-                    }
-                }
-
-                // Save project store if any projects were affected
-                if let Err(e) = app.project_store.save() {
-                    tracing::error!("Failed to save project store: {}", e);
-                }
-
-                // Remove the config
-                app.codex_config_store.remove(config_id);
-
-                // Save config store
-                if let Err(e) = app.codex_config_store.save() {
-                    tracing::error!("Failed to save codex config store: {}", e);
-                    app.state.error_message = Some(format!("Failed to save: {}", e));
-                }
-
-                tracing::info!("Deleted Codex config: {}", config_id);
-
-                // Adjust selection if needed
-                let new_count = app.codex_config_store.count();
-                if app.state.codex_configs_selected_index >= new_count && new_count > 0 {
-                    app.state.codex_configs_selected_index = new_count - 1;
-                } else if new_count == 0 {
-                    app.state.codex_configs_selected_index = 0;
-                }
-            }
-            app.state.input_mode = InputMode::Normal;
-        }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            // Cancel deletion
-            app.state.pending_delete_codex_config = None;
-            app.state.input_mode = InputMode::Normal;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-// ============================================================================
 // Custom Shortcuts Dialog Handlers
 // ============================================================================
 
@@ -799,20 +711,13 @@ pub fn handle_managing_custom_shortcuts_key(app: &mut App, key: KeyEvent) -> Res
         }
         KeyCode::Down => {
             // Navigate down
-            if shortcut_count > 0 {
-                app.state.custom_shortcuts_selected =
-                    (app.state.custom_shortcuts_selected + 1) % shortcut_count;
-            }
+            app.state.custom_shortcuts_selected =
+                crate::app::cycle_next(app.state.custom_shortcuts_selected, shortcut_count);
         }
         KeyCode::Up => {
             // Navigate up
-            if shortcut_count > 0 {
-                app.state.custom_shortcuts_selected = app
-                    .state
-                    .custom_shortcuts_selected
-                    .checked_sub(1)
-                    .unwrap_or(shortcut_count - 1);
-            }
+            app.state.custom_shortcuts_selected =
+                crate::app::cycle_prev(app.state.custom_shortcuts_selected, shortcut_count);
         }
         KeyCode::Char('n') => {
             // Start adding a new shortcut
@@ -1021,4 +926,208 @@ pub fn handle_confirming_custom_shortcut_delete_key(app: &mut App, key: KeyEvent
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::session::SessionStore;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    /// Session manager backed by a temp store - never the real ~/.panoptes
+    fn test_sessions(temp_dir: &TempDir) -> SessionManager {
+        let config = Config {
+            worktrees_dir: temp_dir.path().join("worktrees"),
+            hooks_dir: temp_dir.path().join("hooks"),
+            ..Config::default()
+        };
+        SessionManager::with_store(
+            config,
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // Session delete confirmation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_session_delete_confirm_destroys_session_and_resets_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut sessions = test_sessions(&temp_dir);
+
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let session_id = sessions
+            .insert_test_session("doomed", project_id, branch_id)
+            .unwrap();
+
+        let mut state = AppState {
+            view: View::BranchDetail(project_id, branch_id),
+            input_mode: InputMode::ConfirmingSessionDelete,
+            pending_delete_session: Some(session_id),
+            ..Default::default()
+        };
+
+        confirming_session_delete_key(&mut state, &mut sessions, press(KeyCode::Char('y')))
+            .unwrap();
+
+        assert!(sessions.get(session_id).is_none(), "session must be gone");
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert!(state.pending_delete_session.is_none());
+    }
+
+    #[test]
+    fn test_session_delete_cancel_keeps_session() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut sessions = test_sessions(&temp_dir);
+
+        let session_id = sessions
+            .insert_test_session("kept", Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+
+        for cancel_key in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = AppState {
+                input_mode: InputMode::ConfirmingSessionDelete,
+                pending_delete_session: Some(session_id),
+                ..Default::default()
+            };
+
+            confirming_session_delete_key(&mut state, &mut sessions, press(cancel_key)).unwrap();
+
+            assert!(
+                sessions.get(session_id).is_some(),
+                "cancel must not destroy the session"
+            );
+            assert_eq!(state.input_mode, InputMode::Normal);
+            assert!(state.pending_delete_session.is_none());
+        }
+    }
+
+    #[test]
+    fn test_session_delete_confirm_on_missing_session_resets_mode() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut sessions = test_sessions(&temp_dir);
+
+        let mut state = AppState {
+            input_mode: InputMode::ConfirmingSessionDelete,
+            pending_delete_session: Some(Uuid::new_v4()),
+            ..Default::default()
+        };
+
+        confirming_session_delete_key(&mut state, &mut sessions, press(KeyCode::Char('y')))
+            .unwrap();
+
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert!(state.pending_delete_session.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Branch delete confirmation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_branch_delete_cancel_resets_dialog_state() {
+        let mut state = AppState {
+            input_mode: InputMode::ConfirmingBranchDelete,
+            pending_delete_branch: Some(Uuid::new_v4()),
+            delete_worktree_on_disk: true,
+            ..Default::default()
+        };
+
+        cancel_branch_delete(&mut state);
+
+        assert!(state.pending_delete_branch.is_none());
+        assert!(!state.delete_worktree_on_disk);
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_branch_delete_confirm_on_missing_branch_resets_without_deleting() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut sessions = test_sessions(&temp_dir);
+        let project_store = ProjectStore::with_path(temp_dir.path().join("projects.json"));
+
+        let mut state = AppState {
+            input_mode: InputMode::ConfirmingBranchDelete,
+            pending_delete_branch: Some(Uuid::new_v4()),
+            delete_worktree_on_disk: true,
+            ..Default::default()
+        };
+
+        let branch = begin_branch_delete(&mut state, &mut sessions, &project_store);
+
+        assert!(branch.is_none(), "missing branch must abort the delete");
+        assert!(state.pending_delete_branch.is_none());
+        assert!(!state.delete_worktree_on_disk);
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_branch_delete_confirm_destroys_sessions_and_removes_branch() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut sessions = test_sessions(&temp_dir);
+        let mut project_store = ProjectStore::with_path(temp_dir.path().join("projects.json"));
+        let claude_config_store =
+            ClaudeConfigStore::with_path(temp_dir.path().join("claude_configs.json"));
+
+        let project = crate::project::Project::new(
+            "proj".to_string(),
+            temp_dir.path().to_path_buf(),
+            "main".to_string(),
+        );
+        let project_id = project.id;
+        project_store.add_project(project);
+
+        // A plain (non-worktree) branch: the full 'y' flow runs without any
+        // git or on-disk worktree involvement
+        let branch = Branch::new(
+            project_id,
+            "feature".to_string(),
+            temp_dir.path().join("feature"),
+            false,
+            false,
+        );
+        let branch_id = branch.id;
+        project_store.add_branch(branch);
+
+        let session_id = sessions
+            .insert_test_session("on-branch", project_id, branch_id)
+            .unwrap();
+
+        let mut state = AppState {
+            view: View::ProjectDetail(project_id),
+            input_mode: InputMode::ConfirmingBranchDelete,
+            pending_delete_branch: Some(branch_id),
+            active_session: Some(session_id),
+            ..Default::default()
+        };
+
+        // Mirror the 'y' arm of handle_confirming_branch_delete_key, minus
+        // the on-disk removal (delete_worktree_on_disk is false)
+        let branch = begin_branch_delete(&mut state, &mut sessions, &project_store)
+            .expect("branch exists and must be returned");
+        assert!(
+            sessions.get(session_id).is_none(),
+            "branch sessions must be destroyed"
+        );
+        assert!(state.active_session.is_none());
+
+        finish_branch_delete(
+            &mut state,
+            &mut project_store,
+            &claude_config_store,
+            &branch,
+        );
+
+        assert!(project_store.get_branch(branch_id).is_none());
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert!(!state.delete_worktree_on_disk);
+    }
 }

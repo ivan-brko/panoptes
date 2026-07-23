@@ -32,28 +32,36 @@ Choose the appropriate module based on the mode type:
 | Text input (naming, paths) | `src/input/text_input.rs` |
 | Confirmation dialogs | `src/input/dialogs.rs` |
 | Session interaction | `src/input/session_mode.rs` |
-| Multi-step wizards | `src/wizards/<wizard>/handlers.rs` |
+| Claude/Codex config flows | `src/input/agent_configs.rs` (one handler, parameterized by `AgentKind`) |
+| Multi-step wizards | `src/wizards/<wizard>/` |
+
+If the mode exists for both Claude and Codex, do not write it twice: add it to
+`input/agent_configs.rs` and extend `AgentKind` with whatever differs (the
+`InputMode` variants it moves between, wording, which store it touches).
 
 ### 3. Create Handler Function
 
-In the chosen module, add the handler:
+Handlers are synchronous and return `anyhow::Result<()>`. Prefer a parts-based
+handler that takes only what it needs (`&mut AppState`, a store) so it can be
+unit tested without a terminal, plus a thin `handle_*` wrapper that
+destructures `App` for the dispatcher — see `input/agent_configs.rs` for the
+pattern:
 
 ```rust
-pub async fn handle_new_mode(app: &mut App, key: KeyEvent) -> AppResult<()> {
+pub fn handle_new_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    new_mode_key(&mut app.state, key)
+}
+
+fn new_mode_key(state: &mut AppState, key: KeyEvent) -> Result<()> {
     match key.code {
-        KeyCode::Char(c) => {
-            // Handle character input
-        }
+        KeyCode::Char(c) => { /* handle character input */ }
         KeyCode::Enter => {
             // Confirm/submit
-            app.state.input_mode = InputMode::Normal;
+            state.input_mode = InputMode::Normal;
         }
         KeyCode::Esc => {
             // Cancel
-            app.state.input_mode = InputMode::Normal;
-        }
-        KeyCode::Backspace => {
-            // Handle backspace if text input
+            state.input_mode = InputMode::Normal;
         }
         _ => {}
     }
@@ -63,104 +71,60 @@ pub async fn handle_new_mode(app: &mut App, key: KeyEvent) -> AppResult<()> {
 
 ### 4. Add Dispatch Case
 
-In `src/input/dispatcher.rs`, in `handle_key_event()`, add:
+In `src/input/dispatcher.rs`, in `handle_key_event()`, add an arm to the
+`match app.state.input_mode` block:
 
 ```rust
-InputMode::NewMode => {
-    text_input::handle_new_mode(app, key).await?;
-    // or dialogs::handle_new_mode(app, key).await?;
-    // depending on handler location
-}
+InputMode::NewMode => super::text_input::handle_new_mode_key(app, key),
 ```
 
-### 5. Add State Fields (if needed)
+Then update the routing-table mirror in the same file's test module: the
+`handler_family()` function is deliberately exhaustive over `InputMode`, so
+adding a variant without deciding its routing is a compile error. Add the new
+mode to it and `test_every_mode_reaches_intended_handler_family` verifies the
+routing.
 
-If the mode needs to track state (e.g., text buffer, cursor position), add fields to `AppState` in `src/app/state.rs`:
+### 5. Add Overlay Rendering
 
-```rust
-pub struct AppState {
-    // ... existing fields
-    pub new_mode_buffer: String,
-    pub new_mode_cursor: usize,
-}
-```
+Overlay dialogs are dispatched by the exhaustive `match state.input_mode`
+block in `App::render()` (`src/app/mod.rs`) — a new variant will not compile
+until you decide what it renders (possibly nothing). Build the dialog itself
+with the shared widgets in `tui/widgets/dialog.rs` (`centered_rect`,
+`render_dialog`, `yes_no_line`) so it matches the other dialogs and clamps
+inside tiny terminals.
 
-### 6. Add Trigger Logic
+### 6. Add State Fields (if needed)
 
-Add code to enter the new mode from normal mode. Usually in the relevant view's input handler:
+If the mode needs to track state (e.g., a text buffer or a selection index),
+add fields to `AppState` in `src/app/state.rs`. Reuse existing draft structs
+where they fit (e.g., `session_draft`, `config_draft`).
+
+If the mode has a text field, also wire it into `App::paste_into_mode_field`
+(`src/app/mod.rs`) so paste works in it like in every other text-input mode.
+
+### 7. Add Trigger Logic
+
+Add code to enter the new mode from normal mode, usually in the relevant
+view's input handler:
 
 ```rust
 KeyCode::Char('n') => {
     app.state.input_mode = InputMode::NewMode;
-    app.state.new_mode_buffer.clear();
 }
 ```
 
-### 7. Update Rendering (if needed)
+### 8. Check Mode/View Consistency
 
-If the mode has visual feedback (input box, cursor), update the view's render function to display it when in this mode.
-
-## Common Patterns
-
-### Text Input Mode
-
-```rust
-pub async fn handle_text_mode(app: &mut App, key: KeyEvent) -> AppResult<()> {
-    match key.code {
-        KeyCode::Char(c) => {
-            app.state.text_buffer.insert(app.state.cursor_pos, c);
-            app.state.cursor_pos += 1;
-        }
-        KeyCode::Backspace if app.state.cursor_pos > 0 => {
-            app.state.cursor_pos -= 1;
-            app.state.text_buffer.remove(app.state.cursor_pos);
-        }
-        KeyCode::Left if app.state.cursor_pos > 0 => {
-            app.state.cursor_pos -= 1;
-        }
-        KeyCode::Right if app.state.cursor_pos < app.state.text_buffer.len() => {
-            app.state.cursor_pos += 1;
-        }
-        KeyCode::Enter => {
-            // Process the input
-            let input = app.state.text_buffer.clone();
-            // ... do something with input
-            app.state.input_mode = InputMode::Normal;
-        }
-        KeyCode::Esc => {
-            app.state.input_mode = InputMode::Normal;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-```
-
-### Confirmation Dialog Mode
-
-```rust
-pub async fn handle_confirm_mode(app: &mut App, key: KeyEvent) -> AppResult<()> {
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
-            // Perform confirmed action
-            app.state.input_mode = InputMode::Normal;
-        }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            // Cancel
-            app.state.input_mode = InputMode::Normal;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-```
+`validate_mode_view_consistency()` in `src/input/dispatcher.rs` resets modes
+that only make sense in a particular view (e.g., Session mode outside
+SessionView). If the new mode is view-bound, add it there.
 
 ## Verification
 
-1. Run `cargo build` to check for compile errors
-2. Run `cargo clippy -- -D warnings`
-3. Test the mode:
+1. Run `cargo build` — the exhaustive matches in `App::render()` and the
+   dispatcher test's `handler_family()` will flag anything you missed
+2. Run `cargo lint`
+3. Run `cargo test`
+4. Test the mode manually:
    - Enter the mode via the trigger
-   - Verify input handling works
-   - Verify Esc cancels properly
-   - Verify Enter/confirmation works
+   - Verify input handling, paste, Esc-cancel, and Enter-confirm

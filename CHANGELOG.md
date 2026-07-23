@@ -10,13 +10,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Projects can be grouped into folders in the projects overview, nested up to 3 levels deep (`m` to move, `r` to rename, `d` to ungroup, `Enter`/`←`/`→` to fold).
 
+### Changed
+- **All state files are now written atomically.** `projects.json`, `sessions.json`, both agent-config files, and `config.toml` are saved via a sibling temp file and rename, so a crash mid-write can never truncate a store. Corrupted files are uniformly backed up to a timestamped `<file>.corrupt.<timestamp>` sibling before starting fresh.
+- `notification_method` is validated on load: `bell`, `title`, or `none`. Unknown values log a warning and fall back to `bell` instead of being silently misread.
+- A stalled PTY write blocks the UI for at most ~50ms (was up to 1s), and runaway child output is drained with a per-tick budget, so a single misbehaving session can no longer starve the interface.
+- Paste now works in every text-input mode — config names and paths, folder move/rename, and custom shortcut fields — not just session creation.
+- UI consistency pass: a single `▶` selection glyph everywhere (the worktree wizard used `▸`), standard green/red Yes/No buttons in all confirmations, selector overlays styled like the other menus, and dialogs that clamp inside tiny terminals instead of overflowing.
+- Spawn failures and worktree-wizard errors now include the underlying cause instead of a bare summary.
+
 ### Fixed
 - **A partial `config.toml` no longer refuses to start.** `hook_port`, `worktrees_dir`, `hooks_dir`, and `max_output_lines` had no defaults when deserializing, so a config file omitting any of them failed with `missing field ...` — including the example the configuration guide told you to create. All four now fall back to the same values `Config::default()` already used.
 - Documentation now matches the code: the help overlay and keyboard reference listed `Shift+Tab`, `i`, `g`/`G`, and an `f` auto-follow toggle that were never implemented, and `1-9` in views that do not support it. `max_output_lines` and `theme_preset` are documented as parsed-but-unused, which is what they are.
 - **Every Claude `Notification` hook rang the bell and flagged the session.** The `notification_type` values Panoptes matched (`idle`, `permission_request`, `task_completed`, `elicitation`) were not the ones Claude Code sends (`idle_prompt`, `permission_prompt`, `agent_completed`, `elicitation_dialog`, …), so all of them fell through to the unknown case, which assumes the agent wants you. The worst offender was `idle_prompt`, which fires repeatedly while you have *not* replied — so a session you had already read kept announcing itself with nothing new to show. `auth_success`, `elicitation_complete`, and `elicitation_response` are now classified as informational and stay silent.
 - The session open on screen no longer flags itself as needing attention. An event arriving while you are looking at a session used to leave its badge set until you navigated away and back.
+- Panics on non-ASCII text: both the settings-view path truncation and the paste-limit truncation sliced strings mid-codepoint and crashed on multi-byte characters.
+- Codex subagent counts were computed from the default `CODEX_HOME` even for sessions running under a different Codex account, so their counts were wrong or missing.
+- Multi-byte characters split across PTY reads no longer render as `�` in Codex fallback scrollback; trailing partial bytes are held until the rest of the character arrives.
+- A failed paste or keystroke no longer leaves a session stuck showing "Thinking".
+- Session cleanup leaked navigation-order entries, so number-key jumps could hit holes after sessions aged out.
+- **A corrupt `config.toml` no longer aborts startup.** The unparseable file is backed up with a timestamp, defaults are used, and a visible warning explains what happened.
+- A corrupt `~/.claude/.claude.json` no longer silently disables permission comparison — it is warned about and treated as empty, and the file itself is never touched.
+- A stale default account pointing at a deleted profile now recovers deterministically (alphabetically first remaining profile) for Claude configs too, matching Codex.
+- Removing a git worktree without force no longer deletes the working tree on disk, so local modifications survive.
+- Malformed hook payloads are now logged instead of vanishing silently.
+- Session-create failures always surface an on-screen error; previously only Codex sessions reported them.
+- New sessions start with correct PTY dimensions, removing a brief mis-sized flash on open.
+- Custom-shortcut sessions set auto-close at creation time, closing a race where a command that finished instantly missed the flag and never closed.
+- **A session you had already read kept demanding attention forever.** Alongside the flag set by real events, `session_needs_attention` had a second, time-based rule: any session in `Waiting` whose last activity was older than `idle_threshold_secs` was flagged too. Acknowledging clears the flag, not the clock, so opening the session did nothing and the badge reappeared the instant you looked away. The rule was a leftover from when the state was called `Idle` and meant "this session has gone abnormally quiet" — a job now done by the `Stalled` attention reason. Renaming it to `Waiting`, the normal resting state of every healthy session, quietly turned it into "you finished a turn five minutes ago". It bit Codex hardest: a Codex session parked at its prompt writes nothing to its PTY or its rollout, so its activity clock never moved. Attention is now raised only by events that actually mean something.
 
 ### Removed
+- The `idle_threshold_secs` config key, which only fed the time-based attention rule described above. Leaving it in `config.toml` is harmless — unknown keys are ignored.
 - **Activity Timeline view.** The `a` shortcut, the view, and its documentation are gone. It listed every session sorted by recency, but selecting a row and opening it used two different orderings — the list sorted by last activity while `Enter` indexed creation order — so it opened the wrong session as soon as the two diverged. The homepage Sessions panel covers the same ground without that flaw. `a` is now free for a custom shortcut.
 - **Vim-style `j`/`k` navigation.** It only ever worked in the log viewer, the two config views, and four selector dialogs, and `k` never reached a view at all — it is globally bound to the custom shortcuts manager. Navigation is now consistently by arrow key.
 - **Focus timer and focus statistics.** The `t`, `T`, and `Ctrl+t` shortcuts, the Focus Statistics view, and all focus-interval tracking are gone.
@@ -26,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Overlay notification system.** The focus timer was its only producer, so `NotificationManager`, `NotificationType`, and the notification overlay are gone. Transient messages still appear in the header, and session attention still rings the bell / sets the terminal title per `notification_method`.
 - **Terminal focus tracking.** Focus-change reporting is no longer requested from the terminal. A session you are currently viewing no longer rings when you switch away from the terminal window — attention notifications now fire only for sessions you are *not* looking at.
 - Ordinal numbering in the projects list; digit keys now select only in the Sessions list.
+
+### Technical
+- Major internal refactor with no intended behavior change beyond the entries above: a shared persistence layer (`persistence.rs`), a generic agent-profile store (`agent_profiles.rs`) backing both Claude and Codex configs, a pure session state machine (`session/state_machine.rs`), unified Claude/Codex config input handlers and views, and a decomposed event loop. Unit test count grew from 520 to about 660.
 
 ## [0.3.1] - 2026-02-11
 

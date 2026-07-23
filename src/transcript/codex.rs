@@ -16,9 +16,120 @@
 //! no `*_begin` events at all, so `function_call` / `function_call_output` is
 //! the begin/end pair.
 
+use std::path::{Path, PathBuf};
+
 use serde_json::Value;
 
 use crate::agent::events::{AgentEvent, UsageSnapshot};
+
+/// The `session_meta` header of a Codex rollout file
+///
+/// Beware the field names on a subagent rollout: `payload.id` is the
+/// subagent's own ID while `payload.session_id` is its *parent's*, and a
+/// second `session_meta` record follows carrying the parent's metadata. This
+/// struct always reports the rollout's own identity, with the parent (if any)
+/// in [`RolloutMeta::parent_id`].
+#[derive(Debug, Clone)]
+pub struct RolloutMeta {
+    /// The conversation's own ID
+    pub id: String,
+    /// Working directory the conversation started in
+    pub cwd: Option<PathBuf>,
+    /// When the conversation began - the rollout's own creation timestamp,
+    /// deliberately independent of the file's mtime, which is bumped on every
+    /// turn
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether this rollout belongs to a subagent rather than a real session
+    ///
+    /// Codex subagents get their own rollout files, which look enough like a
+    /// session's own to be claimed by mistake - a real example on this machine
+    /// is a subagent rollout whose `cwd` is a Panoptes worktree, with its own
+    /// fresh start timestamp.
+    pub is_subagent: bool,
+    /// The conversation this rollout was forked from, when it is a subagent's
+    pub parent_id: Option<String>,
+}
+
+/// Every rollout file under a Codex sessions directory
+///
+/// Rollouts are filed under `sessions/YYYY/MM/DD`, so this walks exactly three
+/// levels rather than recursing over an unbounded tree. A missing or
+/// unreadable directory yields an empty list, which is the normal state before
+/// Codex has written anything.
+pub fn rollout_files(sessions_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for year in subdirs(sessions_dir) {
+        for month in subdirs(&year) {
+            for day in subdirs(&month) {
+                let Ok(entries) = std::fs::read_dir(&day) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// List immediate subdirectories, ignoring anything unreadable
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+/// Read the `session_meta` header of a rollout file
+///
+/// Only the first line is read: the rest of a rollout is the conversation,
+/// which can be large and is of no interest here. Returns `None` for anything
+/// that is not a rollout with a parseable `session_meta` header - including a
+/// file observed before Codex finished writing its first line.
+pub fn read_session_meta(path: &Path) -> Option<RolloutMeta> {
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut first_line = String::new();
+    std::io::BufReader::new(file)
+        .read_line(&mut first_line)
+        .ok()?;
+
+    let value: Value = serde_json::from_str(&first_line).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    let id = payload.get("id").and_then(Value::as_str)?.to_string();
+
+    // Codex records the timestamp on the payload and again on the envelope;
+    // either identifies when the conversation began
+    let created_at = payload
+        .get("timestamp")
+        .or_else(|| value.get("timestamp"))
+        .and_then(Value::as_str)
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc));
+
+    Some(RolloutMeta {
+        id,
+        cwd: payload
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(PathBuf::from),
+        created_at,
+        is_subagent: is_subagent_meta(payload),
+        parent_id: parent_conversation_id(payload),
+    })
+}
 
 /// Translate one rollout line into a session event
 ///
@@ -128,17 +239,11 @@ fn parse_token_count(payload: &Value) -> UsageSnapshot {
     }
 }
 
-/// Whether a rollout file belongs to a subagent rather than a real session
+/// Whether a `session_meta` payload belongs to a subagent
 ///
-/// Codex subagents get their own rollout files, which look enough like a
-/// session's own to be claimed by mistake - a real example on this machine is a
-/// subagent rollout whose `cwd` is a Panoptes worktree, with its own fresh
-/// start timestamp.
-///
-/// Beware the field names: on a subagent rollout, `payload.id` is the
-/// subagent's own ID while `payload.session_id` is its *parent's*, and a second
-/// `session_meta` record follows carrying the parent's metadata.
-pub fn is_subagent_meta(payload: &Value) -> bool {
+/// See [`RolloutMeta::is_subagent`] for why this matters; consumers read it
+/// from the struct rather than re-parsing raw payloads.
+fn is_subagent_meta(payload: &Value) -> bool {
     payload.get("forked_from_id").is_some_and(|v| !v.is_null())
         || payload
             .get("source")
@@ -147,7 +252,7 @@ pub fn is_subagent_meta(payload: &Value) -> bool {
 }
 
 /// The conversation this rollout was forked from, if it is a subagent's
-pub fn parent_conversation_id(payload: &Value) -> Option<String> {
+fn parent_conversation_id(payload: &Value) -> Option<String> {
     if let Some(id) = payload.get("forked_from_id").and_then(Value::as_str) {
         return Some(id.to_string());
     }
@@ -305,6 +410,127 @@ mod tests {
             parse_line(r#"{"type":"event_msg","payload":{"type":"something_new"}}"#),
             None
         );
+    }
+
+    /// Write a rollout file with an arbitrary first line
+    fn write_rollout_file(dir: &Path, name: &str, first_line: &str) -> PathBuf {
+        let day = dir.join("2026").join("07").join("22");
+        std::fs::create_dir_all(&day).unwrap();
+        let path = day.join(name);
+        std::fs::write(&path, format!("{}\n{{\"type\":\"message\"}}\n", first_line)).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_rollout_files_walks_the_dated_tree_and_filters_jsonl() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let a = write_rollout_file(dir.path(), "rollout-a.jsonl", "{}");
+        let b = write_rollout_file(dir.path(), "rollout-b.jsonl", "{}");
+        // Not a rollout, must be ignored
+        write_rollout_file(dir.path(), "notes.txt", "irrelevant");
+        // A file outside the YYYY/MM/DD depth must not be picked up
+        std::fs::write(dir.path().join("stray.jsonl"), "{}\n").unwrap();
+
+        let mut found = rollout_files(dir.path());
+        found.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(found, expected);
+
+        // A sessions dir that does not exist yet is the normal starting state
+        assert!(rollout_files(&dir.path().join("nope")).is_empty());
+    }
+
+    #[test]
+    fn test_read_session_meta_full_header() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let line = serde_json::json!({
+            "timestamp": "2026-07-22T10:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "conv-1",
+                "timestamp": "2026-07-22T10:00:05Z",
+                "cwd": "/work/here",
+                "originator": "codex_cli_rs"
+            }
+        });
+        let path = write_rollout_file(dir.path(), "rollout-full.jsonl", &line.to_string());
+
+        let meta = read_session_meta(&path).expect("valid session_meta");
+        assert_eq!(meta.id, "conv-1");
+        assert_eq!(meta.cwd.as_deref(), Some(Path::new("/work/here")));
+        // The payload timestamp wins over the envelope's
+        assert_eq!(
+            meta.created_at.unwrap().to_rfc3339(),
+            "2026-07-22T10:00:05+00:00"
+        );
+        assert!(!meta.is_subagent);
+        assert_eq!(meta.parent_id, None);
+    }
+
+    #[test]
+    fn test_read_session_meta_falls_back_to_envelope_timestamp() {
+        // Some rollouts stamp only the envelope, not the payload. Discovery
+        // matches on this timestamp, so losing it would make the rollout
+        // undiscoverable rather than merely less precise.
+        let dir = tempfile::TempDir::new().unwrap();
+        let line = serde_json::json!({
+            "timestamp": "2026-07-22T09:30:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "envelope-only",
+                "cwd": "/work/here"
+            }
+        });
+        let path = write_rollout_file(dir.path(), "rollout-envelope.jsonl", &line.to_string());
+
+        let meta = read_session_meta(&path).expect("valid session_meta");
+        assert_eq!(meta.id, "envelope-only");
+        assert_eq!(
+            meta.created_at.unwrap().to_rfc3339(),
+            "2026-07-22T09:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn test_read_session_meta_reports_subagents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let line = serde_json::json!({
+            "timestamp": "2026-07-22T10:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                // `id` is the subagent's own; `session_id` is the parent's
+                "id": "child",
+                "session_id": "parent",
+                "forked_from_id": "parent",
+                "cwd": "/work/here",
+                "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}}
+            }
+        });
+        let path = write_rollout_file(dir.path(), "rollout-sub.jsonl", &line.to_string());
+
+        let meta = read_session_meta(&path).expect("valid session_meta");
+        assert_eq!(meta.id, "child", "must report the rollout's own identity");
+        assert!(meta.is_subagent);
+        assert_eq!(meta.parent_id.as_deref(), Some("parent"));
+    }
+
+    #[test]
+    fn test_read_session_meta_rejects_non_rollouts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for (name, first_line) in [
+            ("broken.jsonl", "not json at all"),
+            ("empty.jsonl", ""),
+            ("wrong-type.jsonl", r#"{"type":"event_msg","payload":{}}"#),
+            (
+                "no-id.jsonl",
+                r#"{"type":"session_meta","payload":{"cwd":"/x"}}"#,
+            ),
+        ] {
+            let path = write_rollout_file(dir.path(), name, first_line);
+            assert!(read_session_meta(&path).is_none(), "for {name}");
+        }
+        assert!(read_session_meta(Path::new("/no/such/file.jsonl")).is_none());
     }
 
     #[test]

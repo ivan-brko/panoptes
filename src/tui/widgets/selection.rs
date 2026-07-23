@@ -84,6 +84,37 @@ pub fn selection_style_with_accent(is_selected: bool, theme: &Theme) -> Style {
 /// let span = Span::styled("My Item", style);
 /// // Creates a bold cyan "My Item" span
 /// ```
+/// Style for a row that rolls up session activity, with selection support.
+///
+/// Implements the shared "attention > active > selected > fallback" cascade:
+/// attention and active counts win over everything, a selected quiet row gets
+/// the accent, and a quiet unselected row falls back to `fallback` (plain
+/// text for most lists, bold text for folder headings, accent for the local
+/// checkout row).
+pub fn activity_style(
+    is_selected: bool,
+    attention_count: usize,
+    active_count: usize,
+    fallback: Style,
+    theme: &Theme,
+) -> Style {
+    if is_selected {
+        if attention_count > 0 {
+            selection_style(true, theme.attention_badge)
+        } else if active_count > 0 {
+            selection_style(true, theme.active)
+        } else {
+            selection_style_with_accent(true, theme)
+        }
+    } else if attention_count > 0 {
+        Style::default().fg(theme.attention_badge)
+    } else if active_count > 0 {
+        Style::default().fg(theme.active)
+    } else {
+        fallback
+    }
+}
+
 pub fn selection_name_style(is_selected: bool, theme: &Theme) -> Style {
     Style::default()
         .fg(if is_selected {
@@ -106,6 +137,26 @@ mod tests {
     fn test_selection_prefix() {
         assert_eq!(selection_prefix(true), "▶ ");
         assert_eq!(selection_prefix(false), "  ");
+    }
+
+    #[test]
+    fn test_activity_style_precedence() {
+        let t = crate::tui::theme::theme();
+        let fallback = Style::default().fg(t.text);
+
+        // Attention beats active
+        assert_eq!(
+            activity_style(false, 1, 1, fallback, t).fg,
+            Some(t.attention_badge)
+        );
+        // Active beats fallback
+        assert_eq!(activity_style(false, 0, 1, fallback, t).fg, Some(t.active));
+        // Quiet unselected rows keep the fallback
+        assert_eq!(activity_style(false, 0, 0, fallback, t), fallback);
+        // Quiet selected rows get the accent, bold
+        let selected = activity_style(true, 0, 0, fallback, t);
+        assert_eq!(selected.fg, Some(t.accent));
+        assert!(selected.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

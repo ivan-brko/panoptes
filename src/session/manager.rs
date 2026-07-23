@@ -7,22 +7,65 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::agent::adapter::SpawnConfig;
 use crate::agent::events::AgentEvent;
 use crate::agent::AgentType;
-use crate::claude_config::ClaudeConfigId;
-use crate::config::Config;
-use crate::hooks::{HookEvent, HookEventType, NotificationKind};
+use crate::config::{Config, NotificationMethod};
+use crate::hooks::HookEvent;
 use crate::project::{BranchId, ProjectId};
 
-use crate::codex_config::CodexConfigId;
-
 use super::{
-    AttentionReason, Session, SessionId, SessionInfo, SessionState, SessionStore, SessionType,
+    state_machine, AttentionReason, Session, SessionId, SessionInfo, SessionState, SessionStore,
+    SessionType,
 };
+
+/// Everything needed to create a brand-new session
+///
+/// One spec serves every agent type; the [`AgentType`] passed alongside it to
+/// [`SessionManager::create_session`] decides which process is spawned and how
+/// the optional fields are interpreted.
+#[derive(Debug, Clone)]
+pub struct NewSessionSpec {
+    /// Display name for the session
+    pub name: String,
+    /// Directory the agent or shell starts in
+    pub working_dir: PathBuf,
+    /// Parent project identifier
+    pub project_id: ProjectId,
+    /// Parent branch identifier
+    pub branch_id: BranchId,
+    /// For agents, a prompt handed over at launch. For shells, a command
+    /// written to the PTY once the shell is up (with a newline appended, so it
+    /// executes immediately).
+    pub initial_prompt: Option<String>,
+    /// The Claude/Codex profile to run under, when not the default account
+    pub account: Option<AgentAccount>,
+    /// Close the session automatically once its command finishes (shells only)
+    ///
+    /// Set at creation so the flag is in place before the command can finish,
+    /// rather than patched on afterwards.
+    pub auto_close: bool,
+}
+
+/// The account profile a new session runs under
+///
+/// Claude profiles live in a `ClaudeConfigStore` and point at a
+/// `CLAUDE_CONFIG_DIR`; Codex profiles live in a `CodexConfigStore` and point
+/// at a `CODEX_HOME`. Both ID types are UUIDs, so one struct serves both - the
+/// agent type of the session decides which store the ID belongs to.
+#[derive(Debug, Clone)]
+pub struct AgentAccount {
+    /// Profile ID in the corresponding account store
+    pub id: Uuid,
+    /// Profile name, cached on the session for display
+    pub name: String,
+    /// Directory the profile lives in (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`)
+    pub dir: Option<PathBuf>,
+}
 
 /// Manages multiple Claude Code sessions
 pub struct SessionManager {
@@ -193,8 +236,8 @@ impl SessionManager {
     /// did before the restart.
     ///
     /// Config directories are passed in rather than looked up here, mirroring
-    /// `create_session_with_config` - the manager does not own the account
-    /// stores.
+    /// the account handling in `create_session` - the manager does not own the
+    /// account stores.
     ///
     /// On failure the recovery entry is left untouched so the user can retry or
     /// discard it; a failed resume must not silently consume the record.
@@ -216,18 +259,7 @@ impl SessionManager {
             return Err(anyhow!("Cannot resume '{}': {}", info.name, reason));
         }
 
-        let agent_type = match info.session_type {
-            SessionType::ClaudeCode => AgentType::ClaudeCode,
-            SessionType::OpenAICodex => AgentType::OpenAICodex,
-            SessionType::Shell => AgentType::Shell,
-        };
-
-        // A shell has no conversation to reattach to - it is restored by
-        // respawning in the same directory, so it must not carry a resume cursor
-        let resume = match info.session_type {
-            SessionType::Shell => None,
-            _ => info.agent_session_id.clone(),
-        };
+        let agent_type = AgentType::from(info.session_type);
 
         let spawn_config = SpawnConfig {
             session_id,
@@ -238,11 +270,8 @@ impl SessionManager {
             cols: cols as u16,
             claude_config_dir,
             codex_home,
-            resume,
+            resume: info.resume_cursor(),
         };
-
-        let adapter = agent_type.create_adapter();
-        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
 
         let mut info = info;
         info.state = SessionState::Starting;
@@ -251,23 +280,12 @@ impl SessionManager {
         // Its transcript holds a whole prior conversation; reading from the
         // start would replay it as if it were happening now
         info.resumed_conversation = true;
-        if spawn_result.agent_session_id.is_some() {
-            info.agent_session_id = spawn_result.agent_session_id;
-        }
 
-        let session = Session::with_scrollback(
-            info,
-            spawn_result.pty,
-            rows,
-            cols,
-            self.config.scrollback_lines,
-        );
+        // A failed spawn returns here with the recovery entry untouched
+        self.spawn_and_register(info, spawn_config, agent_type, rows, cols)?;
 
         // Only now that the process exists does the session stop being "recovered"
         self.recovered.remove(&session_id);
-        self.sessions.insert(session_id, session);
-        self.session_order.push(session_id);
-        self.persist_session(session_id);
 
         tracing::info!(session_id = %session_id, "Resumed session from a previous run");
 
@@ -342,11 +360,16 @@ impl SessionManager {
     /// Only a generated name may later be replaced by the agent's own title -
     /// see `SessionInfo::adopt_agent_title`. Callers know this because they
     /// know whether the user left the name field blank; the manager does not.
-    pub fn set_auto_named(&mut self, session_id: SessionId, auto_named: bool) {
-        if let Some(session) = self.sessions.get_mut(&session_id) {
-            session.info.auto_named = auto_named;
-        }
+    ///
+    /// Returns whether the session was found and updated. Persists only when a
+    /// session was actually updated, mirroring `set_agent_session_id`.
+    pub fn set_auto_named(&mut self, session_id: SessionId, auto_named: bool) -> bool {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return false;
+        };
+        session.info.auto_named = auto_named;
         self.persist_session(session_id);
+        true
     }
 
     /// Write a session's record to the durable index
@@ -391,258 +414,128 @@ impl SessionManager {
         }
     }
 
-    /// Create a new session with the given name, working directory, project/branch, and terminal dimensions
-    #[allow(clippy::too_many_arguments)]
+    /// Create a new session running the given agent (or shell)
+    ///
+    /// The one entry point for brand-new sessions of every type. The agent
+    /// type decides which process is spawned, how `spec.initial_prompt` is
+    /// delivered (launch argument for agents, PTY write for shells), and which
+    /// account fields `spec.account` fills in.
     pub fn create_session(
         &mut self,
-        name: String,
-        working_dir: PathBuf,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        initial_prompt: Option<String>,
+        agent: AgentType,
+        spec: NewSessionSpec,
         rows: usize,
         cols: usize,
     ) -> Result<SessionId> {
-        self.create_session_with_config(
+        let NewSessionSpec {
             name,
             working_dir,
             project_id,
             branch_id,
             initial_prompt,
-            rows,
-            cols,
-            None,
-            None,
-            None,
-        )
-    }
+            account,
+            auto_close,
+        } = spec;
 
-    /// Create a new session with a specific Claude configuration
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_session_with_config(
-        &mut self,
-        name: String,
-        working_dir: PathBuf,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        initial_prompt: Option<String>,
-        rows: usize,
-        cols: usize,
-        claude_config_id: Option<ClaudeConfigId>,
-        claude_config_dir: Option<PathBuf>,
-        claude_config_name: Option<String>,
-    ) -> Result<SessionId> {
-        let mut info = SessionInfo::with_claude_config(
-            name.clone(),
-            working_dir.clone(),
-            project_id,
-            branch_id,
-            claude_config_id,
-            claude_config_name,
-        );
-        let session_id = info.id;
+        let mut info = match agent {
+            AgentType::ClaudeCode => SessionInfo::new(name, working_dir, project_id, branch_id),
+            AgentType::OpenAICodex => SessionInfo::codex(name, working_dir, project_id, branch_id),
+            AgentType::Shell => SessionInfo::shell(name, working_dir, project_id, branch_id),
+        };
+        info.auto_close_after_command = auto_close;
 
-        // Create spawn config
+        let mut claude_config_dir = None;
+        let mut codex_home = None;
+        if let Some(account) = account {
+            match agent {
+                AgentType::ClaudeCode => {
+                    info.claude_config_id = Some(account.id);
+                    info.claude_config_name = Some(account.name);
+                    claude_config_dir = account.dir;
+                }
+                AgentType::OpenAICodex => {
+                    info.codex_config_id = Some(account.id);
+                    info.codex_config_name = Some(account.name);
+                    codex_home = account.dir;
+                }
+                AgentType::Shell => {
+                    // Shells have no account to run under; nothing to record
+                    tracing::warn!("Ignoring account profile on a shell session");
+                }
+            }
+        }
+
+        // A shell takes its initial input over the PTY once it is up; agents
+        // take it as a launch argument
+        let is_shell = agent == AgentType::Shell;
         let spawn_config = SpawnConfig {
-            session_id,
-            session_name: name,
-            working_dir,
-            initial_prompt,
+            session_id: info.id,
+            session_name: info.name.clone(),
+            working_dir: info.working_dir.clone(),
+            initial_prompt: if is_shell {
+                None
+            } else {
+                initial_prompt.clone()
+            },
             rows: rows as u16,
             cols: cols as u16,
             claude_config_dir,
-            codex_home: None,
+            codex_home,
             resume: None,
         };
 
-        // Get adapter and spawn the process
-        let agent_type = AgentType::ClaudeCode;
-        let adapter = agent_type.create_adapter();
-        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
+        let session_id = self.spawn_and_register(info, spawn_config, agent, rows, cols)?;
 
-        // Record the agent's conversation ID so this session can be resumed
-        // after a restart
-        info.agent_session_id = spawn_result.agent_session_id;
-
-        // Create session with PTY and virtual terminal
-        let session = Session::with_scrollback(
-            info,
-            spawn_result.pty,
-            rows,
-            cols,
-            self.config.scrollback_lines,
-        );
-
-        // Store session
-        self.sessions.insert(session_id, session);
-        self.session_order.push(session_id);
-        self.persist_session(session_id);
-
-        Ok(session_id)
-    }
-
-    /// Create a new shell session (bash/zsh)
-    ///
-    /// Shell sessions don't use hooks - state tracking is done via foreground detection.
-    pub fn create_shell_session(
-        &mut self,
-        name: String,
-        working_dir: PathBuf,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        rows: usize,
-        cols: usize,
-    ) -> Result<SessionId> {
-        let info = SessionInfo::shell(name.clone(), working_dir.clone(), project_id, branch_id);
-        let session_id = info.id;
-
-        // Create spawn config
-        let spawn_config = SpawnConfig {
-            session_id,
-            session_name: name,
-            working_dir,
-            initial_prompt: None, // Shell doesn't use initial prompts
-            rows: rows as u16,
-            cols: cols as u16,
-            claude_config_dir: None,
-            codex_home: None,
-            resume: None,
-        };
-
-        // Get adapter and spawn the process
-        let agent_type = AgentType::Shell;
-        let adapter = agent_type.create_adapter();
-        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
-
-        // Create session with PTY and virtual terminal
-        let session = Session::with_scrollback(
-            info,
-            spawn_result.pty,
-            rows,
-            cols,
-            self.config.scrollback_lines,
-        );
-
-        // Store session
-        self.sessions.insert(session_id, session);
-        self.session_order.push(session_id);
-        self.persist_session(session_id);
-
-        Ok(session_id)
-    }
-
-    /// Create a new shell session with an initial command to execute
-    ///
-    /// Shell sessions don't use hooks - state tracking is done via foreground detection.
-    /// The command is written to the PTY after the shell starts.
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_shell_session_with_command(
-        &mut self,
-        name: String,
-        working_dir: PathBuf,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        initial_command: String,
-        rows: usize,
-        cols: usize,
-    ) -> Result<SessionId> {
-        // Create the shell session first
-        let session_id =
-            self.create_shell_session(name, working_dir, project_id, branch_id, rows, cols)?;
-
-        // Write the command to the PTY
-        // The shell should be ready immediately, but we can write right away since
-        // the PTY will buffer the input until the shell reads it
-        if let Some(session) = self.sessions.get_mut(&session_id) {
-            // Write the command followed by newline to execute it
-            let command_with_newline = format!("{}\n", initial_command);
-            if let Err(e) = session.pty.write(command_with_newline.as_bytes()) {
-                tracing::warn!(
-                    session_id = %session_id,
-                    command = %initial_command,
-                    error = %e,
-                    "Failed to write initial command to shell session"
-                );
+        if is_shell {
+            if let Some(command) = initial_prompt {
+                // The shell should be ready immediately, but writing right away
+                // is safe either way: the PTY buffers the input until the shell
+                // reads it. The newline makes the command execute.
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    let command_with_newline = format!("{}\n", command);
+                    if let Err(e) = session.pty.write(command_with_newline.as_bytes()) {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            command = %command,
+                            error = %e,
+                            "Failed to write initial command to shell session"
+                        );
+                    }
+                }
             }
         }
 
         Ok(session_id)
     }
 
-    /// Create a new Codex session
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_codex_session(
+    /// Spawn the agent process and take ownership of the resulting session
+    ///
+    /// The shared tail of every path that brings a process to life - create,
+    /// resume, wake. Spawns first, so a failure leaves the manager untouched;
+    /// only then registers the session and persists its record.
+    ///
+    /// When the adapter reports the agent's conversation ID at spawn time (as
+    /// Claude Code does via `--session-id`), it is recorded here so the session
+    /// can be resumed after a restart. Codex reports nothing at spawn; its ID
+    /// is resolved later from the rollout file.
+    fn spawn_and_register(
         &mut self,
-        name: String,
-        working_dir: PathBuf,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        initial_prompt: Option<String>,
+        mut info: SessionInfo,
+        spawn: SpawnConfig,
+        agent: AgentType,
         rows: usize,
         cols: usize,
     ) -> Result<SessionId> {
-        self.create_codex_session_with_config(
-            name,
-            working_dir,
-            project_id,
-            branch_id,
-            initial_prompt,
-            rows,
-            cols,
-            None,
-            None,
-            None,
-        )
-    }
+        let adapter = agent.create_adapter();
+        let spawn_result = adapter
+            .spawn(&self.config, &spawn)
+            .with_context(|| format!("spawning {} in {}", agent, spawn.working_dir.display()))?;
 
-    /// Create a new Codex session with a specific Codex configuration
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_codex_session_with_config(
-        &mut self,
-        name: String,
-        working_dir: PathBuf,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        initial_prompt: Option<String>,
-        rows: usize,
-        cols: usize,
-        codex_config_id: Option<CodexConfigId>,
-        codex_home: Option<PathBuf>,
-        codex_config_name: Option<String>,
-    ) -> Result<SessionId> {
-        let mut info = SessionInfo::with_codex_config(
-            name.clone(),
-            working_dir.clone(),
-            project_id,
-            branch_id,
-            codex_config_id,
-            codex_config_name,
-        );
+        if spawn_result.agent_session_id.is_some() {
+            info.agent_session_id = spawn_result.agent_session_id;
+        }
+
         let session_id = info.id;
-
-        // Create spawn config
-        let spawn_config = SpawnConfig {
-            session_id,
-            session_name: name,
-            working_dir,
-            initial_prompt,
-            rows: rows as u16,
-            cols: cols as u16,
-            claude_config_dir: None,
-            codex_home,
-            resume: None,
-        };
-
-        // Get adapter and spawn the process
-        let agent_type = AgentType::OpenAICodex;
-        let adapter = agent_type.create_adapter();
-        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
-
-        // Codex has no flag to dictate its session ID, so this stays None until
-        // the rollout file is resolved (see step 4)
-        info.agent_session_id = spawn_result.agent_session_id;
-
-        // Create session with PTY and virtual terminal
         let session = Session::with_scrollback(
             info,
             spawn_result.pty,
@@ -651,24 +544,42 @@ impl SessionManager {
             self.config.scrollback_lines,
         );
 
-        // Store session
-        self.sessions.insert(session_id, session);
-        self.session_order.push(session_id);
+        self.register(session);
         self.persist_session(session_id);
 
         Ok(session_id)
     }
 
+    /// Take ownership of a session, keeping the twin collections consistent
+    ///
+    /// `sessions` and `session_order` must always agree; every insertion goes
+    /// through here so that invariant lives in one place. Re-registering an
+    /// existing ID (waking a suspended session) replaces the entry and keeps
+    /// its position in the navigation order.
+    fn register(&mut self, session: Session) {
+        let session_id = session.info.id;
+        self.sessions.insert(session_id, session);
+        if !self.session_order.contains(&session_id) {
+            self.session_order.push(session_id);
+        }
+    }
+
+    /// Release a session, keeping the twin collections consistent
+    ///
+    /// The counterpart of [`Self::register`]. Deliberately does not touch the
+    /// durable store: whether the record survives is the caller's decision.
+    fn unregister(&mut self, session_id: SessionId) -> Option<Session> {
+        self.session_order.retain(|&id| id != session_id);
+        self.sessions.remove(&session_id)
+    }
+
     /// Destroy a session by ID
     pub fn destroy_session(&mut self, session_id: SessionId) -> Result<()> {
-        if let Some(mut session) = self.sessions.remove(&session_id) {
+        if let Some(mut session) = self.unregister(session_id) {
             // Kill the PTY process
             if session.is_alive() {
                 session.kill()?;
             }
-
-            // Remove from order list
-            self.session_order.retain(|&id| id != session_id);
 
             // Closing a session is an explicit discard, so drop its durable
             // record too. Quitting Panoptes deliberately does not do this.
@@ -695,15 +606,6 @@ impl SessionManager {
         self.session_order
             .get(index)
             .and_then(|id| self.sessions.get(id))
-    }
-
-    /// Get mutable session by index in order list
-    pub fn get_by_index_mut(&mut self, index: usize) -> Option<&mut Session> {
-        if let Some(&id) = self.session_order.get(index) {
-            self.sessions.get_mut(&id)
-        } else {
-            None
-        }
     }
 
     /// Get the index of a session in the order list
@@ -736,10 +638,19 @@ impl SessionManager {
 
     /// Poll all sessions for new output
     /// Returns list of session IDs that had new output
-    /// Drains ALL available PTY data before returning to prevent rendering lag
     pub fn poll_outputs(&mut self) -> Vec<SessionId> {
         self.poll_outputs_except(None)
     }
+
+    /// Cap on `poll_output` calls per session per tick.
+    ///
+    /// Each call reads at most one 4KB chunk, so this bounds a tick at
+    /// ~256KB per session: enough to keep up with the chattiest agent
+    /// without visible lag, but small enough that a runaway child (`yes`)
+    /// producing output faster than we drain it cannot starve the event
+    /// loop. Leftover data stays buffered in the PTY and is picked up on
+    /// the next tick.
+    const POLL_BUDGET_PER_SESSION_PER_TICK: usize = 64;
 
     /// Poll all sessions for new output, optionally excluding one session.
     ///
@@ -759,8 +670,11 @@ impl SessionManager {
                 continue;
             }
             let mut had_output = false;
-            // Drain ALL available PTY data before returning
-            while session.poll_output() {
+            // Drain available PTY data, up to a per-tick budget
+            for _ in 0..Self::POLL_BUDGET_PER_SESSION_PER_TICK {
+                if !session.poll_output() {
+                    break;
+                }
                 had_output = true;
             }
             if had_output {
@@ -1076,11 +990,7 @@ impl SessionManager {
             return Err(anyhow!("Cannot wake '{}': {}", info.name, reason));
         }
 
-        let agent_type = match info.session_type {
-            SessionType::ClaudeCode => AgentType::ClaudeCode,
-            SessionType::OpenAICodex => AgentType::OpenAICodex,
-            SessionType::Shell => AgentType::Shell,
-        };
+        let agent_type = AgentType::from(info.session_type);
 
         let spawn_config = SpawnConfig {
             session_id,
@@ -1091,13 +1001,8 @@ impl SessionManager {
             cols: cols as u16,
             claude_config_dir,
             codex_home,
-            resume: info.agent_session_id.clone(),
+            resume: info.resume_cursor(),
         };
-
-        // Spawn before touching the existing entry, so a failure leaves the
-        // suspended session exactly as it was
-        let adapter = agent_type.create_adapter();
-        let spawn_result = adapter.spawn(&self.config, &spawn_config)?;
 
         let mut info = info;
         info.state = SessionState::Starting;
@@ -1106,22 +1011,12 @@ impl SessionManager {
         info.last_engagement = Utc::now();
         info.in_flight.clear();
         info.resumed_conversation = true;
-        if spawn_result.agent_session_id.is_some() {
-            info.agent_session_id = spawn_result.agent_session_id;
-        }
 
-        let session = Session::with_scrollback(
-            info,
-            spawn_result.pty,
-            rows,
-            cols,
-            self.config.scrollback_lines,
-        );
-
-        // Replaces the suspended entry; its position in `session_order` is
-        // keyed by ID and so is untouched
-        self.sessions.insert(session_id, session);
-        self.persist_session(session_id);
+        // Spawning happens before the existing entry is touched, so a failure
+        // leaves the suspended session exactly as it was. On success the new
+        // session replaces the suspended entry; its position in
+        // `session_order` is keyed by ID and so is untouched.
+        self.spawn_and_register(info, spawn_config, agent_type, rows, cols)?;
 
         tracing::info!(session_id = %session_id, "Woke suspended session");
 
@@ -1153,68 +1048,12 @@ impl SessionManager {
 
         let count = to_remove.len();
         for session_id in to_remove {
-            self.sessions.remove(&session_id);
+            self.unregister(session_id);
             // These aged out under the retention policy, which is an explicit
             // statement that they are no longer wanted
             self.forget_session(session_id);
         }
         count
-    }
-
-    /// Translate a Claude Code hook into the canonical vocabulary
-    ///
-    /// Hooks are Claude's way of describing itself. Keeping that translation
-    /// here, rather than in the state machine, is what lets Codex's transcript
-    /// feed the same machine without either agent's vocabulary leaking into it.
-    fn translate_hook(event: &HookEvent) -> AgentEvent {
-        match event.event_type() {
-            HookEventType::SessionStart => {
-                // `SessionStart` does not only mean "a process came up". Claude
-                // also fires it for `clear`, `fork` and - crucially - `compact`,
-                // which happens on its own whenever the context window fills up,
-                // in the middle of a turn the agent is still working on.
-                match event.session_start_source() {
-                    Some("startup") | Some("resume") | Some("clear") | Some("fork") => {
-                        AgentEvent::SessionReset {
-                            title: event.session_title().map(str::to_string),
-                        }
-                    }
-                    // Mid-turn compaction, or a source added after this was
-                    // written. Leave the state alone rather than guess wrong.
-                    _ => AgentEvent::ContextCompacted,
-                }
-            }
-            HookEventType::SessionEnd => AgentEvent::SessionEnding,
-            HookEventType::UserPromptSubmit => AgentEvent::TurnStarted {
-                title: event.session_title().map(str::to_string),
-            },
-            HookEventType::PreToolUse => AgentEvent::ToolStarted {
-                key: event.tool_key(),
-                name: event.tool_name().unwrap_or("unknown").to_string(),
-            },
-            HookEventType::PostToolUse | HookEventType::PostToolUseFailure => {
-                AgentEvent::ToolFinished {
-                    key: event.tool_key(),
-                }
-            }
-            HookEventType::Stop => AgentEvent::TurnCompleted {
-                last_message: event.last_assistant_message().map(str::to_string),
-            },
-            HookEventType::PermissionRequest => AgentEvent::ApprovalRequested {
-                tool: event.tool_name().map(str::to_string),
-            },
-            HookEventType::Notification => match event.notification_kind() {
-                // Carry the tool through where the payload named one; the
-                // generic mapping cannot know it
-                NotificationKind::PermissionRequest => AgentEvent::ApprovalRequested {
-                    tool: event.tool_name().map(str::to_string),
-                },
-                kind => AgentEvent::from(kind),
-            },
-            // Codex CLI's only hook: the agent is done and wants input
-            HookEventType::AgentTurnComplete => AgentEvent::TurnCompleted { last_message: None },
-            HookEventType::Unknown => AgentEvent::Ignored,
-        }
     }
 
     /// Handle a hook event and update session state accordingly
@@ -1232,13 +1071,14 @@ impl SessionManager {
             }
         };
 
-        self.apply_agent_event(session_id, Self::translate_hook(event))
+        self.apply_agent_event(session_id, state_machine::translate_hook(event))
     }
 
     /// Apply a canonical agent event to a session
     ///
     /// The single ingest path. Claude's hooks and both transcript tailers all
-    /// arrive here, so what an event *means* is decided in exactly one place.
+    /// arrive here; what an event *means* is decided in exactly one place,
+    /// [`state_machine::apply`].
     ///
     /// Returns the session ID if this raised a new, bell-worthy reason to look
     /// at the session.
@@ -1247,10 +1087,6 @@ impl SessionManager {
         session_id: SessionId,
         event: AgentEvent,
     ) -> Option<SessionId> {
-        // Read config before taking the session borrow
-        let notify_on = self.config.notify_on.clone();
-        let attention_on_idle = self.config.attention_on_idle;
-
         let session = match self.sessions.get_mut(&session_id) {
             Some(s) => s,
             None => {
@@ -1259,201 +1095,27 @@ impl SessionManager {
             }
         };
 
-        let now = Utc::now();
-
-        // Two events must not count as activity, or they would hold
-        // `last_activity` permanently fresh and neither the idle badge nor the
-        // suspend sweep would ever fire on the sessions they exist for:
-        //
-        // - `IdleReminder` is the agent reporting that nothing has happened.
-        // - `Subagents` is Panoptes' own periodic observation, not the agent
-        //   doing anything.
-        let is_activity = !matches!(
-            event,
-            AgentEvent::IdleReminder | AgentEvent::Subagents { .. }
-        );
-        if is_activity {
-            session.info.last_activity = now;
-        }
-
-        // How an event wants to move the session.
-        //
-        // `Authoritative` overwrites. `AtLeast` only upgrades, per
-        // `SessionState::most_urgent` - subagents share one session, so several
-        // states are genuinely true at once and the events describing them
-        // interleave. An event announcing new concurrent work must not be able
-        // to un-report a permission dialog someone else is blocked on, while an
-        // event reporting the turn is over must be able to demote, or a single
-        // dropped tool completion would pin the session in `Executing`.
-        enum Move {
-            Authoritative(SessionState),
-            AtLeast(SessionState),
-            Unchanged,
-        }
-
-        let mut attention: Option<AttentionReason> = None;
-        let mut clear_attention = false;
-
-        let movement = match event {
-            AgentEvent::SessionReset { title } => {
-                if let Some(title) = title {
-                    session.info.adopt_agent_title(&title);
-                }
-                session.info.in_flight.clear();
-                clear_attention = true;
-                // The agent is up but has not been asked anything yet
-                Move::Authoritative(SessionState::Waiting)
-            }
-
-            AgentEvent::ContextCompacted => {
-                tracing::debug!(
-                    session_id = %session_id,
-                    "Conversation compacted mid-turn; leaving state unchanged"
-                );
-                Move::Unchanged
-            }
-
-            AgentEvent::SessionEnding => {
-                // The process is on its way out but has not gone yet. Leave the
-                // Exited transition to `check_alive`, which is the only place
-                // that can tell a clean exit from a crash; just stop claiming
-                // that tools are still running.
-                session.info.in_flight.clear();
-                Move::Unchanged
-            }
-
-            AgentEvent::TurnStarted { title } => {
-                if let Some(title) = title {
-                    session.info.adopt_agent_title(&title);
-                }
-                // A prompt is a clean turn boundary: anything still marked in
-                // flight from the previous turn is stale, and the user is
-                // demonstrably present so nothing needs flagging for them.
-                session.info.in_flight.clear();
-                clear_attention = true;
-                Move::Authoritative(SessionState::Thinking)
-            }
-
-            AgentEvent::ToolStarted { key, name } => {
-                session.info.start_tool(key, name, now);
-                Move::AtLeast(SessionState::Executing)
-            }
-
-            AgentEvent::ToolFinished { key } => {
-                session.info.finish_tool(&key);
-                if session.info.in_flight.is_empty() {
-                    // Nothing left running. Demote out of Executing, but do not
-                    // stomp on a permission dialog raised meanwhile.
-                    match session.info.state {
-                        SessionState::AwaitingApproval => Move::Unchanged,
-                        _ => Move::Authoritative(SessionState::Thinking),
-                    }
-                } else {
-                    Move::AtLeast(SessionState::Executing)
-                }
-            }
-
-            AgentEvent::TurnCompleted { last_message } => {
-                if let Some(message) = last_message {
-                    session.info.set_last_message(&message);
-                }
-                // End of turn: whatever was still marked in flight never
-                // reported back and is not running any more.
-                session.info.in_flight.clear();
-                attention = Some(AttentionReason::TurnComplete);
-                Move::Authoritative(SessionState::Waiting)
-            }
-
-            AgentEvent::TurnAborted => {
-                // The user interrupted it themselves, so they already know -
-                // flagging it for their attention would be telling them what
-                // they just did.
-                session.info.in_flight.clear();
-                Move::Authoritative(SessionState::Waiting)
-            }
-
-            AgentEvent::ApprovalRequested { tool } => {
-                attention = Some(AttentionReason::Approval { tool });
-                Move::AtLeast(SessionState::AwaitingApproval)
-            }
-
-            AgentEvent::IdleReminder => {
-                if attention_on_idle {
-                    attention = Some(AttentionReason::TurnComplete);
-                }
-                Move::Unchanged
-            }
-
-            AgentEvent::Usage(usage) => {
-                session.info.usage.merge(usage);
-                Move::Unchanged
-            }
-
-            AgentEvent::Subagents { active } => {
-                session.info.subagents = active;
-                Move::Unchanged
-            }
-
-            AgentEvent::Ignored => Move::Unchanged,
-        };
-
-        match movement {
-            Move::Authoritative(state) => session.set_state(state),
-            Move::AtLeast(state) => {
-                let resolved = session.info.state.most_urgent(state);
-                if resolved != session.info.state {
-                    session.set_state(resolved);
-                }
-            }
-            Move::Unchanged => {}
-        }
-
-        if clear_attention {
-            session.info.attention = None;
-        }
-
-        let reason = attention?;
-
-        // Ring only when the reason is new. Re-notifying for a flag the user
-        // has already seen is what makes notifications easy to ignore.
-        let is_new = session.info.attention.as_ref() != Some(&reason);
-        let rings = is_new && notify_on.rings(&reason);
-        session.info.attention = Some(reason);
-
-        rings.then_some(session_id)
+        let applied = state_machine::apply(&mut session.info, event, Utc::now(), &self.config);
+        applied.rang.then_some(session_id)
     }
 
-    /// Send a notification based on the configured method
-    /// - "bell": Ring the terminal bell
-    /// - "title": Update terminal title with attention message
-    /// - "none": Do nothing
-    pub fn send_notification(method: &str, session_name: &str) {
+    /// Send a notification via the configured method
+    pub fn send_notification(method: NotificationMethod, session_name: &str) {
         match method {
-            "bell" => {
+            NotificationMethod::Bell => {
                 print!("\x07"); // ASCII bell character
                 std::io::stdout().flush().ok();
             }
-            "title" => {
+            NotificationMethod::Title => {
                 // Update terminal title using OSC escape sequence
                 // Format: ESC ] 0 ; title BEL
                 print!("\x1b]0;[!] {} needs attention\x07", session_name);
                 std::io::stdout().flush().ok();
             }
-            "none" => {
+            NotificationMethod::None => {
                 // Do nothing
             }
-            _ => {
-                // Unknown method, default to bell
-                print!("\x07");
-                std::io::stdout().flush().ok();
-            }
         }
-    }
-
-    /// Ring the terminal bell (convenience method for backward compatibility)
-    pub fn ring_terminal_bell() {
-        print!("\x07"); // ASCII bell character
-        std::io::stdout().flush().ok();
     }
 
     /// Reset the terminal title to default (used after "title" notification mode)
@@ -1487,11 +1149,6 @@ impl SessionManager {
         self.sessions.iter()
     }
 
-    /// Get mutable iterator over sessions
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&SessionId, &mut Session)> {
-        self.sessions.iter_mut()
-    }
-
     /// Shutdown all sessions, killing any that are still alive
     ///
     /// This should be called when the application is exiting to ensure
@@ -1521,153 +1178,71 @@ impl SessionManager {
             }
         }
 
-        self.sessions.clear();
-        self.session_order.clear();
+        for session_id in self.session_order.clone() {
+            self.unregister(session_id);
+        }
     }
 
-    /// Get all sessions for a specific project
-    pub fn sessions_for_project(&self, project_id: ProjectId) -> Vec<&Session> {
-        self.sessions
-            .values()
-            .filter(|s| s.info.project_id == project_id)
-            .collect()
-    }
-
-    /// Get all sessions for a specific branch
-    pub fn sessions_for_branch(&self, branch_id: BranchId) -> Vec<&Session> {
-        self.sessions
-            .values()
-            .filter(|s| s.info.branch_id == branch_id)
-            .collect()
+    /// Count live sessions whose info satisfies a predicate
+    ///
+    /// Every public count below is a one-liner over this, so the "iterate the
+    /// live sessions and count" shape exists exactly once.
+    fn count_infos(&self, pred: impl Fn(&SessionInfo) -> bool) -> usize {
+        self.sessions.values().filter(|s| pred(&s.info)).count()
     }
 
     /// Get count of sessions for a project
     pub fn session_count_for_project(&self, project_id: ProjectId) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| s.info.project_id == project_id)
-            .count()
+        self.count_infos(|info| info.project_id == project_id)
     }
 
     /// Get count of sessions for a branch
     pub fn session_count_for_branch(&self, branch_id: BranchId) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| s.info.branch_id == branch_id)
-            .count()
+        self.count_infos(|info| info.branch_id == branch_id)
     }
 
     /// Get count of active sessions for a project
     pub fn active_session_count_for_project(&self, project_id: ProjectId) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| s.info.project_id == project_id && s.info.state.is_active())
-            .count()
+        self.count_infos(|info| info.project_id == project_id && info.state.is_active())
     }
 
     /// Get count of active sessions for a branch
     pub fn active_session_count_for_branch(&self, branch_id: BranchId) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| s.info.branch_id == branch_id && s.info.state.is_active())
-            .count()
+        self.count_infos(|info| info.branch_id == branch_id && info.state.is_active())
     }
 
     /// Get total count of active sessions across all projects
     pub fn total_active_count(&self) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| s.info.state.is_active())
-            .count()
+        self.count_infos(|info| info.state.is_active())
     }
 
-    /// Check if a session needs attention
-    ///
-    /// Attention is decoupled from state because subagents share a session_id -
-    /// one subagent can be waiting for input while another is actively working,
-    /// so the session may be in Thinking/Executing state while still needing
-    /// attention. It is set only by hook events and by the crash and stall
-    /// watchdogs, never by PTY output, since only those explicitly signal that
-    /// user interaction is required.
-    ///
-    /// A session left sitting in `Waiting` past the idle threshold also counts,
-    /// even after its `TurnComplete` was acknowledged: something you noticed and
-    /// then forgot about for five minutes is worth resurfacing.
-    ///
-    /// Takes `SessionInfo` rather than `Session` so that list views can call it
-    /// for recovered sessions too, which have no process attached.
-    pub fn session_needs_attention(&self, info: &SessionInfo, idle_threshold_secs: u64) -> bool {
-        // Sticky flag: set by hook events requiring user attention, cleared on acknowledgment
-        if info.attention.is_some() {
-            return true;
-        }
-        // A live session sitting unattended past the threshold resurfaces
-        if info.state == SessionState::Waiting {
-            let idle_duration = Utc::now().signed_duration_since(info.last_activity);
-            return idle_duration.num_seconds() > idle_threshold_secs as i64;
-        }
-        false
-    }
-
-    /// Get all sessions needing attention, sorted by urgency (Waiting first, then by idle duration)
-    pub fn sessions_needing_attention(&self, idle_threshold_secs: u64) -> Vec<&Session> {
+    /// Get all sessions needing attention, oldest first
+    pub fn sessions_needing_attention(&self) -> Vec<&Session> {
         let mut sessions: Vec<_> = self
             .sessions
             .values()
-            .filter(|s| self.session_needs_attention(&s.info, idle_threshold_secs))
+            .filter(|s| s.info.needs_attention())
             .collect();
 
-        // Sort: sessions with an explicit reason first, then by last_activity (oldest first)
-        sessions.sort_by(|a, b| {
-            match (a.info.attention.is_some(), b.info.attention.is_some()) {
-                (true, true) | (false, false) => {
-                    // Same priority: sort by oldest activity first
-                    a.info.last_activity.cmp(&b.info.last_activity)
-                }
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-            }
-        });
+        // The one that has been waiting longest is the one to offer first
+        sessions.sort_by(|a, b| a.info.last_activity.cmp(&b.info.last_activity));
 
         sessions
     }
 
     /// Count sessions needing attention for a project
-    pub fn attention_count_for_project(
-        &self,
-        project_id: ProjectId,
-        idle_threshold_secs: u64,
-    ) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| {
-                s.info.project_id == project_id
-                    && self.session_needs_attention(&s.info, idle_threshold_secs)
-            })
-            .count()
+    pub fn attention_count_for_project(&self, project_id: ProjectId) -> usize {
+        self.count_infos(|info| info.project_id == project_id && info.needs_attention())
     }
 
     /// Count sessions needing attention for a branch
-    pub fn attention_count_for_branch(
-        &self,
-        branch_id: BranchId,
-        idle_threshold_secs: u64,
-    ) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| {
-                s.info.branch_id == branch_id
-                    && self.session_needs_attention(&s.info, idle_threshold_secs)
-            })
-            .count()
+    pub fn attention_count_for_branch(&self, branch_id: BranchId) -> usize {
+        self.count_infos(|info| info.branch_id == branch_id && info.needs_attention())
     }
 
     /// Total sessions needing attention globally
-    pub fn total_attention_count(&self, idle_threshold_secs: u64) -> usize {
-        self.sessions
-            .values()
-            .filter(|s| self.session_needs_attention(&s.info, idle_threshold_secs))
-            .count()
+    pub fn total_attention_count(&self) -> usize {
+        self.count_infos(SessionInfo::needs_attention)
     }
 }
 
@@ -1676,7 +1251,7 @@ impl SessionManager {
     /// Insert a stub session for testing
     ///
     /// Spawns a `sleep` process to create a valid Session with minimal overhead.
-    /// The session will have a real PTY but a short-lived process.
+    /// The session has a real PTY backed by an inert `sleep` process.
     pub fn insert_test_session(
         &mut self,
         name: &str,
@@ -1695,10 +1270,11 @@ impl SessionManager {
         );
         let session_id = info.id;
 
-        // Spawn a simple sleep process for the PTY
+        // Spawn a simple sleep process for the PTY. Long enough that the
+        // process is reliably still alive while a test inspects it.
         let pty = PtyHandle::spawn(
             "sleep",
-            &["1"],
+            &["60"],
             &std::path::PathBuf::from("/tmp"),
             HashMap::new(),
             24,
@@ -1706,8 +1282,7 @@ impl SessionManager {
         )?;
         let session = Session::new(info, pty, 24, 80);
 
-        self.sessions.insert(session_id, session);
-        self.session_order.push(session_id);
+        self.register(session);
 
         Ok(session_id)
     }
@@ -1716,6 +1291,7 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::HookEventType;
     use crate::session::SessionType;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -1737,6 +1313,39 @@ mod tests {
             hooks_dir: temp_dir.path().join("hooks"),
             ..Config::default()
         }
+    }
+
+    /// Create a live shell session through the public API
+    ///
+    /// Shell sessions spawn without needing a Claude or Codex binary on PATH,
+    /// which is what makes them usable in tests.
+    fn create_shell(manager: &mut SessionManager, name: &str) -> SessionId {
+        manager
+            .create_session(
+                AgentType::Shell,
+                NewSessionSpec {
+                    name: name.to_string(),
+                    working_dir: PathBuf::from("/tmp"),
+                    project_id: Uuid::new_v4(),
+                    branch_id: Uuid::new_v4(),
+                    initial_prompt: None,
+                    account: None,
+                    auto_close: false,
+                },
+                24,
+                80,
+            )
+            .expect("failed to create shell session")
+    }
+
+    /// Reload a store from disk, asserting the file was not corrupted
+    fn load_store(path: &std::path::Path) -> SessionStore {
+        let (store, warning) = SessionStore::load_from_with_status(path);
+        assert!(
+            warning.is_none(),
+            "store unexpectedly corrupted: {warning:?}"
+        );
+        store
     }
 
     #[test]
@@ -1822,34 +1431,9 @@ mod tests {
     /// Helper: create a real session in the manager by spawning a lightweight process.
     /// Returns the session ID (which is also the UUID string for hook events).
     fn insert_test_session(manager: &mut SessionManager) -> SessionId {
-        use crate::session::pty::PtyHandle;
-        use crate::session::{Session, SessionInfo};
-        use std::collections::HashMap;
-
-        let project_id = uuid::Uuid::new_v4();
-        let branch_id = uuid::Uuid::new_v4();
-        let info = SessionInfo::new(
-            "test-session".to_string(),
-            "/tmp".into(),
-            project_id,
-            branch_id,
-        );
-        let session_id = info.id;
-
-        let pty = PtyHandle::spawn(
-            "sleep",
-            &["60"],
-            std::path::Path::new("/tmp"),
-            HashMap::new(),
-            24,
-            80,
-        )
-        .expect("Failed to spawn test process");
-        let session = Session::new(info, pty, 24, 80);
-
-        manager.sessions.insert(session_id, session);
-        manager.session_order.push(session_id);
-        session_id
+        manager
+            .insert_test_session("test-session", uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .expect("Failed to spawn test process")
     }
 
     /// A session eligible for suspension: idle, resumable, turn finished
@@ -1890,7 +1474,7 @@ mod tests {
         assert!(!session.is_alive(), "the child process should be gone");
 
         // The whole point: the buffer lives in Panoptes, not the child
-        let visible = manager.get(session_id).unwrap().visible_lines(24);
+        let visible = manager.get(session_id).unwrap().vterm.visible_lines(24);
         assert!(
             visible.iter().any(|line| line.contains("important output")),
             "scrollback must survive suspension, got {visible:?}"
@@ -2142,104 +1726,6 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_transcript_drives_a_full_turn() {
-        use crate::transcript::{Tailer, TranscriptKind};
-
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-        manager.get_mut(session_id).unwrap().info.session_type = SessionType::OpenAICodex;
-        manager
-            .get_mut(session_id)
-            .unwrap()
-            .set_state(SessionState::Waiting);
-
-        // The exact record sequence a real Codex turn writes, in order
-        let rollout = temp_dir.path().join("rollout.jsonl");
-        std::fs::write(
-            &rollout,
-            [
-                r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
-                r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1"}}"#,
-                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"model":"gpt-5-codex","model_context_window":272000,"total_token_usage":{"total_tokens":3000}}}}"#,
-                r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1"}}"#,
-                r#"{"type":"event_msg","payload":{"type":"agent_message"}}"#,
-                r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"pong"}}"#,
-                "",
-            ]
-            .join("\n"),
-        )
-        .unwrap();
-
-        let mut tailer = Tailer::from_start(TranscriptKind::Codex, rollout);
-        let (events, _) = tailer.poll();
-
-        // Feed them through one at a time, checking the state as it goes -
-        // Codex used to be able to report only "my turn ended"
-        let mut states = Vec::new();
-        for event in events {
-            manager.apply_agent_event(session_id, event);
-            states.push(manager.get(session_id).unwrap().info.state);
-        }
-
-        assert_eq!(
-            states,
-            vec![
-                SessionState::Thinking,  // task_started
-                SessionState::Executing, // function_call
-                SessionState::Executing, // token_count changes nothing
-                SessionState::Thinking,  // function_call_output, nothing left
-                SessionState::Waiting,   // task_complete
-            ]
-        );
-
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(info.attention, Some(AttentionReason::TurnComplete));
-        assert_eq!(info.last_message.as_deref(), Some("pong"));
-        assert_eq!(info.usage.model.as_deref(), Some("gpt-5-codex"));
-        assert_eq!(
-            info.usage.context_percent(),
-            Some(3000.0 / 272_000.0 * 100.0)
-        );
-        assert!(info.in_flight.is_empty());
-    }
-
-    #[test]
-    fn test_interrupted_codex_turn_does_not_stay_stuck() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        manager.apply_agent_event(session_id, AgentEvent::TurnStarted { title: None });
-        manager.apply_agent_event(
-            session_id,
-            AgentEvent::ToolStarted {
-                key: "c1".to_string(),
-                name: "shell".to_string(),
-            },
-        );
-        assert_eq!(
-            manager.get(session_id).unwrap().info.state,
-            SessionState::Executing
-        );
-
-        // The user pressed Esc. No completion for the running tool will ever
-        // arrive, so without handling this the session sits in Executing until
-        // the stall watchdog notices.
-        manager.apply_agent_event(session_id, AgentEvent::TurnAborted);
-
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(info.state, SessionState::Waiting);
-        assert!(info.in_flight.is_empty());
-        assert!(
-            info.attention.is_none(),
-            "the user interrupted it themselves; telling them about it is noise"
-        );
-    }
-
-    #[test]
     fn test_subagent_count_is_recorded_and_blocks_suspension() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
@@ -2255,423 +1741,6 @@ mod tests {
 
         manager.apply_agent_event(session_id, AgentEvent::Subagents { active: 0 });
         assert_eq!(manager.suspend_idle_sessions(7200, None), vec![session_id]);
-    }
-
-    #[test]
-    fn test_claude_usage_events_never_disturb_state() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        manager.apply_agent_event(session_id, AgentEvent::TurnStarted { title: None });
-        manager.apply_agent_event(
-            session_id,
-            AgentEvent::ToolStarted {
-                key: "t1".to_string(),
-                name: "Read".to_string(),
-            },
-        );
-
-        // Hooks own Claude's state. The transcript arrives later and must only
-        // ever add figures, or the two producers fight over the same field.
-        manager.apply_agent_event(
-            session_id,
-            AgentEvent::Usage(crate::agent::events::UsageSnapshot {
-                model: Some("claude-opus-4-8".to_string()),
-                total_tokens: Some(1234),
-                ..Default::default()
-            }),
-        );
-
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(info.state, SessionState::Executing);
-        assert_eq!(info.in_flight.len(), 1);
-        assert_eq!(info.usage.total_tokens, Some(1234));
-    }
-
-    #[test]
-    fn test_permission_request_raises_approval_and_rings_once() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        manager
-            .get_mut(session_id)
-            .unwrap()
-            .set_state(SessionState::Waiting);
-        assert!(manager.get(session_id).unwrap().info.attention.is_none());
-
-        let event = hook(
-            session_id,
-            "PermissionRequest",
-            serde_json::json!({"tool_name": "Bash"}),
-        );
-        assert_eq!(
-            manager.handle_hook_event(&event),
-            Some(session_id),
-            "First PermissionRequest should ring bell"
-        );
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(
-            info.attention,
-            Some(AttentionReason::Approval {
-                tool: Some("Bash".to_string())
-            })
-        );
-        assert_eq!(
-            info.state,
-            SessionState::AwaitingApproval,
-            "a blocked dialog must not look like a finished turn"
-        );
-
-        // Same reason again: already flagged, so no second bell
-        assert_eq!(
-            manager.handle_hook_event(&event),
-            None,
-            "Duplicate PermissionRequest should not ring bell"
-        );
-        assert!(manager.get(session_id).unwrap().info.attention.is_some());
-
-        // Acknowledging clears the queue entry but not the state - the dialog
-        // is still open
-        manager.acknowledge_attention(session_id);
-        let info = &manager.get(session_id).unwrap().info;
-        assert!(info.attention.is_none());
-        assert_eq!(info.state, SessionState::AwaitingApproval);
-
-        assert_eq!(
-            manager.handle_hook_event(&event),
-            Some(session_id),
-            "PermissionRequest after ack should ring bell"
-        );
-    }
-
-    /// Every `notification_type` Claude Code actually sends must classify to
-    /// something deliberate.
-    ///
-    /// The values are the CLI's own. Panoptes previously matched invented
-    /// spellings ("idle", "permission_request"), so every real notification
-    /// fell through to `Other` - which is treated as "the agent wants you" and
-    /// therefore rang the bell and flagged the session. The repeating
-    /// `idle_prompt`, which fires precisely when the user has *not* replied,
-    /// made a session look like it needed attention when nothing had changed.
-    #[test]
-    fn test_real_claude_notification_types_do_not_all_ring() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-
-        // Silent: informational, or the idle nag with attention_on_idle off
-        for value in [
-            "idle_prompt",
-            "auth_success",
-            "elicitation_complete",
-            "elicitation_response",
-        ] {
-            let session_id = insert_test_session(&mut manager);
-            manager
-                .get_mut(session_id)
-                .unwrap()
-                .set_state(SessionState::Waiting);
-
-            let event = hook(
-                session_id,
-                "Notification",
-                serde_json::json!({ "notification_type": value }),
-            );
-            assert_eq!(
-                manager.handle_hook_event(&event),
-                None,
-                "{} must not ring",
-                value
-            );
-            assert!(
-                manager.get(session_id).unwrap().info.attention.is_none(),
-                "{} must not flag the session",
-                value
-            );
-        }
-
-        // Actionable: the agent is blocked on the user
-        for value in [
-            "permission_prompt",
-            "elicitation_dialog",
-            "agent_needs_input",
-        ] {
-            let session_id = insert_test_session(&mut manager);
-            let event = hook(
-                session_id,
-                "Notification",
-                serde_json::json!({ "notification_type": value }),
-            );
-            assert_eq!(
-                manager.handle_hook_event(&event),
-                Some(session_id),
-                "{} must ring",
-                value
-            );
-        }
-    }
-
-    /// Re-notifying for a reason the user already cleared is what makes an
-    /// idle session ring with nothing new to show.
-    #[test]
-    fn test_repeated_idle_prompts_stay_silent_after_the_user_looks() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        // The agent answers and waits: one ring, which the user acts on
-        let stop = hook(session_id, "Stop", serde_json::json!({}));
-        assert_eq!(manager.handle_hook_event(&stop), Some(session_id));
-        manager.acknowledge_attention(session_id);
-
-        // The user reads it and does not reply. Claude nags every minute.
-        for _ in 0..5 {
-            let idle = hook(
-                session_id,
-                "Notification",
-                serde_json::json!({"notification_type": "idle_prompt"}),
-            );
-            assert_eq!(
-                manager.handle_hook_event(&idle),
-                None,
-                "an idle nag must never ring again"
-            );
-        }
-        assert!(manager.get(session_id).unwrap().info.attention.is_none());
-        assert_eq!(
-            manager.get(session_id).unwrap().info.state,
-            SessionState::Waiting
-        );
-    }
-
-    #[test]
-    fn test_idle_notification_does_not_ring_but_permission_does() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        manager
-            .get_mut(session_id)
-            .unwrap()
-            .set_state(SessionState::Waiting);
-
-        // Claude's periodic idle nag: not actionable, must stay silent
-        let idle = hook(
-            session_id,
-            "Notification",
-            serde_json::json!({"notification_type": "idle_prompt", "message": "still there?"}),
-        );
-        assert_eq!(manager.handle_hook_event(&idle), None);
-        let info = &manager.get(session_id).unwrap().info;
-        assert!(
-            info.attention.is_none(),
-            "idle nag must not raise attention"
-        );
-        assert_eq!(info.state, SessionState::Waiting);
-
-        // The same event type carrying a permission request must ring
-        let permission = hook(
-            session_id,
-            "Notification",
-            serde_json::json!({"notification_type": "permission_prompt"}),
-        );
-        assert_eq!(manager.handle_hook_event(&permission), Some(session_id));
-        assert_eq!(
-            manager.get(session_id).unwrap().info.state,
-            SessionState::AwaitingApproval
-        );
-    }
-
-    #[test]
-    fn test_turn_with_no_tools_thinks_then_waits() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        // A prompt submitted any way at all - typed, pasted, or passed on the
-        // command line - reports itself. No keystroke is involved.
-        let submit = hook(
-            session_id,
-            "UserPromptSubmit",
-            serde_json::json!({"prompt": "hello"}),
-        );
-        assert_eq!(manager.handle_hook_event(&submit), None);
-        assert_eq!(
-            manager.get(session_id).unwrap().info.state,
-            SessionState::Thinking
-        );
-
-        // The agent answers without calling a tool
-        let stop = hook(
-            session_id,
-            "Stop",
-            serde_json::json!({"last_assistant_message": "Hi there."}),
-        );
-        assert_eq!(manager.handle_hook_event(&stop), Some(session_id));
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(info.state, SessionState::Waiting);
-        assert_eq!(info.attention, Some(AttentionReason::TurnComplete));
-        assert_eq!(info.last_message.as_deref(), Some("Hi there."));
-    }
-
-    #[test]
-    fn test_concurrent_tools_render_as_a_set() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        // Subagents share one session_id, so several tools are genuinely in
-        // flight at once and their events interleave.
-        for (id, name) in [("t1", "Read"), ("t2", "Grep"), ("t3", "Grep")] {
-            manager.handle_hook_event(&hook(
-                session_id,
-                "PreToolUse",
-                serde_json::json!({"tool_name": name, "tool_use_id": id}),
-            ));
-        }
-
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(info.state, SessionState::Executing);
-        assert_eq!(info.in_flight.len(), 3);
-        assert_eq!(info.in_flight_summary().as_deref(), Some("Read, Grep ×2"));
-
-        // Retiring one leaves the others running rather than clearing the state
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PostToolUse",
-            serde_json::json!({"tool_name": "Read", "tool_use_id": "t1"}),
-        ));
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(info.state, SessionState::Executing);
-        assert_eq!(info.in_flight_summary().as_deref(), Some("Grep ×2"));
-
-        // Only when the last one finishes does the session fall back
-        for id in ["t2", "t3"] {
-            manager.handle_hook_event(&hook(
-                session_id,
-                "PostToolUse",
-                serde_json::json!({"tool_name": "Grep", "tool_use_id": id}),
-            ));
-        }
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(info.state, SessionState::Thinking);
-        assert!(info.in_flight.is_empty());
-    }
-
-    #[test]
-    fn test_post_tool_use_retires_the_right_tool_when_reordered() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PreToolUse",
-            serde_json::json!({"tool_name": "Read", "tool_use_id": "t1"}),
-        ));
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PreToolUse",
-            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t2"}),
-        ));
-
-        // Hook deliveries are backgrounded and timestamped to the second, so
-        // the second tool's completion can land first. Keying by tool_use_id
-        // means it retires its own entry rather than the most recent one.
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PostToolUse",
-            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t2"}),
-        ));
-
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(info.in_flight_summary().as_deref(), Some("Read"));
-        assert_eq!(info.state, SessionState::Executing);
-    }
-
-    #[test]
-    fn test_permission_request_survives_concurrent_tool_traffic() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PreToolUse",
-            serde_json::json!({"tool_name": "Read", "tool_use_id": "t1"}),
-        ));
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PermissionRequest",
-            serde_json::json!({"tool_name": "Bash"}),
-        ));
-        assert_eq!(
-            manager.get(session_id).unwrap().info.state,
-            SessionState::AwaitingApproval
-        );
-
-        // Another subagent's tool starting must not un-report the open dialog
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PreToolUse",
-            serde_json::json!({"tool_name": "Grep", "tool_use_id": "t2"}),
-        ));
-        assert_eq!(
-            manager.get(session_id).unwrap().info.state,
-            SessionState::AwaitingApproval,
-            "AwaitingApproval outranks Executing"
-        );
-
-        // Nor must the last tool finishing
-        for id in ["t1", "t2"] {
-            manager.handle_hook_event(&hook(
-                session_id,
-                "PostToolUse",
-                serde_json::json!({"tool_use_id": id}),
-            ));
-        }
-        assert_eq!(
-            manager.get(session_id).unwrap().info.state,
-            SessionState::AwaitingApproval
-        );
-
-        // Only the end of the turn resolves it
-        manager.handle_hook_event(&hook(session_id, "Stop", serde_json::json!({})));
-        assert_eq!(
-            manager.get(session_id).unwrap().info.state,
-            SessionState::Waiting
-        );
-    }
-
-    #[test]
-    fn test_stop_clears_leaked_in_flight_tools() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        // A PreToolUse whose PostToolUse never arrives - dropped hook, dead
-        // subagent - would otherwise pin the session in Executing forever
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PreToolUse",
-            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"}),
-        ));
-        manager.handle_hook_event(&hook(session_id, "Stop", serde_json::json!({})));
-
-        let info = &manager.get(session_id).unwrap().info;
-        assert!(info.in_flight.is_empty());
-        assert_eq!(info.state, SessionState::Waiting);
     }
 
     #[test]
@@ -2773,133 +1842,34 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_title_replaces_only_generated_names() {
+    fn test_a_session_resting_after_its_turn_is_not_flagged() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
         let session_id = insert_test_session(&mut manager);
 
-        let titled = hook(
-            session_id,
-            "SessionStart",
-            serde_json::json!({"source": "startup", "session_title": "Fixing the login bug"}),
-        );
+        // The turn ends: flagged, as it should be
+        manager.apply_agent_event(session_id, AgentEvent::TurnCompleted { last_message: None });
+        assert!(manager.get(session_id).unwrap().info.needs_attention());
 
-        // A name the user typed is theirs
-        manager.handle_hook_event(&titled);
-        assert_eq!(manager.get(session_id).unwrap().info.name, "test-session");
+        // The user opens it and reads it, but has nothing to say back yet
+        manager.acknowledge_attention(session_id);
 
-        // A name Panoptes generated is not
-        manager.get_mut(session_id).unwrap().info.auto_named = true;
-        manager.handle_hook_event(&titled);
-        assert_eq!(
-            manager.get(session_id).unwrap().info.name,
-            "Fixing the login bug"
-        );
-    }
-
-    #[test]
-    fn test_session_start_from_compaction_does_not_report_a_busy_session_as_idle() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        // A long agentic loop, mid-tool
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PreToolUse",
-            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"}),
-        ));
-        assert_eq!(
-            manager.get(session_id).unwrap().info.state,
-            SessionState::Executing
-        );
-
-        // Claude auto-compacts when the context window fills. This fires
-        // SessionStart with no user involvement at all, while the agent is
-        // still working.
-        manager.handle_hook_event(&hook(
-            session_id,
-            "SessionStart",
-            serde_json::json!({"source": "compact", "model": "claude-opus-4-8"}),
-        ));
+        // Hours pass with the session parked at its prompt. A Codex session
+        // writes nothing to its PTY or its rollout while this happens, so
+        // `last_activity` never moves. That must not re-flag it: acknowledging
+        // is the user saying they have seen it, and nothing has happened since.
+        let session = manager.get_mut(session_id).unwrap();
+        session.info.last_activity = Utc::now() - chrono::Duration::seconds(10_000);
+        assert_eq!(session.info.state, SessionState::Waiting);
 
         let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(
-            info.state,
-            SessionState::Executing,
-            "compaction must not report a working session as finished"
+        assert!(
+            !info.needs_attention(),
+            "a read, unanswered session must stay dismissed"
         );
-        assert_eq!(
-            info.in_flight_summary().as_deref(),
-            Some("Bash"),
-            "the tool is still running across a compaction"
-        );
-    }
-
-    #[test]
-    fn test_session_start_from_a_real_start_resets_the_session() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        manager.handle_hook_event(&hook(
-            session_id,
-            "PreToolUse",
-            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"}),
-        ));
-        manager.handle_hook_event(&hook(session_id, "Stop", serde_json::json!({})));
-        assert!(manager.get(session_id).unwrap().info.attention.is_some());
-
-        // /clear starts a fresh conversation: nothing is running and nothing
-        // is owed to the user
-        manager.handle_hook_event(&hook(
-            session_id,
-            "SessionStart",
-            serde_json::json!({"source": "clear"}),
-        ));
-
-        let info = &manager.get(session_id).unwrap().info;
-        assert_eq!(info.state, SessionState::Waiting);
-        assert!(info.in_flight.is_empty());
-        assert!(info.attention.is_none());
-    }
-
-    #[test]
-    fn test_user_prompt_clears_stale_attention() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        manager.handle_hook_event(&hook(session_id, "Stop", serde_json::json!({})));
-        assert!(manager.get(session_id).unwrap().info.attention.is_some());
-
-        // The user is demonstrably present; nothing needs flagging for them
-        manager.handle_hook_event(&hook(session_id, "UserPromptSubmit", serde_json::json!({})));
-        let info = &manager.get(session_id).unwrap().info;
-        assert!(info.attention.is_none());
-        assert_eq!(info.state, SessionState::Thinking);
-    }
-
-    #[test]
-    fn test_notification_without_payload_still_notifies() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = test_config(&temp_dir);
-        let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_test_session(&mut manager);
-
-        // The no-jq degraded path delivers an envelope with no payload. An
-        // unclassifiable notification should fall back to notifying rather
-        // than silently swallowing a possible permission prompt.
-        let bare = hook(session_id, "Notification", serde_json::Value::Null);
-        assert_eq!(manager.handle_hook_event(&bare), Some(session_id));
-        assert_eq!(
-            manager.get(session_id).unwrap().info.attention,
-            Some(AttentionReason::Approval { tool: None })
-        );
+        assert_eq!(manager.total_attention_count(), 0);
+        assert!(manager.sessions_needing_attention().is_empty());
     }
 
     #[test]
@@ -2924,6 +1894,248 @@ mod tests {
         let fake_id = uuid::Uuid::new_v4();
         let result = manager.destroy_session(fake_id);
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_alive_reports_a_crash_and_moves_the_session_to_exited() {
+        use crate::session::pty::PtyHandle;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        // A process that dies on its own with a non-zero exit code
+        let info = SessionInfo::new(
+            "crasher".to_string(),
+            PathBuf::from("/tmp"),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let session_id = info.id;
+        let pty = PtyHandle::spawn(
+            "sh",
+            &["-c", "exit 3"],
+            &PathBuf::from("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+        manager.register(Session::new(info, pty, 24, 80));
+
+        // The exit status only becomes observable once the child is reaped;
+        // poll until it is rather than sleeping a fixed amount
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let crashed = loop {
+            let crashed = manager.check_alive();
+            if !crashed.is_empty() {
+                break crashed;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process exit was never observed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+
+        // The returned triple names the session and says why it crashed
+        assert_eq!(crashed.len(), 1);
+        let (id, name, reason) = &crashed[0];
+        assert_eq!(*id, session_id);
+        assert_eq!(name, "crasher");
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Exited);
+        assert_eq!(info.exit_reason.as_deref(), Some(reason.as_str()));
+        assert!(
+            matches!(&info.attention, Some(AttentionReason::Crashed { reason: r }) if r == reason),
+            "a crash must flag the session with its reason, got {:?}",
+            info.attention
+        );
+    }
+
+    #[test]
+    fn test_cleanup_removes_aged_out_exited_sessions_and_their_records() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        let session_id = create_shell(&mut manager, "doomed");
+        assert!(manager.store().get(session_id).is_some());
+
+        // The session exited longer ago than the retention window
+        let session = manager.get_mut(session_id).unwrap();
+        session.kill().ok();
+        session.set_state(SessionState::Exited);
+        session.info.exited_at = Some(Utc::now() - chrono::Duration::seconds(120));
+
+        assert_eq!(manager.cleanup_exited_sessions(30), 1);
+
+        // Gone from the live set, the navigation order, and - because aging
+        // out under the retention policy is an explicit discard - the store
+        assert!(manager.get(session_id).is_none());
+        assert!(manager.index_of(session_id).is_none());
+        assert!(
+            manager.store().get(session_id).is_none(),
+            "an aged-out session must be forgotten from the store"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_keeps_recently_exited_sessions() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        let session_id = create_shell(&mut manager, "fresh");
+        let session = manager.get_mut(session_id).unwrap();
+        session.kill().ok();
+        session.set_state(SessionState::Exited);
+
+        // Exited just now: still within retention, must survive the sweep
+        assert_eq!(manager.cleanup_exited_sessions(300), 0);
+        assert!(manager.get(session_id).is_some());
+        assert!(manager.store().get(session_id).is_some());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_poll_outputs_except_skips_the_excluded_session() {
+        use crate::session::pty::PtyHandle;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        // `cat` echoes its PTY input back, so output is guaranteed once
+        // something is written - no reliance on shell startup chatter
+        let spawn_cat = |manager: &mut SessionManager| {
+            let info = SessionInfo::new(
+                "cat".to_string(),
+                PathBuf::from("/tmp"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+            );
+            let session_id = info.id;
+            let pty = PtyHandle::spawn(
+                "cat",
+                &[],
+                &PathBuf::from("/tmp"),
+                std::collections::HashMap::new(),
+                24,
+                80,
+            )
+            .unwrap();
+            manager.register(Session::new(info, pty, 24, 80));
+            session_id
+        };
+        let excluded = spawn_cat(&mut manager);
+        let other = spawn_cat(&mut manager);
+
+        for id in [excluded, other] {
+            manager.get_mut(id).unwrap().pty.write(b"hello\n").unwrap();
+        }
+
+        // The excluded session must never be polled, even while its PTY has
+        // data - this is what freezes a scrolled-up view in place
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let with_output = manager.poll_outputs_except(Some(excluded));
+            assert!(
+                !with_output.contains(&excluded),
+                "the excluded session must not be polled"
+            );
+            if with_output.contains(&other) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the other session's output never arrived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // The excluded session's output stayed buffered in the PTY and is
+        // delivered once it is no longer excluded
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if manager.poll_outputs().contains(&excluded) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the excluded session's buffered output was lost"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_poll_outputs_budget_yields_while_a_runaway_child_still_has_data() {
+        use crate::session::pty::PtyHandle;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        // A producer far faster than the per-tick budget (~256KB) can drain:
+        // without the budget, poll_outputs spins here until all 8MB are gone.
+        let info = SessionInfo::new(
+            "runaway".to_string(),
+            PathBuf::from("/tmp"),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let session_id = info.id;
+        let pty = PtyHandle::spawn(
+            "sh",
+            &["-c", "yes | head -c 8000000"],
+            &PathBuf::from("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+        manager.register(Session::new(info, pty, 24, 80));
+
+        // Wait until the producer's output starts arriving
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !manager.poll_outputs().contains(&session_id) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "producer output never arrived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // A single tick must return well before the 8MB are drained
+        let start = std::time::Instant::now();
+        manager.poll_outputs();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "a single poll tick blocked for {:?} on a runaway child",
+            start.elapsed()
+        );
+
+        // The budget stopped the drain mid-stream: data must still be pending
+        // (at most ~512KB of the 8MB can have been consumed above)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if manager.poll_outputs().contains(&session_id) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "leftover data was not picked up on a later tick"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        manager.shutdown_all();
     }
 
     #[test]
@@ -2967,8 +2179,7 @@ mod tests {
         assert_eq!(session.info.session_type, SessionType::Shell);
         assert!(session.info.attention.is_none());
 
-        manager.sessions.insert(session_id, session);
-        manager.session_order.push(session_id);
+        manager.register(session);
 
         // Wait for the process to exit so foreground becomes idle
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -3008,16 +2219,7 @@ mod tests {
         let mut manager =
             SessionManager::with_store(test_config(&temp_dir), SessionStore::with_path(store_path));
 
-        let session_id = manager
-            .create_shell_session(
-                "persisted".to_string(),
-                PathBuf::from("/tmp"),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                24,
-                80,
-            )
-            .unwrap();
+        let session_id = create_shell(&mut manager, "persisted");
 
         // Written immediately, not deferred to shutdown - a crash one second
         // after creation must still leave a usable record
@@ -3040,20 +2242,11 @@ mod tests {
             SessionStore::with_path(store_path.clone()),
         );
 
-        let session_id = manager
-            .create_shell_session(
-                "survivor".to_string(),
-                PathBuf::from("/tmp"),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                24,
-                80,
-            )
-            .unwrap();
+        let session_id = create_shell(&mut manager, "survivor");
         manager.shutdown_all();
 
         // Simulates the next Panoptes launch reading what the previous run left
-        let reloaded = SessionStore::load_from(&store_path).unwrap();
+        let reloaded = load_store(&store_path);
         assert_eq!(
             reloaded.get(session_id).map(|s| s.name.as_str()),
             Some("survivor")
@@ -3069,23 +2262,14 @@ mod tests {
             SessionStore::with_path(store_path.clone()),
         );
 
-        manager
-            .create_shell_session(
-                "kept".to_string(),
-                PathBuf::from("/tmp"),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                24,
-                80,
-            )
-            .unwrap();
+        create_shell(&mut manager, "kept");
 
         manager.shutdown_all();
 
         // Quitting is not the same as discarding: the session must still be
         // offered as recoverable on the next launch
         assert_eq!(manager.store().len(), 1);
-        assert_eq!(SessionStore::load_from(&store_path).unwrap().len(), 1);
+        assert_eq!(load_store(&store_path).len(), 1);
     }
 
     #[test]
@@ -3097,23 +2281,14 @@ mod tests {
             SessionStore::with_path(store_path.clone()),
         );
 
-        let session_id = manager
-            .create_shell_session(
-                "discarded".to_string(),
-                PathBuf::from("/tmp"),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                24,
-                80,
-            )
-            .unwrap();
+        let session_id = create_shell(&mut manager, "discarded");
         assert_eq!(manager.store().len(), 1);
 
         manager.destroy_session(session_id).unwrap();
 
         // Explicitly closing a session is intent to discard it
         assert!(manager.store().get(session_id).is_none());
-        assert!(SessionStore::load_from(&store_path).unwrap().is_empty());
+        assert!(load_store(&store_path).is_empty());
     }
 
     // Startup reconciliation
@@ -3183,16 +2358,7 @@ mod tests {
         let store = store_with_record(&temp_dir, |_| {});
         let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
 
-        manager
-            .create_shell_session(
-                "live".to_string(),
-                PathBuf::from("/tmp"),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                24,
-                80,
-            )
-            .unwrap();
+        create_shell(&mut manager, "live");
 
         let entries = manager.entries_in_order();
         assert_eq!(entries.len(), 2);
@@ -3218,7 +2384,7 @@ mod tests {
         assert_eq!(manager.recovered_count(), 0);
         assert!(manager.entries_in_order().is_empty());
         // Must not reappear on the next launch
-        assert!(SessionStore::load_from(&store_path).unwrap().is_empty());
+        assert!(load_store(&store_path).is_empty());
         // Discarding something that is not recovered is a no-op, not a panic
         assert!(!manager.discard_recovered(session_id));
     }
@@ -3397,10 +2563,7 @@ mod tests {
 
         // Resuming must not lose the record: a crash right after resuming has
         // to leave the session recoverable again
-        assert!(SessionStore::load_from(&store_path)
-            .unwrap()
-            .get(session_id)
-            .is_some());
+        assert!(load_store(&store_path).get(session_id).is_some());
 
         manager.shutdown_all();
     }
@@ -3415,16 +2578,7 @@ mod tests {
             SessionStore::with_path(temp_dir.path().join("sessions.json")),
         );
 
-        manager
-            .create_shell_session(
-                "shell".to_string(),
-                PathBuf::from("/tmp"),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                24,
-                80,
-            )
-            .unwrap();
+        create_shell(&mut manager, "shell");
 
         // Claude dictates its ID at spawn and shells have none to find, so
         // neither should ever trigger a filesystem scan
@@ -3442,22 +2596,13 @@ mod tests {
             SessionStore::with_path(store_path.clone()),
         );
 
-        let session_id = manager
-            .create_shell_session(
-                "session".to_string(),
-                PathBuf::from("/tmp"),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                24,
-                80,
-            )
-            .unwrap();
+        let session_id = create_shell(&mut manager, "session");
 
         assert!(manager.set_agent_session_id(session_id, "codex-abc".to_string()));
 
         // An ID that only exists in memory is the pointer this whole mechanism
         // exists to stop losing
-        let stored = SessionStore::load_from(&store_path).unwrap();
+        let stored = load_store(&store_path);
         assert_eq!(
             stored.get(session_id).unwrap().agent_session_id.as_deref(),
             Some("codex-abc")
@@ -3474,16 +2619,7 @@ mod tests {
             SessionStore::with_path(temp_dir.path().join("sessions.json")),
         );
 
-        let session_id = manager
-            .create_shell_session(
-                "session".to_string(),
-                PathBuf::from("/tmp"),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                24,
-                80,
-            )
-            .unwrap();
+        let session_id = create_shell(&mut manager, "session");
 
         assert!(manager.set_agent_session_id(session_id, "codex-abc".to_string()));
         // Avoids rewriting the store on every scan once resolved
@@ -3510,16 +2646,7 @@ mod tests {
         let mut manager =
             SessionManager::with_store(test_config(&temp_dir), SessionStore::with_path(store_path));
 
-        let session_id = manager
-            .create_shell_session(
-                "shell".to_string(),
-                PathBuf::from("/tmp"),
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                24,
-                80,
-            )
-            .unwrap();
+        let session_id = create_shell(&mut manager, "shell");
 
         // Shells are restored by respawning in the same directory, not by
         // resuming a conversation - there is nothing to resume

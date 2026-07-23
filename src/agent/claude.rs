@@ -6,13 +6,11 @@
 
 use crate::config::Config;
 use crate::hooks::HookEventType;
-use crate::session::PtyHandle;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
+use super::adapter::{AgentAdapter, SpawnConfig};
 
 /// Base hook script filename (shared across all sessions)
 const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
@@ -63,33 +61,18 @@ impl ClaudeCodeAdapter {
     }
 
     /// Install the shared hook script and create symlinks for each event type
-    fn install_hook_script(config: &Config) -> Result<HashMap<String, PathBuf>> {
+    fn install_hook_script(config: &Config) -> Result<Vec<(HookEventType, PathBuf)>> {
         Self::warn_if_jq_missing();
 
         let script_path = Self::hook_script_path(config);
-
-        // Ensure hooks directory exists
-        std::fs::create_dir_all(&config.hooks_dir).context("Failed to create hooks directory")?;
-
-        // Generate the hook script content
-        let script_content = Self::generate_hook_script(config.hook_port);
-
-        // Write the script
-        std::fs::write(&script_path, &script_content).context("Failed to write hook script")?;
-
-        // Make executable (Unix only)
-        #[cfg(unix)]
-        {
-            let mut perms = std::fs::metadata(&script_path)
-                .context("Failed to get script metadata")?
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms)
-                .context("Failed to set script permissions")?;
-        }
+        super::install_executable_script(
+            &script_path,
+            &Self::generate_hook_script(config.hook_port),
+        )
+        .context("Failed to install hook script")?;
 
         // Create symlinks for each event type so basename $0 returns the event name
-        let mut event_scripts = HashMap::new();
+        let mut event_scripts = Vec::with_capacity(HOOK_EVENTS.len());
         for event in HOOK_EVENTS {
             let event_name = event.as_str();
             let symlink_path = config.hooks_dir.join(format!("{}.sh", event_name));
@@ -106,7 +89,7 @@ impl ClaudeCodeAdapter {
                     .with_context(|| format!("Failed to create symlink for {}", event_name))?;
             }
 
-            event_scripts.insert(event_name.to_string(), symlink_path);
+            event_scripts.push((*event, symlink_path));
         }
 
         Ok(event_scripts)
@@ -210,7 +193,7 @@ exit 0
     /// preserving Claude Code trust settings and other user configurations.
     fn create_session_settings(
         working_dir: &Path,
-        event_scripts: &HashMap<String, PathBuf>,
+        event_scripts: &[(HookEventType, PathBuf)],
     ) -> Result<PathBuf> {
         // Create .claude directory in the working directory
         let claude_dir = working_dir.join(".claude");
@@ -235,20 +218,17 @@ exit 0
 
         // Build hooks config using the event-specific script paths
         let mut hooks = serde_json::Map::new();
-        for event in HOOK_EVENTS {
-            let event_name = event.as_str();
-            if let Some(script_path) = event_scripts.get(event_name) {
-                let script_path_str = script_path.to_string_lossy().to_string();
-                hooks.insert(
-                    event_name.to_string(),
-                    serde_json::json!([
-                        {
-                            "matcher": ".*",
-                            "hooks": [{"type": "command", "command": script_path_str}]
-                        }
-                    ]),
-                );
-            }
+        for (event, script_path) in event_scripts {
+            let script_path_str = script_path.to_string_lossy().to_string();
+            hooks.insert(
+                event.as_str().to_string(),
+                serde_json::json!([
+                    {
+                        "matcher": ".*",
+                        "hooks": [{"type": "command", "command": script_path_str}]
+                    }
+                ]),
+            );
         }
 
         // Merge hooks into settings (only overwrite the hooks key, preserve everything else)
@@ -366,46 +346,42 @@ impl AgentAdapter for ClaudeCodeAdapter {
         Ok(cleanup_paths)
     }
 
-    fn spawn(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<SpawnResult> {
-        // Setup hooks first
-        let _cleanup_paths = self.setup_hooks(config, spawn_config)?;
-
-        // Generate environment
-        let env = self.generate_env(config, spawn_config);
-
-        // Build arguments
+    fn build_args(&self, spawn_config: &SpawnConfig) -> Vec<String> {
         let mut args = self.default_args();
         args.extend(Self::conversation_args(spawn_config));
         if let Some(ref prompt) = spawn_config.initial_prompt {
             args.push("--print".to_string());
             args.push(prompt.clone());
         }
+        args
+    }
 
-        // Convert args to &str for PtyHandle
-        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-        // Spawn the process with correct terminal dimensions
-        let pty = PtyHandle::spawn(
-            self.command(),
-            &args_refs,
-            &spawn_config.working_dir,
-            env,
-            spawn_config.rows,
-            spawn_config.cols,
-        )?;
-
-        Ok(SpawnResult {
-            pty,
-            agent_session_id: Some(Self::conversation_id(spawn_config)),
-        })
+    fn agent_session_id(&self, spawn_config: &SpawnConfig) -> Option<String> {
+        Some(Self::conversation_id(spawn_config))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    /// Event scripts as `install_hook_script` would report them, without
+    /// touching the filesystem
+    fn mock_event_scripts() -> Vec<(HookEventType, PathBuf)> {
+        HOOK_EVENTS
+            .iter()
+            .map(|event| {
+                (
+                    *event,
+                    PathBuf::from(format!("/test/{}.sh", event.as_str())),
+                )
+            })
+            .collect()
+    }
 
     fn test_spawn_config(working_dir: PathBuf) -> SpawnConfig {
         SpawnConfig {
@@ -778,7 +754,9 @@ mod tests {
         for event in HOOK_EVENTS {
             let event_name = event.as_str();
             let symlink = event_scripts
-                .get(event_name)
+                .iter()
+                .find(|(e, _)| e == event)
+                .map(|(_, path)| path)
                 .expect("Should have event script");
             assert!(symlink.exists() || symlink.is_symlink());
             assert!(symlink.ends_with(format!("{}.sh", event_name)));
@@ -801,15 +779,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
 
-        // Create mock event scripts HashMap
-        let mut event_scripts = HashMap::new();
-        for event in HOOK_EVENTS {
-            let event_name = event.as_str();
-            event_scripts.insert(
-                event_name.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event_name)),
-            );
-        }
+        let event_scripts = mock_event_scripts();
 
         let settings_path =
             ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
@@ -835,15 +805,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let working_dir = temp_dir.path().to_path_buf();
 
-        // Create mock event scripts HashMap
-        let mut event_scripts = HashMap::new();
-        for event in HOOK_EVENTS {
-            let event_name = event.as_str();
-            event_scripts.insert(
-                event_name.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event_name)),
-            );
-        }
+        let event_scripts = mock_event_scripts();
 
         let settings_path =
             ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
@@ -893,15 +855,7 @@ mod tests {
         }"#;
         std::fs::write(claude_dir.join("settings.local.json"), existing_settings).unwrap();
 
-        // Create mock event scripts
-        let mut event_scripts = HashMap::new();
-        for event in HOOK_EVENTS {
-            let event_name = event.as_str();
-            event_scripts.insert(
-                event_name.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event_name)),
-            );
-        }
+        let event_scripts = mock_event_scripts();
 
         // Create session settings (should merge hooks, not overwrite)
         let settings_path =
@@ -939,15 +893,7 @@ mod tests {
         let original_content = r#"{"original": true}"#;
         std::fs::write(claude_dir.join("settings.local.json"), original_content).unwrap();
 
-        // Create mock event scripts
-        let mut event_scripts = HashMap::new();
-        for event in HOOK_EVENTS {
-            let event_name = event.as_str();
-            event_scripts.insert(
-                event_name.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event_name)),
-            );
-        }
+        let event_scripts = mock_event_scripts();
 
         // Create session settings
         ClaudeCodeAdapter::create_session_settings(&working_dir, &event_scripts).unwrap();
@@ -972,15 +918,7 @@ mod tests {
         std::fs::create_dir_all(&claude_dir).unwrap();
         std::fs::write(claude_dir.join("settings.local.json"), "not valid json").unwrap();
 
-        // Create mock event scripts
-        let mut event_scripts = HashMap::new();
-        for event in HOOK_EVENTS {
-            let event_name = event.as_str();
-            event_scripts.insert(
-                event_name.to_string(),
-                PathBuf::from(format!("/test/{}.sh", event_name)),
-            );
-        }
+        let event_scripts = mock_event_scripts();
 
         // Create session settings (should start fresh when JSON is invalid)
         let settings_path =

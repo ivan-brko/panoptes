@@ -103,44 +103,6 @@ impl GitOps {
         }
     }
 
-    /// List all local branches
-    pub fn list_local_branches(&self) -> Result<Vec<String>> {
-        let branches = self
-            .repo
-            .branches(Some(BranchType::Local))
-            .context("Failed to list branches")?;
-
-        let mut result = Vec::new();
-        for branch_result in branches {
-            let (branch, _) = branch_result.context("Failed to get branch")?;
-            if let Some(name) = branch.name().context("Failed to get branch name")? {
-                result.push(name.to_string());
-            }
-        }
-
-        result.sort();
-        Ok(result)
-    }
-
-    /// List all remote branches
-    pub fn list_remote_branches(&self) -> Result<Vec<String>> {
-        let branches = self
-            .repo
-            .branches(Some(BranchType::Remote))
-            .context("Failed to list remote branches")?;
-
-        let mut result = Vec::new();
-        for branch_result in branches {
-            let (branch, _) = branch_result.context("Failed to get branch")?;
-            if let Some(name) = branch.name().context("Failed to get branch name")? {
-                result.push(name.to_string());
-            }
-        }
-
-        result.sort();
-        Ok(result)
-    }
-
     /// Get the remote URL for origin (if exists)
     pub fn remote_url(&self) -> Option<String> {
         self.repo
@@ -157,11 +119,6 @@ impl GitOps {
     /// Get access to the underlying repository
     pub fn repository(&self) -> &Repository {
         &self.repo
-    }
-
-    /// Get a mutable reference to the underlying repository
-    pub fn repository_mut(&mut self) -> &mut Repository {
-        &mut self.repo
     }
 
     /// Fetch from all remotes using the git CLI
@@ -186,21 +143,7 @@ impl GitOps {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr = stderr.trim();
-            // Provide more helpful messages for common errors
-            if stderr.contains("Could not resolve hostname") || stderr.contains("unable to access")
-            {
-                anyhow::bail!(
-                    "Network error during git fetch: {}. Check your internet connection.",
-                    stderr
-                );
-            } else if stderr.contains("Permission denied")
-                || stderr.contains("authentication failed")
-            {
-                anyhow::bail!("Authentication failed during git fetch: {}. Check your SSH keys or credentials.", stderr);
-            } else {
-                anyhow::bail!("git fetch failed: {}", stderr);
-            }
+            return Err(classify_fetch_error(stderr.trim()));
         }
 
         Ok(())
@@ -276,6 +219,26 @@ impl GitOps {
     }
 }
 
+/// Classify a failed `git fetch`'s stderr into a user-facing error
+///
+/// Provides more helpful messages for common failures (network problems,
+/// authentication) and falls back to the raw stderr otherwise.
+fn classify_fetch_error(stderr: &str) -> anyhow::Error {
+    if stderr.contains("Could not resolve hostname") || stderr.contains("unable to access") {
+        anyhow::anyhow!(
+            "Network error during git fetch: {}. Check your internet connection.",
+            stderr
+        )
+    } else if stderr.contains("Permission denied") || stderr.contains("authentication failed") {
+        anyhow::anyhow!(
+            "Authentication failed during git fetch: {}. Check your SSH keys or credentials.",
+            stderr
+        )
+    } else {
+        anyhow::anyhow!("git fetch failed: {}", stderr)
+    }
+}
+
 /// Type of branch reference
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchRefInfoType {
@@ -318,9 +281,8 @@ pub fn validate_branch_name(name: &str) -> Result<(), String> {
     }
 
     // Check for invalid characters
-    const INVALID_CHARS: &[char] = &[' ', '~', '^', ':', '?', '*', '[', '\\'];
     for c in name.chars() {
-        if INVALID_CHARS.contains(&c) {
+        if INVALID_BRANCH_CHARS.contains(&c) {
             return Err(format!("Branch name cannot contain '{}'", c));
         }
         // Check for control characters (ASCII 0-31 and 127)
@@ -435,22 +397,6 @@ mod tests {
     }
 
     #[test]
-    fn test_git_ops_list_branches() {
-        let (temp_dir, repo) = create_test_repo();
-
-        // Create another branch
-        let head = repo.head().unwrap();
-        let commit = head.peel_to_commit().unwrap();
-        repo.branch("feature-test", &commit, false).unwrap();
-
-        let git_ops = GitOps::open(temp_dir.path()).unwrap();
-        let branches = git_ops.list_local_branches().unwrap();
-
-        assert!(!branches.is_empty());
-        assert!(branches.contains(&"feature-test".to_string()));
-    }
-
-    #[test]
     fn test_git_ops_branch_exists() {
         let (temp_dir, repo) = create_test_repo();
 
@@ -505,6 +451,123 @@ mod tests {
 
         let current = git_ops.current_branch().unwrap();
         assert!(current.is_some());
+    }
+
+    #[test]
+    fn test_classify_fetch_error_host_resolution() {
+        for stderr in [
+            "ssh: Could not resolve hostname github.com",
+            "fatal: unable to access 'https://example.com/repo.git/'",
+        ] {
+            let msg = classify_fetch_error(stderr).to_string();
+            assert!(
+                msg.starts_with("Network error during git fetch:"),
+                "unexpected classification for {stderr:?}: {msg}"
+            );
+            assert!(msg.contains(stderr), "original stderr lost: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_classify_fetch_error_authentication() {
+        for stderr in [
+            "git@github.com: Permission denied (publickey).",
+            "fatal: authentication failed for 'https://example.com/repo.git/'",
+        ] {
+            let msg = classify_fetch_error(stderr).to_string();
+            assert!(
+                msg.starts_with("Authentication failed during git fetch:"),
+                "unexpected classification for {stderr:?}: {msg}"
+            );
+            assert!(msg.contains(stderr), "original stderr lost: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_classify_fetch_error_generic() {
+        let msg = classify_fetch_error("fatal: something else went wrong").to_string();
+        assert_eq!(msg, "git fetch failed: fatal: something else went wrong");
+    }
+
+    /// Set up local branches and simulated remote-tracking refs for sort tests
+    ///
+    /// Remote-tracking branches are plain refs under `refs/remotes/`, so they
+    /// can be created locally without any network remote.
+    fn setup_branch_refs(repo: &Repository) {
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("zeta", &head_commit, false).unwrap();
+        repo.branch("alpha", &head_commit, false).unwrap();
+
+        let oid = head_commit.id();
+        repo.reference("refs/remotes/origin/beta", oid, false, "test")
+            .unwrap();
+        repo.reference("refs/remotes/origin/main", oid, false, "test")
+            .unwrap();
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            false,
+            "test",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_list_all_branch_refs_sorts_default_then_local_then_remote() {
+        let (temp_dir, repo) = create_test_repo();
+        setup_branch_refs(&repo);
+        let head_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        let git_ops = GitOps::open(temp_dir.path()).unwrap();
+        let refs = git_ops.list_all_branch_refs(Some("zeta")).unwrap();
+
+        let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+        // Default base first, then locals alphabetically, then remotes
+        // alphabetically ("alpha" < head branch "main"/"master" < "zeta").
+        assert_eq!(
+            names,
+            vec![
+                "zeta",
+                "alpha",
+                head_branch.as_str(),
+                "origin/beta",
+                "origin/main"
+            ]
+        );
+
+        assert!(refs[0].is_default_base);
+        assert!(refs[1..].iter().all(|r| !r.is_default_base));
+        assert_eq!(refs[0].ref_type, BranchRefInfoType::Local);
+        assert_eq!(refs[3].ref_type, BranchRefInfoType::Remote);
+        assert_eq!(refs[4].ref_type, BranchRefInfoType::Remote);
+    }
+
+    #[test]
+    fn test_list_all_branch_refs_remote_default_floats_first_and_head_skipped() {
+        let (temp_dir, repo) = create_test_repo();
+        setup_branch_refs(&repo);
+
+        let git_ops = GitOps::open(temp_dir.path()).unwrap();
+        let refs = git_ops.list_all_branch_refs(Some("origin/main")).unwrap();
+
+        // A remote default base still sorts first, ahead of all locals.
+        assert_eq!(refs[0].name, "origin/main");
+        assert!(refs[0].is_default_base);
+        assert_eq!(refs[0].ref_type, BranchRefInfoType::Remote);
+
+        // "origin/HEAD" is never listed.
+        assert!(refs.iter().all(|r| r.name != "origin/HEAD"));
+
+        // No default at all: plain local-then-remote ordering.
+        let refs = git_ops.list_all_branch_refs(None).unwrap();
+        assert!(refs.iter().all(|r| !r.is_default_base));
+        let first_remote = refs
+            .iter()
+            .position(|r| r.ref_type == BranchRefInfoType::Remote)
+            .unwrap();
+        assert!(refs[..first_remote]
+            .iter()
+            .all(|r| r.ref_type == BranchRefInfoType::Local));
     }
 
     #[test]

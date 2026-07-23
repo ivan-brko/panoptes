@@ -4,10 +4,11 @@
 //! when creating and deleting worktrees.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use super::{truncate_path, truncate_string};
 use crate::app::{ClaudeSettingsCopyState, ClaudeSettingsMigrateState};
 use crate::tui::theme::theme;
+use crate::tui::widgets::dialog::{render_dialog, yes_no_line, DialogSize, DialogSpec};
 
 /// Render the Claude settings copy dialog
 ///
@@ -28,17 +29,7 @@ pub fn render_claude_settings_copy_dialog(
     let base_height = 11_u16;
     let tools_height = tools_to_show as u16 + if has_more_tools { 1 } else { 0 };
     let mcp_height = if state.has_mcp_servers { 1 } else { 0 };
-    let dialog_height =
-        (base_height + tools_height + mcp_height).min(area.height.saturating_sub(2));
-    let dialog_width = 60_u16.min(area.width.saturating_sub(4));
-
-    let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-    let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-
-    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
-
-    // Clear the background
-    frame.render_widget(Clear, dialog_area);
+    let dialog_height = base_height + tools_height + mcp_height;
 
     // Truncate paths for display
     let source_display = truncate_path(&state.source_path.to_string_lossy(), 45);
@@ -114,30 +105,7 @@ pub fn render_claude_settings_copy_dialog(
     lines.push(Line::from(""));
 
     // Yes/No buttons
-    let yes_style = if state.selected_yes {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Green)
-    };
-
-    let no_style = if !state.selected_yes {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Red)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Red)
-    };
-
-    lines.push(Line::from(vec![
-        Span::raw("           "),
-        Span::styled(" Yes ", yes_style),
-        Span::raw("    "),
-        Span::styled(" No ", no_style),
-    ]));
+    lines.push(yes_no_line(state.selected_yes, "           "));
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -145,14 +113,18 @@ pub fn render_claude_settings_copy_dialog(
         Style::default().fg(t.text_muted),
     )));
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Left).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent))
-            .title(" Copy Claude Code Settings? "),
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: " Copy Claude Code Settings? ",
+            border_color: t.accent,
+            alignment: Alignment::Left,
+            width: DialogSize::Fixed(60),
+            height: DialogSize::Fixed(dialog_height),
+        },
+        lines,
     );
-
-    frame.render_widget(paragraph, dialog_area);
 }
 
 /// Render the Claude settings migrate dialog
@@ -178,16 +150,7 @@ pub fn render_claude_settings_migrate_dialog(
     } else {
         tools_to_show as u16 + if has_more_tools { 1 } else { 0 } + 1 // +1 for header
     };
-    let dialog_height = (base_height + tools_height).min(area.height.saturating_sub(2));
-    let dialog_width = 60_u16.min(area.width.saturating_sub(4));
-
-    let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
-    let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
-
-    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
-
-    // Clear the background
-    frame.render_widget(Clear, dialog_area);
+    let dialog_height = base_height + tools_height;
 
     let mut lines = vec![
         Line::from(""),
@@ -248,30 +211,7 @@ pub fn render_claude_settings_migrate_dialog(
     lines.push(Line::from(""));
 
     // Yes/No buttons
-    let yes_style = if state.selected_yes {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Green)
-    };
-
-    let no_style = if !state.selected_yes {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Red)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Red)
-    };
-
-    lines.push(Line::from(vec![
-        Span::raw("           "),
-        Span::styled(" Yes ", yes_style),
-        Span::raw("    "),
-        Span::styled(" No ", no_style),
-    ]));
+    lines.push(yes_no_line(state.selected_yes, "           "));
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -279,30 +219,88 @@ pub fn render_claude_settings_migrate_dialog(
         Style::default().fg(t.text_muted),
     )));
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Left).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.border_warning))
-            .title(" Migrate Permissions? "),
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: " Migrate Permissions? ",
+            border_color: t.border_warning,
+            alignment: Alignment::Left,
+            width: DialogSize::Fixed(60),
+            height: DialogSize::Fixed(dialog_height),
+        },
+        lines,
     );
-
-    frame.render_widget(paragraph, dialog_area);
 }
 
-/// Truncate a path for display, keeping the end (most relevant part)
-fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
-        path.to_string()
-    } else {
-        format!("...{}", &path[path.len() - max_len + 3..])
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::views::test_util::{contains_line, render_to_lines};
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    #[test]
+    fn test_copy_dialog_lists_permissions_and_buttons() {
+        let state = ClaudeSettingsCopyState {
+            source_path: PathBuf::from("/tmp/main-repo"),
+            target_path: PathBuf::from("/tmp/worktree"),
+            project_id: Uuid::new_v4(),
+            branch_id: Uuid::new_v4(),
+            tools_preview: vec!["Bash(ls)".to_string()],
+            has_mcp_servers: true,
+            selected_yes: true,
+            claude_config_dir: None,
+            has_local_settings: false,
+        };
+
+        let lines = render_to_lines(80, 24, |frame| {
+            render_claude_settings_copy_dialog(frame, frame.size(), &state)
+        });
+
+        assert!(
+            contains_line(&lines, "Copy Claude Code Settings?"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "Permissions to copy:"), "{:?}", lines);
+        assert!(contains_line(&lines, "Bash(ls)"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "MCP servers will also be copied"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "Yes"), "{:?}", lines);
+        assert!(contains_line(&lines, "No"), "{:?}", lines);
     }
-}
 
-/// Truncate a string for display, keeping the beginning
-fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
+    #[test]
+    fn test_migrate_dialog_explains_unique_settings() {
+        let state = ClaudeSettingsMigrateState {
+            worktree_path: PathBuf::from("/tmp/worktree"),
+            main_path: PathBuf::from("/tmp/main-repo"),
+            branch_id: Uuid::new_v4(),
+            unique_tools: vec!["Bash(cargo test)".to_string()],
+            selected_yes: true,
+            claude_config_dir: None,
+            has_local_settings: false,
+        };
+
+        let lines = render_to_lines(80, 24, |frame| {
+            render_claude_settings_migrate_dialog(frame, frame.size(), &state)
+        });
+
+        assert!(contains_line(&lines, "Migrate Permissions?"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "This worktree has unique Claude Code settings"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Permissions to migrate:"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "Bash(cargo test)"), "{:?}", lines);
     }
 }

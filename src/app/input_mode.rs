@@ -18,9 +18,7 @@ pub enum InputMode {
     AddingProject,
     /// Adding a new project - typing optional name (after path validation)
     AddingProjectName,
-    /// Creating a new worktree - typing branch name - DEPRECATED (use WorktreeSelectBranch)
-    CreatingWorktree,
-    /// Selecting default base branch - DEPRECATED (use WorktreeSelectBase)
+    /// Selecting the project's default base branch (via 'b' in project view)
     SelectingDefaultBase,
     /// Confirming session deletion
     ConfirmingSessionDelete,
@@ -80,4 +78,64 @@ pub enum InputMode {
     ConfirmingCodexConfigDelete,
     /// Selecting Codex config for session creation or project default
     SelectingCodexConfig,
+}
+
+impl InputMode {
+    /// Every input mode, for table-driven tests
+    ///
+    /// Keep in sync with the enum; `test_all_lists_every_mode_once` fails if
+    /// an entry is duplicated, and the dispatcher's routing-table test fails
+    /// to compile if a new variant is missing from its match.
+    pub const ALL: [InputMode; 36] = [
+        InputMode::Normal,
+        InputMode::Session,
+        InputMode::CreatingSession,
+        InputMode::CreatingShellSession,
+        InputMode::AddingProject,
+        InputMode::AddingProjectName,
+        InputMode::SelectingDefaultBase,
+        InputMode::ConfirmingSessionDelete,
+        InputMode::ConfirmingBranchDelete,
+        InputMode::ConfirmingProjectDelete,
+        InputMode::ConfirmingQuit,
+        InputMode::RenamingProject,
+        InputMode::MovingToFolder,
+        InputMode::RenamingFolder,
+        InputMode::ConfirmingFolderRemove,
+        InputMode::WorktreeSelectBranch,
+        InputMode::WorktreeSelectBase,
+        InputMode::WorktreeConfirm,
+        InputMode::AddingClaudeConfigName,
+        InputMode::AddingClaudeConfigPath,
+        InputMode::ConfirmingClaudeConfigDelete,
+        InputMode::SelectingClaudeConfig,
+        InputMode::ConfirmingClaudeSettingsCopy,
+        InputMode::ConfirmingClaudeSettingsMigrate,
+        InputMode::ManagingCustomShortcuts,
+        InputMode::AddingCustomShortcutKey,
+        InputMode::AddingCustomShortcutName,
+        InputMode::AddingCustomShortcutCommand,
+        InputMode::AddingCustomShortcutAutoClose,
+        InputMode::ConfirmingCustomShortcutDelete,
+        InputMode::SelectingAgentType,
+        InputMode::CreatingCodexSession,
+        InputMode::AddingCodexConfigName,
+        InputMode::AddingCodexConfigPath,
+        InputMode::ConfirmingCodexConfigDelete,
+        InputMode::SelectingCodexConfig,
+    ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_lists_every_mode_once() {
+        let mut seen: Vec<String> = InputMode::ALL.iter().map(|m| format!("{:?}", m)).collect();
+        seen.sort();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "InputMode::ALL contains a duplicate");
+    }
 }

@@ -4,6 +4,7 @@
 
 use super::{folder_path_key, Branch, BranchId, Project, ProjectId, MAX_FOLDER_DEPTH};
 use crate::config::config_dir;
+use crate::persistence::{self, LoadOutcome};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -17,30 +18,6 @@ struct StoreData {
     /// Display paths of folders the user has collapsed in the projects overview
     #[serde(default)]
     collapsed_folders: Vec<String>,
-}
-
-/// Backup a corrupted file by renaming it with a timestamped .backup extension
-///
-/// Returns the backup path on success
-fn backup_corrupted_file(path: &Path) -> Option<PathBuf> {
-    // Use timestamp to avoid overwriting previous backups
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let backup_path = path.with_extension(format!("json.corrupt.{}", timestamp));
-    if let Err(e) = std::fs::rename(path, &backup_path) {
-        tracing::warn!(
-            "Failed to backup corrupted file {} to {}: {}",
-            path.display(),
-            backup_path.display(),
-            e
-        );
-        None
-    } else {
-        tracing::info!(
-            "Corrupted projects file backed up to {}",
-            backup_path.display()
-        );
-        Some(backup_path)
-    }
 }
 
 /// Store for persisting projects and branches
@@ -446,11 +423,6 @@ impl ProjectStore {
             .count()
     }
 
-    /// Load store from disk
-    pub fn load() -> Result<Self> {
-        Self::load_from(&projects_file_path())
-    }
-
     /// Load store from disk, returning a warning message if data was corrupted
     ///
     /// This is useful for showing a notification to the user on startup.
@@ -460,103 +432,23 @@ impl ProjectStore {
 
     /// Load store from a specific path, returning a warning message if data was corrupted
     pub fn load_from_with_status(path: &Path) -> (Self, Option<String>) {
-        if !path.exists() {
-            return (Self::with_path(path.to_path_buf()), None);
+        match persistence::load_json::<StoreData>(path, "projects") {
+            LoadOutcome::Absent => (Self::with_path(path.to_path_buf()), None),
+            LoadOutcome::Loaded(data) => (Self::from_data(data, path), None),
+            LoadOutcome::Corrupted { fallback_warning } => {
+                (Self::with_path(path.to_path_buf()), Some(fallback_warning))
+            }
         }
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to read projects file: {}", e);
-                if let Some(backup_path) = backup_corrupted_file(path) {
-                    let warning = format!(
-                        "Projects file was unreadable. Backup saved to {}. Starting fresh.",
-                        backup_path.display()
-                    );
-                    return (Self::with_path(path.to_path_buf()), Some(warning));
-                }
-                let warning = format!("Projects file was unreadable ({}). Starting fresh.", e);
-                return (Self::with_path(path.to_path_buf()), Some(warning));
-            }
-        };
-
-        let data: StoreData = match serde_json::from_str(&content) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("Projects file is corrupted: {}", e);
-                if let Some(backup_path) = backup_corrupted_file(path) {
-                    let warning = format!(
-                        "Projects file was corrupted. Backup saved to {}. Starting fresh.",
-                        backup_path.display()
-                    );
-                    return (Self::with_path(path.to_path_buf()), Some(warning));
-                }
-                let warning = format!("Projects file was corrupted ({}). Starting fresh.", e);
-                return (Self::with_path(path.to_path_buf()), Some(warning));
-            }
-        };
-
-        let projects = data.projects.into_iter().map(|p| (p.id, p)).collect();
-        let branches = data.branches.into_iter().map(|b| (b.id, b)).collect();
-        let collapsed_folders = data.collapsed_folders.into_iter().collect();
-
-        (
-            Self {
-                projects,
-                branches,
-                collapsed_folders,
-                store_path: path.to_path_buf(),
-            },
-            None,
-        )
     }
 
-    /// Load store from a specific path
-    ///
-    /// If the file is corrupted, this will create a backup and return an error.
-    pub fn load_from(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::with_path(path.to_path_buf()));
-        }
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to read projects file: {}", e);
-                // Try to create a backup
-                backup_corrupted_file(path);
-                return Err(anyhow::anyhow!(
-                    "Could not read projects file ({}). Starting with empty project list.",
-                    e
-                ));
-            }
-        };
-
-        let data: StoreData = match serde_json::from_str(&content) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("Projects file is corrupted: {}", e);
-                // Create backup of corrupted file
-                backup_corrupted_file(path);
-                return Err(anyhow::anyhow!(
-                    "Projects file is corrupted and could not be parsed ({}). \
-                     A backup has been created. \
-                     Starting with empty project list.",
-                    e
-                ));
-            }
-        };
-
-        let projects = data.projects.into_iter().map(|p| (p.id, p)).collect();
-        let branches = data.branches.into_iter().map(|b| (b.id, b)).collect();
-        let collapsed_folders = data.collapsed_folders.into_iter().collect();
-
-        Ok(Self {
-            projects,
-            branches,
-            collapsed_folders,
+    /// Build a store from parsed data
+    fn from_data(data: StoreData, path: &Path) -> Self {
+        Self {
+            projects: data.projects.into_iter().map(|p| (p.id, p)).collect(),
+            branches: data.branches.into_iter().map(|b| (b.id, b)).collect(),
+            collapsed_folders: data.collapsed_folders.into_iter().collect(),
             store_path: path.to_path_buf(),
-        })
+        }
     }
 
     /// Save store to disk
@@ -564,31 +456,11 @@ impl ProjectStore {
         self.save_to(&self.store_path)
     }
 
-    /// Save store to a specific path
+    /// Save store to a specific path (atomically, via a sibling temp file)
+    ///
+    /// The projects file is saved during live use, so a crash mid-write must
+    /// never be able to truncate it.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        use crate::config::{categorize_io_error, DiskErrorKind};
-
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                let kind = categorize_io_error(&e);
-                match kind {
-                    DiskErrorKind::PermissionDenied => {
-                        anyhow::bail!(
-                            "Permission denied creating directory {:?}. Check file permissions.",
-                            parent
-                        );
-                    }
-                    DiskErrorKind::DiskFull => {
-                        anyhow::bail!("Disk full - cannot create directory {:?}", parent);
-                    }
-                    _ => {
-                        return Err(e).context("Failed to create directory for projects file");
-                    }
-                }
-            }
-        }
-
         // Drop collapse entries for folders that no longer hold any project,
         // so the file does not accumulate stale paths
         let mut collapsed_folders: Vec<String> = self
@@ -608,30 +480,7 @@ impl ProjectStore {
             collapsed_folders,
         };
 
-        let content =
-            serde_json::to_string_pretty(&data).context("Failed to serialize projects")?;
-
-        if let Err(e) = std::fs::write(path, &content) {
-            let kind = categorize_io_error(&e);
-            match kind {
-                DiskErrorKind::DiskFull => {
-                    anyhow::bail!(
-                        "Disk full - free space needed to save projects. Your changes may not be saved."
-                    );
-                }
-                DiskErrorKind::PermissionDenied => {
-                    anyhow::bail!(
-                        "Permission denied writing to {:?}. Check file permissions.",
-                        path
-                    );
-                }
-                _ => {
-                    return Err(e).context("Failed to write projects file");
-                }
-            }
-        }
-
-        Ok(())
+        persistence::save_json_atomic(path, &data, "projects")
     }
 }
 
@@ -806,7 +655,8 @@ mod tests {
         store.save().unwrap();
 
         // Load into new store
-        let loaded = ProjectStore::load_from(&path).unwrap();
+        let (loaded, warning) = ProjectStore::load_from_with_status(&path);
+        assert!(warning.is_none());
         assert_eq!(loaded.project_count(), 1);
         assert_eq!(loaded.branch_count(), 1);
         assert!(loaded.get_project(project_id).is_some());
@@ -818,7 +668,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("nonexistent.json");
 
-        let store = ProjectStore::load_from(&path).unwrap();
+        let (store, warning) = ProjectStore::load_from_with_status(&path);
+        assert!(warning.is_none());
         assert_eq!(store.project_count(), 0);
         assert_eq!(store.branch_count(), 0);
     }
@@ -1090,7 +941,8 @@ mod tests {
         store.set_folder_collapsed(&folder(&["Acme"]), true);
         store.save().unwrap();
 
-        let loaded = ProjectStore::load_from(&path).unwrap();
+        let (loaded, warning) = ProjectStore::load_from_with_status(&path);
+        assert!(warning.is_none());
 
         assert_eq!(
             loaded.get_project(id).unwrap().folder,
@@ -1110,7 +962,8 @@ mod tests {
         store.set_folder_collapsed(&folder(&["Ghost"]), true);
         store.save().unwrap();
 
-        let loaded = ProjectStore::load_from(&path).unwrap();
+        let (loaded, warning) = ProjectStore::load_from_with_status(&path);
+        assert!(warning.is_none());
 
         assert!(loaded.is_folder_collapsed(&folder(&["Acme"])));
         assert!(!loaded.is_folder_collapsed(&folder(&["Ghost"])));
@@ -1135,7 +988,8 @@ mod tests {
         }"#;
         std::fs::write(&path, legacy).unwrap();
 
-        let store = ProjectStore::load_from(&path).unwrap();
+        let (store, warning) = ProjectStore::load_from_with_status(&path);
+        assert!(warning.is_none());
 
         assert_eq!(store.project_count(), 1);
         assert!(store.projects().next().unwrap().folder.is_empty());

@@ -15,7 +15,38 @@ pub use claude::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
 pub use shell::ShellAdapter;
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// Write a script to disk and mark it executable (0755)
+///
+/// The shared install step for every hook and helper script an adapter ships:
+/// parent directory, write, chmod. Content is written unconditionally so a
+/// script left by an older Panoptes is refreshed rather than trusted.
+pub(crate) fn install_executable_script(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create script directory {}", parent.display()))?;
+    }
+
+    std::fs::write(path, content)
+        .with_context(|| format!("Failed to write script {}", path.display()))?;
+
+    // Make executable (Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)
+            .with_context(|| format!("Failed to get metadata for {}", path.display()))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms)
+            .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
+    }
+
+    Ok(())
+}
 
 /// Supported agent types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -39,26 +70,6 @@ impl AgentType {
         }
     }
 
-    /// Get the command used to invoke this agent
-    pub fn command(&self) -> &str {
-        match self {
-            AgentType::ClaudeCode => "claude",
-            AgentType::Shell => std::env::var("SHELL")
-                .map(|_| "shell")
-                .unwrap_or("/bin/bash"),
-            AgentType::OpenAICodex => "codex",
-        }
-    }
-
-    /// Check if this agent supports hooks for state tracking
-    pub fn supports_hooks(&self) -> bool {
-        match self {
-            AgentType::ClaudeCode => true,
-            AgentType::Shell => false,
-            AgentType::OpenAICodex => true,
-        }
-    }
-
     /// Create an adapter instance for this agent type
     pub fn create_adapter(&self) -> Box<dyn AgentAdapter> {
         match self {
@@ -75,6 +86,23 @@ impl std::fmt::Display for AgentType {
     }
 }
 
+/// The adapter that spawns a given kind of session
+///
+/// `SessionType` describes a session's state-tracking behaviour and is
+/// persisted; `AgentType` picks the process to launch. They correspond
+/// one-to-one, and this is the single place that correspondence is written
+/// down.
+impl From<crate::session::SessionType> for AgentType {
+    fn from(session_type: crate::session::SessionType) -> Self {
+        use crate::session::SessionType;
+        match session_type {
+            SessionType::ClaudeCode => AgentType::ClaudeCode,
+            SessionType::OpenAICodex => AgentType::OpenAICodex,
+            SessionType::Shell => AgentType::Shell,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,20 +112,6 @@ mod tests {
         assert_eq!(AgentType::ClaudeCode.display_name(), "Claude Code");
         assert_eq!(AgentType::Shell.display_name(), "Shell");
         assert_eq!(AgentType::OpenAICodex.display_name(), "Codex");
-    }
-
-    #[test]
-    fn test_agent_type_command() {
-        assert_eq!(AgentType::ClaudeCode.command(), "claude");
-        assert_eq!(AgentType::OpenAICodex.command(), "codex");
-        // Shell command depends on $SHELL env var
-    }
-
-    #[test]
-    fn test_agent_type_supports_hooks() {
-        assert!(AgentType::ClaudeCode.supports_hooks());
-        assert!(!AgentType::Shell.supports_hooks());
-        assert!(AgentType::OpenAICodex.supports_hooks());
     }
 
     #[test]

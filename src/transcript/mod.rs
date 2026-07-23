@@ -413,6 +413,68 @@ mod tests {
     }
 
     #[test]
+    fn test_seed_merges_model_from_an_older_record_backwards() {
+        // Codex's newest token_count does not always name the model; an older
+        // record often does. The newest figures must win, with only the gaps
+        // filled in from history.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        append(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model\":\"gpt-5-codex\",\"model_context_window\":272000,\"total_token_usage\":{\"total_tokens\":100}}}}\n");
+        append(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":272000,\"total_token_usage\":{\"total_tokens\":48000}}}}\n");
+
+        let (_, seed) = Tailer::attach(TranscriptKind::Codex, path);
+        let seed = seed.expect("usage should be seeded");
+        assert_eq!(
+            seed.total_tokens,
+            Some(48_000),
+            "the newest record's figures must win"
+        );
+        assert_eq!(
+            seed.model.as_deref(),
+            Some("gpt-5-codex"),
+            "a field the newest record lacks is filled from an older one"
+        );
+    }
+
+    #[test]
+    fn test_seed_scan_skips_the_first_line_of_a_mid_file_window() {
+        // When the scan window starts mid-file, its first "line" is a byte
+        // offset into whatever record happens to be there - possibly the tail
+        // of a longer line - and cannot be trusted. It must be skipped even
+        // when it happens to align with a complete record.
+        let usage_line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model\":\"gpt-5-codex\",\"total_token_usage\":{\"total_tokens\":48000}}}}\n";
+        let window = SEED_SCAN_BYTES as usize;
+
+        // Unparseable filler sized so usage_line + filler fill the window
+        // exactly - the window therefore begins precisely at the usage record
+        let filler = format!("{}\n", "x".repeat(window - usage_line.len() - 1));
+
+        // Sanity: at the very start of the file (start == 0) the same first
+        // line is trusted and seeds
+        let dir = TempDir::new().unwrap();
+        let aligned = dir.path().join("aligned.jsonl");
+        append(&aligned, usage_line);
+        append(&aligned, &filler);
+        let (_, seed) = Tailer::attach(TranscriptKind::Codex, aligned);
+        assert!(
+            seed.is_some(),
+            "a first line at the start of the file is complete and must seed"
+        );
+
+        // Now the same window content preceded by earlier bytes: the window
+        // starts mid-file, so its first line must be skipped
+        let mid_file = dir.path().join("mid-file.jsonl");
+        append(&mid_file, "earlier-history-before-window\n");
+        append(&mid_file, usage_line);
+        append(&mid_file, &filler);
+        let (_, seed) = Tailer::attach(TranscriptKind::Codex, mid_file);
+        assert!(
+            seed.is_none(),
+            "the first line of a mid-file window cannot be trusted and must be skipped"
+        );
+    }
+
+    #[test]
     fn test_missing_file_is_not_an_error() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("never-created.jsonl");

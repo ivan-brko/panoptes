@@ -54,23 +54,19 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
+    use super::agent_configs::{self, AgentKind};
+
     match app.state.input_mode {
         InputMode::Normal => app.handle_normal_mode_key(key),
         InputMode::Session => super::session_mode::handle_session_mode_key(app, key),
-        InputMode::CreatingSession => super::text_input::handle_creating_session_key(app, key),
+        InputMode::CreatingSession => {
+            agent_configs::handle_creating_agent_session_key(app, key, AgentKind::Claude)
+        }
         InputMode::CreatingShellSession => {
             super::text_input::handle_creating_shell_session_key(app, key)
         }
         InputMode::AddingProject => super::text_input::handle_adding_project_key(app, key),
         InputMode::AddingProjectName => super::text_input::handle_adding_project_name_key(app, key),
-        InputMode::CreatingWorktree => {
-            // Need to get project_id from current view
-            if let View::ProjectDetail(project_id) = app.state.view {
-                crate::wizards::worktree::handle_creating_worktree_key(app, key, project_id)
-            } else {
-                Ok(())
-            }
-        }
         InputMode::SelectingDefaultBase => {
             // Need to get project_id from current view
             if let View::ProjectDetail(project_id) = app.state.view {
@@ -112,16 +108,16 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         InputMode::AddingClaudeConfigName => {
-            super::text_input::handle_adding_claude_config_name_key(app, key)
+            agent_configs::handle_adding_config_name_key(app, key, AgentKind::Claude)
         }
         InputMode::AddingClaudeConfigPath => {
-            super::text_input::handle_adding_claude_config_path_key(app, key)
+            agent_configs::handle_adding_config_path_key(app, key, AgentKind::Claude)
         }
         InputMode::ConfirmingClaudeConfigDelete => {
-            super::dialogs::handle_confirming_claude_config_delete_key(app, key)
+            agent_configs::handle_confirming_config_delete_key(app, key, AgentKind::Claude)
         }
         InputMode::SelectingClaudeConfig => {
-            super::text_input::handle_selecting_claude_config_key(app, key)
+            agent_configs::handle_selecting_config_key(app, key, AgentKind::Claude)
         }
         InputMode::ConfirmingClaudeSettingsCopy => {
             super::dialogs::handle_confirming_claude_settings_copy_key(app, key)
@@ -151,19 +147,19 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
             super::text_input::handle_selecting_agent_type_key(app, key)
         }
         InputMode::CreatingCodexSession => {
-            super::text_input::handle_creating_codex_session_key(app, key)
+            agent_configs::handle_creating_agent_session_key(app, key, AgentKind::Codex)
         }
         InputMode::AddingCodexConfigName => {
-            super::text_input::handle_adding_codex_config_name_key(app, key)
+            agent_configs::handle_adding_config_name_key(app, key, AgentKind::Codex)
         }
         InputMode::AddingCodexConfigPath => {
-            super::text_input::handle_adding_codex_config_path_key(app, key)
+            agent_configs::handle_adding_config_path_key(app, key, AgentKind::Codex)
         }
         InputMode::ConfirmingCodexConfigDelete => {
-            super::dialogs::handle_confirming_codex_config_delete_key(app, key)
+            agent_configs::handle_confirming_config_delete_key(app, key, AgentKind::Codex)
         }
         InputMode::SelectingCodexConfig => {
-            super::text_input::handle_selecting_codex_config_key(app, key)
+            agent_configs::handle_selecting_config_key(app, key, AgentKind::Codex)
         }
         InputMode::MovingToFolder => super::text_input::handle_moving_to_folder_key(app, key),
         InputMode::RenamingFolder => super::text_input::handle_renaming_folder_key(app, key),
@@ -187,7 +183,6 @@ fn validate_mode_view_consistency(state: &mut AppState) {
             InputMode::WorktreeSelectBranch
             | InputMode::WorktreeSelectBase
             | InputMode::WorktreeConfirm
-            | InputMode::CreatingWorktree
             | InputMode::SelectingDefaultBase,
             View::ProjectDetail(_),
         ) => true,
@@ -195,7 +190,6 @@ fn validate_mode_view_consistency(state: &mut AppState) {
             InputMode::WorktreeSelectBranch
             | InputMode::WorktreeSelectBase
             | InputMode::WorktreeConfirm
-            | InputMode::CreatingWorktree
             | InputMode::SelectingDefaultBase,
             _,
         ) => false,
@@ -300,6 +294,193 @@ mod tests {
             state.view = view;
             validate_mode_view_consistency(&mut state);
             assert_eq!(state.input_mode, InputMode::Normal);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Routing table
+    // ------------------------------------------------------------------
+
+    use crate::input::agent_configs::AgentKind;
+
+    /// The handler family each mode routes to in [`handle_key_event`]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HandlerFamily {
+        /// Per-view normal-mode handlers
+        Normal,
+        /// Keys forwarded to the active session's PTY
+        Session,
+        /// Text-input handlers in `input::text_input`
+        TextInput,
+        /// Dialog handlers in `input::dialogs`
+        Dialog,
+        /// Worktree wizard handlers in `wizards::worktree` (need a
+        /// ProjectDetail view for their project ID)
+        Wizard,
+        /// Shared Claude/Codex config handlers in `input::agent_configs`
+        AgentConfig(AgentKind),
+    }
+
+    /// Mirror of the dispatcher's match, kept exhaustive on purpose:
+    /// adding an `InputMode` variant without deciding its routing here is a
+    /// compile error, and `test_every_mode_reaches_intended_handler_family`
+    /// then asserts the properties that matter.
+    fn handler_family(mode: InputMode) -> HandlerFamily {
+        use HandlerFamily::*;
+        match mode {
+            InputMode::Normal => Normal,
+            InputMode::Session => Session,
+            InputMode::CreatingShellSession
+            | InputMode::AddingProject
+            | InputMode::AddingProjectName
+            | InputMode::RenamingProject
+            | InputMode::MovingToFolder
+            | InputMode::RenamingFolder
+            | InputMode::SelectingAgentType => TextInput,
+            InputMode::ConfirmingSessionDelete
+            | InputMode::ConfirmingBranchDelete
+            | InputMode::ConfirmingProjectDelete
+            | InputMode::ConfirmingQuit
+            | InputMode::ConfirmingFolderRemove
+            | InputMode::ConfirmingClaudeSettingsCopy
+            | InputMode::ConfirmingClaudeSettingsMigrate
+            | InputMode::ManagingCustomShortcuts
+            | InputMode::AddingCustomShortcutKey
+            | InputMode::AddingCustomShortcutName
+            | InputMode::AddingCustomShortcutCommand
+            | InputMode::AddingCustomShortcutAutoClose
+            | InputMode::ConfirmingCustomShortcutDelete => Dialog,
+            InputMode::SelectingDefaultBase
+            | InputMode::WorktreeSelectBranch
+            | InputMode::WorktreeSelectBase
+            | InputMode::WorktreeConfirm => Wizard,
+            InputMode::CreatingSession
+            | InputMode::AddingClaudeConfigName
+            | InputMode::AddingClaudeConfigPath
+            | InputMode::ConfirmingClaudeConfigDelete
+            | InputMode::SelectingClaudeConfig => AgentConfig(AgentKind::Claude),
+            InputMode::CreatingCodexSession
+            | InputMode::AddingCodexConfigName
+            | InputMode::AddingCodexConfigPath
+            | InputMode::ConfirmingCodexConfigDelete
+            | InputMode::SelectingCodexConfig => AgentConfig(AgentKind::Codex),
+        }
+    }
+
+    #[test]
+    fn test_every_mode_reaches_intended_handler_family() {
+        // Every mode has a routing decision (the match above is exhaustive,
+        // so this mostly guards InputMode::ALL against going stale)
+        for &mode in &InputMode::ALL {
+            let _ = handler_family(mode);
+        }
+
+        // The merged Claude/Codex flows must route to the shared handlers
+        // with the right agent kind - this is the regression the merge could
+        // introduce silently
+        let pairs = [
+            (InputMode::CreatingSession, InputMode::CreatingCodexSession),
+            (
+                InputMode::AddingClaudeConfigName,
+                InputMode::AddingCodexConfigName,
+            ),
+            (
+                InputMode::AddingClaudeConfigPath,
+                InputMode::AddingCodexConfigPath,
+            ),
+            (
+                InputMode::SelectingClaudeConfig,
+                InputMode::SelectingCodexConfig,
+            ),
+            (
+                InputMode::ConfirmingClaudeConfigDelete,
+                InputMode::ConfirmingCodexConfigDelete,
+            ),
+        ];
+        for (claude_mode, codex_mode) in pairs {
+            assert_eq!(
+                handler_family(claude_mode),
+                HandlerFamily::AgentConfig(AgentKind::Claude)
+            );
+            assert_eq!(
+                handler_family(codex_mode),
+                HandlerFamily::AgentConfig(AgentKind::Codex)
+            );
+        }
+
+        // Wizard modes carry a project ID taken from the current view, so
+        // they must be exactly the modes the view-consistency check pins to
+        // ProjectDetail
+        for &mode in &InputMode::ALL {
+            let is_wizard = handler_family(mode) == HandlerFamily::Wizard;
+            let mut state = AppState {
+                input_mode: mode,
+                view: View::LogViewer,
+                ..Default::default()
+            };
+            validate_mode_view_consistency(&mut state);
+            if is_wizard {
+                assert_eq!(
+                    state.input_mode,
+                    InputMode::Normal,
+                    "{mode:?} must be reset outside ProjectDetail"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_mode_view_consistency_covers_all_modes() {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+        let views = [
+            View::ProjectsOverview,
+            View::ProjectDetail(project_id),
+            View::BranchDetail(project_id, branch_id),
+            View::SessionView,
+            View::LogViewer,
+            View::ClaudeConfigs,
+            View::CodexConfigs,
+        ];
+
+        // Which views each mode may appear in; wildcard = every view
+        let allowed = |mode: InputMode, view: View| -> bool {
+            match mode {
+                InputMode::Session => view == View::SessionView,
+                InputMode::WorktreeSelectBranch
+                | InputMode::WorktreeSelectBase
+                | InputMode::WorktreeConfirm
+                | InputMode::SelectingDefaultBase => {
+                    matches!(view, View::ProjectDetail(_))
+                }
+                InputMode::ConfirmingSessionDelete => {
+                    view == View::SessionView || matches!(view, View::BranchDetail(_, _))
+                }
+                InputMode::ConfirmingBranchDelete => {
+                    matches!(view, View::ProjectDetail(_) | View::BranchDetail(_, _))
+                }
+                InputMode::MovingToFolder
+                | InputMode::RenamingFolder
+                | InputMode::ConfirmingFolderRemove => view == View::ProjectsOverview,
+                _ => true,
+            }
+        };
+
+        for &mode in &InputMode::ALL {
+            for &view in &views {
+                let mut state = AppState {
+                    input_mode: mode,
+                    view,
+                    ..Default::default()
+                };
+                validate_mode_view_consistency(&mut state);
+                let expected = if allowed(mode, view) {
+                    mode
+                } else {
+                    InputMode::Normal
+                };
+                assert_eq!(state.input_mode, expected, "mode {mode:?} in view {view:?}");
+            }
         }
     }
 }

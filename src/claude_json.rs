@@ -72,30 +72,48 @@ impl ClaudeJsonStore {
         })
     }
 
-    /// Create a new store pointing to the default ~/.claude/.claude.json
-    ///
-    /// Returns None if the home directory cannot be determined.
-    ///
-    /// Note: Prefer using `for_config_dir` when working with multi-account support.
-    pub fn new() -> Option<Self> {
-        Self::for_config_dir(None)
-    }
-
     /// Load the configuration from disk
     ///
-    /// Returns a default (empty) configuration if the file doesn't exist.
-    pub fn load(&self) -> Result<ClaudeJsonConfig> {
+    /// Returns a default (empty) configuration if the file doesn't exist,
+    /// and — with a warning — if it is unreadable or unparseable.
+    ///
+    /// `.claude.json` is Claude Code's own file, so a corrupt read is handled
+    /// unlike Panoptes' own stores: it is never backed up, renamed, or
+    /// rewritten here, because the file is not ours to move. Falling back to
+    /// empty only costs the permission comparison for that config; failing
+    /// instead used to be swallowed by callers and silently disabled it
+    /// anyway, without ever saying why.
+    pub fn load(&self) -> ClaudeJsonConfig {
         if !self.config_path.exists() {
-            return Ok(ClaudeJsonConfig::default());
+            return ClaudeJsonConfig::default();
         }
 
-        let contents = fs::read_to_string(&self.config_path)
-            .with_context(|| format!("Failed to read {}", self.config_path.display()))?;
+        let contents = match fs::read_to_string(&self.config_path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read {}: {}. Treating it as empty; \
+                     Claude permission comparison is disabled for this config.",
+                    self.config_path.display(),
+                    e
+                );
+                return ClaudeJsonConfig::default();
+            }
+        };
 
-        let config: ClaudeJsonConfig = serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse {}", self.config_path.display()))?;
-
-        Ok(config)
+        match serde_json::from_str(&contents) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse {}: {}. Treating it as empty; \
+                     Claude permission comparison is disabled for this config. \
+                     The file is left untouched.",
+                    self.config_path.display(),
+                    e
+                );
+                ClaudeJsonConfig::default()
+            }
+        }
     }
 
     /// Save the configuration to disk
@@ -120,7 +138,7 @@ impl ClaudeJsonStore {
 
     /// Check if a path has any Claude settings configured
     pub fn has_settings(&self, path: &str) -> Result<bool> {
-        let config = self.load()?;
+        let config = self.load();
         if let Some(settings) = config.projects.get(path) {
             // Has settings if there are any tools, MCP servers, or trust accepted
             Ok(!settings.allowed_tools.is_empty()
@@ -134,7 +152,7 @@ impl ClaudeJsonStore {
 
     /// Get settings for a specific path
     pub fn get_settings(&self, path: &str) -> Result<Option<ClaudeProjectSettings>> {
-        let config = self.load()?;
+        let config = self.load();
         Ok(config.projects.get(path).cloned())
     }
 
@@ -143,7 +161,7 @@ impl ClaudeJsonStore {
     /// This copies the entire ClaudeProjectSettings including tools, MCP servers,
     /// trust acceptance, and any other fields.
     pub fn copy_settings(&self, from: &str, to: &str) -> Result<()> {
-        let mut config = self.load()?;
+        let mut config = self.load();
 
         if let Some(source_settings) = config.projects.get(from).cloned() {
             config.projects.insert(to.to_string(), source_settings);
@@ -161,7 +179,7 @@ impl ClaudeJsonStore {
         path_a: &str,
         path_b: &str,
     ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
-        let config = self.load()?;
+        let config = self.load();
 
         let tools_a: std::collections::HashSet<String> = config
             .projects
@@ -189,7 +207,7 @@ impl ClaudeJsonStore {
     ///
     /// Returns Ok(true) if an entry was removed, Ok(false) if no entry existed.
     pub fn remove_settings(&self, path: &str) -> Result<bool> {
-        let mut config = self.load()?;
+        let mut config = self.load();
 
         if config.projects.remove(path).is_some() {
             self.save(&config)?;
@@ -206,7 +224,7 @@ impl ClaudeJsonStore {
     ///
     /// Returns the list of tools that were added.
     pub fn merge_settings(&self, worktree_path: &str, main_path: &str) -> Result<Vec<String>> {
-        let mut config = self.load()?;
+        let mut config = self.load();
 
         let worktree_tools: std::collections::HashSet<String> = config
             .projects
@@ -443,6 +461,109 @@ pub fn has_unique_local_settings(worktree_dir: &Path, main_dir: &Path) -> Result
     Ok(false)
 }
 
+/// What a project has on offer when Claude settings could be copied elsewhere
+///
+/// Produced by [`check_settings_for_copy`]; the UI turns this into the
+/// copy-confirmation dialog after a worktree is created.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SettingsCopyCheck {
+    /// Whether the source has a modern `.claude/settings.local.json`
+    pub has_local_settings: bool,
+    /// Deduplicated preview of tools/permissions from both formats
+    pub tools_preview: Vec<String>,
+    /// Whether legacy MCP servers would be copied along
+    pub has_mcp_servers: bool,
+}
+
+/// Inspect a project directory's Claude settings, both formats
+///
+/// Checks the modern format (`.claude/settings.local.json` under
+/// `source_dir`) and the legacy format (`.claude.json` in the given Claude
+/// config directory, keyed by `source_dir`'s path). Returns `None` when
+/// neither format has anything worth copying - or when the home directory
+/// cannot be determined for the default config dir.
+pub fn check_settings_for_copy(
+    source_dir: &Path,
+    config_dir: Option<&Path>,
+) -> Option<SettingsCopyCheck> {
+    // Check modern format (.claude/settings.local.json)
+    let source_local_settings = source_dir.join(".claude").join("settings.local.json");
+    let has_local_settings = source_local_settings.exists();
+
+    // Create store for legacy config directory
+    let store = ClaudeJsonStore::for_config_dir(config_dir)?;
+    let main_path = source_dir.to_string_lossy().to_string();
+
+    // Check if the source has any legacy settings configured
+    let has_legacy_settings = store.has_settings(&main_path).ok().unwrap_or(false);
+
+    // Get legacy settings to show a preview (if they exist)
+    let legacy_settings = if has_legacy_settings {
+        store.get_settings(&main_path).ok().flatten()
+    } else {
+        None
+    };
+
+    // Read local settings preview (permissions from modern format)
+    let local_permissions = if has_local_settings {
+        read_local_settings_permissions(&source_local_settings)
+    } else {
+        vec![]
+    };
+
+    // Get legacy tools preview
+    let legacy_tools = legacy_settings
+        .as_ref()
+        .map(|s| s.allowed_tools.clone())
+        .unwrap_or_default();
+    let has_mcp_servers = legacy_settings
+        .as_ref()
+        .map(|s| !s.mcp_servers.is_empty())
+        .unwrap_or(false);
+
+    // Only worth offering if EITHER format has settings
+    if !has_local_settings && legacy_tools.is_empty() && !has_mcp_servers {
+        return None;
+    }
+
+    // Combine previews from both sources (deduplicated)
+    let mut tools_preview: Vec<String> = Vec::new();
+    for tool in legacy_tools.into_iter().chain(local_permissions) {
+        if !tools_preview.contains(&tool) {
+            tools_preview.push(tool);
+        }
+    }
+
+    Some(SettingsCopyCheck {
+        has_local_settings,
+        tools_preview,
+        has_mcp_servers,
+    })
+}
+
+/// Read permission strings from a `settings.local.json` file for preview
+///
+/// Unreadable or unparseable files read as "no permissions" - this feeds a
+/// preview, not a decision.
+pub fn read_local_settings_permissions(path: &Path) -> Vec<String> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return vec![];
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return vec![];
+    };
+
+    json.pointer("/permissions/allow")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,8 +584,51 @@ mod tests {
     #[test]
     fn test_load_empty_config() {
         let (store, _file) = create_test_store("{}");
-        let config = store.load().unwrap();
+        let config = store.load();
         assert!(config.projects.is_empty());
+    }
+
+    #[test]
+    fn test_load_missing_file_is_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = ClaudeJsonStore {
+            config_path: dir.path().join(".claude.json"),
+        };
+        assert!(store.load().projects.is_empty());
+    }
+
+    #[test]
+    fn test_load_corrupt_file_falls_back_without_touching_it() {
+        // Corrupt .claude.json used to propagate an error that every caller
+        // swallowed with .ok(), silently disabling permission comparison.
+        // Now it degrades to empty out loud - and, because the file is
+        // Claude's own, it must be left exactly where and as it was, never
+        // backed up or rewritten.
+        let (store, file) = create_test_store("{ not json at all");
+
+        let config = store.load();
+        assert!(config.projects.is_empty());
+
+        assert_eq!(
+            fs::read_to_string(file.path()).unwrap(),
+            "{ not json at all",
+            "Claude's own config file must be left untouched"
+        );
+
+        // The read-only queries keep working on the fallback
+        assert!(!store.has_settings("/any").unwrap());
+        assert!(store.get_settings("/any").unwrap().is_none());
+        let (shared, only_a, only_b) = store.compare_tools("/a", "/b").unwrap();
+        assert!(shared.is_empty() && only_a.is_empty() && only_b.is_empty());
+
+        // And mutations become no-ops rather than clobbering the corrupt
+        // file with an emptied config
+        assert!(!store.remove_settings("/any").unwrap());
+        store.copy_settings("/from", "/to").unwrap();
+        assert_eq!(
+            fs::read_to_string(file.path()).unwrap(),
+            "{ not json at all"
+        );
     }
 
     #[test]
@@ -479,7 +643,7 @@ mod tests {
         }"#;
 
         let (store, _file) = create_test_store(json);
-        let config = store.load().unwrap();
+        let config = store.load();
 
         assert!(config.projects.contains_key("/path/to/project"));
         let settings = config.projects.get("/path/to/project").unwrap();
@@ -541,7 +705,7 @@ mod tests {
         let (store, _file) = create_test_store(json);
         store.copy_settings("/source", "/dest").unwrap();
 
-        let config = store.load().unwrap();
+        let config = store.load();
         assert!(config.projects.contains_key("/dest"));
         let dest_settings = config.projects.get("/dest").unwrap();
         assert_eq!(dest_settings.allowed_tools, vec!["tool1"]);
@@ -566,7 +730,7 @@ mod tests {
 
         assert_eq!(added, vec!["tool1"]);
 
-        let config = store.load().unwrap();
+        let config = store.load();
         let main_settings = config.projects.get("/main").unwrap();
         assert!(main_settings.allowed_tools.contains(&"tool1".to_string()));
         assert!(main_settings.allowed_tools.contains(&"shared".to_string()));
@@ -595,7 +759,7 @@ mod tests {
         assert!(removed);
 
         // Verify entry is gone
-        let config = store.load().unwrap();
+        let config = store.load();
         assert!(!config.projects.contains_key("/to-remove"));
         assert!(config.projects.contains_key("/to-keep"));
 
@@ -617,7 +781,7 @@ mod tests {
         }"#;
 
         let (store, _file) = create_test_store(json);
-        let config = store.load().unwrap();
+        let config = store.load();
 
         // Check that unknown top-level field is preserved
         assert!(config.other.contains_key("someOtherField"));
@@ -845,5 +1009,126 @@ mod tests {
 
         let result = has_unique_local_settings(worktree_dir.path(), main_dir.path()).unwrap();
         assert!(!result); // Key exists in main (even if value differs)
+    }
+
+    // ------------------------------------------------------------------
+    // read_local_settings_permissions
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_read_local_settings_permissions_reads_allow_list() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("settings.local.json");
+        fs::write(
+            &path,
+            r#"{
+                "permissions": {
+                    "allow": ["Bash(git:*)", "Read", 42, {"not": "a string"}],
+                    "deny": ["Bash(rm:*)"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        // Non-string entries are skipped; deny list is not a preview
+        assert_eq!(
+            read_local_settings_permissions(&path),
+            vec!["Bash(git:*)".to_string(), "Read".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_read_local_settings_permissions_degrades_to_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // Missing file
+        assert!(read_local_settings_permissions(&dir.path().join("nope.json")).is_empty());
+
+        // Unparseable file
+        let bad = dir.path().join("bad.json");
+        fs::write(&bad, "{ not json").unwrap();
+        assert!(read_local_settings_permissions(&bad).is_empty());
+
+        // Valid JSON without permissions.allow
+        let empty = dir.path().join("empty.json");
+        fs::write(&empty, r#"{"permissions": {"deny": ["X"]}}"#).unwrap();
+        assert!(read_local_settings_permissions(&empty).is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // check_settings_for_copy
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_check_settings_for_copy_none_when_nothing_to_copy() {
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let config_dir = tempfile::TempDir::new().unwrap();
+
+        assert_eq!(
+            check_settings_for_copy(project_dir.path(), Some(config_dir.path())),
+            None
+        );
+    }
+
+    #[test]
+    fn test_check_settings_for_copy_local_settings_only() {
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let config_dir = tempfile::TempDir::new().unwrap();
+
+        let claude_dir = project_dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(
+            claude_dir.join("settings.local.json"),
+            r#"{"permissions": {"allow": ["Bash(cargo:*)"]}}"#,
+        )
+        .unwrap();
+
+        let check = check_settings_for_copy(project_dir.path(), Some(config_dir.path()))
+            .expect("local settings should be offered");
+        assert!(check.has_local_settings);
+        assert!(!check.has_mcp_servers);
+        assert_eq!(check.tools_preview, vec!["Bash(cargo:*)".to_string()]);
+    }
+
+    #[test]
+    fn test_check_settings_for_copy_merges_and_dedups_both_formats() {
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let config_dir = tempfile::TempDir::new().unwrap();
+
+        // Modern format in the project
+        let claude_dir = project_dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::write(
+            claude_dir.join("settings.local.json"),
+            r#"{"permissions": {"allow": ["Bash(git:*)", "Read"]}}"#,
+        )
+        .unwrap();
+
+        // Legacy format in the config dir, keyed by the project path, with an
+        // overlapping tool and an MCP server
+        let mut legacy = serde_json::json!({ "projects": {} });
+        legacy["projects"][project_dir.path().to_string_lossy().to_string()] = serde_json::json!({
+            "allowedTools": ["Bash(git:*)", "Bash(npm:*)"],
+            "mcpServers": {"server": {}}
+        });
+        fs::write(
+            config_dir.path().join(".claude.json"),
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let check = check_settings_for_copy(project_dir.path(), Some(config_dir.path()))
+            .expect("both formats should be offered");
+        assert!(check.has_local_settings);
+        assert!(check.has_mcp_servers);
+        // Legacy tools first, then unique local permissions - no duplicates
+        assert_eq!(
+            check.tools_preview,
+            vec![
+                "Bash(git:*)".to_string(),
+                "Bash(npm:*)".to_string(),
+                "Read".to_string()
+            ]
+        );
     }
 }

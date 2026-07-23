@@ -256,21 +256,6 @@ impl Branch {
         branch
     }
 
-    /// Check if this branch's working directory exists
-    pub fn working_dir_exists(&self) -> bool {
-        self.working_dir.exists()
-    }
-
-    /// Mark this branch as stale (working directory missing)
-    pub fn mark_stale(&mut self) {
-        self.stale = true;
-    }
-
-    /// Clear stale status
-    pub fn clear_stale(&mut self) {
-        self.stale = false;
-    }
-
     /// Update last activity timestamp
     pub fn touch(&mut self) {
         self.last_activity = Utc::now();

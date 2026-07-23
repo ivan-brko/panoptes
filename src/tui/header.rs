@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_header_with_attention() {
-        let breadcrumb = Breadcrumb::new().push("Timeline");
+        let breadcrumb = Breadcrumb::new().push("Projects");
         let header = Header::new(breadcrumb).with_attention_count(5);
         assert_eq!(header.attention_count, 5);
     }

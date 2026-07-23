@@ -59,6 +59,20 @@ impl BranchRef {
     }
 }
 
+impl From<crate::git::BranchRefInfo> for BranchRef {
+    /// Adopt a git-layer branch ref into the wizard's representation
+    ///
+    /// Tracking flags (`is_already_tracked`, `has_git_worktree`) are not
+    /// something git knows about; callers that need them stamp them on top.
+    fn from(info: crate::git::BranchRefInfo) -> Self {
+        let ref_type = match info.ref_type {
+            crate::git::BranchRefInfoType::Local => BranchRefType::Local,
+            crate::git::BranchRefInfoType::Remote => BranchRefType::Remote,
+        };
+        BranchRef::new(ref_type, info.name).with_default_base(info.is_default_base)
+    }
+}
+
 /// Type of worktree creation being performed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorktreeCreationType {

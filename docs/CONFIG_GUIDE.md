@@ -6,6 +6,11 @@ Every setting has a default, and the file itself is optional: if it is missing, 
 only sets some of the keys, Panoptes fills in the rest. Keys it does not
 recognise are ignored, so a config left over from an older version still loads.
 
+A file that cannot be parsed at all does not prevent startup either: Panoptes
+backs it up to a timestamped `config.toml.corrupt.<timestamp>` sibling, starts
+with defaults, and shows a warning so you can recover your settings from the
+backup.
+
 ## File Location
 
 ```
@@ -29,9 +34,6 @@ max_output_lines = 10000
 # Maximum scrollback lines per session (for terminal history)
 scrollback_lines = 10000
 
-# Seconds before a waiting session shows the yellow "idle" badge
-idle_threshold_secs = 300
-
 # Seconds before a tool still in flight is treated as stalled and evicted
 # (handles cases where hook events are missed)
 state_timeout_secs = 300
@@ -42,9 +44,6 @@ exited_retention_secs = 300
 # Seconds a session may sit idle before its agent process is suspended
 # (scrollback is kept; the session wakes when you type into it). 0 disables.
 suspend_after_secs = 7200
-
-# Parsed but unused - only the dark theme exists today
-theme_preset = "dark"
 
 # Notification method when sessions need attention
 # Options: "bell" (terminal bell), "title" (update terminal title), "none"
@@ -150,19 +149,6 @@ Each 1000 lines uses approximately 10KB of memory per session.
 
 ---
 
-### idle_threshold_secs
-
-| Property | Value |
-|----------|-------|
-| Default | `300` (5 minutes) |
-| Type | Integer (seconds) |
-
-When a session has been in the "Waiting" state (waiting for your input) for longer than this threshold, its attention badge changes from green to yellow.
-
-**When to change:** Decrease if you want to be notified sooner about idle sessions; increase if you prefer longer uninterrupted stretches.
-
----
-
 ### state_timeout_secs
 
 | Property | Value |
@@ -191,20 +177,6 @@ How long to keep exited sessions before they're removed from the UI. This gives 
 
 ---
 
-### theme_preset
-
-| Property | Value |
-|----------|-------|
-| Default | `"dark"` |
-| Type | String |
-| Status | Not implemented |
-
-**Not currently used.** Only the dark theme is implemented, and it is always
-applied; setting this has no effect today. The key is still accepted so that
-existing config files keep loading.
-
----
-
 ### notification_method
 
 | Property | Value |
@@ -218,6 +190,8 @@ How Panoptes notifies you when a session needs attention.
 - **bell** - Send terminal bell character (produces a sound or visual indicator depending on your terminal)
 - **title** - Update the terminal title to indicate attention needed
 - **none** - No notifications
+
+Any other value logs a warning and falls back to `"bell"`.
 
 **When to change:** Use `"title"` if you find the bell annoying; use `"none"` if you don't want interruptions.
 
@@ -422,7 +396,6 @@ mkdir -p ~/.panoptes
 cat > ~/.panoptes/config.toml << 'EOF'
 hook_port = 9999
 max_output_lines = 10000
-idle_threshold_secs = 300
 notification_method = "bell"
 EOF
 ```

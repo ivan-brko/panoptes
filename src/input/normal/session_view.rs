@@ -7,8 +7,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{App, InputMode, View};
 use crate::input::session_scroll;
-use crate::session::SessionManager;
-use crate::tui::frame::{FrameConfig, FrameLayout};
 
 /// Handle key in session view (normal mode)
 pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -67,26 +65,17 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
             }
         }
         KeyCode::Tab => {
-            // Switch to next session
-            let count = app.sessions.len();
-            if count > 0 {
-                // Clamp current index to valid range before incrementing
-                let current = app.state.session_cycle_index.min(count.saturating_sub(1));
-                app.state.session_cycle_index = (current + 1) % count;
-                if let Some(session) = app.sessions.get_by_index(app.state.session_cycle_index) {
-                    let session_id = session.info.id;
-                    app.state.active_session = Some(session_id);
-                    // Reset scroll offset when switching sessions
-                    session_scroll::reset_for_session_switch(app, session_id);
-                    app.sessions.acknowledge_attention(session_id);
-                    if app.config.notification_method == "title" {
-                        SessionManager::reset_terminal_title();
-                    }
-                    app.resize_active_session_pty()?;
-                }
-            } else {
-                // No sessions - reset index
-                app.state.session_cycle_index = 0;
+            // Switch to next session (stale-safe: an empty list resets to 0)
+            app.state.session_cycle_index =
+                crate::app::cycle_next(app.state.session_cycle_index, app.sessions.len());
+            if let Some(session) = app.sessions.get_by_index(app.state.session_cycle_index) {
+                let session_id = session.info.id;
+                app.state.active_session = Some(session_id);
+                // Reset scroll offset when switching sessions
+                session_scroll::reset_for_session_switch(app, session_id);
+                app.sessions.acknowledge_attention(session_id);
+                app.clear_title_notification();
+                app.resize_active_session_pty()?;
             }
         }
         KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -101,9 +90,7 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                     // Reset scroll offset when switching sessions
                     session_scroll::reset_for_session_switch(app, session_id);
                     app.sessions.acknowledge_attention(session_id);
-                    if app.config.notification_method == "title" {
-                        SessionManager::reset_terminal_title();
-                    }
+                    app.clear_title_notification();
                     app.resize_active_session_pty()?;
                 }
             }
@@ -118,43 +105,18 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                         let branch_id = session.info.branch_id;
                         let working_dir = session.info.working_dir.clone();
 
-                        // Generate a session name from the shortcut
-                        let session_name = shortcut.short_display_name();
-
-                        // Get terminal size
-                        let terminal_size = app.tui.size().unwrap_or_default();
-                        let frame_config = FrameConfig::default();
-                        let layout = FrameLayout::calculate(terminal_size, &frame_config);
-                        let rows = layout.content.height as usize;
-                        let cols = layout.content.width as usize;
-
-                        // Create shell session with command
-                        match app.sessions.create_shell_session_with_command(
-                            session_name,
-                            working_dir,
+                        if let Some(new_session_id) = super::launch_shortcut_session(
+                            app,
+                            &shortcut,
                             project_id,
                             branch_id,
-                            shortcut.command.clone(),
-                            rows,
-                            cols,
+                            working_dir,
                         ) {
-                            Ok(new_session_id) => {
-                                if shortcut.auto_close {
-                                    if let Some(session) = app.sessions.get_mut(new_session_id) {
-                                        session.info.auto_close_after_command = true;
-                                    }
-                                }
-                                // Navigate to the new session
-                                app.state.active_session = Some(new_session_id);
-                                session_scroll::reset_for_session_switch(app, new_session_id);
-                                app.state.input_mode = InputMode::Session;
-                                app.state.view = View::SessionView;
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to create shell session: {}", e);
-                                app.state.error_message =
-                                    Some(format!("Failed to create session: {}", e));
-                            }
+                            // Navigate to the new session
+                            app.state.active_session = Some(new_session_id);
+                            session_scroll::reset_for_session_switch(app, new_session_id);
+                            app.state.input_mode = InputMode::Session;
+                            app.state.view = View::SessionView;
                         }
                     }
                 }

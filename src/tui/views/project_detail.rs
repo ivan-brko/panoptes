@@ -9,17 +9,16 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use crate::app::{AppState, BranchRef, BranchRefType, InputMode, WorktreeCreationType};
 use crate::config::Config;
 use crate::git::GitOps;
-use crate::project::{Project, ProjectId, ProjectStore};
+use crate::project::{Branch, Project, ProjectId, ProjectStore};
 use crate::session::SessionManager;
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
-use crate::tui::views::format_attention_hint;
-use crate::tui::views::Breadcrumb;
+use crate::tui::views::{footer_with_attention, render_footer, status_suffix, Breadcrumb};
 use crate::tui::widgets::selection::{
-    selection_prefix, selection_style, selection_style_with_accent,
+    activity_style, selection_prefix, selection_style, selection_style_with_accent,
 };
 
 /// Render the project detail view showing branches
@@ -34,27 +33,16 @@ pub fn render_project_detail(
     config: &Config,
     header_notifications: &HeaderNotificationManager,
 ) {
-    let idle_threshold = config.idle_threshold_secs;
     let project = project_store.get_project(project_id);
 
     // Build header
-    let attention_count = sessions.attention_count_for_project(project_id, idle_threshold);
+    let attention_count = sessions.attention_count_for_project(project_id);
     let (breadcrumb, suffix) = if let Some(project) = project {
         let active_count = sessions.active_session_count_for_project(project_id);
-        let bc = Breadcrumb::new().push(&project.name);
-        let mut status_parts = vec![];
-        if active_count > 0 {
-            status_parts.push(format!("{} active", active_count));
-        }
-        if attention_count > 0 {
-            status_parts.push(format!("{} need attention", attention_count));
-        }
-        let suffix = if status_parts.is_empty() {
-            String::new()
-        } else {
-            format!("({})", status_parts.join(", "))
-        };
-        (bc, suffix)
+        (
+            Breadcrumb::new().push(&project.name),
+            status_suffix(active_count, attention_count),
+        )
     } else {
         (Breadcrumb::new().push("?"), String::new())
     };
@@ -83,170 +71,34 @@ pub fn render_project_detail(
         render_worktree_select_base(frame, areas.content, state, config);
     } else if state.input_mode == InputMode::WorktreeConfirm {
         render_worktree_confirm(frame, areas.content, state, config);
-    } else if state.input_mode == InputMode::CreatingWorktree {
-        render_worktree_creation(frame, areas.content, state, project);
     } else if state.input_mode == InputMode::SelectingDefaultBase {
         render_default_base_selection(frame, areas.content, state);
     } else if state.input_mode == InputMode::RenamingProject {
         render_rename_dialog(frame, areas.content, state);
     } else if let Some(project) = project {
-        let branches = project_store.branches_for_project_sorted(project_id);
-
-        if branches.is_empty() {
-            let empty = Paragraph::new(
-                "No branches tracked yet.\n\n\
-                Press 'n' to create a worktree for a branch.",
-            )
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title("Branches"));
-            frame.render_widget(empty, areas.content);
-        } else {
-            let selected_index = state.selected_branch_index;
-
-            // Split branches into local checkout (main worktree) and worktrees
-            let local_checkout: Option<&crate::project::Branch> =
-                branches.iter().find(|b| b.is_default).copied();
-            let worktrees: Vec<&crate::project::Branch> =
-                branches.iter().filter(|b| b.is_worktree).copied().collect();
-
-            // Query git for current branch name in the main repo
-            // Returns: Some(name) for normal branch, Some("detached HEAD") for detached, or falls back to stored name on error
-            let current_branch_display = match GitOps::open(&project.repo_path) {
-                Ok(git) => match git.current_branch() {
-                    Ok(Some(name)) => Some(name),
-                    Ok(None) => Some("detached HEAD".to_string()), // Detached HEAD state
-                    Err(_) => None, // Fall back to stored name on error
-                },
-                Err(_) => None, // Fall back to stored name on error
-            };
-
-            let mut items: Vec<ListItem> = Vec::new();
-            let mut item_index = 0;
-
-            // Render local checkout section
-            if let Some(branch) = local_checkout {
-                // Section header
-                items.push(
-                    ListItem::new("Local checkout:").style(Style::default().fg(Color::DarkGray)),
-                );
-
-                let selected = item_index == selected_index;
-                let prefix = selection_prefix(selected);
-
-                // Count sessions for this branch
-                let active_count = sessions.active_session_count_for_branch(branch.id);
-                let attention_count =
-                    sessions.attention_count_for_branch(branch.id, idle_threshold);
-
-                // Use the dynamically queried branch name, fall back to stored name on git error
-                let display_name = current_branch_display.as_deref().unwrap_or(&branch.name);
-
-                let status = if active_count > 0 {
-                    format!("  {} active", active_count)
-                } else {
-                    String::new()
-                };
-
-                let content = format!("{}{}: {}{}", prefix, item_index + 1, display_name, status);
-
-                // Color precedence: attention > active > accent
-                let t = theme();
-                let style = if selected {
-                    if attention_count > 0 {
-                        selection_style(true, t.attention_badge)
-                    } else if active_count > 0 {
-                        selection_style(true, t.active)
-                    } else {
-                        selection_style_with_accent(true, t)
-                    }
-                } else if attention_count > 0 {
-                    Style::default().fg(t.attention_badge)
-                } else if active_count > 0 {
-                    Style::default().fg(t.active)
-                } else {
-                    Style::default().fg(t.accent)
-                };
-
-                items.push(ListItem::new(content).style(style));
-                item_index += 1;
-            }
-
-            // Render separator and worktrees section if there are worktrees
-            if !worktrees.is_empty() {
-                // Add separator if we showed local checkout
-                if local_checkout.is_some() {
-                    items.push(
-                        ListItem::new("───────────────────────────────────────")
-                            .style(Style::default().fg(Color::DarkGray)),
-                    );
-                }
-
-                // Section header
-                items.push(ListItem::new("Worktrees:").style(Style::default().fg(Color::DarkGray)));
-
-                for branch in &worktrees {
-                    let selected = item_index == selected_index;
-                    let prefix = selection_prefix(selected);
-
-                    // Count sessions for this branch
-                    let active_count = sessions.active_session_count_for_branch(branch.id);
-                    let attention_count =
-                        sessions.attention_count_for_branch(branch.id, idle_threshold);
-
-                    let mut status_parts = Vec::new();
-                    if active_count > 0 {
-                        status_parts.push(format!("{} active", active_count));
-                    }
-                    if branch.stale {
-                        status_parts.push("⚠ missing".to_string());
-                    }
-                    let status = if status_parts.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  ({})", status_parts.join(", "))
-                    };
-
-                    let content =
-                        format!("{}{}: {}{}", prefix, item_index + 1, branch.name, status);
-
-                    // Color precedence: stale > attention > active > text
-                    let t = theme();
-                    let style = if branch.stale {
-                        selection_style(selected, Color::Red)
-                    } else if selected {
-                        if attention_count > 0 {
-                            selection_style(true, t.attention_badge)
-                        } else if active_count > 0 {
-                            selection_style(true, t.active)
-                        } else {
-                            selection_style_with_accent(true, t)
-                        }
-                    } else if attention_count > 0 {
-                        Style::default().fg(t.attention_badge)
-                    } else if active_count > 0 {
-                        Style::default().fg(t.active)
-                    } else {
-                        Style::default().fg(t.text)
-                    };
-
-                    items.push(ListItem::new(content).style(style));
-                    item_index += 1;
-                }
-            }
-
-            let title = format!("Branches ({})", branches.len());
-            let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-            frame.render_widget(list, areas.content);
-        }
+        render_branch_list(
+            frame,
+            areas.content,
+            state,
+            project,
+            project_id,
+            project_store,
+            sessions,
+        );
     } else {
+        let t = theme();
         let error = Paragraph::new("Project not found")
-            .style(Style::default().fg(Color::Red))
+            .style(Style::default().fg(t.error_bg))
             .block(Block::default().borders(Borders::ALL).title("Error"));
         frame.render_widget(error, areas.content);
     }
 
-    // Footer
-    let help_text = match state.input_mode {
+    render_footer(frame, areas.footer(), &footer_text(state, sessions));
+}
+
+/// Build the footer help text for the current input mode
+fn footer_text(state: &AppState, sessions: &SessionManager) -> String {
+    match state.input_mode {
         InputMode::ConfirmingBranchDelete => {
             "w: toggle worktree deletion | y: confirm | n/Esc: cancel".to_string()
         }
@@ -257,10 +109,6 @@ pub fn render_project_detail(
             "Type: filter | ↑/↓: navigate | Enter: confirm | Esc: back".to_string()
         }
         InputMode::WorktreeConfirm => "Enter: create | Esc: back".to_string(),
-        InputMode::CreatingWorktree => {
-            "Type: name | ↑/↓: select base | s: set default | Enter: create | Esc: cancel"
-                .to_string()
-        }
         InputMode::SelectingDefaultBase => {
             "Type: filter | ↑/↓: navigate | Enter: set default | Esc: cancel".to_string()
         }
@@ -272,105 +120,220 @@ pub fn render_project_detail(
             let base =
                 "n: new worktree | b: base | c/x: config | r: rename | d: delete | k: shortcuts | q: quit"
                     .to_string();
-            if let Some(hint) = format_attention_hint(sessions, config) {
-                format!("{} | {}", hint, base)
-            } else {
-                base
-            }
+            footer_with_attention(base, sessions)
         }
-    };
-    let footer = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, areas.footer());
+    }
 }
 
-/// Render the worktree creation dialog with base branch selector
-fn render_worktree_creation(
+/// One row of the branch list
+struct BranchItem<'a> {
+    /// Name to show (may differ from the stored branch name)
+    display_name: &'a str,
+    /// 1-based list number, matching the digit-jump shortcuts
+    number: usize,
+    selected: bool,
+    active_count: usize,
+    attention_count: usize,
+    /// Pre-built status suffix (differs between sections)
+    status: String,
+    /// Worktree directory is missing; overrides every other color
+    stale: bool,
+    /// Style when the row is quiet and unselected
+    fallback: Style,
+}
+
+/// Render one branch row with the shared numbering and color cascade
+fn branch_item(item: BranchItem) -> ListItem<'static> {
+    let t = theme();
+    let content = format!(
+        "{}{}: {}{}",
+        selection_prefix(item.selected),
+        item.number,
+        item.display_name,
+        item.status
+    );
+
+    // Color precedence: stale > attention > active > selected > fallback
+    let style = if item.stale {
+        selection_style(item.selected, Color::Red)
+    } else {
+        activity_style(
+            item.selected,
+            item.attention_count,
+            item.active_count,
+            item.fallback,
+            t,
+        )
+    };
+
+    ListItem::new(content).style(style)
+}
+
+/// Render the branch list: local checkout section, then worktrees
+#[allow(clippy::too_many_arguments)]
+fn render_branch_list(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
-    project: Option<&Project>,
+    project: &Project,
+    project_id: ProjectId,
+    project_store: &ProjectStore,
+    sessions: &SessionManager,
 ) {
     let t = theme();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Branch name input
-            Constraint::Length(1), // Instructions
-            Constraint::Min(0),    // Base branch list
-        ])
-        .split(area);
+    let branches = project_store.branches_for_project_sorted(project_id);
 
-    // Branch name input
-    let input_title = if state.new_branch_name.is_empty() {
-        "New Branch Name (leave empty to checkout existing)"
-    } else {
-        "New Branch Name"
+    if branches.is_empty() {
+        let empty = Paragraph::new(
+            "No branches tracked yet.\n\n\
+            Press 'n' to create a worktree for a branch.",
+        )
+        .style(Style::default().fg(t.text_muted))
+        .block(Block::default().borders(Borders::ALL).title("Branches"));
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let selected_index = state.selected_branch_index;
+
+    // Split branches into local checkout (main worktree) and worktrees
+    let local_checkout: Option<&Branch> = branches.iter().find(|b| b.is_default).copied();
+    let worktrees: Vec<&Branch> = branches.iter().filter(|b| b.is_worktree).copied().collect();
+
+    // Query git for current branch name in the main repo
+    // Returns: Some(name) for normal branch, Some("detached HEAD") for detached, or falls back to stored name on error
+    let current_branch_display = match GitOps::open(&project.repo_path) {
+        Ok(git) => match git.current_branch() {
+            Ok(Some(name)) => Some(name),
+            Ok(None) => Some("detached HEAD".to_string()), // Detached HEAD state
+            Err(_) => None,                                // Fall back to stored name on error
+        },
+        Err(_) => None, // Fall back to stored name on error
     };
-    let input_text = format!("> {}_", state.new_branch_name);
-    let input = Paragraph::new(input_text)
-        .style(t.input_style())
-        .block(Block::default().borders(Borders::ALL).title(input_title));
-    frame.render_widget(input, chunks[0]);
 
-    // Instructions line
-    let fetch_warning = if state.fetch_error.is_some() {
-        " (fetch failed, showing cached)"
-    } else {
-        ""
-    };
-    let default_info = project
-        .and_then(|p| p.default_base_branch.as_ref())
-        .map(|b| format!(" Default: {}", b))
-        .unwrap_or_default();
-    let instructions = format!(
-        "Select base branch{}{} | s: set as default",
-        fetch_warning, default_info
-    );
-    let instruction_widget = Paragraph::new(instructions).style(Style::default().fg(t.text_muted));
-    frame.render_widget(instruction_widget, chunks[1]);
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut item_index = 0;
 
-    // Base branch list
-    let items: Vec<ListItem> = state
-        .filtered_branch_refs
-        .iter()
-        .enumerate()
-        .map(|(i, branch_ref)| {
-            let selected = i == state.base_branch_selector_index;
-            let prefix = selection_prefix(selected);
-            let type_prefix = match branch_ref.ref_type {
-                BranchRefType::Local => "[L]",
-                BranchRefType::Remote => "[R]",
-            };
-            let default_marker = if branch_ref.is_default_base { " *" } else { "" };
+    // Render local checkout section
+    if let Some(branch) = local_checkout {
+        // Section header
+        items.push(ListItem::new("Local checkout:").style(t.muted_style()));
 
-            let content = format!(
-                "{}{} {}{}",
-                prefix, type_prefix, branch_ref.name, default_marker
+        let active_count = sessions.active_session_count_for_branch(branch.id);
+        let attention_count = sessions.attention_count_for_branch(branch.id);
+        let status = if active_count > 0 {
+            format!("  {} active", active_count)
+        } else {
+            String::new()
+        };
+
+        items.push(branch_item(BranchItem {
+            // Use the dynamically queried branch name, fall back to stored name on git error
+            display_name: current_branch_display.as_deref().unwrap_or(&branch.name),
+            number: item_index + 1,
+            selected: item_index == selected_index,
+            active_count,
+            attention_count,
+            status,
+            stale: false,
+            fallback: Style::default().fg(t.accent),
+        }));
+        item_index += 1;
+    }
+
+    // Render separator and worktrees section if there are worktrees
+    if !worktrees.is_empty() {
+        // Add separator if we showed local checkout
+        if local_checkout.is_some() {
+            items.push(
+                ListItem::new("───────────────────────────────────────").style(t.muted_style()),
             );
+        }
 
-            let style = if selected {
-                if branch_ref.is_default_base {
-                    selection_style(true, t.accent)
-                } else {
-                    selection_style_with_accent(true, t)
-                }
-            } else if branch_ref.is_default_base {
-                Style::default().fg(t.accent)
-            } else if branch_ref.ref_type == BranchRefType::Local {
-                Style::default().fg(t.text)
+        // Section header
+        items.push(ListItem::new("Worktrees:").style(t.muted_style()));
+
+        for branch in &worktrees {
+            let active_count = sessions.active_session_count_for_branch(branch.id);
+            let attention_count = sessions.attention_count_for_branch(branch.id);
+
+            let mut status_parts = Vec::new();
+            if active_count > 0 {
+                status_parts.push(format!("{} active", active_count));
+            }
+            if branch.stale {
+                status_parts.push("⚠ missing".to_string());
+            }
+            let status = if status_parts.is_empty() {
+                String::new()
             } else {
-                Style::default().fg(t.text_muted)
+                format!("  ({})", status_parts.join(", "))
             };
 
-            ListItem::new(content).style(style)
-        })
-        .collect();
+            items.push(branch_item(BranchItem {
+                display_name: &branch.name,
+                number: item_index + 1,
+                selected: item_index == selected_index,
+                active_count,
+                attention_count,
+                status,
+                stale: branch.stale,
+                fallback: Style::default().fg(t.text),
+            }));
+            item_index += 1;
+        }
+    }
 
-    let title = format!("Base Branch ({} options)", state.filtered_branch_refs.len());
+    let title = format!("Branches ({})", branches.len());
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(list, chunks[2]);
+    frame.render_widget(list, area);
+}
+
+/// Render one row of a branch-ref selector list
+///
+/// Shared by the default-base selector and the worktree wizard steps. They
+/// all build `{prefix}{[L]/[R]} {name}{default marker}{suffix}` with the same
+/// selected/default/local/remote color cascade, but differ in the default
+/// marker text, whether remote refs are dimmed, and the style of a selected
+/// non-default row.
+fn branch_ref_item(
+    branch: &BranchRef,
+    selected: bool,
+    default_marker: &'static str,
+    suffix: &str,
+    dim_remote: bool,
+    selected_plain: Style,
+) -> ListItem<'static> {
+    let t = theme();
+
+    let content = format!(
+        "{}{} {}{}{}",
+        selection_prefix(selected),
+        branch.ref_type.prefix(),
+        branch.name,
+        if branch.is_default_base {
+            default_marker
+        } else {
+            ""
+        },
+        suffix
+    );
+
+    let style = if selected {
+        if branch.is_default_base {
+            selection_style(true, t.accent)
+        } else {
+            selected_plain
+        }
+    } else if branch.is_default_base {
+        Style::default().fg(t.accent)
+    } else if dim_remote && branch.ref_type == BranchRefType::Remote {
+        Style::default().fg(t.text_muted)
+    } else {
+        Style::default().fg(t.text)
+    };
+
+    ListItem::new(content).style(style)
 }
 
 /// Render the default base branch selection dialog
@@ -399,36 +362,14 @@ fn render_default_base_selection(frame: &mut Frame, area: Rect, state: &AppState
         .iter()
         .enumerate()
         .map(|(i, branch_ref)| {
-            let selected = i == state.base_branch_selector_index;
-            let prefix = selection_prefix(selected);
-            let type_prefix = match branch_ref.ref_type {
-                BranchRefType::Local => "[L]",
-                BranchRefType::Remote => "[R]",
-            };
-            let default_marker = if branch_ref.is_default_base {
-                " (current default)"
-            } else {
-                ""
-            };
-
-            let content = format!(
-                "{}{} {}{}",
-                prefix, type_prefix, branch_ref.name, default_marker
-            );
-
-            let style = if selected {
-                if branch_ref.is_default_base {
-                    selection_style(true, t.accent)
-                } else {
-                    selection_style_with_accent(true, t)
-                }
-            } else if branch_ref.is_default_base {
-                Style::default().fg(t.accent)
-            } else {
-                Style::default().fg(t.text)
-            };
-
-            ListItem::new(content).style(style)
+            branch_ref_item(
+                branch_ref,
+                i == state.base_branch_selector_index,
+                " (current default)",
+                "",
+                false,
+                selection_style_with_accent(true, t),
+            )
         })
         .collect();
 
@@ -498,11 +439,9 @@ pub fn render_project_delete_confirmation(
     notes.push("Git worktrees on disk will NOT be deleted.".to_string());
 
     let config = ConfirmDialogConfig {
-        title: "Confirm Delete",
-        item_label: "project",
-        item_name: &project_name,
         warnings,
         notes,
+        ..ConfirmDialogConfig::new("Confirm Delete", "project", &project_name)
     };
     render_confirm_dialog(frame, area, config);
 }
@@ -536,78 +475,33 @@ pub fn render_branch_delete_confirmation(
         (0, 0)
     };
 
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Delete branch: ", Style::default().fg(t.text)),
-            Span::styled(
-                &branch_name,
-                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("?", Style::default().fg(t.text)),
-        ]),
-        Line::from(""),
-    ];
+    let mut warnings = Vec::new();
+    let mut notes = Vec::new();
 
     // Warning about active sessions
     if active_count > 0 {
-        lines.push(Line::from(vec![Span::styled(
-            format!(
-                "⚠  {} active session{} will be terminated",
-                active_count,
-                if active_count == 1 { "" } else { "s" }
-            ),
-            Style::default()
-                .fg(t.border_warning)
-                .add_modifier(Modifier::BOLD),
-        )]));
-        lines.push(Line::from(""));
+        warnings.push(format!(
+            "{} active session{} will be terminated",
+            active_count,
+            if active_count == 1 { "" } else { "s" }
+        ));
     } else if session_count > 0 {
-        lines.push(Line::from(vec![Span::styled(
-            format!(
-                "{} session{} will be removed",
-                session_count,
-                if session_count == 1 { "" } else { "s" }
-            ),
-            Style::default().fg(t.text_muted),
-        )]));
-        lines.push(Line::from(""));
+        notes.push(format!(
+            "{} session{} will be removed",
+            session_count,
+            if session_count == 1 { "" } else { "s" }
+        ));
     }
 
     // Non-worktree info (shown before confirmation prompt)
     if !is_worktree {
-        lines.push(Line::from(vec![Span::styled(
-            "This branch is not a worktree (tracked branch only)",
-            Style::default().fg(t.text_muted),
-        )]));
-        lines.push(Line::from(""));
+        notes.push("This branch is not a worktree (tracked branch only)".to_string());
     }
 
-    // Confirmation prompt
-    lines.push(Line::from(vec![
-        Span::styled("Press ", Style::default().fg(t.text)),
-        Span::styled(
-            "y",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" to confirm, ", Style::default().fg(t.text)),
-        Span::styled(
-            "n",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" or ", Style::default().fg(t.text)),
-        Span::styled(
-            "Esc",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" to cancel", Style::default().fg(t.text)),
-    ]));
-
     // Worktree deletion toggle (shown after confirmation prompt)
+    let mut extra_lines = Vec::new();
     if is_worktree {
-        lines.push(Line::from(""));
+        extra_lines.push(Line::from(""));
         let checkbox = if state.delete_worktree_on_disk {
             "[x]"
         } else {
@@ -620,7 +514,7 @@ pub fn render_branch_delete_confirmation(
         } else {
             Style::default().fg(t.text_muted)
         };
-        lines.push(Line::from(vec![
+        extra_lines.push(Line::from(vec![
             Span::styled(checkbox, checkbox_style),
             Span::styled(
                 " Also delete worktree from disk",
@@ -629,7 +523,7 @@ pub fn render_branch_delete_confirmation(
             Span::styled(" (press w to toggle)", Style::default().fg(t.text_muted)),
         ]));
         if state.delete_worktree_on_disk {
-            lines.push(Line::from(vec![Span::styled(
+            extra_lines.push(Line::from(vec![Span::styled(
                 "    ⚠  This will permanently delete the directory!",
                 Style::default()
                     .fg(t.border_warning)
@@ -638,14 +532,13 @@ pub fn render_branch_delete_confirmation(
         }
     }
 
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.border_warning))
-            .title("Confirm Delete"),
-    );
-
-    frame.render_widget(paragraph, area);
+    let config = ConfirmDialogConfig {
+        warnings,
+        notes,
+        extra_lines,
+        ..ConfirmDialogConfig::new("Confirm Delete", "branch", &branch_name)
+    };
+    render_confirm_dialog(frame, area, config);
 }
 
 // ============================================================================
@@ -705,7 +598,7 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
     // Validation error (if any)
     if let Some(error) = &state.worktree_wizard.branch_validation_error {
         let error_text = format!("⚠ {}", error);
-        let error_widget = Paragraph::new(error_text).style(Style::default().fg(Color::Red));
+        let error_widget = Paragraph::new(error_text).style(Style::default().fg(t.error_bg));
         frame.render_widget(error_widget, chunks[2]);
     }
 
@@ -721,55 +614,29 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
         .map(|(i, branch)| {
             // Already-tracked branches are greyed out and not selectable
             if branch.is_already_tracked {
-                let type_prefix = branch.ref_type.prefix();
-                let content = format!("  {} {} (already open)", type_prefix, branch.name);
-                let style = Style::default().fg(Color::DarkGray);
-                return ListItem::new(content).style(style);
+                let content = format!(
+                    "  {} {} (already open)",
+                    branch.ref_type.prefix(),
+                    branch.name
+                );
+                return ListItem::new(content).style(Style::default().fg(t.text_muted));
             }
 
             let selected = i == state.worktree_wizard.list_index;
-            let prefix = if selected { "▸ " } else { "  " };
-            let type_prefix = branch.ref_type.prefix();
-            let default_marker = if branch.is_default_base { " *" } else { "" };
-
-            // Show indicator for branches with untracked git worktrees
-            let worktree_marker = if branch.has_git_worktree {
-                " (has worktree)"
-            } else {
-                ""
-            };
-
-            let content = format!(
-                "{}{} {}{}{}",
-                prefix, type_prefix, branch.name, default_marker, worktree_marker
-            );
 
             // Branches with untracked git worktrees are highlighted in yellow
-            let style = if branch.has_git_worktree {
-                if selected {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Yellow)
-                }
-            } else if selected {
-                if branch.is_default_base {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    t.selected_style()
-                }
-            } else if branch.is_default_base {
-                Style::default().fg(Color::Cyan)
-            } else if branch.ref_type == BranchRefType::Local {
-                Style::default().fg(t.text)
-            } else {
-                Style::default().fg(t.text_muted)
-            };
+            if branch.has_git_worktree {
+                let content = format!(
+                    "{}{} {}{} (has worktree)",
+                    selection_prefix(selected),
+                    branch.ref_type.prefix(),
+                    branch.name,
+                    if branch.is_default_base { " *" } else { "" },
+                );
+                return ListItem::new(content).style(selection_style(selected, Color::Yellow));
+            }
 
-            ListItem::new(content).style(style)
+            branch_ref_item(branch, selected, " *", "", true, t.selected_style())
         })
         .collect();
 
@@ -782,19 +649,12 @@ fn render_worktree_select_branch(frame: &mut Frame, area: Rect, state: &AppState
         );
 
         let selected = state.worktree_wizard.list_index == filtered_count;
-        let prefix = if selected { "▸ " } else { "  " };
         let content = format!(
             "{}+ Create new branch \"{}\"",
-            prefix, state.worktree_wizard.search_text
+            selection_prefix(selected),
+            state.worktree_wizard.search_text
         );
-        let style = if selected {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Green)
-        };
-        items.push(ListItem::new(content).style(style));
+        items.push(ListItem::new(content).style(selection_style(selected, Color::Green)));
     }
 
     let title = format!("Select Branch ({} found)", filtered_count);
@@ -850,59 +710,29 @@ fn render_worktree_select_base(frame: &mut Frame, area: Rect, state: &AppState, 
     );
     frame.render_widget(search_input, chunks[1]);
 
-    // Filter branches based on search
-    let filtered: Vec<&BranchRef> = if state.worktree_wizard.base_search_text.is_empty() {
-        state.worktree_wizard.all_branches.iter().collect()
-    } else {
-        let query = state.worktree_wizard.base_search_text.to_lowercase();
-        state
-            .worktree_wizard
-            .all_branches
-            .iter()
-            .filter(|b| b.name.to_lowercase().contains(&query))
-            .collect()
-    };
-
-    // Base branch list
-    let items: Vec<ListItem> = filtered
+    // Base branch list; the input handlers keep the cached filter in step
+    // with the search text
+    let items: Vec<ListItem> = state
+        .worktree_wizard
+        .filtered_base_branches
         .iter()
         .enumerate()
         .map(|(i, branch)| {
-            let selected = i == state.worktree_wizard.base_list_index;
-            let prefix = if selected { "▸ " } else { "  " };
-            let type_prefix = branch.ref_type.prefix();
-            let default_marker = if branch.is_default_base {
-                " * (default)"
-            } else {
-                ""
-            };
-
-            let content = format!(
-                "{}{} {}{}",
-                prefix, type_prefix, branch.name, default_marker
-            );
-
-            let style = if selected {
-                if branch.is_default_base {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    t.selected_style()
-                }
-            } else if branch.is_default_base {
-                Style::default().fg(Color::Cyan)
-            } else if branch.ref_type == BranchRefType::Local {
-                Style::default().fg(t.text)
-            } else {
-                Style::default().fg(t.text_muted)
-            };
-
-            ListItem::new(content).style(style)
+            branch_ref_item(
+                branch,
+                i == state.worktree_wizard.base_list_index,
+                " * (default)",
+                "",
+                true,
+                t.selected_style(),
+            )
         })
         .collect();
 
-    let title = format!("Select Base Branch ({} options)", filtered.len());
+    let title = format!(
+        "Select Base Branch ({} options)",
+        state.worktree_wizard.filtered_base_branches.len()
+    );
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(list, chunks[2]);
 }
@@ -989,7 +819,7 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
             )]));
             lines.push(Line::from(vec![Span::styled(
                 format!("    {}", base_name),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(t.accent),
             )]));
         }
         WorktreeCreationType::ImportExisting => {
@@ -1048,13 +878,15 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
         Span::styled(
             "Enter",
             Style::default()
-                .fg(Color::Green)
+                .fg(t.confirm_key)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(action_text, Style::default().fg(t.text)),
         Span::styled(
             "Esc",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(t.cancel_key)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" to go back", Style::default().fg(t.text)),
     ]));
@@ -1072,4 +904,218 @@ fn render_worktree_confirm(frame: &mut Frame, area: Rect, state: &AppState, conf
     );
 
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::Branch;
+    use crate::session::store::SessionStore;
+    use crate::tui::header_notifications::HeaderNotificationManager;
+    use crate::tui::views::test_util::{contains_line, render_to_lines};
+    use crate::wizards::worktree::BranchRefType as WizardRefType;
+    use std::path::PathBuf;
+
+    /// A store with one project ("panoptes"), its local checkout and a worktree
+    fn store_with_project() -> (ProjectStore, ProjectId) {
+        let mut store = ProjectStore::new();
+        let project = Project::new(
+            "panoptes".to_string(),
+            PathBuf::from("/tmp/panoptes"),
+            "main".to_string(),
+        );
+        let project_id = project.id;
+        store.add_project(project);
+        store.add_branch(Branch::default_for_project(
+            project_id,
+            "main".to_string(),
+            PathBuf::from("/tmp/panoptes"),
+        ));
+        store.add_branch(Branch::new(
+            project_id,
+            "feature-x".to_string(),
+            PathBuf::from("/tmp/worktrees/feature-x"),
+            false,
+            true,
+        ));
+        (store, project_id)
+    }
+
+    fn render_detail(state: &AppState, store: &ProjectStore, project_id: ProjectId) -> Vec<String> {
+        let config = Config::default();
+        let sessions = SessionManager::with_store(config.clone(), SessionStore::new());
+        let header_notifications = HeaderNotificationManager::default();
+
+        render_to_lines(80, 24, |frame| {
+            render_project_detail(
+                frame,
+                frame.size(),
+                state,
+                project_id,
+                store,
+                &sessions,
+                &config,
+                &header_notifications,
+            )
+        })
+    }
+
+    #[test]
+    fn test_branch_list_shows_local_checkout_and_worktrees() {
+        let (store, project_id) = store_with_project();
+        let state = AppState::default();
+
+        let lines = render_detail(&state, &store, project_id);
+
+        assert!(contains_line(&lines, "Branches (2)"), "{:?}", lines);
+        assert!(contains_line(&lines, "Local checkout:"), "{:?}", lines);
+        assert!(contains_line(&lines, "Worktrees:"), "{:?}", lines);
+        assert!(contains_line(&lines, "feature-x"), "{:?}", lines);
+        assert!(contains_line(&lines, "n: new worktree"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_wizard_select_branch_lists_branches_and_create_option() {
+        let (store, project_id) = store_with_project();
+        let mut state = AppState {
+            input_mode: InputMode::WorktreeSelectBranch,
+            ..Default::default()
+        };
+        state.worktree_wizard.search_text = "feat".to_string();
+        state.worktree_wizard.filtered_branches = vec![crate::wizards::worktree::BranchRef::new(
+            WizardRefType::Local,
+            "feature-y".to_string(),
+        )];
+
+        let lines = render_detail(&state, &store, project_id);
+
+        assert!(
+            contains_line(&lines, "Select Branch (1 found)"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "[L] feature-y"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "+ Create new branch \"feat\""),
+            "{:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_wizard_select_base_reads_filtered_cache() {
+        let (store, project_id) = store_with_project();
+        let mut state = AppState {
+            input_mode: InputMode::WorktreeSelectBase,
+            ..Default::default()
+        };
+        state.worktree_wizard.branch_name = "new-branch".to_string();
+        state.worktree_wizard.filtered_base_branches =
+            vec![crate::wizards::worktree::BranchRef::new(
+                WizardRefType::Local,
+                "main".to_string(),
+            )
+            .with_default_base(true)];
+
+        let lines = render_detail(&state, &store, project_id);
+
+        assert!(
+            contains_line(&lines, "Branch name: new-branch"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Select Base Branch (1 options)"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "[L] main * (default)"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_wizard_confirm_shows_worktree_location() {
+        let (store, project_id) = store_with_project();
+        let mut state = AppState {
+            input_mode: InputMode::WorktreeConfirm,
+            ..Default::default()
+        };
+        state.worktree_wizard.branch_name = "feature-z".to_string();
+        state.worktree_wizard.project_name = "panoptes".to_string();
+        state.worktree_wizard.creation_type = WorktreeCreationType::ExistingLocal;
+
+        let lines = render_detail(&state, &store, project_id);
+
+        assert!(contains_line(&lines, "Create Worktree"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "You are about to create a worktree from branch:"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "feature-z"), "{:?}", lines);
+        assert!(contains_line(&lines, "Worktree location:"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_default_base_selection_marks_current_default() {
+        let (store, project_id) = store_with_project();
+        let state = AppState {
+            input_mode: InputMode::SelectingDefaultBase,
+            filtered_branch_refs: vec![
+                BranchRef::new(WizardRefType::Local, "main".to_string()).with_default_base(true),
+                BranchRef::new(WizardRefType::Remote, "origin/dev".to_string()),
+            ],
+            ..Default::default()
+        };
+
+        let lines = render_detail(&state, &store, project_id);
+
+        assert!(
+            contains_line(&lines, "Select Default Base Branch (2 options)"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "[L] main (current default)"),
+            "{:?}",
+            lines
+        );
+        assert!(contains_line(&lines, "[R] origin/dev"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_branch_delete_confirmation_offers_worktree_toggle() {
+        let (store, project_id) = store_with_project();
+        let worktree_branch_id = store
+            .branches_for_project_sorted(project_id)
+            .iter()
+            .find(|b| b.is_worktree)
+            .map(|b| b.id)
+            .unwrap();
+        let state = AppState {
+            input_mode: InputMode::ConfirmingBranchDelete,
+            pending_delete_branch: Some(worktree_branch_id),
+            ..Default::default()
+        };
+
+        let lines = render_detail(&state, &store, project_id);
+
+        assert!(
+            contains_line(&lines, "Delete branch: feature-x?"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Press y to confirm, n or Esc to cancel"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(
+                &lines,
+                "[ ] Also delete worktree from disk (press w to toggle)"
+            ),
+            "{:?}",
+            lines
+        );
+    }
 }

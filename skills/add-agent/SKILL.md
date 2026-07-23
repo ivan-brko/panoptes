@@ -17,22 +17,27 @@ Step-by-step checklist for adding a new agent type to Panoptes.
 In `src/agent/mod.rs`, add the new variant:
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum AgentType {
+    #[default]
     ClaudeCode,
+    Shell,
+    OpenAICodex,
     NewAgent,  // Your new agent type
 }
 ```
 
 ### 2. Implement Display
 
-Update the `Display` impl if it exists, or add display helpers:
+Update `display_name()` in `src/agent/mod.rs`:
 
 ```rust
 impl AgentType {
-    pub fn display_name(&self) -> &'static str {
+    pub fn display_name(&self) -> &str {
         match self {
             AgentType::ClaudeCode => "Claude Code",
+            AgentType::Shell => "Shell",
+            AgentType::OpenAICodex => "Codex",
             AgentType::NewAgent => "New Agent",
         }
     }
@@ -41,52 +46,78 @@ impl AgentType {
 
 ### 3. Create Adapter Module
 
-Create `src/agent/new_agent.rs`:
+Create `src/agent/new_agent.rs`. `spawn()` has a default implementation on the
+trait (setup hooks → build env → build args → PTY), so an adapter only supplies
+the varying parts:
 
 ```rust
+use crate::config::Config;
 use anyhow::Result;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
-use crate::agent::AgentAdapter;
+use super::adapter::{AgentAdapter, SpawnConfig};
 
-pub struct NewAgentAdapter {
-    // Configuration fields
-}
-
-impl NewAgentAdapter {
-    pub fn new() -> Self {
-        Self {
-            // Initialize fields
-        }
-    }
-}
+pub struct NewAgentAdapter;
 
 impl AgentAdapter for NewAgentAdapter {
-    fn spawn_command(&self) -> String {
-        // Return the command to spawn the agent
-        "new-agent".to_string()
+    fn name(&self) -> &str {
+        "New Agent"
     }
 
-    fn spawn_args(&self, working_dir: &Path, session_id: &str) -> Vec<String> {
-        // Return command arguments
-        vec![
-            "--workdir".to_string(),
-            working_dir.display().to_string(),
-            "--session".to_string(),
-            session_id.to_string(),
-        ]
+    fn command(&self) -> &str {
+        "new-agent"
     }
 
-    fn environment(&self) -> Vec<(String, String)> {
-        // Return any required environment variables
+    fn default_args(&self) -> Vec<String> {
         vec![]
     }
 
-    fn hook_script(&self, session_id: &str, hook_port: u16) -> Option<String> {
-        // Return hook script content if the agent supports hooks
-        // Return None if hooks aren't supported
+    fn supports_hooks(&self) -> bool {
+        false
+    }
+
+    fn generate_env(
+        &self,
+        _config: &Config,
+        spawn_config: &SpawnConfig,
+    ) -> HashMap<String, String> {
+        let mut env = HashMap::new();
+        env.insert(
+            "PANOPTES_SESSION_ID".to_string(),
+            spawn_config.session_id.to_string(),
+        );
+        env
+    }
+
+    fn setup_hooks(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<Vec<PathBuf>> {
+        // Install hook scripts / settings here if the agent supports them.
+        // Use `super::install_executable_script(&path, &content)` to write
+        // a script and mark it executable in one step.
+        Ok(vec![])
+    }
+
+    fn build_args(&self, spawn_config: &SpawnConfig) -> Vec<String> {
+        // Combine default_args, resume handling and the initial prompt into
+        // the final command line. See CodexAdapter::build_args for a worked
+        // example with a resume subcommand and positional prompt.
+        let mut args = self.default_args();
+        if let Some(ref prompt) = spawn_config.initial_prompt {
+            args.push(prompt.clone());
+        }
+        args
+    }
+
+    fn agent_session_id(&self, spawn_config: &SpawnConfig) -> Option<String> {
+        // Some(...) only if Panoptes can dictate the agent's conversation ID
+        // upfront (as Claude does via --session-id). Return None if the agent
+        // mints its own ID and it must be discovered later (as Codex does).
         None
     }
+
+    // Only override spawn() if the default lifecycle
+    // (setup_hooks → generate_env → build_args → PtyHandle::spawn)
+    // genuinely does not fit.
 }
 ```
 
@@ -95,7 +126,7 @@ impl AgentAdapter for NewAgentAdapter {
 In `src/agent/mod.rs`, add:
 
 ```rust
-mod new_agent;
+pub mod new_agent;
 pub use new_agent::NewAgentAdapter;
 ```
 
@@ -105,56 +136,75 @@ In `src/agent/mod.rs`, update `create_adapter()`:
 
 ```rust
 impl AgentType {
-    pub fn create_adapter(&self, config: &Config) -> Box<dyn AgentAdapter> {
+    pub fn create_adapter(&self) -> Box<dyn AgentAdapter> {
         match self {
-            AgentType::ClaudeCode => Box::new(ClaudeCodeAdapter::new(config)),
-            AgentType::NewAgent => Box::new(NewAgentAdapter::new()),
+            AgentType::ClaudeCode => Box::new(ClaudeCodeAdapter::new()),
+            AgentType::Shell => Box::new(ShellAdapter::new()),
+            AgentType::OpenAICodex => Box::new(CodexAdapter::new()),
+            AgentType::NewAgent => Box::new(NewAgentAdapter),
         }
     }
 }
 ```
+
+Also update the `From<crate::session::SessionType>` impl in the same file if
+the new agent gets its own `SessionType` variant.
 
 ### 6. Update Hook Handling (if applicable)
 
-If the new agent sends hook events, update `src/hooks/mod.rs` to parse its event format:
-
-```rust
-impl HookEvent {
-    pub fn from_agent_payload(agent: AgentType, payload: &str) -> Result<Self> {
-        match agent {
-            AgentType::ClaudeCode => Self::from_claude_payload(payload),
-            AgentType::NewAgent => Self::from_new_agent_payload(payload),
-        }
-    }
-}
-```
+If the new agent reports state via the HTTP hook server, have its hook script
+POST the envelope shape `HookEvent` expects (see `src/hooks/mod.rs`):
+`{"session_id": ..., "event": ..., "timestamp": ..., "payload": {...}}`.
+If it introduces new event names, extend `HookEventType` and the state
+machine's `translate_hook` in `src/session/state_machine.rs`.
 
 ### 7. Update Session Manager (if needed)
 
-If the agent has special session handling requirements, update `src/session/manager.rs`.
+If the agent has special session handling requirements (transcript tailing,
+conversation-ID discovery), see `src/transcript/` and how
+`src/session/manager.rs` wires Codex up.
 
 ## AgentAdapter Trait Reference
 
+From `src/agent/adapter.rs` (object-safe; `spawn` is a default method):
+
 ```rust
 pub trait AgentAdapter: Send + Sync {
-    /// The command to execute (e.g., "claude", "aider")
-    fn spawn_command(&self) -> String;
+    /// Display name of this agent
+    fn name(&self) -> &str;
 
-    /// Arguments for the command
-    fn spawn_args(&self, working_dir: &Path, session_id: &str) -> Vec<String>;
+    /// Command used to invoke this agent
+    fn command(&self) -> &str;
 
-    /// Environment variables to set
-    fn environment(&self) -> Vec<(String, String)>;
+    /// Default command-line arguments
+    fn default_args(&self) -> Vec<String>;
 
-    /// Hook script content (if agent supports hooks)
-    fn hook_script(&self, session_id: &str, hook_port: u16) -> Option<String>;
+    /// Whether this agent supports hooks for state tracking
+    fn supports_hooks(&self) -> bool;
+
+    /// Environment variables for the agent process
+    fn generate_env(&self, config: &Config, spawn_config: &SpawnConfig) -> HashMap<String, String>;
+
+    /// Create hook scripts/settings; returns paths to clean up on session end
+    fn setup_hooks(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<Vec<PathBuf>>;
+
+    /// Complete argument list for a spawn (resume, prompt, defaults)
+    fn build_args(&self, spawn_config: &SpawnConfig) -> Vec<String>;
+
+    /// Agent-native conversation ID, if Panoptes can dictate it upfront
+    fn agent_session_id(&self, spawn_config: &SpawnConfig) -> Option<String>;
+
+    /// Spawn the agent in a PTY — default implementation:
+    /// setup_hooks → generate_env → build_args → PtyHandle::spawn
+    fn spawn(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<SpawnResult> { ... }
 }
 ```
 
 ## Verification
 
 1. Run `cargo build` to check for compile errors
-2. Run `cargo clippy -- -D warnings`
-3. Test spawning a session with the new agent type
-4. Verify hook events are received (if applicable)
-5. Verify session state transitions work correctly
+2. Run `cargo lint` (clippy with `-D warnings`)
+3. Run `cargo test`
+4. Test spawning a session with the new agent type
+5. Verify hook events are received (if applicable)
+6. Verify session state transitions work correctly

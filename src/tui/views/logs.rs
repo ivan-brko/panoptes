@@ -9,11 +9,12 @@ use ratatui::widgets::{
     Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use crate::logging::{LogBuffer, LogFileInfo, LogLevel};
+use crate::logging::{LogBuffer, LogFileInfo};
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
-use crate::tui::views::Breadcrumb;
+use crate::tui::theme::theme;
+use crate::tui::views::{render_footer, Breadcrumb};
 
 /// Render the log viewer showing all log entries
 #[allow(clippy::too_many_arguments)]
@@ -58,10 +59,12 @@ pub fn render_log_viewer(
         scroll_offset.min(entry_count.saturating_sub(visible_height.max(1)))
     };
 
+    let t = theme();
+
     // Log entries list
     if entries.is_empty() {
         let empty = Paragraph::new("No log entries yet.")
-            .style(Style::default().fg(Color::DarkGray))
+            .style(t.muted_style())
             .block(Block::default().borders(Borders::ALL).title("Logs"));
         frame.render_widget(empty, areas.content);
     } else {
@@ -78,26 +81,14 @@ pub fn render_log_viewer(
                 // Format timestamp
                 let time = entry.timestamp.format("%H:%M:%S%.3f");
 
-                // Get level color
-                let level_color = match entry.level {
-                    LogLevel::Trace => Color::DarkGray,
-                    LogLevel::Debug => Color::Gray,
-                    LogLevel::Info => Color::Blue,
-                    LogLevel::Warn => Color::Yellow,
-                    LogLevel::Error => Color::Red,
-                };
-
                 // Build the line with colored level
                 let content = Line::from(vec![
-                    Span::styled(format!("{} ", time), Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{} ", time), t.muted_style()),
                     Span::styled(
                         format!("{:5} ", entry.level.as_str()),
-                        Style::default().fg(level_color).bold(),
+                        Style::default().fg(t.log_level_color(entry.level)).bold(),
                     ),
-                    Span::styled(
-                        format!("{}: ", entry.target),
-                        Style::default().fg(Color::Cyan),
-                    ),
+                    Span::styled(format!("{}: ", entry.target), Style::default().fg(t.accent)),
                     Span::raw(&entry.message),
                 ]);
 
@@ -137,10 +128,65 @@ pub fn render_log_viewer(
     }
 
     // Footer with navigation help
-    let footer_text =
-        "↑/↓: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | Esc/q: back".to_string();
-    let footer = Paragraph::new(footer_text)
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, areas.footer());
+    render_footer(
+        frame,
+        areas.footer(),
+        "↑/↓: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | Esc/q: back",
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logging::{LogEntry, LogLevel};
+    use crate::tui::views::test_util::{contains_line, render_to_lines};
+    use std::path::PathBuf;
+
+    fn render_logs(buffer: &Arc<LogBuffer>) -> Vec<String> {
+        let info = LogFileInfo {
+            path: PathBuf::from("/tmp/panoptes.log"),
+        };
+        let header_notifications = HeaderNotificationManager::default();
+
+        render_to_lines(100, 24, |frame| {
+            render_log_viewer(
+                frame,
+                frame.size(),
+                buffer,
+                &info,
+                0,
+                true,
+                &header_notifications,
+                0,
+            )
+        })
+    }
+
+    #[test]
+    fn test_empty_log_renders_placeholder() {
+        let buffer = Arc::new(LogBuffer::new(10));
+
+        let lines = render_logs(&buffer);
+
+        assert!(contains_line(&lines, "No log entries yet."), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_entries_show_level_target_and_message() {
+        let buffer = Arc::new(LogBuffer::new(10));
+        buffer.push(LogEntry::new(
+            LogLevel::Warn,
+            "panoptes::hooks",
+            "port busy",
+        ));
+
+        let lines = render_logs(&buffer);
+
+        assert!(contains_line(&lines, "Logs [1-1 of 1]"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "WARN  panoptes::hooks: port busy"),
+            "{:?}",
+            lines
+        );
+    }
 }

@@ -215,10 +215,16 @@ impl WatcherState {
         // Only look at rollouts written recently. The full tree holds every
         // conversation ever - over a thousand files on a working machine - and
         // a subagent that has not been written to lately does not count anyway.
-        let recent = recent_rollouts(&targets[0].1);
+        //
+        // Sessions can run under different CODEX_HOMEs (multi-account), so the
+        // recent set is computed per sessions dir, cached for this scan.
+        let mut recent_by_dir: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
-        for (session_id, _, conversation_id) in targets {
-            let count = count_subagents(&recent, &conversation_id);
+        for (session_id, sessions_dir, conversation_id) in targets {
+            let recent = recent_by_dir
+                .entry(sessions_dir)
+                .or_insert_with_key(|dir| recent_rollouts(dir));
+            let count = count_subagents(recent, &conversation_id);
             let Some(watched) = self.watched.get_mut(&session_id) else {
                 continue;
             };
@@ -232,36 +238,17 @@ impl WatcherState {
 
 /// Rollout files written within the liveness window
 fn recent_rollouts(sessions_dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
     let now = std::time::SystemTime::now();
-
-    // Filed under sessions/YYYY/MM/DD, so walk exactly three levels rather than
-    // recursing over an unbounded tree
-    for year in subdirs(sessions_dir) {
-        for month in subdirs(&year) {
-            for day in subdirs(&month) {
-                let Ok(entries) = std::fs::read_dir(&day) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    let fresh = entry
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|m| now.duration_since(m).ok())
-                        .is_some_and(|age| age < SUBAGENT_LIVE_WINDOW);
-                    if fresh {
-                        out.push(path);
-                    }
-                }
-            }
-        }
-    }
-    out
+    super::codex::rollout_files(sessions_dir)
+        .into_iter()
+        .filter(|path| {
+            std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .is_some_and(|age| age < SUBAGENT_LIVE_WINDOW)
+        })
+        .collect()
 }
 
 /// How many of these rollouts are subagents of the given conversation
@@ -269,40 +256,11 @@ fn count_subagents(rollouts: &[PathBuf], conversation_id: &str) -> usize {
     rollouts
         .iter()
         .filter(|path| {
-            read_meta_payload(path).is_some_and(|payload| {
-                super::codex::is_subagent_meta(&payload)
-                    && super::codex::parent_conversation_id(&payload).as_deref()
-                        == Some(conversation_id)
+            super::codex::read_session_meta(path).is_some_and(|meta| {
+                meta.is_subagent && meta.parent_id.as_deref() == Some(conversation_id)
             })
         })
         .count()
-}
-
-/// Read the `session_meta` payload from the first line of a rollout
-fn read_meta_payload(path: &Path) -> Option<serde_json::Value> {
-    use std::io::BufRead;
-
-    let file = std::fs::File::open(path).ok()?;
-    let mut line = String::new();
-    std::io::BufReader::new(file).read_line(&mut line).ok()?;
-
-    let record: serde_json::Value = serde_json::from_str(&line).ok()?;
-    if record.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
-        return None;
-    }
-    record.get("payload").cloned()
-}
-
-/// List immediate subdirectories, ignoring anything unreadable
-fn subdirs(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect()
 }
 
 /// Append raw transcript lines to a per-session debug log
@@ -412,6 +370,136 @@ mod tests {
         assert_eq!(count_subagents(&recent, "parent"), 2);
         assert_eq!(count_subagents(&recent, "someone-else"), 1);
         assert_eq!(count_subagents(&recent, "nobody"), 0);
+    }
+
+    #[test]
+    fn test_scan_uses_each_sessions_own_directory() {
+        // Two sessions under different CODEX_HOMEs: each parent's child lives
+        // only in its own sessions tree, so a scan that reused one directory
+        // for every session would count 0 for the other.
+        let home_a = TempDir::new().unwrap();
+        let home_b = TempDir::new().unwrap();
+
+        write_rollout(
+            home_a.path(),
+            "rollout-child-a.jsonl",
+            serde_json::json!({"id": "ca", "forked_from_id": "parent-a"}),
+        );
+        write_rollout(
+            home_b.path(),
+            "rollout-child-b.jsonl",
+            serde_json::json!({"id": "cb", "forked_from_id": "parent-b"}),
+        );
+
+        let mut state = WatcherState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let session_a = uuid::Uuid::new_v4();
+        let session_b = uuid::Uuid::new_v4();
+        for (session_id, home, conversation) in [
+            (session_a, home_a.path(), "parent-a"),
+            (session_b, home_b.path(), "parent-b"),
+        ] {
+            state.watch(
+                WatchTarget {
+                    session_id,
+                    kind: TranscriptKind::Codex,
+                    path: home.join("transcript.jsonl"),
+                    codex_sessions_dir: Some(home.to_path_buf()),
+                    conversation_id: Some(conversation.to_string()),
+                    from_start: true,
+                },
+                &tx,
+            );
+        }
+
+        state.scan_subagents(&tx);
+
+        let mut counts: HashMap<SessionId, usize> = HashMap::new();
+        while let Ok((id, event)) = rx.try_recv() {
+            if let AgentEvent::Subagents { active } = event {
+                counts.insert(id, active);
+            }
+        }
+        assert_eq!(counts.get(&session_a), Some(&1));
+        assert_eq!(counts.get(&session_b), Some(&1));
+    }
+
+    /// A minimal target for driving `WatcherState` directly
+    fn target(session_id: SessionId, path: PathBuf, from_start: bool) -> WatchTarget {
+        WatchTarget {
+            session_id,
+            kind: TranscriptKind::Codex,
+            path,
+            codex_sessions_dir: None,
+            conversation_id: None,
+            from_start,
+        }
+    }
+
+    #[test]
+    fn test_watch_then_append_then_poll_delivers_the_event() {
+        // The full in-thread lifecycle, minus the thread: watch a file, let
+        // the agent append to it, poll, and the session's event comes out of
+        // the channel addressed to the right session.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let mut state = WatcherState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let session_id = uuid::Uuid::new_v4();
+        state.watch(target(session_id, path.clone(), true), &tx);
+
+        // Nothing has been written yet
+        state.poll(&tx);
+        assert!(rx.try_recv().is_err());
+
+        std::fs::write(
+            &path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+        )
+        .unwrap();
+        state.poll(&tx);
+
+        let (id, event) = rx.try_recv().expect("the appended event must arrive");
+        assert_eq!(id, session_id);
+        assert_eq!(event, AgentEvent::TurnStarted { title: None });
+        assert!(rx.try_recv().is_err(), "and exactly once");
+    }
+
+    #[test]
+    fn test_attaching_seeds_usage_through_the_events_channel() {
+        // Reattaching to a conversation with history: the usage display must
+        // be seeded immediately, but the history itself must not replay.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n\
+             {\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model\":\"gpt-5-codex\",\"model_context_window\":272000,\"total_token_usage\":{\"total_tokens\":48000}}}}\n",
+        )
+        .unwrap();
+
+        let mut state = WatcherState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let session_id = uuid::Uuid::new_v4();
+        state.watch(target(session_id, path, false), &tx);
+
+        let (id, event) = rx.try_recv().expect("attach must seed usage");
+        assert_eq!(id, session_id);
+        let AgentEvent::Usage(usage) = event else {
+            panic!("expected a usage seed, got {event:?}");
+        };
+        assert_eq!(usage.total_tokens, Some(48_000));
+        assert_eq!(usage.model.as_deref(), Some("gpt-5-codex"));
+
+        // The task_started already in the file is history, not news
+        state.poll(&tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "attaching must not replay the existing conversation"
+        );
     }
 
     #[test]

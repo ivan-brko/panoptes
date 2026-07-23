@@ -76,30 +76,6 @@ impl VirtualTerminal {
         self.styled_cache.borrow_mut().take();
     }
 
-    /// Get the screen content as lines of text
-    pub fn get_lines(&self) -> Vec<String> {
-        let screen = self.parser.screen();
-        let (rows, cols) = (screen.size().0 as usize, screen.size().1 as usize);
-
-        (0..rows)
-            .map(|row| {
-                (0..cols)
-                    .map(|col| {
-                        let contents = screen.cell(row as u16, col as u16).unwrap().contents();
-                        // Empty contents means unset cell - use space to preserve column positions
-                        if contents.is_empty() {
-                            " "
-                        } else {
-                            contents
-                        }
-                    })
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect()
-    }
-
     /// Get visible lines for a viewport (plain text, no styling)
     pub fn visible_lines(&self, viewport_height: usize) -> Vec<String> {
         self.visible_styled_lines(viewport_height)
@@ -240,7 +216,7 @@ impl VirtualTerminal {
     /// Scroll up (toward older content) by the given number of lines
     pub fn scroll_up(&mut self, lines: usize) {
         let current = self.parser.screen().scrollback();
-        let max = self.max_scrollback();
+        let max = self.scrollback_capacity();
         let new_offset = (current + lines).min(max);
         self.set_scrollback(new_offset);
     }
@@ -264,14 +240,12 @@ impl VirtualTerminal {
         self.parser.screen().scrollback()
     }
 
-    /// Get maximum scrollback available (number of lines in history)
-    pub fn max_scrollback(&self) -> usize {
+    /// Get the configured scrollback capacity (maximum rows of history kept)
+    ///
+    /// This is the capacity the terminal was created with, not how many rows
+    /// of history currently exist.
+    pub fn scrollback_capacity(&self) -> usize {
         self.scrollback_rows
-    }
-
-    /// Check if at the bottom (live view)
-    pub fn is_at_bottom(&self) -> bool {
-        self.parser.screen().scrollback() == 0
     }
 
     /// Get cursor position (row, col)
@@ -308,7 +282,7 @@ mod tests {
     fn test_vterm_simple_text() {
         let mut vt = VirtualTerminal::new(24, 80);
         vt.process(b"Hello, World!");
-        let lines = vt.get_lines();
+        let lines = vt.visible_lines(vt.size().0);
         assert!(lines[0].starts_with("Hello, World!"));
     }
 
@@ -317,7 +291,7 @@ mod tests {
         let mut vt = VirtualTerminal::new(24, 80);
         // Use CR+LF for proper newline behavior (CR resets column, LF moves down)
         vt.process(b"Line 1\r\nLine 2");
-        let lines = vt.get_lines();
+        let lines = vt.visible_lines(vt.size().0);
         assert!(lines[0].starts_with("Line 1"));
         assert!(lines[1].starts_with("Line 2"));
     }
@@ -326,7 +300,7 @@ mod tests {
     fn test_vterm_cursor_movement() {
         let mut vt = VirtualTerminal::new(24, 80);
         vt.process(b"\x1b[5;10HX"); // Move to row 5, col 10 and print X
-        let lines = vt.get_lines();
+        let lines = vt.visible_lines(vt.size().0);
         assert_eq!(lines[4].chars().nth(9), Some('X'));
     }
 
@@ -335,7 +309,7 @@ mod tests {
         let mut vt = VirtualTerminal::new(24, 80);
         vt.process(b"Text here");
         vt.process(b"\x1b[2J"); // Clear screen
-        let lines = vt.get_lines();
+        let lines = vt.visible_lines(vt.size().0);
         assert!(lines[0].is_empty());
     }
 
@@ -345,7 +319,7 @@ mod tests {
         vt.process(b"Hello");
         vt.resize(10, 40);
         assert_eq!(vt.size(), (10, 40));
-        let lines = vt.get_lines();
+        let lines = vt.visible_lines(vt.size().0);
         assert!(lines[0].starts_with("Hello"));
     }
 
@@ -375,18 +349,120 @@ mod tests {
     fn test_vterm_with_scrollback() {
         let vt = VirtualTerminal::with_scrollback(24, 80, 5000);
         assert_eq!(vt.size(), (24, 80));
-        assert_eq!(vt.max_scrollback(), 5000);
+        assert_eq!(vt.scrollback_capacity(), 5000);
     }
 
     #[test]
     fn test_vterm_default_scrollback() {
         let vt = VirtualTerminal::new(24, 80);
-        assert_eq!(vt.max_scrollback(), DEFAULT_SCROLLBACK_ROWS);
+        assert_eq!(vt.scrollback_capacity(), DEFAULT_SCROLLBACK_ROWS);
     }
 
     #[test]
     fn test_vterm_custom_scrollback_zero() {
         let vt = VirtualTerminal::with_scrollback(24, 80, 0);
-        assert_eq!(vt.max_scrollback(), 0);
+        assert_eq!(vt.scrollback_capacity(), 0);
+    }
+
+    // visible_styled_lines: span merging and cache invalidation
+
+    #[test]
+    fn test_styled_lines_merge_adjacent_same_style_cells() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"\x1b[31mred\x1b[0m plain");
+
+        let lines = vt.visible_styled_lines(24);
+        let spans = &lines[0].spans;
+
+        // "red" is three cells of identical style: one span, not three.
+        // The unstyled tail becomes a second span.
+        assert_eq!(spans.len(), 2, "spans: {:?}", spans);
+        assert_eq!(spans[0].content.as_ref(), "red");
+        assert_eq!(spans[0].style.fg, Some(Color::Indexed(1)));
+        assert_eq!(spans[1].content.as_ref(), " plain");
+        assert_eq!(spans[1].style.fg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn test_styled_lines_cache_returns_same_rc_until_invalidated() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"hello");
+
+        let first = vt.visible_styled_lines(24);
+        let second = vt.visible_styled_lines(24);
+        assert!(
+            Rc::ptr_eq(&first, &second),
+            "repeated renders must reuse the cached allocation"
+        );
+    }
+
+    #[test]
+    fn test_styled_lines_cache_invalidated_by_process() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"hello");
+        let before = vt.visible_styled_lines(24);
+
+        vt.process(b" world");
+        let after = vt.visible_styled_lines(24);
+
+        assert!(!Rc::ptr_eq(&before, &after));
+        assert!(after[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+            .starts_with("hello world"));
+    }
+
+    #[test]
+    fn test_styled_lines_cache_invalidated_by_resize() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"hello");
+        let before = vt.visible_styled_lines(24);
+
+        vt.resize(10, 40);
+        let after = vt.visible_styled_lines(24);
+
+        assert!(!Rc::ptr_eq(&before, &after));
+        // Only 10 rows exist after the resize
+        assert_eq!(after.len(), 10);
+    }
+
+    #[test]
+    fn test_styled_lines_scroll_offset_changes_what_is_returned() {
+        let mut vt = VirtualTerminal::with_scrollback(4, 20, 100);
+        for i in 0..10 {
+            vt.process(format!("line {}\r\n", i).as_bytes());
+        }
+
+        let live = vt.visible_styled_lines(4);
+        let live_text: Vec<String> = live
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        vt.scroll_up(3);
+        let scrolled = vt.visible_styled_lines(4);
+        let scrolled_text: Vec<String> = scrolled
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+
+        assert!(
+            !Rc::ptr_eq(&live, &scrolled),
+            "scroll must invalidate cache"
+        );
+        // Scrolled back 3 rows: the whole viewport shows history 3 rows older
+        assert_ne!(live_text, scrolled_text);
+        assert_eq!(scrolled_text[0], "line 4");
+
+        // Scrolling back to the bottom restores the live view content
+        vt.scroll_to_bottom();
+        let back = vt.visible_styled_lines(4);
+        let back_text: Vec<String> = back
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(back_text, live_text);
     }
 }

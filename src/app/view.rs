@@ -16,7 +16,6 @@ pub enum View {
     BranchDetail(ProjectId, BranchId),
     /// Single session fullscreen view
     SessionView,
-    /// All sessions sorted by recent activity
     /// Log viewer showing application logs
     LogViewer,
     /// Claude configurations management
@@ -29,31 +28,6 @@ impl View {
     /// Check if this view is the projects overview
     pub fn is_projects_overview(&self) -> bool {
         matches!(self, View::ProjectsOverview)
-    }
-
-    /// Check if this view is a project detail view
-    pub fn is_project_detail(&self) -> bool {
-        matches!(self, View::ProjectDetail(_))
-    }
-
-    /// Check if this view is a branch detail view
-    pub fn is_branch_detail(&self) -> bool {
-        matches!(self, View::BranchDetail(_, _))
-    }
-
-    /// Check if this view is the session view
-    pub fn is_session_view(&self) -> bool {
-        matches!(self, View::SessionView)
-    }
-
-    /// Check if this view is the Claude configs view
-    pub fn is_claude_configs(&self) -> bool {
-        matches!(self, View::ClaudeConfigs)
-    }
-
-    /// Check if this view is the Codex configs view
-    pub fn is_codex_configs(&self) -> bool {
-        matches!(self, View::CodexConfigs)
     }
 
     /// Get the parent view for navigation (Esc key)
@@ -99,20 +73,8 @@ mod tests {
 
     #[test]
     fn test_view_is_methods() {
-        let project_id = uuid::Uuid::new_v4();
-        let branch_id = uuid::Uuid::new_v4();
-
         assert!(View::ProjectsOverview.is_projects_overview());
-        assert!(!View::ProjectsOverview.is_project_detail());
-
-        assert!(View::ProjectDetail(project_id).is_project_detail());
-        assert!(!View::ProjectDetail(project_id).is_branch_detail());
-
-        assert!(View::BranchDetail(project_id, branch_id).is_branch_detail());
-        assert!(!View::BranchDetail(project_id, branch_id).is_session_view());
-
-        assert!(View::SessionView.is_session_view());
-        assert!(View::ClaudeConfigs.is_claude_configs());
+        assert!(!View::SessionView.is_projects_overview());
     }
 
     #[test]

@@ -142,14 +142,7 @@ The worktree directory was deleted outside of Panoptes.
 
 **Solutions:**
 
-1. Try a different theme:
-   ```bash
-   echo 'theme_preset = "light"' >> ~/.panoptes/config.toml
-   # or
-   echo 'theme_preset = "high-contrast"' >> ~/.panoptes/config.toml
-   ```
-
-2. Ensure your terminal supports 256 colors:
+1. Ensure your terminal supports 256 colors:
    ```bash
    echo $TERM
    # Should be something like xterm-256color
