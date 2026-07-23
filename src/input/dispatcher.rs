@@ -193,9 +193,11 @@ fn validate_mode_view_consistency(state: &mut AppState) {
             _,
         ) => false,
 
-        // Session delete confirmation only valid in SessionView or BranchDetail
+        // Session delete confirmation is valid wherever a session list lives:
+        // the session view, branch detail, and the overview's sessions list
         (InputMode::ConfirmingSessionDelete, View::SessionView) => true,
         (InputMode::ConfirmingSessionDelete, View::BranchDetail(_, _)) => true,
+        (InputMode::ConfirmingSessionDelete, View::ProjectsOverview) => true,
         (InputMode::ConfirmingSessionDelete, _) => false,
 
         // Folder organization only happens in the projects overview
@@ -453,7 +455,9 @@ mod tests {
                     matches!(view, View::ProjectDetail(_))
                 }
                 InputMode::ConfirmingSessionDelete => {
-                    view == View::SessionView || matches!(view, View::BranchDetail(_, _))
+                    view == View::SessionView
+                        || view == View::ProjectsOverview
+                        || matches!(view, View::BranchDetail(_, _))
                 }
                 InputMode::ConfirmingBranchDelete => {
                     matches!(view, View::ProjectDetail(_) | View::BranchDetail(_, _))

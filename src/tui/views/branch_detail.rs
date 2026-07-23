@@ -9,12 +9,11 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::{SessionManager, SessionType};
+use crate::session::SessionManager;
 use crate::tui::header::Header;
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
-use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{
     footer_with_attention, format_custom_shortcuts_hint, format_custom_shortcuts_list,
@@ -67,7 +66,7 @@ pub fn render_branch_detail(
     } else if state.input_mode == InputMode::CreatingCodexSession {
         render_session_creation(frame, areas.content, state, "Codex");
     } else if state.input_mode == InputMode::ConfirmingSessionDelete {
-        render_delete_confirmation(frame, areas.content, state, sessions);
+        super::render_session_delete_confirmation(frame, areas.content, state, sessions);
     } else if let Some(branch) = branch {
         let branch_sessions = sessions.entries_for_branch(branch_id);
 
@@ -179,35 +178,6 @@ fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState, sess
         .style(t.input_style())
         .block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(input, area);
-}
-
-/// Render the delete confirmation dialog
-fn render_delete_confirmation(
-    frame: &mut Frame,
-    area: Rect,
-    state: &AppState,
-    sessions: &SessionManager,
-) {
-    let session = state.pending_delete_session.and_then(|id| sessions.get(id));
-
-    let session_name = session
-        .map(|s| s.info.name.clone())
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    let warning = session
-        .map(|s| match s.info.session_type {
-            SessionType::ClaudeCode => "This will kill the Claude Code process.",
-            SessionType::OpenAICodex => "This will kill the Codex process.",
-            SessionType::Shell => "This will kill the shell process.",
-        })
-        .unwrap_or("This will kill the process.")
-        .to_string();
-
-    let config = ConfirmDialogConfig {
-        warnings: vec![warning],
-        ..ConfirmDialogConfig::new("Confirm Delete", "session", &session_name)
-    };
-    render_confirm_dialog(frame, area, config);
 }
 
 #[cfg(test)]
