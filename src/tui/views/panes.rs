@@ -14,14 +14,13 @@ use crate::config::Config;
 use crate::logging::LogFileInfo;
 use crate::project::ProjectStore;
 use crate::session::SessionManager;
-use crate::tui::header::Header;
+use crate::tui::header::{Header, LogoKind};
 use crate::tui::layout::ScreenLayout;
 use crate::tui::panes::{side_mode, SideMode};
 use crate::tui::theme::theme;
 use crate::tui::views::pane_settings::SettingsPaneContext;
 use crate::tui::views::{
-    footer_with_attention, format_custom_shortcuts_hint, render_footer, status_parts,
-    truncate_string, Breadcrumb,
+    footer_with_attention, format_custom_shortcuts_hint, render_footer, truncate_string, Breadcrumb,
 };
 
 /// Everything the three panes need to draw themselves
@@ -46,11 +45,11 @@ pub fn render_panes(frame: &mut Frame, area: Rect, ctx: PaneContext) {
     let attention_count = sessions.total_attention_count();
 
     // One global header, visible from every pane - which is what keeps the
-    // blinking attention indicator reachable from deep inside Settings
-    let mut parts = vec![format!("{} projects", ctx.project_store.project_count())];
-    parts.extend(status_parts(sessions.total_active_count(), attention_count));
+    // blinking attention indicator reachable from deep inside Settings.
+    // It carries the wordmark and nothing else in text: the counts it used to
+    // repeat are already in the pane titles, a row apart
     let header = Header::new(Breadcrumb::new())
-        .with_suffix(format!("({})", parts.join(", ")))
+        .with_logo(LogoKind::Full)
         .with_notifications(Some(&state.header_notifications))
         .with_attention_count(attention_count);
 
@@ -374,13 +373,86 @@ mod tests {
         let f = fixture();
         let lines = render(160, &AppState::default(), &f);
 
-        // The header names the app once, not once per pane
-        let header_rows = lines.iter().filter(|l| l.contains("Panoptes")).count();
-        assert_eq!(header_rows, 1, "{lines:?}");
+        // The header names the app once, in the wordmark, not once per pane
+        let wordmark_rows = lines
+            .iter()
+            .filter(|l| l.starts_with(crate::tui::logo::WORDMARK[0]))
+            .count();
+        assert_eq!(wordmark_rows, 1, "{lines:?}");
+        assert!(
+            contains_line(&lines, crate::tui::logo::TAGLINE),
+            "{lines:?}"
+        );
+        assert!(
+            contains_line(&lines, &crate::tui::logo::version()),
+            "{lines:?}"
+        );
         assert!(
             contains_line(&lines, "Tab: pane | q: quit | ?: help"),
             "{lines:?}"
         );
+    }
+
+    /// The counts the header used to carry are a row below it, in the pane
+    /// titles - repeating them beside the wordmark was the reason to drop them
+    #[test]
+    fn test_the_header_carries_no_status_text() {
+        let f = fixture();
+        let lines = render(160, &AppState::default(), &f);
+
+        assert!(!contains_line(&lines, "1 projects"), "{lines:?}");
+        assert!(contains_line(&lines, "Projects (1)"), "{lines:?}");
+    }
+
+    /// Four rows of branding on a short terminal would crowd out the panes,
+    /// so the art gives way to the name spelled out
+    #[test]
+    fn test_a_short_terminal_drops_the_wordmark() {
+        let f = fixture();
+        let state = AppState::default();
+        let widths = pane_widths(120, 0);
+        let lines = render_to_lines(120, 10, |frame| {
+            render_panes(
+                frame,
+                frame.size(),
+                PaneContext {
+                    state: &state,
+                    project_store: &f.project_store,
+                    sessions: &f.sessions,
+                    config: &f.config,
+                    claude_config_store: &f.claude,
+                    codex_config_store: &f.codex,
+                    log_file_info: &f.log,
+                    widths,
+                    hook_port: 9999,
+                    hook_healthy: true,
+                },
+            )
+        });
+
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with(crate::tui::logo::WORDMARK[0])),
+            "{lines:?}"
+        );
+        assert!(contains_line(&lines, crate::tui::logo::PLAIN), "{lines:?}");
+    }
+
+    /// A terminal narrower than the wordmark drops it too, rather than
+    /// drawing three rows of art clipped mid-letter
+    #[test]
+    fn test_a_narrow_terminal_drops_the_wordmark() {
+        let f = fixture();
+        let lines = render(28, &AppState::default(), &f);
+
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with(crate::tui::logo::WORDMARK[0])),
+            "{lines:?}"
+        );
+        assert!(contains_line(&lines, crate::tui::logo::PLAIN), "{lines:?}");
     }
 
     #[test]

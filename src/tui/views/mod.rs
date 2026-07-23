@@ -238,10 +238,14 @@ pub struct Breadcrumb {
 }
 
 impl Breadcrumb {
-    /// Create a new breadcrumb with the root "Panoptes" segment
+    /// Create an empty breadcrumb
+    ///
+    /// There is no "Panoptes" root segment: the wordmark in the header says
+    /// the app's name, so repeating it two columns to the right only pushed
+    /// the part that identifies where you are off the edge.
     pub fn new() -> Self {
         Self {
-            segments: vec!["Panoptes".to_string()],
+            segments: Vec::new(),
         }
     }
 
@@ -258,10 +262,13 @@ impl Breadcrumb {
 
     /// Format the breadcrumb with an optional suffix (e.g., status info)
     pub fn display_with_suffix(&self, suffix: &str) -> String {
+        let path = self.display();
         if suffix.is_empty() {
-            self.display()
+            path
+        } else if path.is_empty() {
+            suffix.to_string()
         } else {
-            format!("{} {}", self.display(), suffix)
+            format!("{} {}", path, suffix)
         }
     }
 }

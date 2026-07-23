@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionManager, SessionState, SessionType};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
-use crate::tui::header::Header;
+use crate::tui::header::{Header, LogoKind};
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
@@ -31,16 +31,9 @@ pub fn render_session_view(
     let session = state.active_session.and_then(|id| sessions.get(id));
     let attention_count = sessions.total_attention_count();
 
-    // Pre-calculate layout using FrameLayout
-    let frame_config = FrameConfig {
-        header_height: 3,
-        footer_height: 3,
-        title: Some("Output".to_string()),
-    };
-    let layout = FrameLayout::calculate(area, &frame_config);
-
     // === HEADER ===
-    // Build breadcrumb and suffix
+    // Built before the layout, because how many rows it needs depends on how
+    // much of the wordmark this terminal can afford
     let (breadcrumb, suffix) = build_header_breadcrumb(session, state, project_store);
 
     // Session header has custom coloring based on session state
@@ -49,11 +42,22 @@ pub fn render_session_view(
         .unwrap_or(t.text_muted);
     let custom_style = Style::default().fg(header_color).bold();
 
+    // The wordmark only, without the tagline and version the pane screen
+    // carries: every row here is agent output the user is reading
     let header = Header::new(breadcrumb)
+        .with_logo(LogoKind::Wordmark)
         .with_suffix(suffix)
         .with_notifications(Some(header_notifications))
         .with_attention_count(attention_count)
         .with_custom_style(custom_style);
+
+    // Pre-calculate layout using FrameLayout
+    let frame_config = FrameConfig {
+        header_height: header.height(area),
+        footer_height: 3,
+        title: Some("Output".to_string()),
+    };
+    let layout = FrameLayout::calculate(area, &frame_config);
 
     header.render(frame, layout.header);
 
@@ -277,7 +281,52 @@ mod tests {
         });
 
         assert!(contains_line(&lines, "Session not found"), "{:?}", lines);
-        assert!(contains_line(&lines, "Panoptes > ? > ? > ?"), "{:?}", lines);
+        assert!(contains_line(&lines, "? > ? > ?"), "{:?}", lines);
         assert!(contains_line(&lines, "Enter: session mode"), "{:?}", lines);
+    }
+
+    /// The session header wears the wordmark but not the tagline or version:
+    /// every row it takes is a row of agent output the user cannot read
+    #[test]
+    fn test_session_header_wears_the_wordmark_alone() {
+        let state = AppState::default();
+        let config = Config::default();
+        let sessions = SessionManager::with_store(config.clone(), SessionStore::new());
+        let store = ProjectStore::new();
+        let header_notifications = HeaderNotificationManager::default();
+
+        let lines = render_to_lines(100, 24, |frame| {
+            render_session_view(
+                frame,
+                frame.size(),
+                &state,
+                &sessions,
+                &store,
+                &config,
+                &header_notifications,
+            )
+        });
+
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with(crate::tui::logo::WORDMARK[0])),
+            "{lines:?}"
+        );
+        assert!(
+            !contains_line(&lines, crate::tui::logo::TAGLINE),
+            "{lines:?}"
+        );
+        assert!(
+            !contains_line(&lines, &crate::tui::logo::version()),
+            "{lines:?}"
+        );
+        // The breadcrumb sits beside the wordmark, on its second row
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with(crate::tui::logo::WORDMARK[1]) && l.contains("? > ? > ?")),
+            "{lines:?}"
+        );
     }
 }
