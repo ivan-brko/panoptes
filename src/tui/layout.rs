@@ -5,7 +5,7 @@
 
 use ratatui::prelude::*;
 
-use crate::tui::header::{Header, HEADER_HEIGHT};
+use crate::tui::header::Header;
 
 /// Default footer height (including top border)
 pub const DEFAULT_FOOTER_HEIGHT: u16 = 3;
@@ -50,11 +50,12 @@ impl<'a> ScreenLayout<'a> {
     /// Returns a `LayoutAreas` struct with the content and footer areas.
     /// The header is rendered automatically if present.
     pub fn render(self, frame: &mut Frame) -> LayoutAreas {
-        let header_height = if self.header.is_some() {
-            HEADER_HEIGHT
-        } else {
-            0
-        };
+        // The header sizes itself: how many rows it wants depends on how much
+        // of the wordmark fits in this terminal
+        let header_height = self
+            .header
+            .as_ref()
+            .map_or(0, |header| header.height(self.area));
 
         // Build constraints
         let mut constraints = Vec::new();

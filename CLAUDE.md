@@ -52,6 +52,8 @@ PTY Output → Session buffer → TUI render
 - `input/agent_configs.rs` - Shared Claude/Codex config input handlers (parameterized by `AgentKind`)
 - `tui/` - Terminal UI rendering with ratatui
 - `tui/panes.rs` - Accordion sizing and its transition (`pane_widths`, `PaneLayout`, `SideMode`)
+- `tui/header.rs` - The one global header: the wordmark, and everything laid out around it
+- `tui/logo.rs` - The wordmark itself, and the column band the header reserves for it
 - `tui/views/panes.rs` - The three-pane frame: one header, three bordered panes, one footer
 - `tui/views/pane_{projects,sessions,settings}.rs` - Each pane's content, at every density
 - `tui/views/prompts.rs` / `tui/views/worktree.rs` - The centred overlays (lists and paragraphs)
@@ -76,6 +78,9 @@ PTY Output → Session buffer → TUI render
   1. Footer help in `src/tui/views/panes.rs` (`footer_text` and its helpers)
   2. Help overlay in `src/tui/views/help.rs`
   3. Reserved keys in `src/config.rs` (`RESERVED_KEYS` constant) - prevents users from binding custom shortcuts to built-in keys
+- The header carries the wordmark, not the app's name in text. `Breadcrumb::new()`
+  has no root segment, so a view names only where the user *is*; the header drops
+  to a spelled-out `PANOPTES` when the terminal is too small for the art
 - Prompts split by content: **if it shows a list or a paragraph it is a centred
   overlay** (`tui/views/prompts.rs`, `worktree.rs`), anchored to the terminal so
   an animating pane cannot resize it mid-typing; **if it is one line you type
