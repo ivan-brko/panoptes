@@ -17,7 +17,7 @@ pub fn handle_log_viewer_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let entry_count = app.log_buffer.len();
 
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
             // Go back to projects overview
             app.state.view = View::ProjectsOverview;
         }

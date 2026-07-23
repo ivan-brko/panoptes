@@ -705,7 +705,7 @@ pub fn handle_managing_custom_shortcuts_key(app: &mut App, key: KeyEvent) -> Res
     let shortcut_count = app.config.custom_shortcuts.len();
 
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
             // Close the dialog
             app.state.input_mode = InputMode::Normal;
         }

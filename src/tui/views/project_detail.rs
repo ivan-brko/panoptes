@@ -118,7 +118,7 @@ fn footer_text(state: &AppState, sessions: &SessionManager) -> String {
         }
         _ => {
             let base =
-                "n: new worktree | b: base | c/x: config | r: rename | d: delete | k: shortcuts | q: quit"
+                "n: new worktree | c/x: config | r: rename | d: delete | ?: help | Esc: back"
                     .to_string();
             footer_with_attention(base, sessions)
         }

@@ -46,11 +46,13 @@ Navigate forward with `Enter`, backward with `Esc`. This mental model makes it e
 Sessions display their current state in real-time:
 
 - **Starting** - Session is initializing
-- **Thinking** - Claude is processing your request
-- **Executing** - Claude is running a tool (like editing files or running commands)
-- **Waiting** - Claude is waiting for your input
-- **Idle** - No recent activity
+- **Thinking** - Agent is processing your request
+- **Executing** - Agent is running a tool (like editing files or running commands)
+- **Needs approval** - Agent is asking for permission to proceed
+- **Waiting** - Agent is waiting for your input
+- **Suspended** - Session process was suspended after inactivity (wakes on interaction)
 - **Exited** - Session has ended
+- **Resumable** - Session recovered from a previous run and can be resumed
 
 Shell sessions show simplified states:
 - **Running** - A command is executing in the foreground
@@ -92,7 +94,7 @@ Session views support scrollback through output history with PgUp/PgDn keys. The
 
 ### Keyboard-Driven Interface
 
-Everything is accessible via keyboard shortcuts. Number keys (1-9) for quick selection, Tab to cycle through sessions, and intuitive vim-style navigation.
+Everything is accessible via keyboard shortcuts. Number keys (1-9) for quick selection, Tab to cycle through sessions, and arrow keys for navigation.
 
 ### Session Naming
 
@@ -196,4 +198,4 @@ The current version includes:
 - Project and branch persistence
 - Path autocomplete when adding projects
 
-Sessions are ephemeral - they exist only while Panoptes is running. Projects and branches are persisted between sessions.
+Sessions are persisted to `sessions.json` and recovered across restarts - a recovered session shows as "Resumable" and can be resumed. Projects and branches are persisted as well.

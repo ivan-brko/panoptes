@@ -179,9 +179,11 @@ pub fn handle_adding_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         KeyCode::Enter => {
-            // Always validate path and transition to name input
+            // Always validate path and transition to name input. Keep the
+            // typed path in `new_project_path` (clone, don't take) so stepping
+            // back here with Esc from the name step shows it again.
             clear_path_completions(app);
-            let path_str = std::mem::take(&mut app.state.new_project_path);
+            let path_str = app.state.new_project_path.clone();
             let user_path = PathBuf::from(shellexpand::tilde(&path_str).into_owned());
             let user_path = user_path.canonicalize().unwrap_or(user_path);
 
@@ -272,13 +274,10 @@ pub fn handle_adding_project_name_key(app: &mut App, key: KeyEvent) -> Result<()
     }
     match key.code {
         KeyCode::Esc => {
-            // Cancel project addition entirely
-            app.state.input_mode = InputMode::Normal;
+            // Step back to the path entry (keeping the typed path), consistent
+            // with Esc meaning "back one level" through the wizard
             app.state.new_project_name.clear();
-            app.state.new_project_path.clear();
-            app.state.pending_project_path = PathBuf::new();
-            app.state.pending_session_subdir = None;
-            app.state.pending_default_branch.clear();
+            app.state.input_mode = InputMode::AddingProject;
         }
         KeyCode::Enter => {
             // Create project with custom (or default) name
@@ -336,6 +335,8 @@ pub fn handle_adding_project_name_key(app: &mut App, key: KeyEvent) -> Result<()
             let project_count = app.project_store.project_count();
             app.state.selected_project_index = project_count.saturating_sub(1);
 
+            // The flow is finished; drop the path retained for step-back
+            app.state.new_project_path.clear();
             app.state.input_mode = InputMode::Normal;
         }
         KeyCode::Backspace => {

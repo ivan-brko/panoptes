@@ -28,9 +28,6 @@ hook_port = 9999
 worktrees_dir = "/Users/you/.panoptes/worktrees"
 hooks_dir = "/Users/you/.panoptes/hooks"
 
-# Parsed but unused - scrollback_lines is what bounds session history
-max_output_lines = 10000
-
 # Maximum scrollback lines per session (for terminal history)
 scrollback_lines = 10000
 
@@ -59,14 +56,12 @@ turn_complete = true  # an agent finished its turn
 stalled = false       # a tool has been in flight far longer than expected
 crashed = true        # a session's process died unexpectedly
 
-# Milliseconds to hold Escape for exiting session mode (deprecated)
-esc_hold_threshold_ms = 400
-
 # Custom shortcuts for spawning shell sessions with predefined commands
 [[custom_shortcuts]]
 key = "v"
 name = "VSCode"
 command = "code . &"
+auto_close = false    # close the shell session automatically when the command finishes
 
 [[custom_shortcuts]]
 key = "e"
@@ -118,19 +113,6 @@ It rewrites them on startup, so treat this directory as generated.
 
 **When to change:** Rarely. Mainly if `~/.panoptes/` is on a filesystem that
 cannot hold executable scripts.
-
----
-
-### max_output_lines
-
-| Property | Value |
-|----------|-------|
-| Default | `10000` |
-| Type | Integer |
-
-**Not currently used.** The setting is still parsed so old config files keep
-loading, but nothing reads it. Session history is bounded by
-[`scrollback_lines`](#scrollback_lines) instead.
 
 ---
 
@@ -283,17 +265,6 @@ reminder back.
 
 ---
 
-### esc_hold_threshold_ms
-
-| Property | Value |
-|----------|-------|
-| Default | `400` |
-| Type | Integer (milliseconds) |
-
-**Deprecated:** This setting is no longer actively used. Escape key behavior now uses `Shift+Escape` to forward Escape to Claude Code.
-
----
-
 ### custom_shortcuts
 
 | Property | Value |
@@ -301,16 +272,17 @@ reminder back.
 | Default | `[]` (empty array) |
 | Type | Array of shortcut objects |
 
-Defines custom keyboard shortcuts that spawn shell sessions with predefined commands. Each shortcut is an array entry with three fields:
+Defines custom keyboard shortcuts that spawn shell sessions with predefined commands. Each shortcut is an array entry with these fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `key` | character | Yes | Single character trigger (e.g., `'v'`, `'e'`) |
 | `name` | string | No | Display name shown in footer (if empty, uses first 6 chars of command) |
 | `command` | string | Yes | Command to run in the shell session |
+| `auto_close` | bool | No | Default `false`. When `true`, the shortcut's shell session closes automatically once its command finishes |
 
 **Reserved keys** (cannot be used for custom shortcuts):
-- `q`, `i`, `g`, `G`, `t`, `T`, `k`, `x` - Already bound in session view
+- `g`, `G`, `k`, `x`, `n`, `s`, `d` - Already bound in the views
 - `0-9` - Used for session number jumping
 
 **Example:**
@@ -348,8 +320,10 @@ Panoptes stores data in the `~/.panoptes/` directory:
 |------|---------|
 | `~/.panoptes/config.toml` | User configuration file |
 | `~/.panoptes/projects.json` | Project and branch data |
-| `~/.panoptes/worktrees/` | Git worktrees created by Panoptes |
+| `~/.panoptes/sessions.json` | Persisted sessions (recovered across restarts) |
+| `~/.panoptes/claude_configs.json` | Claude Code account configurations |
 | `~/.panoptes/codex_configs.json` | Codex account configurations |
+| `~/.panoptes/worktrees/` | Git worktrees created by Panoptes |
 | `~/.panoptes/hooks/` | Hook scripts for agent integration |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
 
@@ -395,7 +369,7 @@ To create a config file with default values:
 mkdir -p ~/.panoptes
 cat > ~/.panoptes/config.toml << 'EOF'
 hook_port = 9999
-max_output_lines = 10000
+scrollback_lines = 10000
 notification_method = "bell"
 EOF
 ```
@@ -406,7 +380,7 @@ Configuration changes require restarting Panoptes to take effect.
 
 ```bash
 # After editing config.toml
-# Press q to quit Panoptes
+# Press Esc at the Projects Overview to quit Panoptes (confirm when prompted)
 # Then restart it
 ./target/release/panoptes
 ```

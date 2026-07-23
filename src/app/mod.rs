@@ -43,9 +43,10 @@ use crate::tui::views::{
     render_agent_config_delete_dialog, render_agent_config_name_input_dialog,
     render_agent_config_path_input_dialog, render_agent_config_selector, render_agent_configs,
     render_agent_type_selector, render_branch_detail, render_claude_settings_copy_dialog,
-    render_claude_settings_migrate_dialog, render_custom_shortcut_dialogs, render_help_overlay,
-    render_loading_indicator, render_log_viewer, render_project_detail, render_projects_overview,
-    render_session_view,
+    render_claude_settings_migrate_dialog, render_custom_shortcut_dialogs, render_error_overlay,
+    render_help_overlay, render_loading_indicator, render_log_viewer, render_project_detail,
+    render_projects_overview, render_quit_confirm_dialog, render_session_view,
+    render_startup_notice_overlay,
 };
 use crate::tui::Tui;
 use crate::wizards::worktree::{
@@ -196,9 +197,11 @@ impl App {
         let tui = Tui::new()?;
 
         let mut state = AppState::default();
-        // Add any startup warnings as notifications
-        for warning in startup_warnings {
-            state.header_notifications.push(warning);
+        // Surface any startup warnings (corrupt-file backups, etc.) as a
+        // persistent, dismissable overlay rather than a 5-second toast that
+        // scrolls away before it can be read
+        if !startup_warnings.is_empty() {
+            state.startup_notice = Some(startup_warnings.join("\n"));
         }
 
         if mouse_debug_enabled {
@@ -234,7 +237,7 @@ impl App {
         // Enter TUI mode
         self.tui.enter()?;
 
-        tracing::info!("Panoptes started. Press 'n' to create a session, 'q' to quit.");
+        tracing::info!("Panoptes started. Press 'n' to create a session, Esc to quit.");
 
         // Main event loop
         let result = self.event_loop().await;
@@ -272,9 +275,13 @@ impl App {
             if event::poll(tick_rate)? {
                 match event::read()? {
                     Event::Key(key) => {
-                        // Clear error message on any keypress
+                        // Dismiss the error message and startup notice on any
+                        // keypress; the same key still performs its action
                         if self.state.error_message.is_some() {
                             self.state.error_message = None;
+                        }
+                        if self.state.startup_notice.is_some() {
+                            self.state.startup_notice = None;
                         }
                         crate::input::dispatcher::handle_key_event(self, key)?;
                         self.state.needs_render = true;
@@ -1890,6 +1897,11 @@ impl App {
                 | InputMode::ConfirmingCustomShortcutDelete => {
                     render_custom_shortcut_dialogs(frame, area, state, config);
                 }
+                // Centralized so the quit prompt is visible from any view, not
+                // only the overview where it is triggered
+                InputMode::ConfirmingQuit => {
+                    render_quit_confirm_dialog(frame, area);
+                }
                 // These modes draw no overlay from here: their dialogs are
                 // rendered by the per-view renderers above (session-name
                 // inputs, delete confirmations, worktree wizard, folder
@@ -1905,7 +1917,6 @@ impl App {
                 | InputMode::ConfirmingSessionDelete
                 | InputMode::ConfirmingBranchDelete
                 | InputMode::ConfirmingProjectDelete
-                | InputMode::ConfirmingQuit
                 | InputMode::RenamingProject
                 | InputMode::MovingToFolder
                 | InputMode::RenamingFolder
@@ -1923,6 +1934,15 @@ impl App {
             // Render loading overlay if a blocking operation is in progress
             if let Some(message) = &state.loading_message {
                 render_loading_indicator(frame, area, message);
+            }
+
+            // Dismissable overlays sit on top of everything so a message set
+            // from any view or dialog is actually seen. An error takes
+            // precedence over the startup notice.
+            if let Some(message) = &state.error_message {
+                render_error_overlay(frame, area, message);
+            } else if let Some(message) = &state.startup_notice {
+                render_startup_notice_overlay(frame, area, message);
             }
         })?;
 

@@ -31,7 +31,7 @@ pub fn handle_branch_detail_key(
     let session_count = branch_sessions.len();
 
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
             app.state.navigate_back();
         }
         KeyCode::Down => {
@@ -39,6 +39,17 @@ pub fn handle_branch_detail_key(
         }
         KeyCode::Up => {
             app.state.select_prev(session_count);
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            // Sessions are numbered in the list; jump to one by its number
+            // (1-indexed, 0 means session 10). Digits are reserved, so this
+            // never collides with a custom shortcut.
+            if let Some(num) = c.to_digit(10) {
+                let target = if num == 0 { 9 } else { (num as usize) - 1 };
+                if target < session_count {
+                    app.state.selected_session_index = target;
+                }
+            }
         }
         KeyCode::Enter => {
             // Use checked access to handle potential race conditions

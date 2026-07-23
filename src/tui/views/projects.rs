@@ -19,7 +19,6 @@ use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::render_project_delete_confirmation;
-use crate::tui::views::render_quit_confirm_dialog;
 use crate::tui::views::Breadcrumb;
 use crate::tui::views::{footer_with_attention, render_footer, status_parts, visible_window};
 use crate::tui::widgets::selection::{
@@ -40,7 +39,6 @@ pub fn render_projects_overview(
     let attention_count = sessions.total_attention_count();
     let attention_sessions = sessions.sessions_needing_attention();
     let has_dropped_events = state.dropped_events_count > 0;
-    let has_error = state.error_message.is_some();
     let t = theme();
 
     // Build header
@@ -58,13 +56,8 @@ pub fn render_projects_overview(
     // Create layout with header and footer
     let areas = ScreenLayout::new(area).with_header(header).render(frame);
 
-    // Dynamic content layout based on error/warning banners and attention section
+    // Dynamic content layout based on warning banner and attention section
     let mut content_constraints: Vec<Constraint> = Vec::new();
-
-    // Error message banner
-    if has_error {
-        content_constraints.push(Constraint::Length(1));
-    }
 
     // Warning banner for dropped events
     if has_dropped_events {
@@ -86,14 +79,6 @@ pub fn render_projects_overview(
         .split(areas.content);
 
     let mut chunk_idx = 0;
-
-    // Error message banner
-    if let Some(error_msg) = &state.error_message {
-        let error_text = format!("✖ {} (press any key to dismiss)", error_msg);
-        let error_banner = Paragraph::new(error_text).style(t.error_banner_style());
-        frame.render_widget(error_banner, content_chunks[chunk_idx]);
-        chunk_idx += 1;
-    }
 
     // Dropped events warning banner
     if has_dropped_events {
@@ -121,9 +106,6 @@ pub fn render_projects_overview(
 
     // Main content area
     match state.input_mode {
-        InputMode::CreatingSession => {
-            render_session_creation(frame, main_area, state);
-        }
         InputMode::AddingProject => {
             render_project_addition(frame, main_area, state);
         }
@@ -153,7 +135,6 @@ pub fn render_projects_overview(
 
     // Footer with help
     let help_text = match state.input_mode {
-        InputMode::CreatingSession => "Enter: create | Esc: cancel".to_string(),
         InputMode::AddingProject => {
             "Tab: autocomplete | Enter: select/validate | Esc: cancel".to_string()
         }
@@ -166,11 +147,6 @@ pub fn render_projects_overview(
         _ => footer_with_attention(normal_mode_footer(state, project_store, sessions), sessions),
     };
     render_footer(frame, areas.footer(), &help_text);
-
-    // Render quit confirmation dialog as overlay
-    if state.input_mode == InputMode::ConfirmingQuit {
-        render_quit_confirm_dialog(frame, area);
-    }
 }
 
 /// Build the normal-mode footer hint
@@ -192,7 +168,7 @@ fn normal_mode_footer(
     };
 
     if !has_projects {
-        return "n: new | c/x: configs | k: shortcuts | q: quit".to_string();
+        return "n: new | c/x: configs | k: shortcuts | ?: help | Esc: quit".to_string();
     }
 
     // Which list the keys currently act on
@@ -207,12 +183,12 @@ fn normal_mode_footer(
         // Folder context drops the global keys to keep the line inside a
         // narrow terminal; "ungroup" signals that nothing gets deleted
         format!(
-            "Enter/←→: expand/collapse | m: move | r: rename | d: ungroup | {}q: quit",
+            "Enter/←→: expand/collapse | m: move | r: rename | d: ungroup | {}Esc: quit",
             switch_hint
         )
     } else {
         format!(
-            "Enter: open | n: new | m: move | d: delete | {}c/x: configs | k: shortcuts | q: quit",
+            "Enter: open | n: new | d: delete | {}c/x: configs | ?: help | Esc: quit",
             switch_hint
         )
     }
@@ -268,19 +244,6 @@ fn render_attention_section(
             .border_style(Style::default().fg(t.border_warning)),
     );
     frame.render_widget(list, area);
-}
-
-/// Render the session creation input
-fn render_session_creation(frame: &mut Frame, area: Rect, state: &AppState) {
-    let t = theme();
-    let input = Paragraph::new(format!("New session name: {}_", state.session_draft.name))
-        .style(t.input_style())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Create Session"),
-        );
-    frame.render_widget(input, area);
 }
 
 /// Render the project addition input with path completion
@@ -392,8 +355,8 @@ fn render_main_content(
         // Empty state
         let t = theme();
         let empty_text = "No projects yet.\n\n\
-            Press 'n' to add a git repository as a project,\n\
-            or 'n' to create a quick session in the current directory.";
+            Press 'n' to add a git repository as a project.\n\
+            Press '?' for help, or 'Esc' to quit.";
         let empty = Paragraph::new(empty_text)
             .style(t.muted_style())
             .alignment(Alignment::Center)
@@ -977,6 +940,24 @@ mod tests {
             lines
         );
         assert!(contains_line(&lines, "d: ungroup"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_footer_uses_esc_to_quit_and_offers_help_not_q() {
+        // Navigation is Esc-only now: the overview footer must offer Esc to
+        // quit and ? for help, and must never advertise a `q` key again.
+        let store = store_with(&[("api-gateway", &[][..])]);
+        let state = AppState::default();
+
+        let lines = render_to_lines(&state, &store);
+
+        assert!(contains_line(&lines, "Esc: quit"), "{:?}", lines);
+        assert!(contains_line(&lines, "?: help"), "{:?}", lines);
+        assert!(
+            !lines.iter().any(|l| l.contains("q: quit")),
+            "footer must not advertise a q key: {:?}",
+            lines
+        );
     }
 
     #[test]

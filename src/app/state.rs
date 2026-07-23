@@ -308,6 +308,9 @@ pub struct AppState {
     pub dropped_events_count: u64,
     /// Error message to display to the user (cleared on next keypress)
     pub error_message: Option<String>,
+    /// Startup notice (e.g. corrupt-file backups) shown as a persistent,
+    /// dismissable overlay until the user presses a key
+    pub startup_notice: Option<String>,
     /// Timestamp of last resize event (for debouncing)
     pub last_resize: Option<Instant>,
     /// Whether a resize is pending (debounced)

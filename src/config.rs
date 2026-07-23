@@ -61,14 +61,14 @@ impl CustomShortcut {
 /// matches first. The list is deliberately a little wider than that, covering
 /// keys bound in neighbouring views too, so a shortcut does not mean one thing
 /// on one screen and something else on the next:
-/// - q: quit/back, in both views
 /// - k: manage shortcuts (this feature), handled globally
 /// - g, G: jump to top/bottom in the log viewer
 /// - x: Codex configurations, from the overview and project views
+/// - n, s, d: new worktree/AI, shell, delete - bound in the branch/project views
 /// - 0-9: jump to session by number
 ///
 /// `Space`, `Esc`, `Enter`, and `Tab` are not chars and cannot be bound at all.
-const RESERVED_KEYS: &[char] = &['q', 'g', 'G', 'k', 'x'];
+const RESERVED_KEYS: &[char] = &['g', 'G', 'k', 'x', 'n', 's', 'd'];
 const RESERVED_DIGITS: bool = true;
 
 /// Check if a key is reserved and cannot be used for custom shortcuts
@@ -103,10 +103,6 @@ pub struct Config {
     #[serde(default = "default_hooks_dir")]
     pub hooks_dir: PathBuf,
 
-    /// Maximum lines to keep in output buffer per session
-    #[serde(default = "default_max_output_lines")]
-    pub max_output_lines: usize,
-
     /// State timeout in seconds - Executing states auto-transition to Idle after this (default: 300 = 5 min)
     #[serde(default = "default_state_timeout")]
     pub state_timeout_secs: u64,
@@ -118,10 +114,6 @@ pub struct Config {
     /// How to get the user's attention when a session needs it
     #[serde(default)]
     pub notification_method: NotificationMethod,
-
-    /// Esc hold threshold in milliseconds for exiting session mode (default: 400ms)
-    #[serde(default = "default_esc_hold_threshold_ms")]
-    pub esc_hold_threshold_ms: u64,
 
     /// Maximum scrollback lines per session (default: 10000)
     /// Each 1000 lines uses approximately 10KB of memory
@@ -274,20 +266,12 @@ fn default_hooks_dir() -> PathBuf {
     config_dir().join("hooks")
 }
 
-fn default_max_output_lines() -> usize {
-    10_000
-}
-
 fn default_state_timeout() -> u64 {
     300 // 5 minutes
 }
 
 fn default_exited_retention() -> u64 {
     300 // 5 minutes
-}
-
-fn default_esc_hold_threshold_ms() -> u64 {
-    400
 }
 
 fn default_scrollback_lines() -> usize {
@@ -304,11 +288,9 @@ impl Default for Config {
             hook_port: default_hook_port(),
             worktrees_dir: default_worktrees_dir(),
             hooks_dir: default_hooks_dir(),
-            max_output_lines: default_max_output_lines(),
             state_timeout_secs: default_state_timeout(),
             exited_retention_secs: default_exited_retention(),
             notification_method: NotificationMethod::default(),
-            esc_hold_threshold_ms: default_esc_hold_threshold_ms(),
             scrollback_lines: default_scrollback_lines(),
             suspend_after_secs: default_suspend_after(),
             log_agent_events: false,
@@ -464,7 +446,6 @@ mod tests {
         assert!(parsed.notify_on.stalled);
         assert!(parsed.notify_on.approval);
         assert_eq!(parsed.custom_shortcuts.len(), 1);
-        assert_eq!(parsed.esc_hold_threshold_ms, original.esc_hold_threshold_ms);
         assert_eq!(parsed.scrollback_lines, original.scrollback_lines);
     }
 
@@ -480,7 +461,8 @@ notification_method = "title"
 "#;
         let parsed: Config = toml::from_str(legacy).expect("legacy config must load");
 
-        assert_eq!(parsed.max_output_lines, 500);
+        // `max_output_lines` was removed; an old file that still sets it must
+        // load fine (the now-unknown key is simply ignored, not an error)
         assert_eq!(parsed.notification_method, NotificationMethod::Title);
         // Absent sections fall back to the documented defaults
         assert!(parsed.notify_on.approval);
@@ -494,7 +476,6 @@ notification_method = "title"
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.hook_port, 9999);
-        assert_eq!(config.max_output_lines, 10_000);
         assert_eq!(config.notification_method, NotificationMethod::Bell);
     }
 
@@ -643,10 +624,14 @@ notification_method = "title"
     #[test]
     fn test_is_reserved_key() {
         // Reserved alphabetic keys
-        assert!(is_reserved_key('q'));
         assert!(is_reserved_key('g'));
         assert!(is_reserved_key('G'));
         assert!(is_reserved_key('k'));
+
+        // Built-in action keys shadowed by branch/project views
+        assert!(is_reserved_key('n'));
+        assert!(is_reserved_key('s'));
+        assert!(is_reserved_key('d'));
 
         // Reserved digits
         assert!(is_reserved_key('0'));
@@ -655,6 +640,9 @@ notification_method = "title"
 
         // Codex configs key
         assert!(is_reserved_key('x'));
+
+        // Freed when q stopped being a key at all (navigation is Esc-only)
+        assert!(!is_reserved_key('q'));
 
         // Non-reserved keys
         assert!(!is_reserved_key('v'));
@@ -681,7 +669,7 @@ notification_method = "title"
     #[test]
     fn test_config_add_shortcut_reserved_key() {
         let mut config = Config::default();
-        let shortcut = CustomShortcut::new('q', "Quit".to_string(), "exit".to_string(), false);
+        let shortcut = CustomShortcut::new('n', "New".to_string(), "true".to_string(), false);
 
         assert!(config.add_shortcut(shortcut).is_err());
     }

@@ -23,7 +23,8 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
     let projects_focused = !both_exist || app.state.homepage_focus == HomepageFocus::Projects;
 
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
+            // Top level: Esc prompts to leave the application
             app.state.input_mode = InputMode::ConfirmingQuit;
         }
         KeyCode::Char('n') => {
