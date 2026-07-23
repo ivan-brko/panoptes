@@ -36,7 +36,8 @@ pub use claude_settings::{
 };
 pub use confirm::{
     render_confirm_dialog, render_error_overlay, render_loading_indicator,
-    render_quit_confirm_dialog, render_startup_notice_overlay, ConfirmDialogConfig,
+    render_quit_confirm_dialog, render_session_delete_confirmation, render_startup_notice_overlay,
+    ConfirmDialogConfig,
 };
 pub use custom_shortcuts::render_custom_shortcut_dialogs;
 pub use help::render_help_overlay;

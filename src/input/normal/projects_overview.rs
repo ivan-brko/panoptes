@@ -157,7 +157,11 @@ pub fn handle_projects_overview_key(app: &mut App, key: KeyEvent) -> Result<()> 
                     None => {}
                 }
             } else if session_count > 0 {
-                destroy_selected_session(app);
+                // Ask first, like every other delete in the app
+                if let Some(session) = app.sessions.get_by_index(app.state.selected_session_index) {
+                    app.state.pending_delete_session = Some(session.info.id);
+                    app.state.input_mode = InputMode::ConfirmingSessionDelete;
+                }
             }
         }
         KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -224,24 +228,4 @@ fn open_selected_session(app: &mut App) -> Result<()> {
     };
     let session_id = session.info.id;
     app.activate_session(session_id)
-}
-
-/// Destroy the session currently selected in the sessions list
-fn destroy_selected_session(app: &mut App) {
-    let Some(session) = app.sessions.get_by_index(app.state.selected_session_index) else {
-        return;
-    };
-    let id = session.info.id;
-
-    // Clear active_session if it was the destroyed session
-    if app.state.active_session == Some(id) {
-        app.state.active_session = None;
-    }
-    if let Err(e) = app.sessions.destroy_session(id) {
-        tracing::error!("Failed to destroy session: {}", e);
-    }
-    let new_count = app.sessions.len();
-    if app.state.selected_session_index >= new_count && app.state.selected_session_index > 0 {
-        app.state.selected_session_index -= 1;
-    }
 }

@@ -79,9 +79,14 @@ pub(crate) fn confirming_session_delete_key(
                     tracing::error!("Failed to destroy session: {}", e);
                 }
 
-                // Adjust selection if needed
-                if let Some(branch_id) = branch_id {
-                    let new_count = sessions.entries_for_branch(branch_id).len();
+                // Adjust selection in whichever list the delete came from
+                let remaining = match branch_id {
+                    Some(branch_id) => Some(sessions.entries_for_branch(branch_id).len()),
+                    // The overview's sessions list is keyed off the same index
+                    None if state.view == View::ProjectsOverview => Some(sessions.len()),
+                    None => None,
+                };
+                if let Some(new_count) = remaining {
                     if state.selected_session_index >= new_count && new_count > 0 {
                         state.selected_session_index = new_count - 1;
                     }

@@ -128,6 +128,11 @@ pub fn render_projects_overview(
         InputMode::ConfirmingFolderRemove => {
             render_folder_remove_confirmation(frame, main_area, state, project_store);
         }
+        InputMode::ConfirmingSessionDelete => {
+            crate::tui::views::render_session_delete_confirmation(
+                frame, main_area, state, sessions,
+            );
+        }
         _ => {
             render_main_content(frame, main_area, state, project_store, sessions);
         }
@@ -140,6 +145,7 @@ pub fn render_projects_overview(
         }
         InputMode::AddingProjectName => "Enter: create project | Esc: cancel".to_string(),
         InputMode::ConfirmingProjectDelete => "y: confirm delete | n/Esc: cancel".to_string(),
+        InputMode::ConfirmingSessionDelete => "y: confirm delete | n/Esc: cancel".to_string(),
         InputMode::ConfirmingQuit => "y/Enter: quit | n/Esc: cancel".to_string(),
         InputMode::MovingToFolder => "Tab: complete | Enter: move | Esc: cancel".to_string(),
         InputMode::RenamingFolder => "Enter: rename | Esc: cancel".to_string(),

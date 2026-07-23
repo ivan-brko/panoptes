@@ -5,6 +5,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::app::AppState;
+use crate::session::{SessionManager, SessionType};
 use crate::tui::theme::theme;
 use crate::tui::widgets::dialog::{centered_rect, render_dialog, DialogSize, DialogSpec};
 
@@ -153,6 +155,38 @@ pub fn render_confirm_dialog(frame: &mut Frame, area: Rect, config: ConfirmDialo
     frame.render_widget(paragraph, dialog_area);
 }
 
+/// Render the "Confirm Delete" dialog for a session, filling `area`
+///
+/// Shared by every session list (branch detail and the projects overview) so
+/// deleting a session always asks first and reads the same wherever it happens.
+pub fn render_session_delete_confirmation(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    sessions: &SessionManager,
+) {
+    let session = state.pending_delete_session.and_then(|id| sessions.get(id));
+
+    let session_name = session
+        .map(|s| s.info.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let warning = session
+        .map(|s| match s.info.session_type {
+            SessionType::ClaudeCode => "This will kill the Claude Code process.",
+            SessionType::OpenAICodex => "This will kill the Codex process.",
+            SessionType::Shell => "This will kill the shell process.",
+        })
+        .unwrap_or("This will kill the process.")
+        .to_string();
+
+    let config = ConfirmDialogConfig {
+        warnings: vec![warning],
+        ..ConfirmDialogConfig::new("Confirm Delete", "session", &session_name)
+    };
+    render_confirm_dialog(frame, area, config);
+}
+
 /// Render a quit confirmation dialog
 ///
 /// Centered dialog asking user to confirm quitting the application.
@@ -279,6 +313,31 @@ pub fn render_loading_indicator(frame: &mut Frame, area: Rect, message: &str) {
 mod tests {
     use super::*;
     use crate::tui::views::test_util::{contains_line, render_to_lines};
+
+    #[test]
+    fn test_session_delete_confirmation_asks_before_deleting() {
+        use crate::config::Config;
+        use crate::session::store::SessionStore;
+
+        let config = Config::default();
+        let sessions = SessionManager::with_store(config, SessionStore::new());
+        let state = AppState {
+            input_mode: crate::app::InputMode::ConfirmingSessionDelete,
+            pending_delete_session: Some(uuid::Uuid::new_v4()),
+            ..Default::default()
+        };
+
+        let lines = render_to_lines(70, 20, |frame| {
+            render_session_delete_confirmation(frame, frame.size(), &state, &sessions)
+        });
+
+        assert!(contains_line(&lines, "Confirm Delete"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "Press y to confirm, n or Esc to cancel"),
+            "{:?}",
+            lines
+        );
+    }
 
     #[test]
     fn test_error_overlay_shows_message_and_dismiss_hint() {
