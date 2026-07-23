@@ -8,9 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Three always-visible panes: Projects, Sessions, Settings.** `Tab`/`Shift+Tab` cycle focus; the focused pane widens and the other two shrink rather than disappearing, so watching sessions no longer means leaving the project tree. How aggressively the accordion leans depends on the terminal — from a 60/10/10 split with the sides reduced to counters at 80 columns, out to near-equal thirds at 200. Unfocused panes degrade full → compact → strip by dropping whole fields, never by cutting one long string. Opening a session is still full-screen, and `Esc` returns you to the pane you opened it from.
+- **A Settings pane**, replacing four scattered entry points (`c`, `x`, `k`, `l`) with one place to look: Claude configs, Codex configs, custom shortcuts, notifications, and an About/paths section naming the version, the hook server's port and health, and where every file Panoptes writes actually lives.
+- **Notification settings are editable while Panoptes runs** — how you are notified, the four attention reasons that ring, and whether Claude's idle nudge counts. Each takes effect on the next event with no restart. Everything else stays read-only, shown under About/paths, because it is only read at startup or when a session spawns.
+- **Per-project settings on `,`**, gathering the project's default Claude config, default Codex config, default base branch, and rename into one list.
 - Projects can be grouped into folders in the projects overview, nested up to 3 levels deep (`m` to move, `r` to rename, `d` to ungroup, `Enter`/`←`/`→` to fold).
 
 ### Changed
+- **`Esc` means exactly one thing everywhere: back one level.** At the root of a pane it does nothing at all — "Esc at the overview quits" is gone. `q` quits instead, from every pane and from session-view normal mode. It still reaches the agent when you are attached to a session, so `q` keeps typing `q`.
+- **`Tab` is unambiguous app-wide.** It switches panes in normal mode, and nothing else: every other input mode owns it completely, so it still completes a path in the add-project prompt and still types a tab into an agent. It no longer silently means "next session" in the session view.
+- **Prompts split by content.** Anything showing a list or a paragraph — the add-project path and its completions, the folder move, all three worktree wizard steps, the base-branch selector, and every delete confirmation — is now a centred overlay anchored to the terminal, so an animating pane cannot resize a prompt under you and a list of paths is never truncated to one pane's width. One-line inputs stay inline in the pane that owns them.
+- Reserved keys are now `q`, `n`, `s`, `d`, `,` and the digits. `c`, `g`, `G`, `k` and `x` are freed — a net gain of three bindable keys. A custom shortcut bound to a key that has since become reserved is dropped on load and reported in a startup notice, rather than being left in place to be silently shadowed.
+- The "Needs Attention" list moved into the Sessions pane as a pinned top section. The blinking indicator stays in the global header, so it is visible from every pane including deep inside Settings.
 - **Git operations no longer freeze the interface.** Fetching remotes and creating or removing a worktree ran on the event-loop thread behind a static "Please Wait" box, so the whole TUI stopped rendering — no session output, no hook updates, no way out — for as long as git took. They now run on a worker thread while the UI keeps rendering, under a "Working" overlay with an animated spinner. A slow `git fetch` can be called off with `Esc`: the fetch is killed and the flow continues with the refs already on disk, the same fallback used when a fetch fails. Worktree create and remove are deliberately not cancellable — interrupting one halfway leaves the repository worse off than not starting.
 - Terminology is now consistent across footers, help, and dialogs: the Claude/Codex account configs are "configs" everywhere (were "Configs", "Configurations", and "accounts" in different places), and entering or leaving Session mode is "session mode" everywhere (the footer said "activate"/"deactivate" while the help said "Enter/Exit session mode").
 - The worktree delete dialog says plainly that the git branch itself is never deleted, and its toggle is explicit about deleting the *directory* from disk.
@@ -20,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paste now works in every text-input mode — config names and paths, folder move/rename, and custom shortcut fields — not just session creation.
 - UI consistency pass: a single `▶` selection glyph everywhere (the worktree wizard used `▸`), standard green/red Yes/No buttons in all confirmations, selector overlays styled like the other menus, and dialogs that clamp inside tiny terminals instead of overflowing.
 - Spawn failures and worktree-wizard errors now include the underlying cause instead of a bare summary.
+
+### Removed
+- **The log viewer, and the in-memory log buffer that fed it.** Panoptes is not a better `cat`: file logging to `~/.panoptes/logs/` is untouched, with its 7-day retention, and Settings → About/paths tells you which file is current. The 10,000-entry ring buffer that mirrored every log line into memory is gone with it.
+- The global `k` shortcut overlay. Custom shortcuts are managed from Settings → Shortcuts, one place and one path.
 
 ### Fixed
 - **A partial `config.toml` no longer refuses to start.** `hook_port`, `worktrees_dir`, `hooks_dir`, and `max_output_lines` had no defaults when deserializing, so a config file omitting any of them failed with `missing field ...` — including the example the configuration guide told you to create. All four now fall back to the same values `Config::default()` already used.

@@ -155,24 +155,34 @@ pub fn render_confirm_dialog(frame: &mut Frame, area: Rect, config: ConfirmDialo
     frame.render_widget(paragraph, dialog_area);
 }
 
-/// Render the "Confirm Delete" dialog for a session, filling `area`
+/// Render the "Confirm Delete" dialog for a session, as a centred overlay
 ///
-/// Shared by every session list (branch detail and the projects overview) so
-/// deleting a session always asks first and reads the same wherever it happens.
+/// Shared by every session list - pane 1's branch drill-down, pane 2, and the
+/// session view - so deleting a session always asks first, reads the same
+/// wherever it happens, and is anchored to the terminal rather than to a pane
+/// that may be mid-transition.
 pub fn render_session_delete_confirmation(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
     sessions: &SessionManager,
 ) {
-    let session = state.pending_delete_session.and_then(|id| sessions.get(id));
+    // A recovered session has no process, but it does have a record to
+    // discard, and both session lists offer exactly that - so look in both
+    // places or the dialog asks about "Unknown"
+    let session = state.pending_delete_session.and_then(|id| {
+        sessions
+            .get(id)
+            .map(|s| &s.info)
+            .or_else(|| sessions.get_recovered(id))
+    });
 
     let session_name = session
-        .map(|s| s.info.name.clone())
+        .map(|info| info.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
 
     let warning = session
-        .map(|s| match s.info.session_type {
+        .map(|info| match info.session_type {
             SessionType::ClaudeCode => "This will kill the Claude Code process.",
             SessionType::OpenAICodex => "This will kill the Codex process.",
             SessionType::Shell => "This will kill the shell process.",
@@ -182,6 +192,7 @@ pub fn render_session_delete_confirmation(
 
     let config = ConfirmDialogConfig {
         warnings: vec![warning],
+        overlay: Some((DialogSize::Fixed(60), DialogSize::Fixed(9))),
         ..ConfirmDialogConfig::new("Confirm Delete", "session", &session_name)
     };
     render_confirm_dialog(frame, area, config);

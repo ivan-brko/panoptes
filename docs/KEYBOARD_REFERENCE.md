@@ -2,191 +2,188 @@
 
 Complete keyboard shortcut reference for Panoptes.
 
+Panoptes shows three panes at once — **Projects**, **Sessions**, **Settings** —
+and one of them holds focus. Opening a session is the only thing that takes over
+the whole terminal.
+
 ## Global Shortcuts
 
-These shortcuts work in most views (except when in Session mode or text input dialogs).
+These work from every pane, in normal mode. Any other input mode (a text field,
+a confirmation dialog, an autocomplete) owns these keys itself.
 
 | Key | Action |
 |-----|--------|
-| `?` | Show the shortcuts for the current view (`?` or `Esc` closes it) |
+| `Tab` / `Shift+Tab` | Switch to the next / previous pane (wraps around) |
+| `q` | Quit (prompts for confirmation) |
+| `?` | Show the shortcuts for wherever you are (`?` or `Esc` closes it) |
 | `Space` | Jump to the next session needing attention |
-| `k` | Open the custom shortcuts manager |
-| `Esc` | Go back one level / Cancel current action (quits with confirmation at the Projects Overview) |
+| `Esc` | Go back one level in the focused pane — never quits, and does nothing at a pane's root |
 
-`?`, `Space`, and `k` are handled before the view sees the key, so they behave
-the same everywhere except in Session mode, where keys go to the agent.
+`Tab` switches panes **only** in normal mode. In a path input it completes a
+path; in Session mode it types a tab into the agent. In the Settings pane's
+Notifications section, `Space` toggles the highlighted option instead of jumping.
 
 Navigation is by arrow key throughout. There are no `j`/`k` bindings.
 
-## Projects Overview
+## Pane 1 — Projects
 
-The main view showing all projects and sessions.
+The project tree, and three levels beneath it.
 
-### Navigation
+### Projects (the tree)
 
 | Key | Action |
 |-----|--------|
-| `Down` | Move selection down |
-| `Up` | Move selection up |
-| `Tab` | Toggle focus between Projects and Sessions lists |
-| `1-9` | Select session by number (Sessions list only — the project tree is not numbered) |
-| `Enter` | Open selected project or session; expand/collapse selected folder |
+| `Up` / `Down` | Move selection |
+| `Enter` | Open selected project; expand/collapse selected folder |
 | `Right` | Expand selected folder |
 | `Left` | Collapse selected folder, or jump to its parent folder |
-
-Expanded folders are marked `▾`, collapsed ones `▸`. The footer changes to show
-folder actions whenever a folder heading is selected.
-
-### Folders
-
-Projects can be grouped into folders, nested up to 3 levels deep. Folders are
-created by moving a project into a path that does not exist yet.
-
-| Key | Action |
-|-----|--------|
+| `n` | Add new project (opens the path prompt) |
+| `d` | Delete selected project — or ungroup a folder, which deletes nothing |
 | `m` | Move selected project (or folder subtree) into a folder |
 | `r` | Rename selected folder |
-| `d` | Remove selected folder — its contents move up one level, nothing is deleted |
-
-In the move dialog, type a path like `Acme/Platform`, use `Tab` to autocomplete
-against existing folders, and leave the input empty to move back to the root level.
-Collapsed folders show a rollup of the sessions inside them, so you still see
-active and attention counts without expanding.
-
-### Actions
-
-| Key | Action |
-|-----|--------|
-| `n` | Add new project (opens path input) |
-| `c` | Open Claude configs management |
-| `x` | Open Codex configs management |
-| `l` | Open log viewer |
-| `d` | Delete selected project or session (removes a folder when one is selected) |
 | `R` | Refresh git state for all projects |
-| `Esc` | Quit (prompts for confirmation) |
 
-## Project Detail
+Expanded folders are marked `▾`, collapsed ones `▸`. The footer changes to show
+folder actions whenever a folder heading is selected. Collapsed folders show a
+rollup of the sessions inside them, so you still see active and attention counts
+without expanding.
 
-Shows branches within a selected project.
+Projects can be grouped into folders, nested up to 3 levels deep. Folders are
+created by moving a project into a path that does not exist yet. In the move
+prompt, type a path like `Acme/Platform`, use `Tab` to autocomplete against
+existing folders, and leave the input empty to move back to the root level.
 
-### Navigation
+### Project (its branches)
 
 | Key | Action |
 |-----|--------|
-| `Down` | Move selection down |
-| `Up` | Move selection up |
-| `1-9` | Select branch by number |
+| `Up` / `Down` / `1-9` | Select a branch |
 | `Enter` | Open selected branch |
-| `Esc` | Return to Projects Overview |
-
-### Actions
-
-| Key | Action |
-|-----|--------|
-| `n` | Create new worktree (opens wizard) |
-| `b` | Set default base branch |
-| `c` | Set default Claude config for project |
-| `x` | Set default Codex config for project |
-| `r` | Rename project |
-| `R` | Refresh branches (check for stale worktrees) |
+| `n` | Create new worktree (opens the wizard) |
 | `d` | Delete selected worktree (never deletes the git branch) |
-| `Esc` | Return to Projects Overview |
+| `R` | Refresh branches (check for stale worktrees) |
+| `,` | Project settings |
+| `Esc` | Back to the tree |
 
-## Branch Detail
+### Project settings (`,`)
 
-Shows sessions for a specific branch.
+Per-project defaults. Replaces the old `c`, `x`, `b` and `r` keys.
 
-### Navigation
-
-| Key | Action |
-|-----|--------|
-| `Down` | Move selection down |
-| `Up` | Move selection up |
-| `Enter` | Open selected session |
-| `Esc` | Return to Project Detail |
-
-### Actions
+| Row | What it opens |
+|-----|---------------|
+| Default Claude config | Claude config selector |
+| Default Codex config | Codex config selector |
+| Default base branch | Branch-ref selector |
+| Rename project | One-line input |
 
 | Key | Action |
 |-----|--------|
+| `Up` / `Down` | Move selection |
+| `Enter` | Open the selected setting |
+| `Esc` | Back to the branch list |
+
+### Branch (its sessions)
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` / `1-9` | Select a session (`0` = 10) |
+| `Enter` | Open selected session (resumes it if `[Resumable]`) |
 | `n` | Create new AI session (Claude Code or Codex) |
 | `s` | Create new shell session |
 | `d` | Delete selected session (prompts for confirmation) |
+| `Esc` | Back to the branch list |
 | any other key | Run a matching custom shortcut, if one is bound |
+
+## Pane 2 — Sessions
+
+Every session, flat and sorted, with a pinned "Needs Attention" section on top.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` / `1-9` | Select a session (`0` = 10) |
+| `Enter` | Open the selected session full-screen |
+| `d` | Delete the selected session (prompts for confirmation) |
+
+## Pane 3 — Settings
+
+Five sections. The highlighted row's description shows in the footer.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Move through the sections |
+| `Enter` | Open the selected section |
+| `Esc` | Back to the sections list (from inside a section) |
+
+### Claude configs / Codex configs
+
+Manage multiple Claude Code accounts (`CLAUDE_CONFIG_DIR`) or Codex accounts
+(`CODEX_HOME`). Both sections use the same keys.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Move selection |
+| `n` | Add new configuration |
+| `s` | Set selected as global default |
+| `d` | Delete selected configuration (prompts for confirmation) |
+
+### Shortcuts
+
+Custom keys that launch a shell command.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Move selection |
+| `n` | Bind a key to a command |
+| `d` | Delete the selected shortcut (prompts for confirmation) |
+
+### Notifications
+
+Six live toggles. Each takes effect on the **next** event — no restart — and is
+written to `config.toml` immediately.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Move through the rows |
+| `Space` | Toggle the highlighted option |
+| `Left` / `Right` | Change how you are notified (Bell / Title / Silent) |
+
+### About / paths
+
+Read-only: version, hook server port and health, and where `config.toml`,
+`logs/`, `projects.json`, `sessions.json`, `worktrees/` and `hooks/` live. The
+settings that are only read at startup are shown here too. Edit `config.toml`
+by hand to change them.
 
 ## Session View (Normal Mode)
 
 Viewing a session without interacting with it.
 
-### Navigation
-
 | Key | Action |
 |-----|--------|
-| `PageUp` | Scroll up through history |
-| `PageDown` | Scroll down through history |
-| `Home` | Scroll to top (oldest) |
-| `End` | Scroll to bottom (live view) |
-| `Tab` | Switch to next session |
-| `1-9` | Switch to session by number |
-| `Esc` | Return to previous view |
-
-### Actions
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Enter Session mode (interact with session) |
+| `Enter` | Enter Session mode (interact with the session) |
+| `Esc` | Back to the pane the session was opened from |
+| `q` | Quit (prompts for confirmation) |
+| `Up` / `Down` | Scroll (3 lines) |
+| `PageUp` / `PageDown` | Scroll a page |
+| `Home` / `End` | Scroll to top (oldest) / bottom (live view) |
+| `1-9` | Switch to session by number (`0` = 10) |
+| any other key | Run a matching custom shortcut, if one is bound |
 
 ## Session View (Session Mode)
 
-Interacting directly with the session (Claude Code, Codex, or shell). Most keys are forwarded to the PTY.
+Interacting directly with the session (Claude Code, Codex, or shell). Most keys
+are forwarded to the PTY — including `q`, `Tab` and `Space`.
 
 | Key | Action |
 |-----|--------|
 | `Esc` | Exit Session mode |
 | `Shift+Esc` | Send Escape to the session |
-| `PageUp` | Scroll up through history |
-| `PageDown` | Scroll down through history |
-| `Ctrl+Home` | Scroll to top |
-| `Ctrl+End` | Scroll to bottom |
+| `PageUp` / `PageDown` | Scroll through history |
+| `Ctrl+Home` / `Ctrl+End` | Scroll to top / bottom |
 | All other keys | Forwarded to the session |
 
-**Note:** When scrolled up in history, typing any key (except scroll keys) will automatically scroll back to the live view.
-
-## Log Viewer
-
-Shows application logs for debugging.
-
-### Navigation
-
-| Key | Action |
-|-----|--------|
-| `Down` | Scroll down |
-| `Up` | Scroll up |
-| `PageDown` | Page down |
-| `PageUp` | Page up |
-| `g` | Jump to top |
-| `G` | Jump to bottom (enables auto-scroll) |
-| `Esc` | Return to Projects Overview |
-
-## Claude Configs / Codex Configs
-
-Manage multiple Claude Code accounts (`c` from Projects Overview) or Codex accounts (`x` from Projects Overview). Both views use the same keyboard shortcuts.
-
-### Navigation
-
-| Key | Action |
-|-----|--------|
-| `Down` | Move selection down |
-| `Up` | Move selection up |
-| `Esc` | Return to Projects Overview |
-
-### Actions
-
-| Key | Action |
-|-----|--------|
-| `n` | Add new configuration |
-| `s` | Set selected as global default |
-| `d` | Delete selected configuration (prompts for confirmation) |
+**Note:** When scrolled up in history, typing any key (except scroll keys) will
+automatically scroll back to the live view.
 
 ## Worktree Creation Wizard
 
@@ -197,8 +194,7 @@ Letters typed here go into the filter, so only the arrow keys navigate.
 | Key | Action |
 |-----|--------|
 | Type | Filter branches / enter new branch name |
-| `Down` | Move selection down |
-| `Up` | Move selection up |
+| `Up` / `Down` | Move selection |
 | `Enter` | Select branch (or create new) |
 | `Esc` | Cancel |
 
@@ -207,8 +203,7 @@ Letters typed here go into the filter, so only the arrow keys navigate.
 | Key | Action |
 |-----|--------|
 | Type | Filter base branches |
-| `Down` | Move selection down |
-| `Up` | Move selection up |
+| `Up` / `Down` | Move selection |
 | `Enter` | Confirm selection |
 | `Esc` | Go back to step 1 |
 
@@ -241,6 +236,16 @@ When prompted to confirm an action:
 | `n` / `Esc` | Cancel |
 | `w` | (Worktree delete) Toggle deleting the worktree directory from disk |
 
+## Reserved Keys
+
+Custom shortcuts cannot be bound to `q`, `n`, `s`, `d`, `,` or the digits `0-9`:
+those are built-in where custom shortcuts fire, so a shortcut on one could never
+run. `Space`, `Esc`, `Enter` and `Tab` are not characters and cannot be bound at
+all.
+
+A shortcut bound to a key that has since become reserved is dropped when
+Panoptes starts, and a startup notice says which ones went.
+
 ## Mouse Support
 
 Panoptes supports mouse scrolling in Session View:
@@ -250,4 +255,5 @@ Panoptes supports mouse scrolling in Session View:
 | Scroll Up | Scroll up through session history |
 | Scroll Down | Scroll down through session history |
 
-When the session has mouse mode enabled (e.g., in vim), mouse events are forwarded to the PTY instead.
+When the session has mouse mode enabled (e.g., in vim), mouse events are
+forwarded to the PTY instead.

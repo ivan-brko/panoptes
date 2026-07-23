@@ -38,7 +38,9 @@ PTY Output → Session buffer → TUI render
 
 ### Key Modules
 
-- `app/` - Application orchestration, state, views, input modes
+- `app/` - Application orchestration, state, navigation, input modes
+- `app/nav.rs` - `Focus` / `Tab` / `ProjectsNav` / `SettingsNav`: which pane owns
+  the screen and how far each one is drilled in
 - `app/background.rs` - Off-thread git jobs (fetch, worktree create/remove) with a cancellable loading overlay
 - `agent/` - Agent adapters (Claude Code, Codex, Shell) with hook setup
 - `session/` - Session lifecycle, PTY management, terminal emulation
@@ -46,8 +48,13 @@ PTY Output → Session buffer → TUI render
 - `hooks/` - HTTP server for agent callbacks
 - `transcript/` - Reads agent transcripts on disk (Codex state, usage for both)
 - `input/` - Input handling by mode (normal, session, dialogs)
+- `input/normal/{projects,sessions,settings}_pane.rs` - One handler per pane, each routing on its own drill-down level
 - `input/agent_configs.rs` - Shared Claude/Codex config input handlers (parameterized by `AgentKind`)
 - `tui/` - Terminal UI rendering with ratatui
+- `tui/panes.rs` - Accordion sizing and its transition (`pane_widths`, `PaneLayout`, `SideMode`)
+- `tui/views/panes.rs` - The three-pane frame: one header, three bordered panes, one footer
+- `tui/views/pane_{projects,sessions,settings}.rs` - Each pane's content, at every density
+- `tui/views/prompts.rs` / `tui/views/worktree.rs` - The centred overlays (lists and paragraphs)
 - `tui/views/agent_configs.rs` - Shared Claude/Codex config view rendering
 - `tui/widgets/dialog.rs` - Shared dialog widget (Yes/No buttons, clamped centering)
 - `project/` - Project/branch management, folder tree, and persistence
@@ -66,9 +73,15 @@ PTY Output → Session buffer → TUI render
 - State enums with display/color helpers for TUI rendering
 - Always run `cargo fmt` and `cargo lint` before committing
 - When adding keyboard shortcuts, update **all three**:
-  1. Footer help in `src/tui/views/<view>.rs`
+  1. Footer help in `src/tui/views/panes.rs` (`footer_text` and its helpers)
   2. Help overlay in `src/tui/views/help.rs`
   3. Reserved keys in `src/config.rs` (`RESERVED_KEYS` constant) - prevents users from binding custom shortcuts to built-in keys
+- Prompts split by content: **if it shows a list or a paragraph it is a centred
+  overlay** (`tui/views/prompts.rs`, `worktree.rs`), anchored to the terminal so
+  an animating pane cannot resize it mid-typing; **if it is one line you type
+  into, it is inline** in the pane that owns it
+- Pane rows drop fields whole as the pane narrows rather than truncating one
+  long string, and are truncated against the pane's *current* width
 
 ## Error Handling
 

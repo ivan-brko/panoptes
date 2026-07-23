@@ -1,7 +1,8 @@
 //! File-based logging with tracing integration
 //!
-//! Sets up file logging with timestamped filenames and integrates with the LogBuffer
-//! for real-time TUI display.
+//! Sets up file logging with timestamped filenames. Nothing is buffered in
+//! memory: the Settings pane points at the file, and reading it is `tail`'s
+//! job rather than the TUI's.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -10,18 +11,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::{Local, Utc};
+use chrono::Local;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-
-use super::buffer::{LogBuffer, LogEntry, LogLevel};
 
 /// Number of consecutive write failures before emitting a warning
 const FAILURE_THRESHOLD: usize = 5;
 
 /// Global counter for consecutive write failures
-/// We use a static counter because the DualWriter is recreated on each write operation
+/// We use a static counter because the writer is recreated on each write operation
 static FAILURE_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Track if we've already emitted a warning (to avoid spamming)
 static WARNING_EMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -39,18 +38,18 @@ pub fn create_log_file_path(logs_dir: &Path) -> PathBuf {
     logs_dir.join(format!("panoptes-{}.log", timestamp))
 }
 
-/// A writer that writes to both a file and the LogBuffer
-struct DualWriter {
+/// A writer that appends to the shared log file
+///
+/// Write failures are counted rather than propagated: a full disk must not
+/// take the application down, and `Ok` keeps the tracing pipeline alive.
+struct FileWriter {
     file: Arc<std::sync::Mutex<File>>,
-    buffer: Arc<LogBuffer>,
 }
 
-impl Write for DualWriter {
+impl Write for FileWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // Write to file with failure tracking
         if let Ok(mut file) = self.file.lock() {
-            let write_result = file.write_all(buf).and_then(|_| file.flush());
-            match write_result {
+            match file.write_all(buf).and_then(|_| file.flush()) {
                 Ok(()) => {
                     // Reset failure counter on success
                     FAILURE_COUNT.store(0, Ordering::Relaxed);
@@ -65,7 +64,6 @@ impl Write for DualWriter {
                             "WARNING: Log file writes failing repeatedly ({} failures): {}",
                             count, e
                         );
-                        eprintln!("         Log entries are being stored in memory but may not be persisted.");
                     }
                 }
             }
@@ -79,20 +77,6 @@ impl Write for DualWriter {
             }
         }
 
-        // Parse the log line and add to buffer (always, even if file write fails)
-        // This ensures logs are still visible in the TUI even if file writes fail
-        if let Ok(line) = std::str::from_utf8(buf) {
-            let line = line.trim();
-            if !line.is_empty() {
-                // Parse format: "2026-01-21T14:30:45.123456Z LEVEL target: message"
-                if let Some(entry) = parse_log_line(line) {
-                    self.buffer.push(entry);
-                }
-            }
-        }
-
-        // Return success even if the file write failed, to avoid breaking the
-        // logging pipeline - the entries are still in the in-memory buffer
         Ok(buf.len())
     }
 
@@ -105,78 +89,17 @@ impl Write for DualWriter {
     }
 }
 
-/// Parse a log line into a LogEntry
-fn parse_log_line(line: &str) -> Option<LogEntry> {
-    // Format: "2026-01-21T14:30:45.123456Z LEVEL message"
-    // The tracing_subscriber fmt layer produces this format
-
-    // Skip empty lines
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-
-    // Try to find the level indicator
-    let level = if line.contains(" TRACE ") {
-        LogLevel::Trace
-    } else if line.contains(" DEBUG ") {
-        LogLevel::Debug
-    } else if line.contains(" INFO ") {
-        LogLevel::Info
-    } else if line.contains(" WARN ") {
-        LogLevel::Warn
-    } else if line.contains(" ERROR ") {
-        LogLevel::Error
-    } else {
-        // If we can't parse, treat as info
-        LogLevel::Info
-    };
-
-    // Extract message (everything after the level)
-    let level_str = format!(" {} ", level.as_str());
-    let message = if let Some(pos) = line.find(&level_str) {
-        line[pos + level_str.len()..].trim().to_string()
-    } else {
-        line.to_string()
-    };
-
-    // Extract target from message if present (format: "target: message")
-    let (target, final_message) = if let Some(colon_pos) = message.find(": ") {
-        let potential_target = &message[..colon_pos];
-        // Check if it looks like a module path (contains :: or is a simple word)
-        if potential_target.contains("::") || !potential_target.contains(' ') {
-            (
-                potential_target.to_string(),
-                message[colon_pos + 2..].to_string(),
-            )
-        } else {
-            ("panoptes".to_string(), message)
-        }
-    } else {
-        ("panoptes".to_string(), message)
-    };
-
-    Some(LogEntry {
-        timestamp: Utc::now(),
-        level,
-        target,
-        message: final_message,
-    })
-}
-
 /// Writer factory for tracing-subscriber
-struct DualWriterMaker {
+struct FileWriterMaker {
     file: Arc<std::sync::Mutex<File>>,
-    buffer: Arc<LogBuffer>,
 }
 
-impl<'a> MakeWriter<'a> for DualWriterMaker {
-    type Writer = DualWriter;
+impl<'a> MakeWriter<'a> for FileWriterMaker {
+    type Writer = FileWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        DualWriter {
+        FileWriter {
             file: Arc::clone(&self.file),
-            buffer: Arc::clone(&self.buffer),
         }
     }
 }
@@ -186,13 +109,10 @@ pub struct LoggingGuard {
     _file: Arc<std::sync::Mutex<File>>,
 }
 
-/// Initialize file logging with buffer integration
+/// Initialize file logging
 ///
 /// Returns the log file info and a guard that must be kept alive for the duration of logging.
-pub fn init_file_logging(
-    logs_dir: PathBuf,
-    buffer: Arc<LogBuffer>,
-) -> Result<(LogFileInfo, LoggingGuard)> {
+pub fn init_file_logging(logs_dir: PathBuf) -> Result<(LogFileInfo, LoggingGuard)> {
     // Ensure logs directory exists
     fs::create_dir_all(&logs_dir).context("Failed to create logs directory")?;
 
@@ -209,9 +129,8 @@ pub fn init_file_logging(
     let file = Arc::new(std::sync::Mutex::new(file));
 
     // Create writer maker
-    let writer = DualWriterMaker {
+    let writer = FileWriterMaker {
         file: Arc::clone(&file),
-        buffer,
     };
 
     // Create file logging layer
@@ -242,31 +161,6 @@ pub fn init_file_logging(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_log_line_info() {
-        let line = "2026-01-21T14:30:45.123456Z  INFO panoptes: Starting application";
-        let entry = parse_log_line(line).unwrap();
-        assert_eq!(entry.level, LogLevel::Info);
-        assert_eq!(entry.target, "panoptes");
-        assert_eq!(entry.message, "Starting application");
-    }
-
-    #[test]
-    fn test_parse_log_line_warn() {
-        let line = "2026-01-21T14:30:45.123456Z  WARN panoptes::config: Config not found";
-        let entry = parse_log_line(line).unwrap();
-        assert_eq!(entry.level, LogLevel::Warn);
-        assert_eq!(entry.target, "panoptes::config");
-        assert_eq!(entry.message, "Config not found");
-    }
-
-    #[test]
-    fn test_parse_log_line_error() {
-        let line = "2026-01-21T14:30:45.123456Z ERROR panoptes::session: Failed to start";
-        let entry = parse_log_line(line).unwrap();
-        assert_eq!(entry.level, LogLevel::Error);
-    }
 
     #[test]
     fn test_create_log_file_path() {

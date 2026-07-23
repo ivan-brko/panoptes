@@ -89,8 +89,8 @@ impl AgentKind {
     /// Hint shown when a project default is requested but no configs exist
     pub fn no_configs_hint(self) -> &'static str {
         match self {
-            AgentKind::Claude => "No Claude configs defined. Press 'c' from homepage.",
-            AgentKind::Codex => "No Codex configs defined. Press 'x' from homepage.",
+            AgentKind::Claude => "No Claude configs yet. Add one in Settings > Claude configs.",
+            AgentKind::Codex => "No Codex configs yet. Add one in Settings > Codex configs.",
         }
     }
 
@@ -335,14 +335,14 @@ pub fn handle_confirming_config_delete_key(
     }
 }
 
-/// Handle key in a configs management view (normal mode)
-pub fn handle_configs_view_key(app: &mut App, key: KeyEvent, kind: AgentKind) -> Result<()> {
+/// Handle key in a configs section of the settings pane (normal mode)
+pub fn handle_configs_section_key(app: &mut App, key: KeyEvent, kind: AgentKind) -> Result<()> {
     match kind {
         AgentKind::Claude => {
-            configs_view_key(&mut app.state, &mut app.claude_config_store, kind, key)
+            configs_section_key(&mut app.state, &mut app.claude_config_store, kind, key)
         }
         AgentKind::Codex => {
-            configs_view_key(&mut app.state, &mut app.codex_config_store, kind, key)
+            configs_section_key(&mut app.state, &mut app.codex_config_store, kind, key)
         }
     }
 }
@@ -633,8 +633,8 @@ pub(crate) fn confirming_config_delete_key<C: AgentProfile>(
     Ok(())
 }
 
-/// Configs management view body (normal mode)
-pub(crate) fn configs_view_key<C: AgentProfile>(
+/// Configs section body (normal mode, inside the settings pane)
+pub(crate) fn configs_section_key<C: AgentProfile>(
     state: &mut AppState,
     store: &mut ProfileStore<C>,
     kind: AgentKind,
@@ -651,14 +651,12 @@ pub(crate) fn configs_view_key<C: AgentProfile>(
             state.navigate_back();
         }
         KeyCode::Down => {
-            if config_count > 0 {
-                state.select_next(config_count);
-            }
+            let next = cycle_next(kind.view_selected_index(state), config_count);
+            kind.set_view_selected_index(state, next);
         }
         KeyCode::Up => {
-            if config_count > 0 {
-                state.select_prev(config_count);
-            }
+            let prev = cycle_prev(kind.view_selected_index(state), config_count);
+            kind.set_view_selected_index(state, prev);
         }
         KeyCode::Char('n') => {
             // Start creating a new config
@@ -1111,13 +1109,14 @@ mod tests {
     }
 
     #[test]
-    fn test_configs_view_starts_add_and_delete_flows() {
+    fn test_configs_section_starts_add_and_delete_flows() {
         let mut f = fixture();
-        f.state.view = crate::app::View::CodexConfigs;
+        f.state.focus = crate::app::Focus::Panes(crate::app::Tab::Settings);
+        f.state.settings_nav = crate::app::SettingsNav::CodexConfigs;
 
         // 'n' starts the add flow with a clean draft
         f.state.config_draft.name = "stale".to_string();
-        configs_view_key(
+        configs_section_key(
             &mut f.state,
             &mut f.codex,
             AgentKind::Codex,
@@ -1132,7 +1131,7 @@ mod tests {
         let config_id = config.id;
         f.codex.add(config);
         f.state.input_mode = InputMode::Normal;
-        configs_view_key(
+        configs_section_key(
             &mut f.state,
             &mut f.codex,
             AgentKind::Codex,
@@ -1145,7 +1144,7 @@ mod tests {
         // 's' sets the selected config as default
         f.state.input_mode = InputMode::Normal;
         f.state.pending_delete_agent_config = None;
-        configs_view_key(
+        configs_section_key(
             &mut f.state,
             &mut f.codex,
             AgentKind::Codex,

@@ -58,8 +58,11 @@ Follow these steps to create a new selectable list menu:
 - [ ] Implement other shortcuts (Delete, New, etc.)
 - [ ] Export from `src/input/normal/mod.rs`
 
-### 6. Input Routing (`src/app/mod.rs`)
-- [ ] Add a `View::MyMenu => ...` arm in `App::handle_normal_mode_key()`
+### 6. Input Routing
+- [ ] Add an arm to the pane handler that owns the menu
+      (`src/input/normal/{projects,sessions,settings}_pane.rs`), keyed on that
+      pane's drill-down enum - not to `App::handle_normal_mode_key()`, which
+      only routes by pane
 
 ## State Management
 
@@ -350,18 +353,23 @@ pub fn handle_my_menu_key(app: &mut App, key: KeyEvent) -> anyhow::Result<()> {
 }
 ```
 
-### Routing the View's Keys
+### Routing the Menu's Keys
 
-Normal-mode keys are routed by view in `App::handle_normal_mode_key()`
-(`src/app/mod.rs`):
+`App::handle_normal_mode_key()` routes by *pane*; each pane handler then routes
+on its own drill-down level. So a menu inside the Settings pane is an arm of
+`match app.state.settings_nav` in `src/input/normal/settings_pane.rs`:
 
 ```rust
-View::MyMenu => normal::my_menu::handle_my_menu_key(self, key),
+SettingsNav::MyMenu => handle_my_menu_key(app, key),
 ```
 
-(`src/input/dispatcher.rs` routes by *input mode*; it only matters here if
-your menu introduces a new `InputMode`, e.g. a selector overlay - see the
-add-input-mode skill.)
+`Tab`, `q`, `?` and `Space` are global and never reach your handler; see
+`handle_global_normal_key` in `src/input/dispatcher.rs`.
+
+(`src/input/dispatcher.rs` also routes by *input mode*; that only matters here
+if your menu introduces a new `InputMode`, e.g. a selector overlay - see the
+add-input-mode skill. A new mode must also be pinned in
+`validate_mode_focus_consistency`.)
 
 ### Navigation Patterns
 
@@ -384,19 +392,22 @@ KeyCode::Down => {
 KeyCode::Enter => {
     let selected_index = app.state.selected_my_menu_index;
     if let Some(item) = items.get(selected_index) {
-        // Navigate to detail view
-        app.state.view = View::MyMenuDetail(item.id);
+        // Drill this pane down a level
+        app.state.settings_nav = SettingsNav::MyMenuDetail;
         // Or perform action
         perform_action(item);
     }
 }
 ```
 
-#### Reset Selection When Entering View
+#### Reset Selection When Entering the Menu
+
+A stale index from a previous visit can point past a list that has since shrunk,
+so reset on the way in:
 
 ```rust
-// In the handler that navigates TO your view
-app.state.view = View::MyMenu;
+// In the handler that drills INTO your menu
+app.state.settings_nav = SettingsNav::MyMenu;
 app.state.reset_my_menu_selection();
 ```
 

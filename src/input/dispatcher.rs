@@ -5,12 +5,12 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, AppState, InputMode, View};
+use crate::app::{App, AppState, Focus, InputMode, ProjectsNav, SettingsNav, Tab};
 
 /// Handle a key event by routing to the appropriate mode handler
 pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
-    // Validate mode/view consistency before dispatch
-    validate_mode_view_consistency(&mut app.state);
+    // Validate mode/focus consistency before dispatch
+    validate_mode_focus_consistency(&mut app.state);
 
     // Handle help overlay first - it captures all keys when visible
     if app.state.show_help_overlay {
@@ -28,28 +28,14 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         // In Session mode, fall through to forward Ctrl+C to PTY
         if app.state.input_mode != InputMode::Session {
             // Show warning in all other modes
-            app.state.error_message = Some("Ctrl+C disabled. Press Esc to quit.".to_string());
+            app.state.error_message = Some("Ctrl+C disabled. Press q to quit.".to_string());
             return Ok(());
         }
     }
 
-    // Toggle help overlay with ? key in Normal mode
-    if key.code == KeyCode::Char('?') && app.state.input_mode == InputMode::Normal {
-        app.state.show_help_overlay = true;
-        return Ok(());
-    }
-
-    // Global: Jump to next session needing attention (Space key)
-    // Only works in Normal mode (not in text input modes or Session mode)
-    if key.code == KeyCode::Char(' ') && app.state.input_mode == InputMode::Normal {
-        return app.jump_to_next_attention();
-    }
-
-    // Global: Open custom shortcuts management dialog (k key)
-    // Works in Normal mode across all views except Session mode
-    if key.code == KeyCode::Char('k') && app.state.input_mode == InputMode::Normal {
-        app.state.custom_shortcuts_selected = 0;
-        app.state.input_mode = InputMode::ManagingCustomShortcuts;
+    // Global keys exist in normal mode only, which is what lets every other
+    // mode own `Tab` completely
+    if globals_apply(app.state.input_mode) && handle_global_normal_key(app, key)? {
         return Ok(());
     }
 
@@ -67,11 +53,13 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::AddingProject => super::text_input::handle_adding_project_key(app, key),
         InputMode::AddingProjectName => super::text_input::handle_adding_project_name_key(app, key),
         InputMode::SelectingDefaultBase => {
-            // Need to get project_id from current view
-            if let View::ProjectDetail(project_id) = app.state.view {
-                crate::wizards::worktree::handle_selecting_default_base_key(app, key, project_id)
-            } else {
-                Ok(())
+            // The selector is opened from a project's settings level, which is
+            // where its project ID comes from
+            match app.state.projects_nav.project_id() {
+                Some(project_id) => crate::wizards::worktree::handle_selecting_default_base_key(
+                    app, key, project_id,
+                ),
+                None => Ok(()),
             }
         }
         InputMode::ConfirmingSessionDelete => {
@@ -85,27 +73,24 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         InputMode::ConfirmingQuit => super::dialogs::handle_confirming_quit_key(app, key),
         InputMode::RenamingProject => super::text_input::handle_renaming_project_key(app, key),
-        InputMode::WorktreeSelectBranch => {
-            if let View::ProjectDetail(project_id) = app.state.view {
+        InputMode::WorktreeSelectBranch => match app.state.projects_nav.project_id() {
+            Some(project_id) => {
                 crate::wizards::worktree::handle_worktree_select_branch_key(app, key, project_id)
-            } else {
-                Ok(())
             }
-        }
-        InputMode::WorktreeSelectBase => {
-            if let View::ProjectDetail(project_id) = app.state.view {
+            None => Ok(()),
+        },
+        InputMode::WorktreeSelectBase => match app.state.projects_nav.project_id() {
+            Some(project_id) => {
                 crate::wizards::worktree::handle_worktree_select_base_key(app, key, project_id)
-            } else {
-                Ok(())
             }
-        }
-        InputMode::WorktreeConfirm => {
-            if let View::ProjectDetail(project_id) = app.state.view {
+            None => Ok(()),
+        },
+        InputMode::WorktreeConfirm => match app.state.projects_nav.project_id() {
+            Some(project_id) => {
                 crate::wizards::worktree::handle_worktree_confirm_key(app, key, project_id)
-            } else {
-                Ok(())
             }
-        }
+            None => Ok(()),
+        },
         InputMode::AddingClaudeConfigName => {
             agent_configs::handle_adding_config_name_key(app, key, AgentKind::Claude)
         }
@@ -123,9 +108,6 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         InputMode::ConfirmingClaudeSettingsMigrate => {
             super::dialogs::handle_confirming_claude_settings_migrate_key(app, key)
-        }
-        InputMode::ManagingCustomShortcuts => {
-            super::dialogs::handle_managing_custom_shortcuts_key(app, key)
         }
         InputMode::AddingCustomShortcutKey => {
             super::dialogs::handle_adding_custom_shortcut_key_key(app, key)
@@ -168,60 +150,158 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
     }
 }
 
-/// Validate that the current InputMode is valid for the current View.
+/// Whether the global keys (`Tab`, `q`, `?`, `Space`) apply in this mode
+///
+/// `Tab` is the load-bearing one: it switches panes *only* in normal mode,
+/// which means every other input mode owns it completely - path autocomplete
+/// (`text_input`), config-path autocomplete (`agent_configs`), and Yes/No
+/// toggling in the Claude-settings dialogs all keep it. One rule, and it
+/// covers every existing consumer.
+fn globals_apply(mode: InputMode) -> bool {
+    mode == InputMode::Normal
+}
+
+/// Keys that mean the same thing from every pane, in normal mode only
+///
+/// Returns whether the key was consumed.
+fn handle_global_normal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Tab | KeyCode::BackTab => {
+            // Cycling only makes sense while the panes are what is on screen
+            if app.state.cycle_pane(key.code == KeyCode::Tab) {
+                app.sync_pane_focus();
+            }
+            Ok(true)
+        }
+        KeyCode::Char('?') => {
+            app.state.show_help_overlay = true;
+            Ok(true)
+        }
+        // Quit from every pane and from session-view normal mode. In session
+        // *mode* this never runs, so `q` keeps reaching the agent.
+        KeyCode::Char('q') => {
+            app.state.input_mode = InputMode::ConfirmingQuit;
+            Ok(true)
+        }
+        // Jump to the next session needing attention - except in the
+        // Notifications section, where Space is the toggle
+        KeyCode::Char(' ') if !owns_space(&app.state) => {
+            app.jump_to_next_attention()?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Whether the focused pane has a stronger claim on `Space` than the jump
+fn owns_space(state: &AppState) -> bool {
+    state.focus == Focus::Panes(Tab::Settings) && state.settings_nav == SettingsNav::Notifications
+}
+
+/// Validate that the current [`InputMode`] can exist where the user is.
 ///
 /// If an invalid combination is detected, reset to Normal mode to prevent
 /// UI state corruption.
-fn validate_mode_view_consistency(state: &mut AppState) {
-    let is_valid = match (&state.input_mode, &state.view) {
-        // Session mode only valid in SessionView
-        (InputMode::Session, view) => *view == View::SessionView,
+fn validate_mode_focus_consistency(state: &mut AppState) {
+    let on = |tab: Tab| state.focus == Focus::Panes(tab);
+    let is_valid = match state.input_mode {
+        // Session mode only means anything with a session on screen
+        InputMode::Session => state.focus == Focus::Session,
 
-        // Worktree wizard modes only valid in ProjectDetail
-        (
-            InputMode::WorktreeSelectBranch
-            | InputMode::WorktreeSelectBase
-            | InputMode::WorktreeConfirm
-            | InputMode::SelectingDefaultBase,
-            View::ProjectDetail(_),
-        ) => true,
-        (
-            InputMode::WorktreeSelectBranch
-            | InputMode::WorktreeSelectBase
-            | InputMode::WorktreeConfirm
-            | InputMode::SelectingDefaultBase,
-            _,
-        ) => false,
+        // The worktree wizard carries a project ID taken from pane 1's
+        // drill-down, so it can only exist at a level that has one
+        InputMode::WorktreeSelectBranch
+        | InputMode::WorktreeSelectBase
+        | InputMode::WorktreeConfirm => {
+            on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::Project(_))
+        }
 
-        // Session delete confirmation is valid wherever a session list lives:
-        // the session view, branch detail, and the overview's sessions list
-        (InputMode::ConfirmingSessionDelete, View::SessionView) => true,
-        (InputMode::ConfirmingSessionDelete, View::BranchDetail(_, _)) => true,
-        (InputMode::ConfirmingSessionDelete, View::ProjectsOverview) => true,
-        (InputMode::ConfirmingSessionDelete, _) => false,
+        // The default-base selector is reached only from per-project settings
+        InputMode::SelectingDefaultBase => {
+            on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::ProjectSettings(_))
+        }
 
-        // Folder organization only happens in the projects overview
-        (
-            InputMode::MovingToFolder
-            | InputMode::RenamingFolder
-            | InputMode::ConfirmingFolderRemove,
-            view,
-        ) => *view == View::ProjectsOverview,
+        // Renaming a project is likewise a per-project settings row
+        InputMode::RenamingProject => {
+            on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::ProjectSettings(_))
+        }
 
-        // Branch delete confirmation only valid in ProjectDetail or BranchDetail
-        (InputMode::ConfirmingBranchDelete, View::ProjectDetail(_)) => true,
-        (InputMode::ConfirmingBranchDelete, View::BranchDetail(_, _)) => true,
-        (InputMode::ConfirmingBranchDelete, _) => false,
+        // Session deletion is valid wherever a session list lives: the session
+        // view, pane 1's branch drill-down, and pane 2
+        InputMode::ConfirmingSessionDelete => {
+            state.focus == Focus::Session
+                || on(Tab::Sessions)
+                || (on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::Branch(_, _)))
+        }
 
-        // All other combinations are assumed valid
-        _ => true,
+        // Folder organization only happens in pane 1's overview
+        InputMode::MovingToFolder
+        | InputMode::RenamingFolder
+        | InputMode::ConfirmingFolderRemove => {
+            on(Tab::Projects) && state.projects_nav == ProjectsNav::Overview
+        }
+
+        // Adding a project likewise starts at the overview
+        InputMode::AddingProject | InputMode::AddingProjectName => {
+            on(Tab::Projects) && state.projects_nav == ProjectsNav::Overview
+        }
+
+        // Deleting a project is an overview action; deleting a branch belongs
+        // to the project and branch levels
+        InputMode::ConfirmingProjectDelete => {
+            on(Tab::Projects) && state.projects_nav == ProjectsNav::Overview
+        }
+        InputMode::ConfirmingBranchDelete | InputMode::ConfirmingClaudeSettingsMigrate => {
+            on(Tab::Projects)
+                && matches!(
+                    state.projects_nav,
+                    ProjectsNav::Project(_) | ProjectsNav::Branch(_, _)
+                )
+        }
+
+        // Creating a session starts from pane 1's branch level
+        InputMode::SelectingAgentType
+        | InputMode::CreatingSession
+        | InputMode::CreatingCodexSession
+        | InputMode::CreatingShellSession => {
+            on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::Branch(_, _))
+        }
+
+        // The shortcut and config editors live in pane 3
+        InputMode::AddingCustomShortcutKey
+        | InputMode::AddingCustomShortcutName
+        | InputMode::AddingCustomShortcutCommand
+        | InputMode::AddingCustomShortcutAutoClose
+        | InputMode::ConfirmingCustomShortcutDelete => {
+            on(Tab::Settings) && state.settings_nav == SettingsNav::Shortcuts
+        }
+        InputMode::AddingClaudeConfigName
+        | InputMode::AddingClaudeConfigPath
+        | InputMode::ConfirmingClaudeConfigDelete => {
+            on(Tab::Settings) && state.settings_nav == SettingsNav::ClaudeConfigs
+        }
+        InputMode::AddingCodexConfigName
+        | InputMode::AddingCodexConfigPath
+        | InputMode::ConfirmingCodexConfigDelete => {
+            on(Tab::Settings) && state.settings_nav == SettingsNav::CodexConfigs
+        }
+
+        // Reachable from a session being created (pane 1) and from a project's
+        // settings (also pane 1), so pinning them further would be wrong
+        InputMode::SelectingClaudeConfig | InputMode::SelectingCodexConfig => on(Tab::Projects),
+
+        // Quit, the settings-copy offer, and normal mode are valid everywhere
+        InputMode::Normal | InputMode::ConfirmingQuit | InputMode::ConfirmingClaudeSettingsCopy => {
+            true
+        }
     };
 
     if !is_valid {
         tracing::warn!(
-            "Mode/view mismatch detected: {:?} in {:?}, resetting to Normal",
+            "Mode/focus mismatch detected: {:?} at {:?}/{:?}, resetting to Normal",
             state.input_mode,
-            state.view
+            state.focus,
+            state.projects_nav
         );
         state.input_mode = InputMode::Normal;
     }
@@ -232,258 +312,241 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    #[test]
-    fn test_validate_session_mode_in_session_view_valid() {
-        let mut state = AppState {
-            input_mode: InputMode::Session,
-            view: View::SessionView,
+    fn state_at(focus: Focus, mode: InputMode) -> AppState {
+        AppState {
+            focus,
+            input_mode: mode,
             ..Default::default()
-        };
-
-        validate_mode_view_consistency(&mut state);
-
-        assert_eq!(state.input_mode, InputMode::Session); // Should remain
+        }
     }
 
     #[test]
-    fn test_validate_session_mode_in_other_view_invalid() {
-        let mut state = AppState {
-            input_mode: InputMode::Session,
-            view: View::ProjectsOverview,
-            ..Default::default()
-        };
+    fn test_session_mode_only_survives_with_a_session_on_screen() {
+        let mut state = state_at(Focus::Session, InputMode::Session);
+        validate_mode_focus_consistency(&mut state);
+        assert_eq!(state.input_mode, InputMode::Session);
 
-        validate_mode_view_consistency(&mut state);
-
-        assert_eq!(state.input_mode, InputMode::Normal); // Should be reset
+        for tab in Tab::ALL {
+            let mut state = state_at(Focus::Panes(tab), InputMode::Session);
+            validate_mode_focus_consistency(&mut state);
+            assert_eq!(state.input_mode, InputMode::Normal, "pane {tab:?}");
+        }
     }
 
     #[test]
-    fn test_validate_worktree_mode_in_project_detail_valid() {
-        let mut state = AppState::default();
+    fn test_worktree_modes_need_pane_ones_project_level() {
         let project_id = Uuid::new_v4();
-        state.input_mode = InputMode::WorktreeSelectBranch;
-        state.view = View::ProjectDetail(project_id);
+        for mode in [
+            InputMode::WorktreeSelectBranch,
+            InputMode::WorktreeSelectBase,
+            InputMode::WorktreeConfirm,
+        ] {
+            let mut state = state_at(Focus::Panes(Tab::Projects), mode);
+            state.projects_nav = ProjectsNav::Project(project_id);
+            validate_mode_focus_consistency(&mut state);
+            assert_eq!(state.input_mode, mode);
 
-        validate_mode_view_consistency(&mut state);
+            // Anywhere else the project ID the handler needs is not there
+            let mut state = state_at(Focus::Panes(Tab::Projects), mode);
+            state.projects_nav = ProjectsNav::Overview;
+            validate_mode_focus_consistency(&mut state);
+            assert_eq!(state.input_mode, InputMode::Normal, "{mode:?} at overview");
 
-        assert_eq!(state.input_mode, InputMode::WorktreeSelectBranch); // Should remain
-    }
-
-    #[test]
-    fn test_validate_worktree_mode_in_other_view_invalid() {
-        let mut state = AppState {
-            input_mode: InputMode::WorktreeSelectBranch,
-            view: View::ProjectsOverview,
-            ..Default::default()
-        };
-
-        validate_mode_view_consistency(&mut state);
-
-        assert_eq!(state.input_mode, InputMode::Normal); // Should be reset
-    }
-
-    #[test]
-    fn test_validate_normal_mode_always_valid() {
-        let mut state = AppState {
-            input_mode: InputMode::Normal,
-            ..Default::default()
-        };
-
-        // Test in various views
-        for view in [View::ProjectsOverview, View::SessionView, View::LogViewer] {
-            state.view = view;
-            validate_mode_view_consistency(&mut state);
-            assert_eq!(state.input_mode, InputMode::Normal);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Routing table
-    // ------------------------------------------------------------------
-
-    use crate::input::agent_configs::AgentKind;
-
-    /// The handler family each mode routes to in [`handle_key_event`]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum HandlerFamily {
-        /// Per-view normal-mode handlers
-        Normal,
-        /// Keys forwarded to the active session's PTY
-        Session,
-        /// Text-input handlers in `input::text_input`
-        TextInput,
-        /// Dialog handlers in `input::dialogs`
-        Dialog,
-        /// Worktree wizard handlers in `wizards::worktree` (need a
-        /// ProjectDetail view for their project ID)
-        Wizard,
-        /// Shared Claude/Codex config handlers in `input::agent_configs`
-        AgentConfig(AgentKind),
-    }
-
-    /// Mirror of the dispatcher's match, kept exhaustive on purpose:
-    /// adding an `InputMode` variant without deciding its routing here is a
-    /// compile error, and `test_every_mode_reaches_intended_handler_family`
-    /// then asserts the properties that matter.
-    fn handler_family(mode: InputMode) -> HandlerFamily {
-        use HandlerFamily::*;
-        match mode {
-            InputMode::Normal => Normal,
-            InputMode::Session => Session,
-            InputMode::CreatingShellSession
-            | InputMode::AddingProject
-            | InputMode::AddingProjectName
-            | InputMode::RenamingProject
-            | InputMode::MovingToFolder
-            | InputMode::RenamingFolder
-            | InputMode::SelectingAgentType => TextInput,
-            InputMode::ConfirmingSessionDelete
-            | InputMode::ConfirmingBranchDelete
-            | InputMode::ConfirmingProjectDelete
-            | InputMode::ConfirmingQuit
-            | InputMode::ConfirmingFolderRemove
-            | InputMode::ConfirmingClaudeSettingsCopy
-            | InputMode::ConfirmingClaudeSettingsMigrate
-            | InputMode::ManagingCustomShortcuts
-            | InputMode::AddingCustomShortcutKey
-            | InputMode::AddingCustomShortcutName
-            | InputMode::AddingCustomShortcutCommand
-            | InputMode::AddingCustomShortcutAutoClose
-            | InputMode::ConfirmingCustomShortcutDelete => Dialog,
-            InputMode::SelectingDefaultBase
-            | InputMode::WorktreeSelectBranch
-            | InputMode::WorktreeSelectBase
-            | InputMode::WorktreeConfirm => Wizard,
-            InputMode::CreatingSession
-            | InputMode::AddingClaudeConfigName
-            | InputMode::AddingClaudeConfigPath
-            | InputMode::ConfirmingClaudeConfigDelete
-            | InputMode::SelectingClaudeConfig => AgentConfig(AgentKind::Claude),
-            InputMode::CreatingCodexSession
-            | InputMode::AddingCodexConfigName
-            | InputMode::AddingCodexConfigPath
-            | InputMode::ConfirmingCodexConfigDelete
-            | InputMode::SelectingCodexConfig => AgentConfig(AgentKind::Codex),
+            let mut state = state_at(Focus::Panes(Tab::Settings), mode);
+            validate_mode_focus_consistency(&mut state);
+            assert_eq!(state.input_mode, InputMode::Normal, "{mode:?} in settings");
         }
     }
 
     #[test]
-    fn test_every_mode_reaches_intended_handler_family() {
-        // Every mode has a routing decision (the match above is exhaustive,
-        // so this mostly guards InputMode::ALL against going stale)
-        for &mode in &InputMode::ALL {
-            let _ = handler_family(mode);
-        }
-
-        // The merged Claude/Codex flows must route to the shared handlers
-        // with the right agent kind - this is the regression the merge could
-        // introduce silently
-        let pairs = [
-            (InputMode::CreatingSession, InputMode::CreatingCodexSession),
-            (
-                InputMode::AddingClaudeConfigName,
-                InputMode::AddingCodexConfigName,
-            ),
-            (
-                InputMode::AddingClaudeConfigPath,
-                InputMode::AddingCodexConfigPath,
-            ),
-            (
-                InputMode::SelectingClaudeConfig,
-                InputMode::SelectingCodexConfig,
-            ),
-            (
-                InputMode::ConfirmingClaudeConfigDelete,
-                InputMode::ConfirmingCodexConfigDelete,
-            ),
-        ];
-        for (claude_mode, codex_mode) in pairs {
-            assert_eq!(
-                handler_family(claude_mode),
-                HandlerFamily::AgentConfig(AgentKind::Claude)
-            );
-            assert_eq!(
-                handler_family(codex_mode),
-                HandlerFamily::AgentConfig(AgentKind::Codex)
-            );
-        }
-
-        // Wizard modes carry a project ID taken from the current view, so
-        // they must be exactly the modes the view-consistency check pins to
-        // ProjectDetail
-        for &mode in &InputMode::ALL {
-            let is_wizard = handler_family(mode) == HandlerFamily::Wizard;
-            let mut state = AppState {
-                input_mode: mode,
-                view: View::LogViewer,
-                ..Default::default()
-            };
-            validate_mode_view_consistency(&mut state);
-            if is_wizard {
-                assert_eq!(
-                    state.input_mode,
-                    InputMode::Normal,
-                    "{mode:?} must be reset outside ProjectDetail"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_mode_view_consistency_covers_all_modes() {
+    fn test_session_delete_is_valid_from_every_session_list() {
         let project_id = Uuid::new_v4();
         let branch_id = Uuid::new_v4();
-        let views = [
-            View::ProjectsOverview,
-            View::ProjectDetail(project_id),
-            View::BranchDetail(project_id, branch_id),
-            View::SessionView,
-            View::LogViewer,
-            View::ClaudeConfigs,
-            View::CodexConfigs,
+
+        let valid = [
+            (Focus::Session, ProjectsNav::Overview),
+            (Focus::Panes(Tab::Sessions), ProjectsNav::Overview),
+            (
+                Focus::Panes(Tab::Projects),
+                ProjectsNav::Branch(project_id, branch_id),
+            ),
         ];
+        for (focus, nav) in valid {
+            let mut state = state_at(focus, InputMode::ConfirmingSessionDelete);
+            state.projects_nav = nav;
+            validate_mode_focus_consistency(&mut state);
+            assert_eq!(
+                state.input_mode,
+                InputMode::ConfirmingSessionDelete,
+                "{focus:?}/{nav:?}"
+            );
+        }
 
-        // Which views each mode may appear in; wildcard = every view
-        let allowed = |mode: InputMode, view: View| -> bool {
-            match mode {
-                InputMode::Session => view == View::SessionView,
-                InputMode::WorktreeSelectBranch
-                | InputMode::WorktreeSelectBase
-                | InputMode::WorktreeConfirm
-                | InputMode::SelectingDefaultBase => {
-                    matches!(view, View::ProjectDetail(_))
-                }
-                InputMode::ConfirmingSessionDelete => {
-                    view == View::SessionView
-                        || view == View::ProjectsOverview
-                        || matches!(view, View::BranchDetail(_, _))
-                }
-                InputMode::ConfirmingBranchDelete => {
-                    matches!(view, View::ProjectDetail(_) | View::BranchDetail(_, _))
-                }
-                InputMode::MovingToFolder
-                | InputMode::RenamingFolder
-                | InputMode::ConfirmingFolderRemove => view == View::ProjectsOverview,
-                _ => true,
-            }
-        };
+        // Not from the settings pane, which has no session list
+        let mut state = state_at(
+            Focus::Panes(Tab::Settings),
+            InputMode::ConfirmingSessionDelete,
+        );
+        validate_mode_focus_consistency(&mut state);
+        assert_eq!(state.input_mode, InputMode::Normal);
+    }
 
-        for &mode in &InputMode::ALL {
-            for &view in &views {
-                let mut state = AppState {
-                    input_mode: mode,
-                    view,
-                    ..Default::default()
-                };
-                validate_mode_view_consistency(&mut state);
-                let expected = if allowed(mode, view) {
-                    mode
-                } else {
-                    InputMode::Normal
-                };
-                assert_eq!(state.input_mode, expected, "mode {mode:?} in view {view:?}");
+    #[test]
+    fn test_settings_editors_are_pinned_to_their_own_sections() {
+        let cases = [
+            (InputMode::AddingCustomShortcutKey, SettingsNav::Shortcuts),
+            (
+                InputMode::AddingClaudeConfigName,
+                SettingsNav::ClaudeConfigs,
+            ),
+            (InputMode::AddingCodexConfigPath, SettingsNav::CodexConfigs),
+        ];
+        for (mode, section) in cases {
+            let mut state = state_at(Focus::Panes(Tab::Settings), mode);
+            state.settings_nav = section;
+            validate_mode_focus_consistency(&mut state);
+            assert_eq!(state.input_mode, mode, "{mode:?} in {section:?}");
+
+            let mut state = state_at(Focus::Panes(Tab::Settings), mode);
+            state.settings_nav = SettingsNav::About;
+            validate_mode_focus_consistency(&mut state);
+            assert_eq!(state.input_mode, InputMode::Normal, "{mode:?} in About");
+        }
+    }
+
+    #[test]
+    fn test_normal_and_quit_are_valid_anywhere() {
+        for focus in [
+            Focus::Session,
+            Focus::Panes(Tab::Projects),
+            Focus::Panes(Tab::Sessions),
+            Focus::Panes(Tab::Settings),
+        ] {
+            for mode in [InputMode::Normal, InputMode::ConfirmingQuit] {
+                let mut state = state_at(focus, mode);
+                validate_mode_focus_consistency(&mut state);
+                assert_eq!(state.input_mode, mode, "{mode:?} at {focus:?}");
             }
         }
+    }
+
+    /// Every mode has a decision recorded above; this catches a new variant
+    /// that was added to `InputMode::ALL` but never routed
+    #[test]
+    fn test_every_mode_has_a_place_it_is_valid() {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+
+        let places: Vec<(Focus, ProjectsNav, SettingsNav)> = vec![
+            (Focus::Session, ProjectsNav::Overview, SettingsNav::Sections),
+            (
+                Focus::Panes(Tab::Projects),
+                ProjectsNav::Overview,
+                SettingsNav::Sections,
+            ),
+            (
+                Focus::Panes(Tab::Projects),
+                ProjectsNav::Project(project_id),
+                SettingsNav::Sections,
+            ),
+            (
+                Focus::Panes(Tab::Projects),
+                ProjectsNav::Branch(project_id, branch_id),
+                SettingsNav::Sections,
+            ),
+            (
+                Focus::Panes(Tab::Projects),
+                ProjectsNav::ProjectSettings(project_id),
+                SettingsNav::Sections,
+            ),
+            (
+                Focus::Panes(Tab::Sessions),
+                ProjectsNav::Overview,
+                SettingsNav::Sections,
+            ),
+            (
+                Focus::Panes(Tab::Settings),
+                ProjectsNav::Overview,
+                SettingsNav::Shortcuts,
+            ),
+            (
+                Focus::Panes(Tab::Settings),
+                ProjectsNav::Overview,
+                SettingsNav::ClaudeConfigs,
+            ),
+            (
+                Focus::Panes(Tab::Settings),
+                ProjectsNav::Overview,
+                SettingsNav::CodexConfigs,
+            ),
+        ];
+
+        for &mode in &InputMode::ALL {
+            let survives_somewhere = places.iter().any(|&(focus, nav, settings)| {
+                let mut state = AppState {
+                    focus,
+                    projects_nav: nav,
+                    settings_nav: settings,
+                    input_mode: mode,
+                    ..Default::default()
+                };
+                validate_mode_focus_consistency(&mut state);
+                state.input_mode == mode
+            });
+            assert!(
+                survives_somewhere,
+                "{mode:?} is rejected everywhere, so it can never be entered"
+            );
+        }
+    }
+
+    /// Every mode that consumes `Tab` for its own purposes must keep it: the
+    /// add-project prompt completes a path, it does not switch panes
+    #[test]
+    fn test_only_normal_mode_gives_tab_to_the_panes() {
+        assert!(globals_apply(InputMode::Normal));
+
+        for &mode in &InputMode::ALL {
+            if mode == InputMode::Normal {
+                continue;
+            }
+            assert!(
+                !globals_apply(mode),
+                "{mode:?} must own Tab, q, ? and Space itself"
+            );
+        }
+
+        // The modes that would visibly break are worth naming
+        for mode in [
+            InputMode::AddingProject,
+            InputMode::AddingClaudeConfigPath,
+            InputMode::AddingCodexConfigPath,
+            InputMode::MovingToFolder,
+            InputMode::ConfirmingClaudeSettingsCopy,
+            InputMode::ConfirmingClaudeSettingsMigrate,
+            InputMode::AddingCustomShortcutAutoClose,
+            InputMode::Session,
+        ] {
+            assert!(!globals_apply(mode), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn test_space_belongs_to_the_notifications_section_and_nowhere_else() {
+        let mut state = AppState {
+            focus: Focus::Panes(Tab::Settings),
+            settings_nav: SettingsNav::Notifications,
+            ..Default::default()
+        };
+        assert!(owns_space(&state));
+
+        state.settings_nav = SettingsNav::About;
+        assert!(!owns_space(&state));
+
+        state.focus = Focus::Panes(Tab::Projects);
+        state.settings_nav = SettingsNav::Notifications;
+        assert!(!owns_space(&state), "another pane has focus");
+
+        assert!(!owns_space(&AppState::default()));
     }
 }

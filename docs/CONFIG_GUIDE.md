@@ -11,6 +11,13 @@ backs it up to a timestamped `config.toml.corrupt.<timestamp>` sibling, starts
 with defaults, and shows a warning so you can recover your settings from the
 backup.
 
+> **Hand-written comments are not preserved.** Panoptes rewrites the whole file
+> from its own state whenever something in the app changes a setting — which the
+> Settings → Notifications toggles do on every keystroke, and adding or deleting
+> a custom shortcut does too. The first such write drops your comments and
+> reorders the keys. Everything below stays hand-edited only, so if you keep
+> notes in `config.toml`, keep a copy of them somewhere else.
+
 ## File Location
 
 ```
@@ -282,8 +289,18 @@ Defines custom keyboard shortcuts that spawn shell sessions with predefined comm
 | `auto_close` | bool | No | Default `false`. When `true`, the shortcut's shell session closes automatically once its command finishes |
 
 **Reserved keys** (cannot be used for custom shortcuts):
-- `g`, `G`, `k`, `x`, `n`, `s`, `d` - Already bound in the views
+- `q` - Quit, handled globally in normal mode
+- `n`, `s`, `d` - New / shell / delete, bound in panes 1 and 2
+- `,` - Per-project settings, bound at pane 1's project level
 - `0-9` - Used for session number jumping
+
+`c`, `g`, `G`, `k` and `x` used to be reserved and are now free: the configs,
+shortcuts and log viewer they belonged to have moved into the Settings pane,
+which is reached with `Tab` rather than a letter.
+
+A shortcut bound to a key that has since become reserved is **dropped** when
+Panoptes starts, and a startup notice says which ones went — it is never left in
+place to be silently shadowed by the built-in binding.
 
 **Example:**
 
@@ -305,8 +322,9 @@ command = "npm run dev"
 ```
 
 **Managing shortcuts:**
-- Press `k` in any view to open the shortcuts management dialog
-- In session view (normal mode), press the shortcut key to spawn a shell session with that command
+- Settings pane → Shortcuts: `n` adds one, `d` deletes the selected one
+- At a branch, or in session view (normal mode), press the shortcut key to spawn
+  a shell session with that command
 
 **When to use:** Define shortcuts for commands you frequently run when working with Claude Code sessions, such as opening editors, starting dev servers, or running build tools.
 
@@ -376,11 +394,24 @@ EOF
 
 ## Reloading Configuration
 
-Configuration changes require restarting Panoptes to take effect.
+Six settings can be changed while Panoptes is running, from **Settings →
+Notifications**. They take effect on the next event, with no restart:
+
+| Row | Field |
+|-----|-------|
+| Notify me by | `notification_method` |
+| …on approval needed | `notify_on.approval` |
+| …on turn finished | `notify_on.turn_complete` |
+| …on tool stalled | `notify_on.stalled` |
+| …on session crashed | `notify_on.crashed` |
+| Idle nudge counts as attention | `attention_on_idle` |
+
+Everything else is read at startup or when a session is spawned, and needs a
+restart. Those settings are shown read-only under **Settings → About / paths**,
+alongside where each file lives.
 
 ```bash
-# After editing config.toml
-# Press Esc at the Projects Overview to quit Panoptes (confirm when prompted)
-# Then restart it
+# After hand-editing config.toml
+# Press q to quit Panoptes (confirm when prompted), then restart it
 ./target/release/panoptes
 ```

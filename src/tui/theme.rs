@@ -77,18 +77,6 @@ pub struct Theme {
     pub cancel_key: Color,
     /// Color for default-item markers (e.g. "★" / "(default)")
     pub default_marker: Color,
-
-    // === Log Levels ===
-    /// TRACE log level
-    pub log_trace: Color,
-    /// DEBUG log level
-    pub log_debug: Color,
-    /// INFO log level
-    pub log_info: Color,
-    /// WARN log level
-    pub log_warn: Color,
-    /// ERROR log level
-    pub log_error: Color,
 }
 
 impl Default for Theme {
@@ -144,25 +132,6 @@ impl Theme {
             confirm_key: Color::Green,
             cancel_key: Color::Red,
             default_marker: Color::Yellow,
-
-            // Log levels
-            log_trace: Color::DarkGray,
-            log_debug: Color::Gray,
-            log_info: Color::Blue,
-            log_warn: Color::Yellow,
-            log_error: Color::Red,
-        }
-    }
-
-    /// Get the color for a log level
-    pub fn log_level_color(&self, level: crate::logging::LogLevel) -> Color {
-        use crate::logging::LogLevel;
-        match level {
-            LogLevel::Trace => self.log_trace,
-            LogLevel::Debug => self.log_debug,
-            LogLevel::Info => self.log_info,
-            LogLevel::Warn => self.log_warn,
-            LogLevel::Error => self.log_error,
         }
     }
 

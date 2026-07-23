@@ -77,36 +77,38 @@ cargo build --release
 
 ## Keyboard Shortcuts
 
+Panoptes shows three panes at once — **Projects**, **Sessions**, **Settings** —
+and `Tab` cycles focus. The focused pane widens; the other two shrink but stay
+in view.
+
 ### Essential Navigation
 
 | Key | Action |
 |-----|--------|
-| `?` | Show the keys for the current view |
+| `Tab` / `Shift+Tab` | Switch pane (wraps around) |
 | `Enter` | Open selected item / Enter session mode |
-| `Esc` | Go back / Exit session mode (quits with confirmation at the Projects overview) |
+| `Esc` | Back one level — never quits, and does nothing at a pane's root |
+| `q` | Quit (with confirmation) |
 | `Shift+Esc` | Send Escape to the session (from session mode) |
 | `Space` | Jump to next session needing attention |
-| `Tab` | Switch to next session (in session view) |
-| `k` | Manage custom shortcuts |
+| `?` | Show the keys for wherever you are |
 
 ### Project Management
 
 | Key | Action |
 |-----|--------|
 | `n` | Add new project / New worktree / New session (context-dependent) |
-| `s` | New shell session (from branch view) |
-| `d` | Delete selected item (removes a folder when one is selected) |
-| `m` | Move a project or folder into a folder (from homepage) |
-| `r` | Rename project (project view) / Rename folder (homepage) |
+| `s` | New shell session (at a branch) |
+| `d` | Delete selected item (ungroups a folder when one is selected) |
+| `m` | Move a project or folder into a folder (in the tree) |
+| `r` | Rename folder (in the tree) |
 | `R` | Refresh git state / branches |
-| `c` | Claude configs (from homepage) / Set project Claude config |
-| `x` | Codex configs (from homepage) / Set project Codex config |
+| `,` | Per-project settings: default configs, base branch, rename |
 
-### Views
+### Settings
 
-| Key | Action |
-|-----|--------|
-| `l` | Open log viewer |
+Claude accounts, Codex accounts, custom shortcuts, notification toggles, and the
+paths of every file Panoptes writes all live in pane 3. Press `Tab` twice.
 
 See [Keyboard Reference](docs/KEYBOARD_REFERENCE.md) for the complete list.
 
@@ -115,13 +117,13 @@ See [Keyboard Reference](docs/KEYBOARD_REFERENCE.md) for the complete list.
 Need to manage multiple accounts — say, one for work and one for personal projects? Panoptes has you covered.
 
 ### Claude Code Accounts
-Press `c` from the homepage to manage Claude configurations, then assign defaults per-project with `c` from the project view.
+Open Settings (`Tab` twice) → Claude configs to manage them, then assign a per-project default with `,` at the project.
 
 - **New account**: Select any folder as your config directory. Claude will prompt you to log in the first time you use it.
 - **Existing account**: Select the Claude config directory you already have (e.g., `~/.claude-work`).
 
 ### Codex Accounts
-Press `x` from the homepage to manage Codex configurations, then assign defaults per-project with `x` from the project view.
+Open Settings (`Tab` twice) → Codex configs to manage them, then assign a per-project default with `,` at the project.
 
 - **New account**: Select any folder as the `CODEX_HOME` directory. Codex will use it for config, auth, and sessions.
 - **Existing account**: Select your existing Codex home directory (default `~/.codex`).
@@ -136,6 +138,10 @@ Configuration is stored in `~/.panoptes/config.toml`:
 hook_port = 9999                # HTTP server port for Claude Code hooks
 notification_method = "bell"    # "bell", "title", or "none"
 ```
+
+The notification settings can be changed live from Settings → Notifications;
+everything else is read at startup. Note that anything the app writes rewrites
+the whole file, so hand-written comments in `config.toml` do not survive.
 
 See [Configuration Guide](docs/CONFIG_GUIDE.md) for all options.
 

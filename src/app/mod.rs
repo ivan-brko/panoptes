@@ -6,23 +6,22 @@
 // Submodules
 mod background;
 mod input_mode;
+mod nav;
 mod state;
-mod view;
 
 // Re-exports from submodules
 pub use input_mode::InputMode;
+pub use nav::{Focus, ProjectsNav, SettingsNav, Tab};
 pub use state::{
     cycle_next, cycle_prev, AppState, ClaudeSettingsCopyState, ClaudeSettingsMigrateState,
-    FolderMoveTarget, HomepageFocus, LoadingOverlay, SessionDraft, WorktreeWizardState,
+    FolderMoveTarget, LoadingOverlay, SessionDraft, WorktreeWizardState,
 };
-pub use view::View;
 
 // Re-exports from wizards (for backwards compatibility)
 pub use crate::wizards::worktree::{BranchRef, BranchRefType, WorktreeCreationType};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -35,19 +34,23 @@ use crate::hooks::{
     self, HookEventReceiver, HookEventSender, ServerHandle, ServerStatus, DEFAULT_CHANNEL_BUFFER,
 };
 use crate::input::agent_configs::AgentKind;
-use crate::logging::{LogBuffer, LogFileInfo};
+use crate::logging::LogFileInfo;
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionId, SessionManager, SessionType};
 use crate::transcript::{TranscriptKind, TranscriptWatcher, WatchTarget};
 use crate::tui::frame::{FrameConfig, FrameLayout};
+use crate::tui::panes::PaneLayout;
 use crate::tui::views::{
     render_agent_config_delete_dialog, render_agent_config_name_input_dialog,
-    render_agent_config_path_input_dialog, render_agent_config_selector, render_agent_configs,
-    render_agent_type_selector, render_branch_detail, render_claude_settings_copy_dialog,
-    render_claude_settings_migrate_dialog, render_custom_shortcut_dialogs, render_error_overlay,
-    render_help_overlay, render_loading_indicator, render_log_viewer, render_project_detail,
-    render_projects_overview, render_quit_confirm_dialog, render_session_view,
-    render_startup_notice_overlay,
+    render_agent_config_path_input_dialog, render_agent_config_selector,
+    render_agent_type_selector, render_branch_delete_confirmation,
+    render_claude_settings_copy_dialog, render_claude_settings_migrate_dialog,
+    render_custom_shortcut_dialogs, render_default_base_selector, render_error_overlay,
+    render_folder_move_dialog, render_folder_remove_confirmation, render_help_overlay,
+    render_loading_indicator, render_panes, render_project_addition_dialog,
+    render_project_delete_confirmation, render_quit_confirm_dialog,
+    render_session_delete_confirmation, render_session_view, render_startup_notice_overlay,
+    render_worktree_wizard, PaneContext,
 };
 use crate::tui::Tui;
 use crate::wizards::worktree::{
@@ -93,10 +96,12 @@ pub struct App {
     hook_server: ServerHandle,
     /// Terminal UI
     pub(crate) tui: Tui,
-    /// Log buffer for real-time log viewing
-    pub(crate) log_buffer: Arc<LogBuffer>,
     /// Information about the current log file
     pub(crate) log_file_info: LogFileInfo,
+    /// Animated split between the three panes
+    pub(crate) panes: PaneLayout,
+    /// Whether the hook server is still accepting agent callbacks
+    pub(crate) hook_server_healthy: bool,
     /// Whether verbose mouse diagnostics are enabled
     mouse_debug_enabled: bool,
     /// When the Codex rollout directory was last scanned for conversation IDs
@@ -139,14 +144,23 @@ fn default_codex_home() -> std::path::PathBuf {
 
 impl App {
     /// Create a new application instance
-    pub async fn new(log_buffer: Arc<LogBuffer>, log_file_info: LogFileInfo) -> Result<Self> {
+    pub async fn new(log_file_info: LogFileInfo) -> Result<Self> {
         // Track any startup warnings to show as notifications
         let mut startup_warnings: Vec<String> = Vec::new();
 
         // Load config (or fall back to defaults if config.toml is corrupted)
-        let (config, config_warning) = Config::load_with_status();
+        let (mut config, config_warning) = Config::load_with_status();
         if let Some(warning) = config_warning {
             startup_warnings.push(warning);
+        }
+        // A shortcut bound to a key that has since become reserved could never
+        // fire - the built-in arm matches first - so it is dropped rather than
+        // silently shadowed, and the user is told which ones went.
+        if let Some(warning) = config.drop_reserved_shortcuts() {
+            startup_warnings.push(warning);
+            if let Err(e) = config.save() {
+                tracing::warn!("Failed to persist shortcut migration: {}", e);
+            }
         }
         let mouse_debug_enabled = mouse_debug_enabled_from_env();
 
@@ -198,6 +212,8 @@ impl App {
 
         // Create TUI
         let tui = Tui::new()?;
+        let terminal_width = tui.size().map(|size| size.width).unwrap_or(80);
+        let panes = PaneLayout::new(terminal_width, Tab::default().index(), Instant::now());
 
         let mut state = AppState::default();
         // Surface any startup warnings (corrupt-file backups, etc.) as a
@@ -225,8 +241,9 @@ impl App {
             hook_rx,
             hook_server,
             tui,
-            log_buffer,
             log_file_info,
+            panes,
+            hook_server_healthy: true,
             mouse_debug_enabled,
             last_codex_id_scan: None,
             transcripts,
@@ -303,9 +320,14 @@ impl App {
                         }
                         self.state.needs_render = true;
                     }
-                    Event::Resize(_, _) => {
-                        // Debounce resize events - record time and mark pending
-                        // We still need to render (for UI layout), but PTY resize is deferred
+                    Event::Resize(width, _) => {
+                        // The panes adopt the new width immediately: they are
+                        // drawn from these boundaries, and a frame drawn at the
+                        // old width would not fill the terminal. Retargeting
+                        // keeps the current widths as the starting point, so a
+                        // drag glides rather than jumping.
+                        self.panes.set_total_width(width, Instant::now());
+                        // PTY resizing is the expensive half, and stays debounced
                         self.state.last_resize = Some(Instant::now());
                         self.state.pending_resize = true;
                         self.state.needs_render = true;
@@ -322,6 +344,7 @@ impl App {
             }
 
             let mut dirty = false;
+            dirty |= self.tick_pane_transition();
             dirty |= self.tick_background_job();
             dirty |= self.tick_resize_debounce()?;
             dirty |= self.process_hook_events();
@@ -361,9 +384,25 @@ impl App {
         Ok(())
     }
 
+    /// Advance the accordion transition
+    ///
+    /// Returns whether a frame is owed. Once the transition lands this stops
+    /// returning true, so an idle Panoptes renders exactly as often as it did
+    /// before the accordion existed.
+    fn tick_pane_transition(&mut self) -> bool {
+        self.panes.tick(Instant::now())
+    }
+
+    /// Point the accordion at the focused pane, animating from where it is
+    pub(crate) fn sync_pane_focus(&mut self) {
+        if let Some(tab) = self.state.focused_tab() {
+            self.panes.set_focus(tab.index(), Instant::now());
+        }
+    }
+
     /// Safety net: Codex session mode requires mouse capture for wheel events.
     fn tick_mouse_capture_safety_net(&mut self) {
-        if self.state.view == View::SessionView
+        if self.state.focus == Focus::Session
             && self.state.input_mode == InputMode::Session
             && self
                 .state
@@ -394,7 +433,7 @@ impl App {
                 column = mouse.column,
                 row = mouse.row,
                 modifiers = ?mouse.modifiers,
-                view = ?self.state.view,
+                focus = ?self.state.focus,
                 input_mode = ?self.state.input_mode,
                 mouse_capture_enabled = self.tui.is_mouse_capture_enabled(),
                 active_session = ?self.state.active_session,
@@ -431,7 +470,12 @@ impl App {
         self.state.pending_resize = false;
         let size = self.tui.size()?;
 
-        // Use FrameLayout for consistent size calculation
+        // Belt and braces: the Resize event already adopted the width, but a
+        // terminal that resized without one leaves the panes short otherwise
+        self.panes.set_total_width(size.width, Instant::now());
+
+        // PTY dimensions come from the full terminal, not from a pane: the
+        // session view is still full-screen, so the split must not leak here.
         let frame_config = FrameConfig::default();
         let layout = FrameLayout::calculate(
             ratatui::prelude::Rect::new(0, 0, size.width, size.height),
@@ -587,6 +631,7 @@ impl App {
         match status {
             ServerStatus::Error(msg) => {
                 tracing::error!("Hook server error: {}", msg);
+                self.hook_server_healthy = false;
                 self.state.header_notifications.set_persistent(
                     "Hook server stopped - session state updates unavailable".to_string(),
                 );
@@ -594,6 +639,7 @@ impl App {
             }
             ServerStatus::Shutdown => {
                 tracing::debug!("Hook server shut down normally");
+                self.hook_server_healthy = false;
                 false
             }
             ServerStatus::Running => {
@@ -772,7 +818,7 @@ impl App {
     /// Returns true if the event caused a state change requiring re-render.
     fn handle_mouse_event(&mut self, mouse: MouseEvent) -> Result<bool> {
         // Only handle mouse events in session view with active session
-        if self.state.view != View::SessionView {
+        if self.state.focus != Focus::Session {
             return Ok(false);
         }
 
@@ -908,28 +954,17 @@ impl App {
     // ========================================================================
 
     /// Handle key in normal mode
+    ///
+    /// Routes to the focused pane, which then routes on its own drill-down
+    /// level. A session filling the screen is the only thing that bypasses the
+    /// panes entirely.
     pub(crate) fn handle_normal_mode_key(&mut self, key: KeyEvent) -> Result<()> {
         use crate::input::normal;
-        match self.state.view {
-            View::ProjectsOverview => {
-                normal::projects_overview::handle_projects_overview_key(self, key)
-            }
-            View::ProjectDetail(_) => normal::project_detail::handle_project_detail_key(self, key),
-            View::BranchDetail(project_id, branch_id) => {
-                normal::branch_detail::handle_branch_detail_key(self, key, project_id, branch_id)
-            }
-            View::SessionView => normal::session_view::handle_session_view_normal_key(self, key),
-            View::LogViewer => normal::log_viewer::handle_log_viewer_key(self, key),
-            View::ClaudeConfigs => crate::input::agent_configs::handle_configs_view_key(
-                self,
-                key,
-                crate::input::agent_configs::AgentKind::Claude,
-            ),
-            View::CodexConfigs => crate::input::agent_configs::handle_configs_view_key(
-                self,
-                key,
-                crate::input::agent_configs::AgentKind::Codex,
-            ),
+        match self.state.focus {
+            Focus::Panes(Tab::Projects) => normal::projects_pane::handle_key(self, key),
+            Focus::Panes(Tab::Sessions) => normal::sessions_pane::handle_key(self, key),
+            Focus::Panes(Tab::Settings) => normal::settings_pane::handle_key(self, key),
+            Focus::Session => normal::session_view::handle_session_view_normal_key(self, key),
         }
     }
 
@@ -1457,7 +1492,7 @@ impl App {
     /// state: a session blocked on a permission dialog still reads as
     /// `AwaitingApproval`, which is visible on screen anyway.
     fn acknowledge_visible_session(&mut self) {
-        if self.state.view != View::SessionView {
+        if self.state.focus != Focus::Session {
             return;
         }
         if let Some(session_id) = self.state.active_session {
@@ -1694,7 +1729,7 @@ impl App {
     pub(crate) fn spawn_worktree_removal(&mut self, branch: &crate::project::Branch) -> bool {
         let repo_path = self
             .state
-            .view
+            .projects_nav
             .project_id()
             .and_then(|project_id| self.project_store.get_project(project_id))
             .map(|project| project.repo_path.clone());
@@ -1939,97 +1974,45 @@ impl App {
         let codex_config_store = &self.codex_config_store;
         let sessions = &self.sessions;
         let config = &self.config;
-        let log_buffer = &self.log_buffer;
         let log_file_info = &self.log_file_info;
+        let panes = &self.panes;
+        let hook_port = self.hook_server.addr().port();
+        let hook_healthy = self.hook_server_healthy;
+        let now = Instant::now();
 
         self.tui.draw(|frame| {
             let area = frame.size();
 
-            match state.view {
-                View::ProjectsOverview => {
-                    render_projects_overview(
-                        frame,
-                        area,
+            if state.focus == Focus::Session {
+                render_session_view(
+                    frame,
+                    area,
+                    state,
+                    sessions,
+                    project_store,
+                    config,
+                    &state.header_notifications,
+                );
+            } else {
+                render_panes(
+                    frame,
+                    area,
+                    PaneContext {
                         state,
                         project_store,
                         sessions,
                         config,
-                        &state.header_notifications,
-                    );
-                }
-                View::ProjectDetail(project_id) => {
-                    render_project_detail(
-                        frame,
-                        area,
-                        state,
-                        project_id,
-                        project_store,
-                        sessions,
-                        config,
-                        &state.header_notifications,
-                    );
-                }
-                View::BranchDetail(project_id, branch_id) => {
-                    render_branch_detail(
-                        frame,
-                        area,
-                        state,
-                        project_id,
-                        branch_id,
-                        project_store,
-                        sessions,
-                        config,
-                        &state.header_notifications,
-                    );
-                }
-                View::SessionView => {
-                    render_session_view(
-                        frame,
-                        area,
-                        state,
-                        sessions,
-                        project_store,
-                        config,
-                        &state.header_notifications,
-                    );
-                }
-                View::LogViewer => {
-                    let attention_count = sessions.total_attention_count();
-                    render_log_viewer(
-                        frame,
-                        area,
-                        log_buffer,
-                        log_file_info,
-                        state.log_viewer_scroll,
-                        state.log_viewer_auto_scroll,
-                        &state.header_notifications,
-                        attention_count,
-                    );
-                }
-                View::ClaudeConfigs => {
-                    let attention_count = sessions.total_attention_count();
-                    render_agent_configs(
-                        frame,
-                        area,
-                        AgentKind::Claude,
                         claude_config_store,
-                        state.claude_configs_selected_index,
-                        &state.header_notifications,
-                        attention_count,
-                    );
-                }
-                View::CodexConfigs => {
-                    let attention_count = sessions.total_attention_count();
-                    render_agent_configs(
-                        frame,
-                        area,
-                        AgentKind::Codex,
                         codex_config_store,
-                        state.codex_configs_selected_index,
-                        &state.header_notifications,
-                        attention_count,
-                    );
-                }
+                        log_file_info,
+                        // Widths come from the animated boundaries, so a pane
+                        // renders at whatever density its *current* width
+                        // allows rather than its target one
+                        widths: panes.widths_at(now),
+                        hook_port,
+                        hook_healthy,
+                    },
+                );
             }
 
             // Render the overlay belonging to the current input mode.
@@ -2147,46 +2130,67 @@ impl App {
                         codex_config_store.get_default_id(),
                     );
                 }
-                InputMode::ManagingCustomShortcuts
-                | InputMode::AddingCustomShortcutKey
+                InputMode::AddingCustomShortcutKey
                 | InputMode::AddingCustomShortcutName
                 | InputMode::AddingCustomShortcutCommand
                 | InputMode::AddingCustomShortcutAutoClose
                 | InputMode::ConfirmingCustomShortcutDelete => {
                     render_custom_shortcut_dialogs(frame, area, state, config);
                 }
-                // Centralized so the quit prompt is visible from any view, not
-                // only the overview where it is triggered
+                // Centralized so the quit prompt is visible from any pane, not
+                // only where it is triggered
                 InputMode::ConfirmingQuit => {
                     render_quit_confirm_dialog(frame, area);
                 }
-                // These modes draw no overlay from here: their dialogs are
-                // rendered by the per-view renderers above (session-name
-                // inputs, delete confirmations, worktree wizard, folder
-                // dialogs), or they need no overlay at all (Normal, Session).
+                // Anything showing a list or a paragraph is an overlay
+                // anchored to the terminal, never to a pane: a list of paths
+                // truncated to one pane's width is not a list you can choose
+                // from, and an animating pane must not resize a prompt under
+                // the user mid-typing.
+                InputMode::AddingProject => {
+                    render_project_addition_dialog(frame, area, state);
+                }
+                InputMode::MovingToFolder => {
+                    render_folder_move_dialog(frame, area, state);
+                }
+                InputMode::WorktreeSelectBranch
+                | InputMode::WorktreeSelectBase
+                | InputMode::WorktreeConfirm => {
+                    render_worktree_wizard(frame, area, state, config);
+                }
+                InputMode::SelectingDefaultBase => {
+                    render_default_base_selector(frame, area, state);
+                }
+                InputMode::ConfirmingSessionDelete => {
+                    render_session_delete_confirmation(frame, area, state, sessions);
+                }
+                InputMode::ConfirmingBranchDelete => {
+                    render_branch_delete_confirmation(frame, area, state, project_store, sessions);
+                }
+                InputMode::ConfirmingProjectDelete => {
+                    let project = state
+                        .pending_delete_project
+                        .and_then(|id| project_store.get_project(id));
+                    render_project_delete_confirmation(frame, area, state, project, sessions);
+                }
+                InputMode::ConfirmingFolderRemove => {
+                    render_folder_remove_confirmation(frame, area, state, project_store);
+                }
+                // The remaining modes are one-line inputs drawn inline in the
+                // pane that owns them, or need no overlay at all.
                 InputMode::Normal
                 | InputMode::Session
                 | InputMode::CreatingSession
                 | InputMode::CreatingShellSession
                 | InputMode::CreatingCodexSession
-                | InputMode::AddingProject
                 | InputMode::AddingProjectName
-                | InputMode::SelectingDefaultBase
-                | InputMode::ConfirmingSessionDelete
-                | InputMode::ConfirmingBranchDelete
-                | InputMode::ConfirmingProjectDelete
                 | InputMode::RenamingProject
-                | InputMode::MovingToFolder
-                | InputMode::RenamingFolder
-                | InputMode::ConfirmingFolderRemove
-                | InputMode::WorktreeSelectBranch
-                | InputMode::WorktreeSelectBase
-                | InputMode::WorktreeConfirm => {}
+                | InputMode::RenamingFolder => {}
             }
 
             // Render help overlay if active
             if state.show_help_overlay {
-                render_help_overlay(frame, area, &state.view);
+                render_help_overlay(frame, area, state);
             }
 
             // Render loading overlay if an operation is in progress
@@ -2326,8 +2330,10 @@ mod tests {
         assert!(state.new_project_path.is_empty());
     }
 
+    /// A `Space` attention-jump followed by `Esc` lands back in the pane the
+    /// jump started from, with pane 1 following the session to its branch
     #[test]
-    fn test_return_from_session_uses_session_context() {
+    fn test_attention_jump_and_back_restores_the_origin_pane() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config = Config {
             worktrees_dir: temp_dir.path().join("worktrees"),
@@ -2344,32 +2350,53 @@ mod tests {
         let project_b = Uuid::new_v4();
         let branch_b = Uuid::new_v4();
 
-        // Create test sessions in different projects/branches
-        let _session_a = sessions
+        let session_a = sessions
             .insert_test_session("Session A", project_a, branch_a)
             .unwrap();
         let session_b = sessions
             .insert_test_session("Session B", project_b, branch_b)
             .unwrap();
 
+        // Jump out of the Settings pane, then hop to a second session
         let mut state = AppState {
-            view: View::LogViewer,
+            focus: Focus::Panes(Tab::Settings),
+            settings_nav: SettingsNav::About,
             ..Default::default()
         };
+        state.navigate_to_session(session_a);
+        state.navigate_to_session(session_b);
 
-        // Start somewhere unrelated, navigate to session A
-        state.navigate_to_session(_session_a);
-        assert_eq!(state.session_return_view, Some(View::LogViewer));
-
-        // Jump to session B (simulates Space key)
-        state.active_session = Some(session_b);
-        state.session_return_view = Some(View::SessionView); // This is what causes the bug
-
-        // Return from session - should go to session B's branch detail, not where we came from
         state.return_from_session(&sessions);
-        assert_eq!(state.view, View::BranchDetail(project_b, branch_b));
+        assert_eq!(state.focus, Focus::Panes(Tab::Settings));
+        assert_eq!(state.settings_nav, SettingsNav::About);
         assert!(state.active_session.is_none());
-        assert!(state.session_return_view.is_none());
+        assert!(state.session_return_focus.is_none());
+
+        // The same jump out of pane 1 lands on the session's own branch
+        let mut state = AppState::default();
+        state.navigate_to_session(session_b);
+        state.return_from_session(&sessions);
+        assert_eq!(state.focus, Focus::Panes(Tab::Projects));
+        assert_eq!(state.projects_nav, ProjectsNav::Branch(project_b, branch_b));
+    }
+
+    /// The pane split must never reach the PTY: a session is still full-screen
+    #[test]
+    fn test_pty_size_is_the_full_terminal_not_a_pane() {
+        let terminal = ratatui::prelude::Rect::new(0, 0, 200, 50);
+        let (rows, cols) = FrameLayout::calculate(terminal, &FrameConfig::default()).pty_size();
+
+        // Header, footer and the frame border, and nothing pane-shaped
+        assert_eq!(cols, terminal.width - 2);
+        assert_eq!(rows, terminal.height - 3 - 3 - 2);
+
+        // The widest pane at this terminal is far narrower than the PTY
+        let widths = crate::tui::panes::pane_widths(terminal.width, 0);
+        assert!(
+            widths[0] < cols,
+            "the focused pane ({}) must not be what sizes the PTY ({cols})",
+            widths[0]
+        );
     }
 
     #[test]

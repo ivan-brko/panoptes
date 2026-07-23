@@ -133,7 +133,7 @@ When Panoptes starts for the first time:
 Panoptes will:
 - Detect the repository and its default branch
 - Create a branch entry for the default branch
-- Display the project in the Projects Overview
+- Display the project in the Projects pane
 
 ### Create Your First Session
 
