@@ -7,36 +7,23 @@
 //! once, generic over [`AgentProfile`]; [`AgentKind`] picks the wording.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 use uuid::Uuid;
 
 use crate::agent_profiles::{AgentProfile, ProfileStore};
 use crate::input::agent_configs::AgentKind;
-use crate::tui::header::Header;
-use crate::tui::header_notifications::HeaderNotificationManager;
-use crate::tui::layout::ScreenLayout;
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
-use crate::tui::views::{render_footer, Breadcrumb};
 use crate::tui::widgets::dialog::{render_dialog, DialogSize, DialogSpec};
 use crate::tui::widgets::selection::{
     selection_name_style, selection_prefix, selection_style_with_accent,
 };
 
-/// The wording that differs between the Claude and Codex config screens
+/// The wording that differs between the Claude and Codex config dialogs
+///
+/// The list itself lives in pane 3, which titles and borders it, so only the
+/// add-config dialogs still need agent-specific copy.
 struct AgentConfigCopy {
-    /// Breadcrumb segment (e.g. "Claude Configs")
-    breadcrumb: &'static str,
-    /// List/empty-state title (e.g. "Claude Configs")
-    list_title: &'static str,
-    /// Empty state: nothing found line
-    none_found: &'static str,
-    /// Empty state: what a config points at
-    dir_line: &'static str,
-    /// Empty state: what multiple configs enable
-    accounts_line: &'static str,
-    /// Empty state: which directory is used by default
-    default_note: &'static str,
     /// Path dialog: prompt for the directory
     dir_prompt: &'static str,
     /// Path dialog: hint about the default directory
@@ -46,24 +33,12 @@ struct AgentConfigCopy {
 }
 
 const CLAUDE_COPY: AgentConfigCopy = AgentConfigCopy {
-    breadcrumb: "Claude Configs",
-    list_title: "Claude Configs",
-    none_found: "No Claude configs found.",
-    dir_line: "Each config points to a different Claude config directory,",
-    accounts_line: "so you can switch between Claude accounts.",
-    default_note: "The default config (~/.claude) is used if you don't specify a path.",
     dir_prompt: "Enter the path to the Claude config directory:",
     default_dir_hint: "(Leave empty for default ~/.claude)",
     new_dialog_title: " New Claude Config ",
 };
 
 const CODEX_COPY: AgentConfigCopy = AgentConfigCopy {
-    breadcrumb: "Codex Configs",
-    list_title: "Codex Configs",
-    none_found: "No Codex configs found.",
-    dir_line: "Each config points to a different CODEX_HOME directory,",
-    accounts_line: "so you can switch between Codex accounts.",
-    default_note: "The default config (~/.codex) is used if you don't specify a path.",
     dir_prompt: "Enter the path to the CODEX_HOME directory:",
     default_dir_hint: "(Leave empty for default ~/.codex)",
     new_dialog_title: " New Codex Config ",
@@ -77,100 +52,28 @@ fn copy_for(kind: AgentKind) -> &'static AgentConfigCopy {
     }
 }
 
-/// Render the agent configs view
-pub fn render_agent_configs<C: AgentProfile>(
+/// Render an agent's config list into a settings-pane rect
+///
+/// The pane owns the border and title, so this draws rows only, truncated
+/// against the pane's current width.
+pub fn render_agent_config_list<C: AgentProfile>(
     frame: &mut Frame,
     area: Rect,
-    kind: AgentKind,
     config_store: &ProfileStore<C>,
     selected_index: usize,
-    header_notifications: &HeaderNotificationManager,
-    attention_count: usize,
 ) {
-    let copy = copy_for(kind);
-
-    // Build header
-    let breadcrumb = Breadcrumb::new().push(copy.breadcrumb);
-    let suffix = format!("({} configs)", config_store.count());
-
-    let header = Header::new(breadcrumb)
-        .with_suffix(suffix)
-        .with_notifications(Some(header_notifications))
-        .with_attention_count(attention_count);
-
-    // Create layout with header and footer
-    let areas = ScreenLayout::new(area).with_header(header).render(frame);
-
-    // Render config list or empty state
+    let t = theme();
     let configs = config_store.configs_sorted();
     if configs.is_empty() {
-        render_empty_state(frame, areas.content, copy);
-    } else {
-        render_config_list(
-            frame,
-            areas.content,
-            copy,
-            &configs,
-            config_store.get_default_id(),
-            selected_index,
+        frame.render_widget(
+            Paragraph::new("No configs yet.\n\nPress 'n' to add one.").style(t.muted_style()),
+            area,
         );
+        return;
     }
 
-    // Footer
-    let footer_text = if configs.is_empty() {
-        "n: new config | ?: help | Esc: back"
-    } else {
-        "n: new | s: set default | d: delete | ?: help | Esc: back"
-    };
-    render_footer(frame, areas.footer(), footer_text);
-}
-
-/// Render the empty state message
-fn render_empty_state(frame: &mut Frame, area: Rect, copy: &AgentConfigCopy) {
-    let t = theme();
-
-    let message = vec![
-        Line::from(""),
-        Line::from(Span::styled(copy.none_found, Style::default().fg(t.text))),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press 'n' to add a config.",
-            Style::default().fg(t.text_muted),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            copy.dir_line,
-            Style::default().fg(t.text_muted),
-        )),
-        Line::from(Span::styled(
-            copy.accounts_line,
-            Style::default().fg(t.text_muted),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            copy.default_note,
-            Style::default().fg(t.text_muted),
-        )),
-    ];
-
-    let paragraph = Paragraph::new(message).alignment(Alignment::Center).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(copy.list_title),
-    );
-    frame.render_widget(paragraph, area);
-}
-
-/// Render the list of configs
-fn render_config_list<C: AgentProfile>(
-    frame: &mut Frame,
-    area: Rect,
-    copy: &AgentConfigCopy,
-    configs: &[&C],
-    default_id: Option<Uuid>,
-    selected_index: usize,
-) {
-    let t = theme();
+    let default_id = config_store.get_default_id();
+    let width = area.width as usize;
 
     let items: Vec<ListItem> = configs
         .iter()
@@ -179,32 +82,27 @@ fn render_config_list<C: AgentProfile>(
             let is_selected = i == selected_index;
             let is_default = default_id == Some(config.id());
 
-            let prefix = selection_prefix(is_selected);
-            let default_marker = if is_default { " ★" } else { "" };
-
-            let content = Line::from(vec![
-                Span::raw(prefix),
+            let line = Line::from(vec![
+                Span::raw(selection_prefix(is_selected)),
                 Span::styled(
                     config.name().to_string(),
                     selection_name_style(is_selected, t),
                 ),
-                Span::styled(default_marker, Style::default().fg(t.default_marker)),
+                Span::styled(
+                    if is_default { " ★" } else { "" },
+                    Style::default().fg(t.default_marker),
+                ),
                 Span::styled(
                     format!("  {}", config.home_dir_display()),
                     Style::default().fg(t.text_muted),
                 ),
             ]);
 
-            ListItem::new(content)
+            ListItem::new(crate::tui::views::pane_projects::clamp_line(line, width))
         })
         .collect();
 
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
-        "{} ({})",
-        copy.list_title,
-        configs.len()
-    )));
-    frame.render_widget(list, area);
+    frame.render_widget(List::new(items), area);
 }
 
 /// Render the config name input dialog
@@ -449,67 +347,19 @@ mod tests {
     use crate::tui::views::test_util::{contains_line, render_to_lines};
     use std::path::PathBuf;
 
-    fn render_view<C: AgentProfile>(
-        kind: AgentKind,
-        store: &ProfileStore<C>,
-        selected: usize,
-    ) -> Vec<String> {
-        let header_notifications = HeaderNotificationManager::default();
-        render_to_lines(80, 24, |frame| {
-            render_agent_configs(
-                frame,
-                frame.size(),
-                kind,
-                store,
-                selected,
-                &header_notifications,
-                0,
-            )
+    fn render_list<C: AgentProfile>(store: &ProfileStore<C>, selected: usize) -> Vec<String> {
+        render_to_lines(60, 12, |frame| {
+            render_agent_config_list(frame, frame.size(), store, selected)
         })
     }
 
     #[test]
-    fn test_claude_empty_state() {
-        let lines = render_view(AgentKind::Claude, &ClaudeConfigStore::new(), 0);
+    fn test_empty_list_points_at_the_add_key() {
+        let lines = render_list(&ClaudeConfigStore::new(), 0);
 
+        assert!(contains_line(&lines, "No configs yet."), "{:?}", lines);
         assert!(
-            contains_line(&lines, "No Claude configs found."),
-            "{:?}",
-            lines
-        );
-        assert!(
-            contains_line(&lines, "Press 'n' to add a config."),
-            "{:?}",
-            lines
-        );
-        assert!(
-            contains_line(&lines, "The default config (~/.claude) is used"),
-            "{:?}",
-            lines
-        );
-        assert!(
-            contains_line(&lines, "n: new config | ?: help | Esc: back"),
-            "{:?}",
-            lines
-        );
-    }
-
-    #[test]
-    fn test_codex_empty_state() {
-        let lines = render_view(AgentKind::Codex, &CodexConfigStore::new(), 0);
-
-        assert!(
-            contains_line(&lines, "No Codex configs found."),
-            "{:?}",
-            lines
-        );
-        assert!(
-            contains_line(&lines, "CODEX_HOME directory,"),
-            "{:?}",
-            lines
-        );
-        assert!(
-            contains_line(&lines, "The default config (~/.codex) is used"),
+            contains_line(&lines, "Press 'n' to add one."),
             "{:?}",
             lines
         );
@@ -523,9 +373,8 @@ mod tests {
             Some(PathBuf::from("/tmp/claude-work")),
         ));
 
-        let lines = render_view(AgentKind::Claude, &store, 0);
+        let lines = render_list(&store, 0);
 
-        assert!(contains_line(&lines, "Claude Configs (1)"), "{:?}", lines);
         // First (and only) config becomes the default and carries the star
         assert!(
             contains_line(&lines, "Work ★  /tmp/claude-work"),
@@ -542,9 +391,8 @@ mod tests {
             Some(PathBuf::from("/tmp/codex-work")),
         ));
 
-        let lines = render_view(AgentKind::Codex, &store, 0);
+        let lines = render_list(&store, 0);
 
-        assert!(contains_line(&lines, "Codex Configs (1)"), "{:?}", lines);
         assert!(
             contains_line(&lines, "Work ★  /tmp/codex-work"),
             "{:?}",

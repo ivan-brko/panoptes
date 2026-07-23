@@ -218,5 +218,5 @@ PANOPTES_MOUSE_DEBUG=1 cargo run
 
 Then inspect logs in:
 
-- Panoptes log viewer (`l` from Projects view), or
+- `~/.panoptes/logs/` (Settings -> About / paths names the current file), or
 - log file under `~/.panoptes/logs/`.

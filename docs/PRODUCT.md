@@ -29,17 +29,33 @@ Panoptes provides a unified interface where you can:
 
 ## Navigation Model
 
-Panoptes uses a hierarchical navigation structure:
+Panoptes shows three panes at once. `Tab` and `Shift+Tab` cycle focus; the
+focused pane widens and the other two shrink, so whatever you are working on
+gets the room and the rest stay in view.
 
 ```
-Projects Overview
+┌──────────────────────────┬─────────────────┬─────────────────────┐
+│ Projects                 │ Sessions        │ Settings            │
+│   folders, projects,     │   every session │   accounts, custom  │
+│   branches, sessions     │   flat & sorted │   keys, notifications│
+└──────────────────────────┴─────────────────┴─────────────────────┘
+```
+
+Pane 1 drills down; the other two stay put while it does:
+
+```
+Projects (tree)
     └── Folder (optional, up to 3 levels deep)
-            └── Project Detail (branches)
-                    └── Branch Detail (sessions)
-                            └── Session View (fullscreen)
+            └── Project (branches)  ── , ──> Project settings
+                    └── Branch (sessions)
+                            └── Session (fullscreen)
 ```
 
-Navigate forward with `Enter`, backward with `Esc`. This mental model makes it easy to manage many sessions across multiple codebases.
+Navigate forward with `Enter`, back with `Esc`. `Esc` means exactly one thing
+everywhere — back one level — and does nothing at a pane's root. `q` quits.
+
+Opening a session is the only thing that fills the terminal; `Esc` puts you back
+in the pane you opened it from.
 
 ## Session States
 
@@ -81,12 +97,14 @@ Panoptes actively helps you manage your attention across sessions:
   - Green dot (`●`) - The turn finished; the agent is waiting for your next prompt
   - Yellow dot (`●`) - Blocked on a permission dialog, or a tool that stopped reporting
   - Red dot (`●`) - The agent process died
-- **Needs Attention Section** - The projects overview highlights sessions requiring your input
+- **Needs Attention Section** - Pinned to the top of the Sessions pane, with a blinking count in the header that is visible from every pane
 - **Auto-Acknowledge** - Opening a session clears its attention flag, and nothing re-raises it until something new happens
 
-### Log Viewer
+### Logs
 
-Press `l` from the projects overview to access the application log viewer. Useful for debugging and understanding what's happening under the hood. Logs are stored in `~/.panoptes/logs/` with 7-day automatic retention.
+Logs are written to `~/.panoptes/logs/` with 7-day automatic retention.
+Settings → About / paths shows the current log file's path; read it with
+whatever you already use for tailing files.
 
 ### Session Scrollback
 
@@ -94,7 +112,8 @@ Session views support scrollback through output history with PgUp/PgDn keys. The
 
 ### Keyboard-Driven Interface
 
-Everything is accessible via keyboard shortcuts. Number keys (1-9) for quick selection, Tab to cycle through sessions, and arrow keys for navigation.
+Everything is accessible via keyboard shortcuts. Number keys (1-9) for quick
+selection, `Tab` to cycle panes, and arrow keys for navigation.
 
 ### Session Naming
 
@@ -104,7 +123,7 @@ You name each session when you create it, making it easy to remember what each o
 
 In addition to Claude Code sessions, Panoptes can manage regular shell sessions (bash/zsh). This is useful when you need a terminal alongside your AI sessions - for running servers, watching logs, or manual testing.
 
-- Press `s` from Branch Detail to create a shell session
+- Press `s` at a branch to create a shell session
 - Shell sessions show "Running" when a command is executing, "Ready" when idle
 - Same keyboard shortcuts work for both session types
 - State is detected automatically via foreground process detection
@@ -114,7 +133,7 @@ In addition to Claude Code sessions, Panoptes can manage regular shell sessions 
 
 Define keyboard shortcuts that quickly spawn shell sessions with predefined commands. Perfect for frequently-used tasks like opening editors, starting dev servers, or running builds.
 
-- Press `k` from any view to manage shortcuts
+- Manage them in Settings → Shortcuts
 - In session view (normal mode), press your shortcut key to spawn a shell with that command
 - Shortcuts are stored in `~/.panoptes/config.toml` and persist between sessions
 - The footer shows your configured shortcuts (e.g., `v:VSCode e:vim`)

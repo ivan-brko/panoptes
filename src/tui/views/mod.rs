@@ -12,25 +12,27 @@ use crate::tui::theme::theme;
 
 mod agent_configs;
 mod agent_select;
-mod branch_detail;
 mod claude_settings;
 mod confirm;
 mod custom_shortcuts;
 mod help;
-mod logs;
-mod project_detail;
-mod projects;
+pub(crate) mod pane_projects;
+pub(crate) mod pane_sessions;
+pub(crate) mod pane_settings;
+mod panes;
+mod prompts;
 mod session;
+mod worktree;
 
 #[cfg(test)]
 pub(crate) mod test_util;
 
 pub use agent_configs::{
-    render_agent_config_delete_dialog, render_agent_config_name_input_dialog,
-    render_agent_config_path_input_dialog, render_agent_config_selector, render_agent_configs,
+    render_agent_config_delete_dialog, render_agent_config_list,
+    render_agent_config_name_input_dialog, render_agent_config_path_input_dialog,
+    render_agent_config_selector,
 };
 pub use agent_select::render_agent_type_selector;
-pub use branch_detail::render_branch_detail;
 pub use claude_settings::{
     render_claude_settings_copy_dialog, render_claude_settings_migrate_dialog,
 };
@@ -39,12 +41,17 @@ pub use confirm::{
     render_quit_confirm_dialog, render_session_delete_confirmation, render_startup_notice_overlay,
     ConfirmDialogConfig,
 };
-pub use custom_shortcuts::render_custom_shortcut_dialogs;
+pub use custom_shortcuts::{render_custom_shortcut_dialogs, render_shortcuts_list};
 pub use help::render_help_overlay;
-pub use logs::render_log_viewer;
-pub use project_detail::{render_project_delete_confirmation, render_project_detail};
-pub use projects::render_projects_overview;
+pub use panes::{render_panes, PaneContext};
+pub use prompts::{
+    render_folder_move_dialog, render_folder_remove_confirmation, render_project_addition_dialog,
+};
 pub use session::render_session_view;
+pub use worktree::{
+    render_branch_delete_confirmation, render_default_base_selector,
+    render_project_delete_confirmation, render_worktree_wizard,
+};
 
 /// How a session's state should read in a list
 ///
@@ -162,16 +169,6 @@ pub(crate) fn status_parts(active: usize, attention: usize) -> Vec<String> {
     parts
 }
 
-/// Header status suffix like "(2 active, 1 need attention)"; empty when quiet
-pub(crate) fn status_suffix(active: usize, attention: usize) -> String {
-    let parts = status_parts(active, attention);
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("({})", parts.join(", "))
-    }
-}
-
 /// Window of a scrolling list that keeps the selection visible with context
 ///
 /// Returns the `(start, end)` range of items to show. Lists shorter than
@@ -261,28 +258,35 @@ impl Default for Breadcrumb {
 /// Truncate a path for display, keeping the end (most relevant part)
 ///
 /// `max_len` is measured in characters, so multibyte text truncates safely.
+/// The result never exceeds `max_len`: below four columns there is no room for
+/// both content and an ellipsis, so the ellipsis is what goes.
 pub(crate) fn truncate_path(path: &str, max_len: usize) -> String {
     let char_count = path.chars().count();
     if char_count <= max_len {
-        path.to_string()
-    } else {
-        let keep = max_len.saturating_sub(3);
-        let tail: String = path.chars().skip(char_count - keep).collect();
-        format!("...{}", tail)
+        return path.to_string();
     }
+    if max_len <= 3 {
+        return path.chars().skip(char_count - max_len).collect();
+    }
+    let tail: String = path.chars().skip(char_count - (max_len - 3)).collect();
+    format!("...{}", tail)
 }
 
 /// Truncate a string for display, keeping the beginning
 ///
 /// `max_len` is measured in characters, so multibyte text truncates safely.
+/// The result never exceeds `max_len`, ellipsis included - which matters now
+/// that a pane can be ten columns wide.
 pub(crate) fn truncate_string(s: &str, max_len: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_len {
-        s.to_string()
-    } else {
-        let head: String = s.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{}...", head)
+        return s.to_string();
     }
+    if max_len <= 3 {
+        return s.chars().take(max_len).collect();
+    }
+    let head: String = s.chars().take(max_len - 3).collect();
+    format!("{}...", head)
 }
 
 #[cfg(test)]
@@ -290,11 +294,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_status_suffix_combinations() {
-        assert_eq!(status_suffix(0, 0), "");
-        assert_eq!(status_suffix(2, 0), "(2 active)");
-        assert_eq!(status_suffix(0, 1), "(1 need attention)");
-        assert_eq!(status_suffix(2, 1), "(2 active, 1 need attention)");
+    fn test_status_parts_only_names_what_is_happening() {
+        assert!(status_parts(0, 0).is_empty());
+        assert_eq!(status_parts(2, 0), vec!["2 active"]);
+        assert_eq!(status_parts(0, 1), vec!["1 need attention"]);
+        assert_eq!(status_parts(2, 1), vec!["2 active", "1 need attention"]);
     }
 
     #[test]
@@ -357,6 +361,21 @@ mod tests {
     #[test]
     fn test_truncate_string_keeps_the_beginning() {
         assert_eq!(truncate_string("abcdefghij", 8), "abcde...");
+    }
+
+    /// A ten-column pane leaves less room than the ellipsis needs; the result
+    /// must still fit, or the row spills across the pane border
+    #[test]
+    fn test_truncate_never_exceeds_the_width_it_was_given() {
+        for max_len in 0..=6 {
+            assert!(truncate_string("abcdefghij", max_len).chars().count() <= max_len);
+            assert!(truncate_path("/a/very/long/path", max_len).chars().count() <= max_len);
+        }
+        assert_eq!(truncate_string("abcdefghij", 0), "");
+        assert_eq!(truncate_string("abcdefghij", 3), "abc");
+        assert_eq!(truncate_string("abcdefghij", 4), "a...");
+        assert_eq!(truncate_path("abcdefghij", 3), "hij");
+        assert_eq!(truncate_path("abcdefghij", 4), "...j");
     }
 
     #[test]

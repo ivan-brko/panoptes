@@ -64,6 +64,10 @@ Generate test scaffolding for untested modules in Panoptes.
 ## Panoptes-Specific Patterns
 
 ### Testing State Navigation
+
+Navigation is per-pane: `focus` says which pane owns the screen, and each pane
+keeps its own drill-down (`projects_nav`, `settings_nav`).
+
 ```rust
 #[test]
 fn test_navigate_to_project() {
@@ -72,8 +76,27 @@ fn test_navigate_to_project() {
 
     state.navigate_to_project(project_id);
 
-    assert_eq!(state.view, View::ProjectDetail(project_id));
+    assert_eq!(state.projects_nav, ProjectsNav::Project(project_id));
     assert_eq!(state.selected_branch_index, 0);
+}
+```
+
+Drilling one pane must leave the others alone - that is the whole point of the
+layout, so it is worth asserting:
+
+```rust
+#[test]
+fn test_drilling_pane_one_leaves_the_other_panes_alone() {
+    let mut state = AppState {
+        settings_nav: SettingsNav::Notifications,
+        sessions_pane_index: 3,
+        ..Default::default()
+    };
+
+    state.navigate_to_project(uuid::Uuid::new_v4());
+
+    assert_eq!(state.settings_nav, SettingsNav::Notifications);
+    assert_eq!(state.sessions_pane_index, 3);
 }
 ```
 

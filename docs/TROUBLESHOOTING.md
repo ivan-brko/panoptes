@@ -36,7 +36,7 @@ This guide covers common issues and their solutions.
 1. Check that the hook server is running (look for startup message in logs)
 
 2. View logs for errors:
-   - Press `l` in Panoptes to open log viewer
+   - Read `~/.panoptes/logs/` (Settings → About / paths names the current file)
    - Or check `~/.panoptes/logs/`
 
 3. Verify Claude Code hooks are configured correctly:
@@ -62,7 +62,7 @@ This guide covers common issues and their solutions.
 ### Failed to Create Worktree
 
 **Symptoms:**
-- "Failed to create worktree" error when using `n` in Project Detail
+- "Failed to create worktree" error when using `n` in a project's branch list
 
 **Possible causes and solutions:**
 
@@ -214,7 +214,7 @@ The worktree directory was deleted outside of Panoptes.
    chmod +x ~/.panoptes/hooks/codex-notify.sh
    ```
 
-4. Check Panoptes logs for hook event errors (press `l`)
+4. Check Panoptes logs in `~/.panoptes/logs/` for hook event errors
 
 ### Codex Session Shows No Executing State
 
@@ -291,7 +291,7 @@ ls -la ~/.panoptes/logs/
 # View latest log
 cat ~/.panoptes/logs/$(ls -t ~/.panoptes/logs/ | head -1)
 
-# Or use the in-app log viewer (press 'l')
+# Settings -> About / paths names the current log file
 ```
 
 ### Reading Log Levels
@@ -361,6 +361,6 @@ rm ~/.panoptes/projects.json
 
 If your issue isn't covered here:
 
-1. Check the application logs (`l` key or `~/.panoptes/logs/`)
+1. Check the application logs in `~/.panoptes/logs/`
 2. Look for error messages in the header notifications
 3. File an issue at: https://github.com/ivan-brko/panoptes/issues

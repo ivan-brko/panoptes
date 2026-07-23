@@ -242,7 +242,7 @@ fn build_footer_text(
             let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
 
             let base = format!(
-                "{}{}Enter: session mode | Tab: next | \u{2191}\u{2193}/PgUp/Dn: scroll | ?: help | Esc: back",
+                "{}{}Enter: session mode | 1-9: switch | \u{2191}\u{2193}/PgUp/Dn: scroll | q: quit | ?: help | Esc: back",
                 scroll_hint, shortcuts_hint
             );
             footer_with_attention(base, sessions)

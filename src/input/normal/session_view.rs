@@ -5,7 +5,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, InputMode, View};
+use crate::app::{App, InputMode};
 use crate::input::session_scroll;
 
 /// Handle key in session view (normal mode)
@@ -64,20 +64,6 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                 session_scroll::scroll_to_bottom(app, session_id);
             }
         }
-        KeyCode::Tab => {
-            // Switch to next session (stale-safe: an empty list resets to 0)
-            app.state.session_cycle_index =
-                crate::app::cycle_next(app.state.session_cycle_index, app.sessions.len());
-            if let Some(session) = app.sessions.get_by_index(app.state.session_cycle_index) {
-                let session_id = session.info.id;
-                app.state.active_session = Some(session_id);
-                // Reset scroll offset when switching sessions
-                session_scroll::reset_for_session_switch(app, session_id);
-                app.sessions.acknowledge_attention(session_id);
-                app.clear_title_notification();
-                app.resize_active_session_pty()?;
-            }
-        }
         KeyCode::Char(c) if c.is_ascii_digit() => {
             // Jump to session by number (1-indexed, 0 means session 10)
             if let Some(num) = c.to_digit(10) {
@@ -112,11 +98,11 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                             branch_id,
                             working_dir,
                         ) {
-                            // Navigate to the new session
+                            // Swap the screen over to the new session, keeping
+                            // the pane the original was opened from
                             app.state.active_session = Some(new_session_id);
                             session_scroll::reset_for_session_switch(app, new_session_id);
                             app.state.input_mode = InputMode::Session;
-                            app.state.view = View::SessionView;
                         }
                     }
                 }

@@ -54,7 +54,7 @@ pub struct ClaudeSettingsMigrateState {
 }
 
 use super::input_mode::InputMode;
-use super::view::View;
+use super::nav::{Focus, ProjectsNav, SettingsNav, Tab};
 
 /// Advance a wrap-around list selection, tolerating stale indices
 ///
@@ -146,16 +146,6 @@ pub enum FolderMoveTarget {
     Project(ProjectId),
     /// A folder and everything under it is being re-parented
     Folder(Vec<String>),
-}
-
-/// Focus state for the homepage (projects overview)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HomepageFocus {
-    /// Projects list is focused
-    #[default]
-    Projects,
-    /// Sessions list is focused
-    Sessions,
 }
 
 /// Worktree creation wizard state
@@ -278,25 +268,41 @@ impl LoadingOverlay {
 /// Application state
 #[derive(Default)]
 pub struct AppState {
-    /// Current view
-    pub view: View,
+    /// What owns the screen: one of the three panes, or a full-screen session
+    pub focus: Focus,
+    /// Drill-down level of pane 1
+    pub projects_nav: ProjectsNav,
+    /// Drill-down level of pane 3
+    pub settings_nav: SettingsNav,
     /// Current input mode
     pub input_mode: InputMode,
-    /// Selected index in ProjectsOverview, counted over *visible tree rows*
+    /// Selected index in the project tree, counted over *visible tree rows*
     /// (folder headings included), not over projects
     pub selected_project_index: usize,
-    /// Selected index in ProjectDetail (branch selection)
+    /// Selected index in pane 1's branch list
     pub selected_branch_index: usize,
-    /// Selected index in BranchDetail (session selection)
-    pub selected_session_index: usize,
-    /// Which session the session view is on, for `Tab` cycling and digit jumps
+    /// Selected index in pane 1's per-branch session list
+    ///
+    /// Separate from [`Self::sessions_pane_index`]: pane 1's branch drill-down
+    /// and pane 2's flat list are on screen at the same time, so one index
+    /// cannot serve both.
+    pub branch_session_index: usize,
+    /// Selected index in pane 2's flat session list
+    pub sessions_pane_index: usize,
+    /// Selected row in pane 3's sections list
+    pub settings_section_index: usize,
+    /// Selected row in the per-project settings list (pane 1, opened with `,`)
+    pub project_settings_index: usize,
+    /// Selected row in pane 3's notifications list
+    pub notifications_index: usize,
+    /// Which session the session view is on, for digit jumps
     ///
     /// Indexes `SessionManager::session_order`, not any on-screen list.
     pub session_cycle_index: usize,
     /// Session being viewed (in session view)
     pub active_session: Option<SessionId>,
-    /// Context for returning from session view (which view to go back to)
-    pub session_return_view: Option<View>,
+    /// Pane the session view was opened from, restored when it is left
+    pub session_return_focus: Option<Focus>,
     /// Draft for the session being created (name plus project/branch context)
     pub session_draft: SessionDraft,
     /// Buffer for new project path input
@@ -370,10 +376,6 @@ pub struct AppState {
     pub last_resize: Option<Instant>,
     /// Whether a resize is pending (debounced)
     pub pending_resize: bool,
-    /// Scroll offset in log viewer
-    pub log_viewer_scroll: usize,
-    /// Whether log viewer auto-scrolls to new entries
-    pub log_viewer_auto_scroll: bool,
     /// Scroll offset for session view (0 = live view, >0 = scrolled back)
     pub session_scroll_offset: usize,
 
@@ -382,8 +384,6 @@ pub struct AppState {
 
     /// Loading overlay shown while an operation is in flight
     pub loading: Option<LoadingOverlay>,
-    /// Focus state for homepage (projects vs sessions list)
-    pub homepage_focus: HomepageFocus,
 
     /// Header notification manager for transient header messages
     pub header_notifications: HeaderNotificationManager,
@@ -440,89 +440,83 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Get the current selected index for the current view
-    pub fn current_selected_index(&self) -> usize {
-        match self.view {
-            View::ProjectsOverview => self.selected_project_index,
-            View::ProjectDetail(_) => self.selected_branch_index,
-            View::BranchDetail(_, _) => self.selected_session_index,
-            View::SessionView => 0,
-            View::LogViewer => self.log_viewer_scroll,
-            View::ClaudeConfigs => self.claude_configs_selected_index,
-            View::CodexConfigs => self.codex_configs_selected_index,
-        }
+    /// The pane that currently has focus, or `None` inside a session
+    pub fn focused_tab(&self) -> Option<Tab> {
+        self.focus.tab()
     }
 
-    /// Set the selected index for the current view
-    pub fn set_current_selected_index(&mut self, index: usize) {
-        match self.view {
-            View::ProjectsOverview => self.selected_project_index = index,
-            View::ProjectDetail(_) => self.selected_branch_index = index,
-            View::BranchDetail(_, _) => self.selected_session_index = index,
-            View::SessionView => {}
-            View::LogViewer => self.log_viewer_scroll = index,
-            View::ClaudeConfigs => self.claude_configs_selected_index = index,
-            View::CodexConfigs => self.codex_configs_selected_index = index,
-        }
+    /// Whether pane `tab` currently has focus
+    pub fn is_focused(&self, tab: Tab) -> bool {
+        self.focus == Focus::Panes(tab)
     }
 
-    /// Select the next item in the current view (stale-safe, wraps around)
-    pub fn select_next(&mut self, item_count: usize) {
-        let next = cycle_next(self.current_selected_index(), item_count);
-        self.set_current_selected_index(next);
+    /// Move focus to the next or previous pane, wrapping around
+    ///
+    /// A no-op while a session fills the screen: there are no panes to cycle.
+    pub fn cycle_pane(&mut self, forward: bool) -> bool {
+        let Focus::Panes(tab) = self.focus else {
+            return false;
+        };
+        self.focus = Focus::Panes(if forward { tab.next() } else { tab.prev() });
+        true
     }
 
-    /// Select the previous item in the current view (stale-safe, wraps around)
-    pub fn select_prev(&mut self, item_count: usize) {
-        let prev = cycle_prev(self.current_selected_index(), item_count);
-        self.set_current_selected_index(prev);
-    }
-
-    /// Select by number (1-indexed) in the current view
-    pub fn select_by_number(&mut self, num: usize, item_count: usize) {
-        if num > 0 && num <= item_count {
-            self.set_current_selected_index(num - 1);
-        }
-    }
-
-    /// Navigate to the parent view
-    pub fn navigate_back(&mut self) {
-        if let Some(parent) = self.view.parent() {
-            // If leaving session view, reset session mode state
-            if self.view == View::SessionView {
-                self.active_session = None;
-                self.input_mode = InputMode::Normal;
-            }
-
-            self.view = parent;
-
-            // Reset input mode if it's not Normal (handles cases where user was in a text input mode)
-            if self.input_mode != InputMode::Normal && self.input_mode != InputMode::Session {
-                // Only reset text input modes - keep Session mode if going to SessionView
-                if self.view != View::SessionView {
-                    self.input_mode = InputMode::Normal;
+    /// Go back one level in the focused pane
+    ///
+    /// At the root of a pane this does nothing at all - `Esc` never quits and
+    /// never changes which pane is focused. Returns whether anything moved.
+    pub fn navigate_back(&mut self) -> bool {
+        match self.focus {
+            Focus::Panes(Tab::Projects) => match self.projects_nav.parent() {
+                Some(parent) => {
+                    self.projects_nav = parent;
+                    true
                 }
-            }
+                None => false,
+            },
+            Focus::Panes(Tab::Settings) => match self.settings_nav.parent() {
+                Some(parent) => {
+                    self.settings_nav = parent;
+                    true
+                }
+                None => false,
+            },
+            // Pane 2 is a flat list with nothing to pop, and the session view
+            // has its own two-step Esc in `handle_session_view_normal_key`
+            Focus::Panes(Tab::Sessions) | Focus::Session => false,
         }
     }
 
-    /// Navigate to a project detail view
+    /// Drill pane 1 into a project's branch list
     pub fn navigate_to_project(&mut self, project_id: ProjectId) {
-        self.view = View::ProjectDetail(project_id);
+        self.projects_nav = ProjectsNav::Project(project_id);
         self.selected_branch_index = 0;
     }
 
-    /// Navigate to a branch detail view
+    /// Drill pane 1 into a branch's session list
     pub fn navigate_to_branch(&mut self, project_id: ProjectId, branch_id: BranchId) {
-        self.view = View::BranchDetail(project_id, branch_id);
-        self.selected_session_index = 0;
+        self.projects_nav = ProjectsNav::Branch(project_id, branch_id);
+        self.branch_session_index = 0;
     }
 
-    /// Navigate to session view (auto-activates session mode)
+    /// Open the per-project settings level of pane 1
+    pub fn navigate_to_project_settings(&mut self, project_id: ProjectId) {
+        self.projects_nav = ProjectsNav::ProjectSettings(project_id);
+        self.project_settings_index = 0;
+    }
+
+    /// Open a session full-screen (auto-activates session mode)
+    ///
+    /// Records the pane it was opened from so `Esc` can put it back, including
+    /// after a `Space` attention-jump from a pane the session has nothing to do
+    /// with.
     pub fn navigate_to_session(&mut self, session_id: SessionId) {
-        // Remember where we came from
-        self.session_return_view = Some(self.view);
-        self.view = View::SessionView;
+        // Only remember a pane; jumping between sessions must not overwrite
+        // the pane the first jump came from with "the session view"
+        if let Focus::Panes(_) = self.focus {
+            self.session_return_focus = Some(self.focus);
+        }
+        self.focus = Focus::Session;
         self.active_session = Some(session_id);
         // Reset scroll offset when entering session view
         self.session_scroll_offset = 0;
@@ -530,46 +524,23 @@ impl AppState {
         self.input_mode = InputMode::Session;
     }
 
-    /// Navigate to Claude configs view
-    pub fn navigate_to_claude_configs(&mut self) {
-        self.view = View::ClaudeConfigs;
-        self.claude_configs_selected_index = 0;
-    }
-
-    /// Navigate to Codex configs view
-    pub fn navigate_to_codex_configs(&mut self) {
-        self.view = View::CodexConfigs;
-        self.codex_configs_selected_index = 0;
-    }
-
-    /// Return from session view based on the current session's context
+    /// Leave the session view, restoring the pane it was opened from
     ///
-    /// Navigates to the branch detail view for the current session's project/branch,
-    /// rather than returning to where the user originally came from. This ensures
-    /// consistent navigation when jumping between sessions with Space.
+    /// When that pane was pane 1, its drill-down follows the session to its own
+    /// branch, so `Esc` lands on the list the session belongs to rather than
+    /// wherever pane 1 happened to be.
     pub fn return_from_session(&mut self, sessions: &SessionManager) {
-        // Navigate based on the current session's context (not where we came from)
-        if let Some(session_id) = self.active_session {
-            if let Some(session) = sessions.get(session_id) {
-                // Go to the session's branch detail view
-                self.view = View::BranchDetail(session.info.project_id, session.info.branch_id);
-            } else {
-                // Session was deleted - fall back to stored return view or projects overview
-                self.view = self
-                    .session_return_view
-                    .take()
-                    .unwrap_or(View::ProjectsOverview);
+        let restored = self.session_return_focus.take().unwrap_or_default();
+
+        if restored == Focus::Panes(Tab::Projects) {
+            if let Some(session) = self.active_session.and_then(|id| sessions.get(id)) {
+                self.navigate_to_branch(session.info.project_id, session.info.branch_id);
             }
-        } else {
-            // No active session - fall back
-            self.view = self
-                .session_return_view
-                .take()
-                .unwrap_or(View::ProjectsOverview);
         }
+
+        self.focus = restored;
         self.active_session = None;
         self.input_mode = InputMode::Normal;
-        self.session_return_view = None; // Clear it
     }
 }
 
@@ -634,11 +605,32 @@ mod tests {
         assert!(draft2.branch_id.is_none());
     }
 
-    // HomepageFocus tests
+    // Pane focus tests
     #[test]
-    fn test_homepage_focus_default() {
-        let focus = HomepageFocus::default();
-        assert_eq!(focus, HomepageFocus::Projects);
+    fn test_cycle_pane_wraps_in_both_directions() {
+        let mut state = AppState::default();
+        assert!(state.is_focused(Tab::Projects));
+
+        assert!(state.cycle_pane(true));
+        assert!(state.is_focused(Tab::Sessions));
+        state.cycle_pane(true);
+        assert!(state.is_focused(Tab::Settings));
+        state.cycle_pane(true);
+        assert!(state.is_focused(Tab::Projects));
+
+        state.cycle_pane(false);
+        assert!(state.is_focused(Tab::Settings));
+    }
+
+    #[test]
+    fn test_cycle_pane_does_nothing_inside_a_session() {
+        let mut state = AppState {
+            focus: Focus::Session,
+            ..Default::default()
+        };
+        assert!(!state.cycle_pane(true));
+        assert_eq!(state.focus, Focus::Session);
+        assert!(state.focused_tab().is_none());
     }
 
     // WorktreeWizardState tests
@@ -711,81 +703,12 @@ mod tests {
     #[test]
     fn test_app_state_default() {
         let state = AppState::default();
-        assert_eq!(state.view, View::ProjectsOverview);
+        assert_eq!(state.focus, Focus::Panes(Tab::Projects));
+        assert_eq!(state.projects_nav, ProjectsNav::Overview);
+        assert_eq!(state.settings_nav, SettingsNav::Sections);
         assert_eq!(state.input_mode, InputMode::Normal);
         assert_eq!(state.selected_project_index, 0);
         assert!(!state.should_quit);
-    }
-
-    #[test]
-    fn test_select_next() {
-        let mut state = AppState {
-            view: View::ProjectsOverview,
-            selected_project_index: 0,
-            ..Default::default()
-        };
-
-        state.select_next(3);
-        assert_eq!(state.selected_project_index, 1);
-
-        state.select_next(3);
-        assert_eq!(state.selected_project_index, 2);
-
-        // Wrap around
-        state.select_next(3);
-        assert_eq!(state.selected_project_index, 0);
-    }
-
-    #[test]
-    fn test_select_prev() {
-        let mut state = AppState {
-            view: View::ProjectsOverview,
-            selected_project_index: 2,
-            ..Default::default()
-        };
-
-        state.select_prev(3);
-        assert_eq!(state.selected_project_index, 1);
-
-        state.select_prev(3);
-        assert_eq!(state.selected_project_index, 0);
-
-        // Wrap around
-        state.select_prev(3);
-        assert_eq!(state.selected_project_index, 2);
-    }
-
-    #[test]
-    fn test_select_by_number() {
-        let mut state = AppState {
-            view: View::ProjectsOverview,
-            ..Default::default()
-        };
-
-        state.select_by_number(2, 5);
-        assert_eq!(state.selected_project_index, 1); // 1-indexed, so 2 -> index 1
-
-        // Out of range - no change
-        state.select_by_number(10, 5);
-        assert_eq!(state.selected_project_index, 1);
-
-        // Zero - no change
-        state.select_by_number(0, 5);
-        assert_eq!(state.selected_project_index, 1);
-    }
-
-    #[test]
-    fn test_select_with_empty_list() {
-        let mut state = AppState {
-            selected_project_index: 5,
-            ..Default::default()
-        };
-
-        state.select_next(0);
-        assert_eq!(state.selected_project_index, 0);
-
-        state.select_prev(0);
-        assert_eq!(state.selected_project_index, 0);
     }
 
     #[test]
@@ -793,8 +716,9 @@ mod tests {
         let mut state = AppState::default();
         let project_id = uuid::Uuid::new_v4();
 
+        state.selected_branch_index = 4;
         state.navigate_to_project(project_id);
-        assert_eq!(state.view, View::ProjectDetail(project_id));
+        assert_eq!(state.projects_nav, ProjectsNav::Project(project_id));
         assert_eq!(state.selected_branch_index, 0);
     }
 
@@ -804,28 +728,70 @@ mod tests {
         let project_id = uuid::Uuid::new_v4();
         let branch_id = uuid::Uuid::new_v4();
 
+        state.branch_session_index = 3;
         state.navigate_to_branch(project_id, branch_id);
-        assert_eq!(state.view, View::BranchDetail(project_id, branch_id));
-        assert_eq!(state.selected_session_index, 0);
+        assert_eq!(
+            state.projects_nav,
+            ProjectsNav::Branch(project_id, branch_id)
+        );
+        assert_eq!(state.branch_session_index, 0);
+    }
+
+    /// Pane 1's own drill-down must not disturb the other two panes
+    #[test]
+    fn test_drilling_pane_one_leaves_the_other_panes_alone() {
+        let mut state = AppState {
+            settings_nav: SettingsNav::Notifications,
+            sessions_pane_index: 3,
+            ..Default::default()
+        };
+
+        state.navigate_to_project(uuid::Uuid::new_v4());
+        state.navigate_to_branch(uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+
+        assert_eq!(state.settings_nav, SettingsNav::Notifications);
+        assert_eq!(state.sessions_pane_index, 3);
     }
 
     #[test]
-    fn test_navigate_to_session() {
-        let mut state = AppState::default();
+    fn test_navigate_to_session_records_the_pane_it_came_from() {
+        let mut state = AppState {
+            focus: Focus::Panes(Tab::Settings),
+            ..Default::default()
+        };
         let session_id = uuid::Uuid::new_v4();
 
-        state.view = View::ProjectsOverview;
         state.navigate_to_session(session_id);
 
-        assert_eq!(state.view, View::SessionView);
+        assert_eq!(state.focus, Focus::Session);
         assert_eq!(state.active_session, Some(session_id));
         assert_eq!(state.input_mode, InputMode::Session);
-        assert_eq!(state.session_return_view, Some(View::ProjectsOverview));
+        assert_eq!(
+            state.session_return_focus,
+            Some(Focus::Panes(Tab::Settings))
+        );
         assert_eq!(state.session_scroll_offset, 0);
     }
 
+    /// Jumping session-to-session must not overwrite the origin pane with
+    /// "the session view", which is what used to strand `Esc`
     #[test]
-    fn test_return_from_session_falls_back_to_stored_return_view() {
+    fn test_jumping_between_sessions_keeps_the_original_pane() {
+        let mut state = AppState {
+            focus: Focus::Panes(Tab::Settings),
+            ..Default::default()
+        };
+        state.navigate_to_session(uuid::Uuid::new_v4());
+        state.navigate_to_session(uuid::Uuid::new_v4());
+
+        assert_eq!(
+            state.session_return_focus,
+            Some(Focus::Panes(Tab::Settings))
+        );
+    }
+
+    #[test]
+    fn test_return_from_session_restores_the_pane_it_was_opened_from() {
         // Backed by a temp store so the test never touches the real
         // ~/.panoptes/sessions.json.
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -834,81 +800,81 @@ mod tests {
             crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
         );
 
-        let mut state = AppState::default();
-        let project_id = uuid::Uuid::new_v4();
-        let branch_id = uuid::Uuid::new_v4();
-
-        state.navigate_to_branch(project_id, branch_id);
+        // Attention-jump out of Settings: Esc must land back in Settings
+        let mut state = AppState {
+            focus: Focus::Panes(Tab::Settings),
+            settings_nav: SettingsNav::Notifications,
+            ..Default::default()
+        };
         state.navigate_to_session(uuid::Uuid::new_v4());
-
-        // Session not in the manager: falls back to the stored return view
         state.return_from_session(&sessions);
-        assert_eq!(state.view, View::BranchDetail(project_id, branch_id));
+
+        assert_eq!(state.focus, Focus::Panes(Tab::Settings));
+        assert_eq!(state.settings_nav, SettingsNav::Notifications);
         assert!(state.active_session.is_none());
-        assert!(state.session_return_view.is_none());
-    }
-
-    #[test]
-    fn test_navigate_to_claude_configs() {
-        let mut state = AppState::default();
-        state.navigate_to_claude_configs();
-        assert_eq!(state.view, View::ClaudeConfigs);
-        assert_eq!(state.claude_configs_selected_index, 0);
-    }
-
-    #[test]
-    fn test_navigate_back_from_project_detail() {
-        let mut state = AppState::default();
-        let project_id = uuid::Uuid::new_v4();
-
-        state.view = View::ProjectDetail(project_id);
-        state.navigate_back();
-        assert_eq!(state.view, View::ProjectsOverview);
-    }
-
-    #[test]
-    fn test_navigate_back_from_branch_detail() {
-        let mut state = AppState::default();
-        let project_id = uuid::Uuid::new_v4();
-        let branch_id = uuid::Uuid::new_v4();
-
-        state.view = View::BranchDetail(project_id, branch_id);
-        state.navigate_back();
-        assert_eq!(state.view, View::ProjectDetail(project_id));
-    }
-
-    #[test]
-    fn test_navigate_back_resets_input_mode() {
-        let mut state = AppState::default();
-        let project_id = uuid::Uuid::new_v4();
-
-        state.view = View::ProjectDetail(project_id);
-        state.input_mode = InputMode::RenamingProject;
-        state.navigate_back();
-
+        assert!(state.session_return_focus.is_none());
         assert_eq!(state.input_mode, InputMode::Normal);
     }
 
     #[test]
-    fn test_current_selected_index_for_different_views() {
+    fn test_return_to_pane_one_follows_the_session_to_its_branch() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = crate::config::Config {
+            worktrees_dir: temp_dir.path().join("worktrees"),
+            hooks_dir: temp_dir.path().join("hooks"),
+            ..crate::config::Config::default()
+        };
+        let mut sessions = SessionManager::with_store(
+            config,
+            crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+        let session_id = sessions
+            .insert_test_session("elsewhere", project_id, branch_id)
+            .unwrap();
+
+        // Pane 1 is sitting on the overview when the session is opened
         let mut state = AppState::default();
+        state.navigate_to_session(session_id);
+        state.return_from_session(&sessions);
+
+        assert_eq!(state.focus, Focus::Panes(Tab::Projects));
+        assert_eq!(
+            state.projects_nav,
+            ProjectsNav::Branch(project_id, branch_id)
+        );
+    }
+
+    #[test]
+    fn test_esc_pops_one_level_and_is_a_no_op_at_a_root() {
         let project_id = uuid::Uuid::new_v4();
         let branch_id = uuid::Uuid::new_v4();
 
-        // ProjectsOverview
-        state.view = View::ProjectsOverview;
-        state.selected_project_index = 2;
-        assert_eq!(state.current_selected_index(), 2);
+        let mut state = AppState {
+            projects_nav: ProjectsNav::Branch(project_id, branch_id),
+            ..Default::default()
+        };
+        assert!(state.navigate_back());
+        assert_eq!(state.projects_nav, ProjectsNav::Project(project_id));
+        assert!(state.navigate_back());
+        assert_eq!(state.projects_nav, ProjectsNav::Overview);
+        // At the root: nothing happens, and the focused pane does not change
+        assert!(!state.navigate_back());
+        assert_eq!(state.projects_nav, ProjectsNav::Overview);
+        assert_eq!(state.focus, Focus::Panes(Tab::Projects));
 
-        // ProjectDetail
-        state.view = View::ProjectDetail(project_id);
-        state.selected_branch_index = 3;
-        assert_eq!(state.current_selected_index(), 3);
+        // Pane 2 is flat, so Esc never has anywhere to go
+        state.focus = Focus::Panes(Tab::Sessions);
+        assert!(!state.navigate_back());
 
-        // BranchDetail
-        state.view = View::BranchDetail(project_id, branch_id);
-        state.selected_session_index = 1;
-        assert_eq!(state.current_selected_index(), 1);
+        // Pane 3 pops back to its sections list, then stops
+        state.focus = Focus::Panes(Tab::Settings);
+        state.settings_nav = SettingsNav::About;
+        assert!(state.navigate_back());
+        assert_eq!(state.settings_nav, SettingsNav::Sections);
+        assert!(!state.navigate_back());
     }
 
     #[test]

@@ -3,14 +3,12 @@
 //! Renders dialogs for managing custom shell session shortcuts.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, Paragraph};
 
 use crate::app::{AppState, InputMode};
 use crate::config::{reserved_keys_display, Config};
 use crate::tui::theme::theme;
-use crate::tui::widgets::dialog::{
-    centered_rect, render_dialog, yes_no_line, DialogSize, DialogSpec,
-};
+use crate::tui::widgets::dialog::{render_dialog, yes_no_line, DialogSize, DialogSpec};
 use crate::tui::widgets::selection::{selection_prefix, selection_style_with_accent};
 
 /// Width of the wider dialogs (management, command, auto-close)
@@ -27,99 +25,66 @@ const NARROW: DialogSize = DialogSize::Percent {
     max: 50,
 };
 
-/// Render the custom shortcuts management dialog
-pub fn render_custom_shortcuts_dialog(
-    frame: &mut Frame,
-    area: Rect,
-    state: &AppState,
-    config: &Config,
-) {
+/// Render the custom shortcuts list into a settings-pane rect
+///
+/// The pane owns the border and title, so this draws rows only. Fields are
+/// dropped whole as the pane narrows rather than truncating one long string.
+pub fn render_shortcuts_list(frame: &mut Frame, area: Rect, config: &Config, selected: usize) {
     let t = theme();
 
-    // Centered dialog (60% width max 60 chars, 50% height max 20 lines)
-    let dialog_area = centered_rect(
-        area,
-        WIDE,
-        DialogSize::Percent {
-            pct: 50,
-            min: 10,
-            max: 20,
-        },
-    );
-
-    // Clear background
-    frame.render_widget(Clear, dialog_area);
-
-    // Split dialog into content and footer
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(2)])
-        .split(dialog_area);
-
-    let content_area = chunks[0];
-    let footer_area = chunks[1];
-
-    // Render list of shortcuts or empty message
     if config.custom_shortcuts.is_empty() {
-        let empty_msg = Paragraph::new("No custom shortcuts defined.\n\nPress 'n' to add one.")
-            .style(Style::default().fg(t.text_muted))
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(t.accent))
-                    .title(" Custom Shortcuts "),
-            );
-        frame.render_widget(empty_msg, content_area);
-    } else {
-        let items: Vec<ListItem> = config
-            .custom_shortcuts
-            .iter()
-            .enumerate()
-            .map(|(i, shortcut)| {
-                let selected = i == state.custom_shortcuts_selected;
-                let prefix = selection_prefix(selected);
-
-                // Format: "  v  VSCode    code . &"
-                let name_display = if shortcut.name.is_empty() {
-                    "-".to_string()
-                } else {
-                    shortcut.name.clone()
-                };
-
-                // Truncate command for display
-                let cmd_display: String = shortcut.command.chars().take(25).collect();
-                let cmd_suffix = if shortcut.command.chars().count() > 25 {
-                    "..."
-                } else {
-                    ""
-                };
-
-                let ac_indicator = if shortcut.auto_close { " [AC]" } else { "" };
-                let content = format!(
-                    "{}{}  {:10}  {}{}{}",
-                    prefix, shortcut.key, name_display, cmd_display, cmd_suffix, ac_indicator
-                );
-
-                let style = selection_style_with_accent(selected, t);
-                ListItem::new(content).style(style)
-            })
-            .collect();
-
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(t.accent))
-                .title(" Custom Shortcuts "),
+        frame.render_widget(
+            Paragraph::new(
+                "No custom shortcuts yet.\n\n\
+                 Press 'n' to bind a key to a shell command.",
+            )
+            .style(Style::default().fg(t.text_muted)),
+            area,
         );
-        frame.render_widget(list, content_area);
+        return;
     }
 
-    // Footer with instructions
-    let footer = Paragraph::new("n: add | d: delete | ↑/↓: navigate | Esc: close")
-        .style(Style::default().fg(t.text_muted))
-        .alignment(Alignment::Center);
-    frame.render_widget(footer, footer_area);
+    let width = area.width as usize;
+    let show_command = width >= 30;
+
+    let items: Vec<ListItem> = config
+        .custom_shortcuts
+        .iter()
+        .enumerate()
+        .map(|(i, shortcut)| {
+            let is_selected = i == selected;
+            let name_display = if shortcut.name.is_empty() {
+                "-".to_string()
+            } else {
+                shortcut.name.clone()
+            };
+            let auto_close = if shortcut.auto_close { " [AC]" } else { "" };
+
+            let content = if show_command {
+                format!(
+                    "{}{}  {}  {}{}",
+                    selection_prefix(is_selected),
+                    shortcut.key,
+                    name_display,
+                    shortcut.command,
+                    auto_close
+                )
+            } else {
+                format!(
+                    "{}{}  {}{}",
+                    selection_prefix(is_selected),
+                    shortcut.key,
+                    name_display,
+                    auto_close
+                )
+            };
+
+            ListItem::new(crate::tui::views::truncate_string(&content, width))
+                .style(selection_style_with_accent(is_selected, t))
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), area);
 }
 
 /// Render the add shortcut key input dialog
@@ -395,9 +360,6 @@ pub fn render_custom_shortcut_dialogs(
     config: &Config,
 ) {
     match state.input_mode {
-        InputMode::ManagingCustomShortcuts => {
-            render_custom_shortcuts_dialog(frame, area, state, config);
-        }
         InputMode::AddingCustomShortcutKey => {
             render_add_shortcut_key_dialog(frame, area, state);
         }
@@ -433,20 +395,42 @@ mod tests {
     }
 
     #[test]
-    fn test_manage_dialog_empty_state() {
-        let lines = render_in_mode(InputMode::ManagingCustomShortcuts, &Config::default());
+    fn test_shortcuts_list_empty_state_points_at_the_add_key() {
+        let lines = render_to_lines(40, 10, |frame| {
+            render_shortcuts_list(frame, frame.size(), &Config::default(), 0)
+        });
 
-        assert!(contains_line(&lines, "Custom Shortcuts"), "{:?}", lines);
         assert!(
-            contains_line(&lines, "No custom shortcuts defined."),
+            contains_line(&lines, "No custom shortcuts yet."),
             "{:?}",
             lines
         );
-        assert!(
-            contains_line(&lines, "n: add | d: delete | ↑/↓: navigate | Esc: close"),
-            "{:?}",
-            lines
-        );
+    }
+
+    #[test]
+    fn test_shortcuts_list_drops_the_command_in_a_narrow_pane() {
+        let mut config = Config::default();
+        config
+            .custom_shortcuts
+            .push(crate::config::CustomShortcut::new(
+                'v',
+                "VSCode".to_string(),
+                "code . &".to_string(),
+                true,
+            ));
+
+        let wide = render_to_lines(60, 10, |frame| {
+            render_shortcuts_list(frame, frame.size(), &config, 0)
+        });
+        assert!(contains_line(&wide, "v  VSCode  code . & [AC]"), "{wide:?}");
+
+        let narrow = render_to_lines(24, 10, |frame| {
+            render_shortcuts_list(frame, frame.size(), &config, 0)
+        });
+        assert!(contains_line(&narrow, "v  VSCode [AC]"), "{narrow:?}");
+        for line in &narrow {
+            assert!(line.chars().count() <= 24, "{line:?}");
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@ At minimum, [Claude Code CLI](https://claude.ai/code) installed and configured. 
 
 ### How do I add my first project?
 
-1. Press `n` from the Projects Overview
+1. Press `n` in the Projects pane
 2. Enter the path to a git repository (Tab for autocomplete)
 3. Press Enter
 
@@ -45,21 +45,21 @@ At minimum, [Claude Code CLI](https://claude.ai/code) installed and configured. 
 
 ### How do I add a new project?
 
-Press `n` from Projects Overview, enter the path, and press Enter.
+Press `n` in the Projects pane, enter the path, and press Enter.
 
 ### How do I set the default base branch for new worktrees?
 
-From Project Detail, press `b` and select the branch (e.g., `main` or `develop`).
+Open the project, press `,` for its settings, choose "Default base branch", and select the branch (e.g. `main` or `develop`).
 
 ### How do I create a worktree for an existing branch vs. a new branch?
 
-Press `n` from Project Detail to open the worktree wizard:
+Open the project and press `n` to open the worktree wizard:
 - **Existing branch**: Start typing to filter, select from the list, press Enter
 - **New branch**: Type a name that doesn't match any existing branch, press Enter, then select a base branch
 
 ### How do I delete a worktree without deleting the branch?
 
-Press `d` on a worktree in Project Detail. A confirmation dialog appears with a checkbox that `w` toggles to control whether the worktree's directory is removed from disk. Either way, deletion only removes the worktree — it never deletes the git branch itself.
+Press `d` on a worktree in the project's branch list. A confirmation dialog appears with a checkbox that `w` toggles to control whether the worktree's directory is removed from disk. Either way, deletion only removes the worktree — it never deletes the git branch itself.
 
 ### How do I use Panoptes with monorepos (session subdirectory)?
 
@@ -77,7 +77,7 @@ No. The worktree location is managed by Panoptes and git. Moving worktrees manua
 
 ### How do I group related projects together?
 
-Select a project on the homepage, press `m`, and type a folder path such as
+Select a project in the Projects pane, press `m`, and type a folder path such as
 `Acme/Platform`. Folders are created as you name them - there is no separate
 "new folder" step - and can nest up to 3 levels. `Tab` autocompletes against
 folders you already have, and an empty path moves a project back to the top level.
@@ -97,15 +97,15 @@ and which folders you had collapsed is remembered too.
 
 ### Does Panoptes support Codex CLI?
 
-Yes! Press `n` from Branch Detail and select "Codex" from the agent type selector. Codex sessions work the same way as Claude Code sessions, with the same attention tracking and notification system.
+Yes! Press `n` at a branch and select "Codex" from the agent type selector. Codex sessions work the same way as Claude Code sessions, with the same attention tracking and notification system.
 
 ### How do I create a Claude Code or Codex session?
 
-From Branch Detail, press `n`, select Claude Code or Codex from the agent type selector, enter a session name, and press Enter.
+At a branch, press `n`, select Claude Code or Codex from the agent type selector, enter a session name, and press Enter.
 
 ### How do I create a shell session?
 
-From Branch Detail, press `s`, enter a session name, and press Enter. Shell sessions run your default shell (bash/zsh) instead of Claude Code.
+At a branch, press `s`, enter a session name, and press Enter. Shell sessions run your default shell (bash/zsh) instead of Claude Code.
 
 ### How do I enter/exit session mode?
 
@@ -171,7 +171,7 @@ Press `Space` from any view. This is the fastest way to context-switch between w
 
 ### How do I set up multiple Claude accounts?
 
-1. Press `c` from Projects Overview to open Claude Configs
+1. Open Settings (`Tab` twice) → Claude configs
 2. Press `n` to add a new configuration
 3. Enter a name and the path to the config directory
    - For a **new account**: Choose any folder; Claude will prompt for login on first use
@@ -179,7 +179,7 @@ Press `Space` from any view. This is the fastest way to context-switch between w
 
 ### How do I set up multiple Codex accounts?
 
-1. Press `x` from Projects Overview to open Codex Configs
+1. Open Settings (`Tab` twice) → Codex configs
 2. Press `n` to add a new configuration
 3. Enter a name and the path to the `CODEX_HOME` directory
    - For a **new account**: Choose any folder; Codex will use it for config and auth
@@ -187,7 +187,7 @@ Press `Space` from any view. This is the fastest way to context-switch between w
 
 ### How do I set a default account for a project?
 
-From Project Detail, press `c` for Claude config or `x` for Codex config and select the configuration.
+Open the project, press `,` for its settings, and choose "Default Claude config" or "Default Codex config".
 
 ### How do I switch accounts for a single session?
 
@@ -234,7 +234,7 @@ in the file.
 
 ### Do I need to restart Panoptes after config changes?
 
-Yes. Press `Esc` at the Projects Overview to quit (confirm when prompted), then restart Panoptes.
+Yes. Press `q` to quit (confirm when prompted), then restart Panoptes.
 
 ---
 
@@ -264,14 +264,16 @@ The prompts are optional—you can decline each time. There's no global setting 
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Open/Enter session mode |
-| `Esc` | Go back/Exit session mode; quit (with confirmation) at the Projects Overview |
+| `Tab` / `Shift+Tab` | Switch pane (Projects → Sessions → Settings, wrapping) |
+| `Enter` | Open / Enter session mode |
+| `Esc` | Back one level; nothing at a pane's root, and never quits |
+| `q` | Quit (with confirmation) |
 | `Shift+Esc` | Send Escape to active session |
 | `Space` | Jump to next session needing attention |
-| `Tab` | Switch to next session |
 | `n` | New (project/worktree/session depending on context) |
-| `s` | New shell session (from branch view) |
+| `s` | New shell session (at a branch) |
 | `d` | Delete selected item |
+| `,` | Per-project settings (at a project) |
 
 ### Navigation Keys
 
@@ -281,18 +283,15 @@ The prompts are optional—you can decline each time. There's no global setting 
 | `Up` | Move up |
 | `1-9` | Select by number (not in the project tree) |
 | `PageUp/Down` | Scroll history |
-| `?` | Show the keys for the current view |
+| `?` | Show the keys for wherever you are |
 
 Navigation is by arrow key everywhere; there are no `j`/`k` bindings.
-`k` opens the custom shortcuts manager.
 
-### View Shortcuts
+### Where the settings live
 
-| Key | Action |
-|-----|--------|
-| `c` | Claude configs |
-| `x` | Codex configs |
-| `l` | Log viewer |
+Claude configs, Codex configs, custom shortcuts, notification toggles, and the
+paths of every file Panoptes writes are all in the **Settings** pane — press
+`Tab` twice to reach it.
 
 For the complete list, see [Keyboard Reference](KEYBOARD_REFERENCE.md).
 
@@ -301,5 +300,5 @@ For the complete list, see [Keyboard Reference](KEYBOARD_REFERENCE.md).
 ## Still Have Questions?
 
 1. Check the [Troubleshooting Guide](TROUBLESHOOTING.md)
-2. View logs with `l` or check `~/.panoptes/logs/`
+2. Read the logs in `~/.panoptes/logs/` (Settings → About / paths names the current file)
 3. File an issue: https://github.com/ivan-brko/panoptes/issues

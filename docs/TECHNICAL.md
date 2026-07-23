@@ -119,9 +119,11 @@
 Panoptes includes a comprehensive logging system for debugging and diagnostics:
 
 - **File-based logging** - Logs written to `~/.panoptes/logs/` with daily rotation
-- **In-memory buffer** - Real-time log buffer accessible via Log Viewer (`l` key)
 - **Automatic retention** - Old log files automatically cleaned up after 7 days
 - **Structured logging** - Uses tracing framework with timestamps and log levels
+- **No in-memory buffer** - Nothing is held in memory for the TUI to display.
+  Settings → About / paths names the current log file; reading it is `tail`'s
+  job, not the dashboard's.
 
 ## Theme System
 
@@ -136,8 +138,33 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 
 ### User Input
 1. Crossterm captures keyboard events
-2. Application routes based on mode (Normal/Session) and view
-3. In Session mode, keystrokes are written to the PTY
+2. In normal mode the global keys are handled first (`Tab`, `q`, `?`, `Space`);
+   every other input mode owns those keys itself, which is why `Tab` completes a
+   path in the add-project prompt and types a tab in Session mode
+3. Otherwise the key routes on `Focus` — one of the three panes, or a
+   full-screen session — and then on that pane's own drill-down level
+   (`ProjectsNav` / `SettingsNav`)
+4. In Session mode, keystrokes are written to the PTY
+
+### Pane Layout
+The three panes are sized by `tui/panes.rs`. `pane_widths(total, focused)` is a
+pure function of the terminal width and the focused pane; `PaneLayout` eases
+between two width sets over ~140ms, driven from the existing 16ms tick.
+
+Two invariants hold at every frame, including mid-transition:
+- only the two boundaries *between* panes are interpolated, and the three widths
+  are derived from them, so they always sum to exactly the terminal width;
+- a pane's render density (`SideMode`: full / compact / strip / hidden) comes
+  from its *current* width, so a pane can cross strip → compact part-way through
+  a transition.
+
+A focus change retargets from wherever the panes currently are rather than
+queueing, so holding `Tab` never overshoots or builds up a backlog. Once a
+transition lands, `PaneLayout::tick` stops asking for frames — idle Panoptes
+renders exactly as often as it did before the accordion existed.
+
+PTY dimensions are still computed from the *full* terminal via `FrameLayout`:
+the session view is full-screen, so the pane split must never reach the PTY.
 
 ### Session Output
 1. PTY reader captures output from Claude Code
@@ -335,12 +362,12 @@ command = "code . &"
 
 **Architecture:**
 - Stored in `~/.panoptes/config.toml` as a TOML array
-- Managed via dialog UI (press `k` in any view)
+- Managed in Settings → Shortcuts (pane 3)
 - Triggered in session view (normal mode) by pressing the shortcut key
 - Creates shell session using `SessionManager::create_shell_session_with_command()`
 
 **Key validation:**
-- Reserved keys are rejected (g, G, k, x, n, s, d, 0-9)
+- Reserved keys are rejected (q, n, s, d, `,`, 0-9)
 - Duplicate keys are rejected
 - Validation occurs in `config::is_reserved_key()` and `Config::add_shortcut()`
 

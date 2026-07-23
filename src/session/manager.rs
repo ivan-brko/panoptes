@@ -150,6 +150,19 @@ impl SessionManager {
             .collect()
     }
 
+    /// Adopt the settings the Settings pane can change while Panoptes runs
+    ///
+    /// The manager keeps its own copy of the config, and the state machine
+    /// reads *that* copy on every event - so a toggle in `App::config` would
+    /// otherwise not be seen until a restart. Only the live fields are copied:
+    /// everything else here is read at spawn or startup, and quietly changing
+    /// it mid-run would make a session disagree with the one beside it.
+    pub fn apply_runtime_config(&mut self, config: &Config) {
+        self.config.notification_method = config.notification_method;
+        self.config.notify_on = config.notify_on.clone();
+        self.config.attention_on_idle = config.attention_on_idle;
+    }
+
     /// Access the durable session store
     pub fn store(&self) -> &SessionStore {
         &self.store
@@ -1313,6 +1326,75 @@ mod tests {
             hooks_dir: temp_dir.path().join("hooks"),
             ..Config::default()
         }
+    }
+
+    /// The Settings pane's six live fields must reach the copy the state
+    /// machine reads, and the startup-only ones must not follow them
+    #[test]
+    fn test_apply_runtime_config_copies_the_live_fields_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+
+        let mut edited = test_config(&temp_dir);
+        edited.notification_method = NotificationMethod::Title;
+        edited.notify_on.approval = false;
+        edited.notify_on.turn_complete = false;
+        edited.notify_on.stalled = true;
+        edited.notify_on.crashed = false;
+        edited.attention_on_idle = true;
+        // Startup-only: changing this mid-run would make one session's
+        // scrollback disagree with the session beside it
+        edited.scrollback_lines = 42;
+
+        manager.apply_runtime_config(&edited);
+
+        assert_eq!(
+            manager.config.notification_method,
+            NotificationMethod::Title
+        );
+        assert!(!manager.config.notify_on.approval);
+        assert!(!manager.config.notify_on.turn_complete);
+        assert!(manager.config.notify_on.stalled);
+        assert!(!manager.config.notify_on.crashed);
+        assert!(manager.config.attention_on_idle);
+        assert_eq!(
+            manager.config.scrollback_lines,
+            Config::default().scrollback_lines,
+            "startup-only settings must not change under a running session"
+        );
+    }
+
+    /// A toggle must be visible to the very next event, with no restart
+    #[test]
+    fn test_a_notification_toggle_changes_the_next_event() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = test_config(&temp_dir);
+        config.notify_on.turn_complete = true;
+        let mut manager = test_manager(&temp_dir, config.clone());
+
+        let session_id = create_shell(&mut manager, "toggler");
+        // Shell vocabulary is translated in the state machine, so make this an
+        // agent session and drive the real hook-event path
+        manager.get_mut(session_id).unwrap().info.session_type = SessionType::ClaudeCode;
+
+        let turn_complete = || AgentEvent::TurnCompleted { last_message: None };
+
+        manager.get_mut(session_id).unwrap().info.attention = None;
+        assert_eq!(
+            manager.apply_agent_event(session_id, turn_complete()),
+            Some(session_id),
+            "turn_complete rings while it is enabled"
+        );
+
+        config.notify_on.turn_complete = false;
+        manager.apply_runtime_config(&config);
+
+        manager.get_mut(session_id).unwrap().info.attention = None;
+        assert_eq!(
+            manager.apply_agent_event(session_id, turn_complete()),
+            None,
+            "the toggle must apply without a restart"
+        );
     }
 
     /// Create a live shell session through the public API

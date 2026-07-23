@@ -155,10 +155,12 @@ pub fn render_confirm_dialog(frame: &mut Frame, area: Rect, config: ConfirmDialo
     frame.render_widget(paragraph, dialog_area);
 }
 
-/// Render the "Confirm Delete" dialog for a session, filling `area`
+/// Render the "Confirm Delete" dialog for a session, as a centred overlay
 ///
-/// Shared by every session list (branch detail and the projects overview) so
-/// deleting a session always asks first and reads the same wherever it happens.
+/// Shared by every session list - pane 1's branch drill-down, pane 2, and the
+/// session view - so deleting a session always asks first, reads the same
+/// wherever it happens, and is anchored to the terminal rather than to a pane
+/// that may be mid-transition.
 pub fn render_session_delete_confirmation(
     frame: &mut Frame,
     area: Rect,
@@ -182,6 +184,7 @@ pub fn render_session_delete_confirmation(
 
     let config = ConfirmDialogConfig {
         warnings: vec![warning],
+        overlay: Some((DialogSize::Fixed(60), DialogSize::Fixed(9))),
         ..ConfirmDialogConfig::new("Confirm Delete", "session", &session_name)
     };
     render_confirm_dialog(frame, area, config);

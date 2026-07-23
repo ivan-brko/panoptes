@@ -56,19 +56,25 @@ impl CustomShortcut {
 
 /// Keys that cannot be bound to a custom shortcut
 ///
-/// Custom shortcuts fire in the session and branch views, so a shortcut sharing
-/// a key with something bound there could never run - the view's own arm
+/// Custom shortcuts fire in the branch list and the session view, so a shortcut
+/// sharing a key with something bound there could never run - the built-in arm
 /// matches first. The list is deliberately a little wider than that, covering
-/// keys bound in neighbouring views too, so a shortcut does not mean one thing
+/// keys bound in neighbouring levels too, so a shortcut does not mean one thing
 /// on one screen and something else on the next:
-/// - k: manage shortcuts (this feature), handled globally
-/// - g, G: jump to top/bottom in the log viewer
-/// - x: Codex configs, from the overview and project views
-/// - n, s, d: new worktree/AI, shell, delete - bound in the branch/project views
+/// - q: quit, handled globally in normal mode (and in session-view normal mode)
+/// - n, s, d: new worktree/AI, shell, delete - bound in pane 1 and pane 2
+/// - ',': per-project settings, bound at pane 1's project level
 /// - 0-9: jump to session by number
 ///
+/// `c`, `g`, `G`, `k` and `x` used to be here and are now free: configs,
+/// shortcuts and the log viewer they belonged to have all moved into pane 3,
+/// which is reached with `Tab` rather than a letter.
+///
+/// `m` and `r` stay unreserved: they are bound only in the projects overview,
+/// where custom shortcuts do not fire.
+///
 /// `Space`, `Esc`, `Enter`, and `Tab` are not chars and cannot be bound at all.
-const RESERVED_KEYS: &[char] = &['g', 'G', 'k', 'x', 'n', 's', 'd'];
+const RESERVED_KEYS: &[char] = &['q', 'n', 's', 'd', ','];
 const RESERVED_DIGITS: bool = true;
 
 /// Check if a key is reserved and cannot be used for custom shortcuts
@@ -339,7 +345,43 @@ impl Config {
         }
     }
 
+    /// Drop custom shortcuts bound to keys that have since become reserved
+    ///
+    /// `q` and `,` were legal shortcut keys before the three-pane layout gave
+    /// them meanings of their own. A shortcut on one of them could never fire
+    /// again - the built-in arm matches first - so it is dropped rather than
+    /// silently shadowed. Returns a message naming what went, for the startup
+    /// notice, or `None` when nothing had to be dropped.
+    pub fn drop_reserved_shortcuts(&mut self) -> Option<String> {
+        let dropped: Vec<String> = self
+            .custom_shortcuts
+            .iter()
+            .filter(|s| is_reserved_key(s.key))
+            .map(|s| format!("'{}' ({})", s.key, s.display_name()))
+            .collect();
+        if dropped.is_empty() {
+            return None;
+        }
+        self.custom_shortcuts.retain(|s| !is_reserved_key(s.key));
+        tracing::warn!(
+            "Dropped {} custom shortcut(s) bound to now-reserved keys",
+            dropped.len()
+        );
+        Some(format!(
+            "Dropped {} custom shortcut{} bound to keys that are now reserved: {}.\n\
+             Rebind {} from Settings > Shortcuts.",
+            dropped.len(),
+            if dropped.len() == 1 { "" } else { "s" },
+            dropped.join(", "),
+            if dropped.len() == 1 { "it" } else { "them" },
+        ))
+    }
+
     /// Save configuration to file (atomically, via a sibling temp file)
+    ///
+    /// The whole file is rewritten from the struct, so a hand-edited
+    /// `config.toml` loses its comments and key order the first time anything
+    /// writes it - which the Notifications section does on every keystroke.
     pub fn save(&self) -> Result<()> {
         let path = config_file_path();
         let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
@@ -621,39 +663,98 @@ notification_method = "title"
         assert_eq!(shortcut.short_display_name(), "VSCode");
     }
 
+    /// The reserved set after the three-pane layout: `q n s d ,` and digits
     #[test]
     fn test_is_reserved_key() {
-        // Reserved alphabetic keys
-        assert!(is_reserved_key('g'));
-        assert!(is_reserved_key('G'));
-        assert!(is_reserved_key('k'));
+        // Quit, from every pane and from session-view normal mode
+        assert!(is_reserved_key('q'));
 
-        // Built-in action keys shadowed by branch/project views
+        // Built-in action keys shadowed by pane 1 and pane 2
         assert!(is_reserved_key('n'));
         assert!(is_reserved_key('s'));
         assert!(is_reserved_key('d'));
 
-        // Reserved digits
+        // Per-project settings; deliberately not a letter, so it cannot
+        // compete with anything a user would reach for
+        assert!(is_reserved_key(','));
+
+        // Jump to session by number
         assert!(is_reserved_key('0'));
         assert!(is_reserved_key('5'));
         assert!(is_reserved_key('9'));
 
-        // Codex configs key
-        assert!(is_reserved_key('x'));
+        // Freed by the three-pane layout: configs, shortcuts and the log
+        // viewer all live in pane 3 now, reached with Tab rather than a letter
+        for freed in ['c', 'g', 'G', 'k', 'x'] {
+            assert!(!is_reserved_key(freed), "{freed} should be bindable now");
+        }
 
-        // Freed when q stopped being a key at all (navigation is Esc-only)
-        assert!(!is_reserved_key('q'));
+        // Bound only in the projects overview, where shortcuts do not fire
+        assert!(!is_reserved_key('m'));
+        assert!(!is_reserved_key('r'));
 
-        // Non-reserved keys
+        // Never bound at all
         assert!(!is_reserved_key('v'));
         assert!(!is_reserved_key('e'));
-
-        // Freed when the focus timer was removed
-        assert!(!is_reserved_key('t'));
-        assert!(!is_reserved_key('T'));
-
-        // Never actually bound: nothing enters session mode with 'i'
         assert!(!is_reserved_key('i'));
+        assert!(!is_reserved_key('t'));
+    }
+
+    #[test]
+    fn test_reserved_keys_display_lists_every_reserved_key() {
+        let display = reserved_keys_display();
+        for key in RESERVED_KEYS {
+            assert!(display.contains(*key), "{key} missing from {display:?}");
+        }
+        assert!(display.contains("0-9"));
+    }
+
+    #[test]
+    fn test_drop_reserved_shortcuts_removes_and_reports_them() {
+        let mut config = Config::default();
+        // Written by an older version, when q and ',' were still bindable
+        config.custom_shortcuts.push(CustomShortcut::new(
+            'q',
+            "Quit".into(),
+            "exit".into(),
+            false,
+        ));
+        config.custom_shortcuts.push(CustomShortcut::new(
+            ',',
+            String::new(),
+            "settings".into(),
+            false,
+        ));
+        config.custom_shortcuts.push(CustomShortcut::new(
+            'v',
+            "VSCode".into(),
+            "code . &".into(),
+            false,
+        ));
+
+        let warning = config
+            .drop_reserved_shortcuts()
+            .expect("dropping must be reported, never silent");
+
+        assert!(warning.contains("'q' (Quit)"), "{warning}");
+        assert!(warning.contains("','"), "{warning}");
+        assert!(!warning.contains("VSCode"), "{warning}");
+        assert_eq!(config.custom_shortcuts.len(), 1);
+        assert_eq!(config.custom_shortcuts[0].key, 'v');
+    }
+
+    #[test]
+    fn test_drop_reserved_shortcuts_is_quiet_when_nothing_changes() {
+        let mut config = Config::default();
+        config.custom_shortcuts.push(CustomShortcut::new(
+            'v',
+            "VSCode".into(),
+            "code . &".into(),
+            false,
+        ));
+
+        assert!(config.drop_reserved_shortcuts().is_none());
+        assert_eq!(config.custom_shortcuts.len(), 1);
     }
 
     #[test]

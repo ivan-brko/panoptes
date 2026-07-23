@@ -6,6 +6,7 @@ pub mod frame;
 pub mod header;
 pub mod header_notifications;
 pub mod layout;
+pub mod panes;
 pub mod theme;
 pub mod views;
 pub mod widgets;

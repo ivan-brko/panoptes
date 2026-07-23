@@ -54,8 +54,6 @@ pub enum InputMode {
     ConfirmingClaudeSettingsCopy,
     /// Confirming Claude settings migration before worktree deletion
     ConfirmingClaudeSettingsMigrate,
-    /// Managing custom shell shortcuts - list view with add/delete
-    ManagingCustomShortcuts,
     /// Adding a custom shortcut - capturing the key
     AddingCustomShortcutKey,
     /// Adding a custom shortcut - entering the name
@@ -86,7 +84,7 @@ impl InputMode {
     /// Keep in sync with the enum; `test_all_lists_every_mode_once` fails if
     /// an entry is duplicated, and the dispatcher's routing-table test fails
     /// to compile if a new variant is missing from its match.
-    pub const ALL: [InputMode; 36] = [
+    pub const ALL: [InputMode; 35] = [
         InputMode::Normal,
         InputMode::Session,
         InputMode::CreatingSession,
@@ -111,7 +109,6 @@ impl InputMode {
         InputMode::SelectingClaudeConfig,
         InputMode::ConfirmingClaudeSettingsCopy,
         InputMode::ConfirmingClaudeSettingsMigrate,
-        InputMode::ManagingCustomShortcuts,
         InputMode::AddingCustomShortcutKey,
         InputMode::AddingCustomShortcutName,
         InputMode::AddingCustomShortcutCommand,

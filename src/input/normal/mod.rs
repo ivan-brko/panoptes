@@ -1,13 +1,13 @@
 //! Normal mode input handlers
 //!
-//! Handlers for keyboard input when in normal (command) mode. The Claude and
-//! Codex configs views share one handler in [`crate::input::agent_configs`].
+//! One handler per pane, plus the full-screen session view. Each pane handler
+//! routes on its own drill-down level; the Claude and Codex config sections
+//! share one handler in [`crate::input::agent_configs`].
 
-pub mod branch_detail;
-pub mod log_viewer;
-pub mod project_detail;
-pub mod projects_overview;
+pub mod projects_pane;
 pub mod session_view;
+pub mod sessions_pane;
+pub mod settings_pane;
 
 use std::path::PathBuf;
 

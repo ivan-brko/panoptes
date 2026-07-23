@@ -5,7 +5,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, AppState, InputMode, View};
+use crate::app::{App, AppState, Focus, InputMode, ProjectsNav};
 use crate::claude_config::ClaudeConfigStore;
 use crate::claude_json::ClaudeJsonStore;
 use crate::config::{is_reserved_key, CustomShortcut};
@@ -47,28 +47,19 @@ pub(crate) fn confirming_session_delete_key(
                     return Ok(());
                 }
 
-                // Get branch_id before destroying (for selection adjustment)
-                let branch_id = state.view.branch_id();
-                let project_id = state.view.project_id();
                 let was_active = state.active_session == Some(session_id);
-                let was_in_session_view = state.view == View::SessionView;
+                let was_full_screen = state.focus == Focus::Session;
 
                 // Clear active_session if it was the destroyed session
                 if was_active {
                     state.active_session = None;
-                    state.session_return_view = None;
-                    // Navigate back from session view if we're there
-                    if was_in_session_view {
-                        // Navigate to branch detail or project detail or projects overview
-                        if let (Some(pid), Some(bid)) = (project_id, branch_id) {
-                            state.view = View::BranchDetail(pid, bid);
-                        } else if let Some(pid) = project_id {
-                            state.view = View::ProjectDetail(pid);
-                        } else {
-                            state.view = View::ProjectsOverview;
-                        }
+                    // The session filling the screen is gone, so put the pane
+                    // it was opened from back rather than leaving a blank one
+                    if was_full_screen {
+                        state.focus = state.session_return_focus.take().unwrap_or_default();
                         state.header_notifications.push("Session ended".to_string());
                     }
+                    state.session_return_focus = None;
                 }
 
                 // A recovered session has no process to kill - discarding it just
@@ -79,18 +70,16 @@ pub(crate) fn confirming_session_delete_key(
                     tracing::error!("Failed to destroy session: {}", e);
                 }
 
-                // Adjust selection in whichever list the delete came from
-                let remaining = match branch_id {
-                    Some(branch_id) => Some(sessions.entries_for_branch(branch_id).len()),
-                    // The overview's sessions list is keyed off the same index
-                    None if state.view == View::ProjectsOverview => Some(sessions.len()),
-                    None => None,
-                };
-                if let Some(new_count) = remaining {
-                    if state.selected_session_index >= new_count && new_count > 0 {
-                        state.selected_session_index = new_count - 1;
-                    }
+                // Adjust the selection in whichever list the delete came
+                // from - the two lists are on screen at once now, so only the
+                // one that was acted on may move
+                if let ProjectsNav::Branch(_, branch_id) = state.projects_nav {
+                    clamp(
+                        &mut state.branch_session_index,
+                        sessions.entries_for_branch(branch_id).len(),
+                    );
                 }
+                clamp(&mut state.sessions_pane_index, sessions.len());
             }
             state.input_mode = InputMode::Normal;
         }
@@ -102,6 +91,15 @@ pub(crate) fn confirming_session_delete_key(
         _ => {}
     }
     Ok(())
+}
+
+/// Clamp a list selection into a list that just shrank
+fn clamp(index: &mut usize, count: usize) {
+    if count == 0 {
+        *index = 0;
+    } else if *index >= count {
+        *index = count - 1;
+    }
 }
 
 /// Handle key when confirming worktree deletion
@@ -226,7 +224,7 @@ pub(crate) fn finish_branch_delete(
         let worktree_path = branch.working_dir.to_string_lossy().to_string();
 
         // Get the Claude config to use (project default or global default)
-        if let Some(project_id) = state.view.project_id() {
+        if let Some(project_id) = state.projects_nav.project_id() {
             let config_dir = project_store
                 .get_project(project_id)
                 .and_then(|p| p.default_claude_config)
@@ -272,7 +270,7 @@ pub(crate) fn finish_branch_delete(
     tracing::info!("Deleted branch: {}", branch.id);
 
     // Adjust selected index if needed
-    if let Some(project_id) = state.view.project_id() {
+    if let Some(project_id) = state.projects_nav.project_id() {
         let new_count = project_store.branches_for_project(project_id).len();
         if state.selected_branch_index >= new_count && new_count > 0 {
             state.selected_branch_index = new_count - 1;
@@ -338,8 +336,8 @@ pub fn handle_confirming_project_delete_key(app: &mut App, key: KeyEvent) -> Res
 
                 tracing::info!("Deleted project: {}", project_id);
 
-                // Navigate back to projects overview
-                app.state.view = View::ProjectsOverview;
+                // The project is gone, so pane 1 cannot stay inside it
+                app.state.projects_nav = ProjectsNav::Overview;
 
                 // Adjust selected index if needed (counted over visible tree rows)
                 let new_row_count = crate::project::row_count(&app.project_store);
@@ -663,50 +661,6 @@ fn confirm_claude_settings_migrate(app: &mut App) {
 // Custom Shortcuts Dialog Handlers
 // ============================================================================
 
-/// Handle key when managing custom shortcuts (list view)
-pub fn handle_managing_custom_shortcuts_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    if key.kind != KeyEventKind::Press {
-        return Ok(());
-    }
-
-    let shortcut_count = app.config.custom_shortcuts.len();
-
-    match key.code {
-        KeyCode::Esc => {
-            // Close the dialog
-            app.state.input_mode = InputMode::Normal;
-        }
-        KeyCode::Down => {
-            // Navigate down
-            app.state.custom_shortcuts_selected =
-                crate::app::cycle_next(app.state.custom_shortcuts_selected, shortcut_count);
-        }
-        KeyCode::Up => {
-            // Navigate up
-            app.state.custom_shortcuts_selected =
-                crate::app::cycle_prev(app.state.custom_shortcuts_selected, shortcut_count);
-        }
-        KeyCode::Char('n') => {
-            // Start adding a new shortcut
-            app.state.new_shortcut_key = None;
-            app.state.new_shortcut_name.clear();
-            app.state.new_shortcut_command.clear();
-            app.state.new_shortcut_auto_close = false;
-            app.state.shortcut_error = None;
-            app.state.input_mode = InputMode::AddingCustomShortcutKey;
-        }
-        KeyCode::Char('d') => {
-            // Delete selected shortcut (if any)
-            if shortcut_count > 0 {
-                app.state.pending_delete_shortcut_index = Some(app.state.custom_shortcuts_selected);
-                app.state.input_mode = InputMode::ConfirmingCustomShortcutDelete;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
 /// Handle key when adding a custom shortcut - capturing the key
 pub fn handle_adding_custom_shortcut_key_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if key.kind != KeyEventKind::Press {
@@ -715,9 +669,9 @@ pub fn handle_adding_custom_shortcut_key_key(app: &mut App, key: KeyEvent) -> Re
 
     match key.code {
         KeyCode::Esc => {
-            // Cancel and go back to management dialog
+            // Cancel; the Shortcuts section is behind the dialog already
             app.state.shortcut_error = None;
-            app.state.input_mode = InputMode::ManagingCustomShortcuts;
+            app.state.input_mode = InputMode::Normal;
         }
         KeyCode::Char(c) => {
             // Validate the key
@@ -853,7 +807,7 @@ fn save_new_shortcut(app: &mut App) {
         app.state.new_shortcut_command.clear();
         app.state.new_shortcut_auto_close = false;
         app.state.shortcut_error = None;
-        app.state.input_mode = InputMode::ManagingCustomShortcuts;
+        app.state.input_mode = InputMode::Normal;
     }
 }
 
@@ -883,12 +837,12 @@ pub fn handle_confirming_custom_shortcut_delete_key(app: &mut App, key: KeyEvent
                     }
                 }
             }
-            app.state.input_mode = InputMode::ManagingCustomShortcuts;
+            app.state.input_mode = InputMode::Normal;
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             // Cancel deletion
             app.state.pending_delete_shortcut_index = None;
-            app.state.input_mode = InputMode::ManagingCustomShortcuts;
+            app.state.input_mode = InputMode::Normal;
         }
         _ => {}
     }
@@ -936,7 +890,8 @@ mod tests {
             .unwrap();
 
         let mut state = AppState {
-            view: View::BranchDetail(project_id, branch_id),
+            focus: Focus::Panes(crate::app::Tab::Projects),
+            projects_nav: ProjectsNav::Branch(project_id, branch_id),
             input_mode: InputMode::ConfirmingSessionDelete,
             pending_delete_session: Some(session_id),
             ..Default::default()
@@ -1069,7 +1024,8 @@ mod tests {
             .unwrap();
 
         let mut state = AppState {
-            view: View::ProjectDetail(project_id),
+            focus: Focus::Panes(crate::app::Tab::Projects),
+            projects_nav: ProjectsNav::Project(project_id),
             input_mode: InputMode::ConfirmingBranchDelete,
             pending_delete_branch: Some(branch_id),
             active_session: Some(session_id),
