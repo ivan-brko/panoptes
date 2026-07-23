@@ -12,9 +12,10 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use crate::app::{AppState, Tab};
 use crate::project::ProjectStore;
 use crate::session::SessionManager;
-use crate::tui::panes::{side_mode, SideMode};
+use crate::tui::panes::SideMode;
 use crate::tui::theme::theme;
 use crate::tui::views::pane_projects::{clamp_line, compact_state};
+use crate::tui::views::window_rows;
 use crate::tui::widgets::selection::{selection_prefix, selection_style};
 
 /// Rows the attention section may take, borders included
@@ -29,14 +30,17 @@ pub fn sessions_title(sessions: &SessionManager, mode: SideMode) -> String {
 }
 
 /// Render pane 2's content into `area` (already inside the pane border)
+///
+/// `mode` is decided once by the caller from the *outer* pane width; see
+/// [`super::pane_projects::render_projects_pane`].
 pub fn render_sessions_pane(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
     project_store: &ProjectStore,
     sessions: &SessionManager,
+    mode: SideMode,
 ) {
-    let mode = side_mode(area.width);
     if mode == SideMode::Hidden || area.height == 0 {
         return;
     }
@@ -226,6 +230,7 @@ fn render_session_list(
         })
         .collect();
 
+    let items = window_rows(items, selected_index, area.height);
     frame.render_widget(List::new(items), area);
 }
 
@@ -261,8 +266,9 @@ mod tests {
             focus: crate::app::Focus::Panes(Tab::Sessions),
             ..Default::default()
         };
+        let mode = crate::tui::panes::side_mode(width + 2);
         render_to_lines(width, 12, |frame| {
-            render_sessions_pane(frame, frame.size(), &state, &store, sessions)
+            render_sessions_pane(frame, frame.size(), &state, &store, sessions, mode)
         })
     }
 

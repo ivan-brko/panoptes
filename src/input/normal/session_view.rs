@@ -71,7 +71,6 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
                 // Use checked access for safety
                 if let Some(session) = app.sessions.get_by_index(target_index) {
                     let session_id = session.info.id;
-                    app.state.session_cycle_index = target_index;
                     app.state.active_session = Some(session_id);
                     // Reset scroll offset when switching sessions
                     session_scroll::reset_for_session_switch(app, session_id);

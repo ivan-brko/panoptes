@@ -4,13 +4,25 @@
 //! depends on the terminal: the accordion exists to fight scarcity, so it
 //! backs off toward equal thirds once there is room for everyone.
 //!
-//! | terminal width | focused | each side | side mode |
-//! |---|---|---|---|
-//! | < 60           | 100%        | -       | hidden  |
-//! | 60-87          | total - 20  | 10      | strip   |
-//! | 88-139         | 50%         | 25%     | compact |
-//! | 140-199        | 45%         | ~27%    | full    |
-//! | >= 200         | 40%         | 30%     | full    |
+//! | terminal width | focused | each side |
+//! |---|---|---|
+//! | < 60           | 100%        | - (hidden) |
+//! | 60-87          | total - 20  | 10         |
+//! | 88-139         | 50%         | 25%        |
+//! | 140-199        | 45%         | ~27%       |
+//! | >= 200         | 40%         | 30%        |
+//!
+//! Density is deliberately not a fifth column of this table. It follows from
+//! the width a pane ends up with, via [`side_mode`]: a side pane is a strip up
+//! to 87 columns of terminal, compact from 88, and wide enough for the full row
+//! format from about 151. The thresholds are what the row *content* needs; where
+//! they land on this table is arithmetic, not a second policy that could drift
+//! out of step with the first.
+//!
+//! [`side_mode`] is asked once per pane per frame, by the caller that owns the
+//! pane's border, and the answer is handed to the body. Asking twice - once for
+//! the title, once for the content, two columns apart - is how a pane ends up
+//! wearing a full title over a strip.
 //!
 //! The 87/88 boundary is a deliberate discontinuity: below it three readable
 //! panes are impossible, so the sides become strips and the focused pane
@@ -118,22 +130,14 @@ pub fn widths_from_boundaries(total: u16, boundaries: (u16, u16)) -> [u16; 3] {
     [b1, b2 - b1, total - b2]
 }
 
-/// Resting widths and side density for a terminal width and focused pane
+/// Resting widths for a terminal width and focused pane
 ///
-/// The returned [`SideMode`] describes the narrower of the two side panes, and
-/// is only a summary: rendering asks [`side_mode`] about each pane's own
-/// current width, which is what makes a mid-transition pane render honestly.
-pub fn pane_widths(total: u16, focused: usize) -> ([u16; 3], SideMode) {
-    let widths = widths_from_boundaries(total, pane_boundaries(total, focused));
-    let focused = focused.min(2);
-    let narrowest_side = widths
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != focused)
-        .map(|(_, w)| *w)
-        .min()
-        .unwrap_or(0);
-    (widths, side_mode(narrowest_side))
+/// Density is deliberately *not* returned alongside: rendering asks
+/// [`side_mode`] about each pane's own current width, which is what makes a
+/// mid-transition pane render honestly. A summary computed here would be the
+/// target's density, and would disagree with what is on screen.
+pub fn pane_widths(total: u16, focused: usize) -> [u16; 3] {
+    widths_from_boundaries(total, pane_boundaries(total, focused))
 }
 
 /// Ease-out cubic: fast at first, settling gently
@@ -220,13 +224,27 @@ impl PaneLayout {
         if to == self.to && total == self.total && focused == self.focused {
             return;
         }
+
+        // Boundaries are absolute columns, so a width change has to rescale
+        // them or they mean something different in the new terminal. Without
+        // this, dragging a terminal edge - which fires a resize per column and
+        // keeps restarting the transition near `from` - leaves the first two
+        // panes frozen at their old widths while the third absorbs the whole
+        // change.
+        let from = if total != self.total && self.total > 0 {
+            let scale = total as f32 / self.total as f32;
+            (current.0 * scale, current.1 * scale)
+        } else {
+            current
+        };
+
         self.total = total;
         self.focused = focused;
-        // A shrunken terminal can leave the current boundaries outside it;
-        // clamping keeps `widths_from_boundaries` honest on the first frame.
+        // A shrunken terminal can still leave a boundary outside it; clamping
+        // keeps `widths_from_boundaries` honest on the first frame.
         self.from = (
-            current.0.clamp(0.0, total as f32),
-            current.1.clamp(0.0, total as f32),
+            from.0.clamp(0.0, total as f32),
+            from.1.clamp(from.0.max(0.0), total as f32),
         );
         self.to = to;
         self.started_at = now;
@@ -278,28 +296,30 @@ mod tests {
             (220, [88, 66, 66]),
         ];
         for (total, expected) in cases {
-            let (widths, _) = pane_widths(total, 0);
-            assert_eq!(widths, expected, "focused pane 0 at {total} columns");
+            assert_eq!(
+                pane_widths(total, 0),
+                expected,
+                "focused pane 0 at {total} columns"
+            );
         }
     }
 
     #[test]
     fn test_focused_pane_gets_the_wide_slot_wherever_it_sits() {
         for focused in 0..3 {
-            let (widths, _) = pane_widths(160, focused);
+            let widths = pane_widths(160, focused);
             assert_eq!(widths[focused], 72, "focused pane {focused}");
             assert_eq!(widths.iter().sum::<u16>(), 160);
         }
         // Pane 1 focused at 220: 88 in the middle, 66 either side
-        let (widths, _) = pane_widths(220, 1);
-        assert_eq!(widths, [66, 88, 66]);
+        assert_eq!(pane_widths(220, 1), [66, 88, 66]);
     }
 
     #[test]
     fn test_widths_always_sum_to_the_terminal_width() {
         for total in 0..=300u16 {
             for focused in 0..3 {
-                let (widths, _) = pane_widths(total, focused);
+                let widths = pane_widths(total, focused);
                 assert_eq!(
                     widths.iter().sum::<u16>(),
                     total,
@@ -312,24 +332,25 @@ mod tests {
     #[test]
     fn test_narrow_terminal_shows_only_the_focused_pane() {
         for focused in 0..3 {
-            let (widths, mode) = pane_widths(59, focused);
+            let widths = pane_widths(59, focused);
             assert_eq!(widths[focused], 59);
             assert_eq!(widths.iter().sum::<u16>(), 59);
-            assert_eq!(mode, SideMode::Hidden);
+            // The two side panes are not there at all
+            assert_eq!(side_mode(widths[(focused + 1) % 3]), SideMode::Hidden);
         }
     }
 
     #[test]
     fn test_the_87_88_boundary_is_a_discontinuity() {
         // 87: strips either side, focused absorbs the rest
-        let (narrow, narrow_mode) = pane_widths(87, 0);
+        let narrow = pane_widths(87, 0);
         assert_eq!(narrow, [67, 10, 10]);
-        assert_eq!(narrow_mode, SideMode::Strip);
+        assert_eq!(side_mode(narrow[1]), SideMode::Strip);
 
         // 88: three panes, sides wide enough for the compact format
-        let (wide, wide_mode) = pane_widths(88, 0);
+        let wide = pane_widths(88, 0);
         assert_eq!(wide, [44, 22, 22]);
-        assert_eq!(wide_mode, SideMode::Compact);
+        assert_eq!(side_mode(wide[1]), SideMode::Compact);
     }
 
     #[test]
@@ -359,7 +380,7 @@ mod tests {
         assert!(!layout.is_animating());
         assert!(!layout.tick(start + TRANSITION + Duration::from_millis(16)));
 
-        assert_eq!(layout.widths_at(start + TRANSITION), pane_widths(160, 1).0);
+        assert_eq!(layout.widths_at(start + TRANSITION), pane_widths(160, 1));
     }
 
     #[test]
@@ -391,7 +412,7 @@ mod tests {
 
         // And lands exactly on pane 0's resting widths, not past them
         layout.tick(mid + TRANSITION);
-        assert_eq!(layout.widths_at(mid + TRANSITION), pane_widths(200, 0).0);
+        assert_eq!(layout.widths_at(mid + TRANSITION), pane_widths(200, 0));
         assert!(!layout.is_animating());
     }
 
@@ -413,7 +434,54 @@ mod tests {
         assert_ne!(before.iter().sum::<u16>(), 120);
 
         layout.tick(mid + TRANSITION);
-        assert_eq!(layout.widths_at(mid + TRANSITION), pane_widths(120, 1).0);
+        assert_eq!(layout.widths_at(mid + TRANSITION), pane_widths(120, 1));
+    }
+
+    /// Dragging a terminal edge fires a resize per column, each restarting the
+    /// transition near its start. The panes must still track the drag rather
+    /// than freezing while the last one absorbs everything.
+    #[test]
+    fn test_dragging_the_terminal_edge_keeps_the_split_proportional() {
+        let start = Instant::now();
+        let mut layout = PaneLayout::new(120, 0, start);
+        let first = layout.widths_at(start);
+
+        // Sixty resize events in quick succession, as a drag produces
+        let mut last = first;
+        for (step, total) in (121..=180u16).enumerate() {
+            let now = start + Duration::from_millis(step as u64 * 2);
+            layout.set_total_width(total, now);
+
+            let widths = layout.widths_at(now);
+            assert_eq!(widths.iter().sum::<u16>(), total, "at {total} columns");
+            // No pane may lurch: a step is at most the column that was added,
+            // plus a column of rounding as the boundaries rescale
+            for pane in 0..3 {
+                assert!(
+                    widths[pane].abs_diff(last[pane]) <= 2,
+                    "pane {pane} jumped ({} -> {}) at {total} columns",
+                    last[pane],
+                    widths[pane]
+                );
+            }
+            last = widths;
+        }
+
+        // Every pane shared in the growth. The regression this pins is the
+        // first two freezing at their old widths while the last one - which is
+        // whatever is left over - absorbs the entire 60-column drag.
+        for pane in 0..3 {
+            assert!(
+                last[pane] > first[pane],
+                "pane {pane} never moved: {} -> {}",
+                first[pane],
+                last[pane]
+            );
+        }
+
+        let settled = start + Duration::from_millis(120) + TRANSITION;
+        layout.tick(settled);
+        assert_eq!(layout.widths_at(settled), pane_widths(180, 0));
     }
 
     #[test]

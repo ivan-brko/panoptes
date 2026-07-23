@@ -84,6 +84,7 @@ pub fn render_shortcuts_list(frame: &mut Frame, area: Rect, config: &Config, sel
         })
         .collect();
 
+    let items = crate::tui::views::window_rows(items, selected, area.height);
     frame.render_widget(List::new(items), area);
 }
 

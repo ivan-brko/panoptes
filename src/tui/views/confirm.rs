@@ -167,14 +167,22 @@ pub fn render_session_delete_confirmation(
     state: &AppState,
     sessions: &SessionManager,
 ) {
-    let session = state.pending_delete_session.and_then(|id| sessions.get(id));
+    // A recovered session has no process, but it does have a record to
+    // discard, and both session lists offer exactly that - so look in both
+    // places or the dialog asks about "Unknown"
+    let session = state.pending_delete_session.and_then(|id| {
+        sessions
+            .get(id)
+            .map(|s| &s.info)
+            .or_else(|| sessions.get_recovered(id))
+    });
 
     let session_name = session
-        .map(|s| s.info.name.clone())
+        .map(|info| info.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
 
     let warning = session
-        .map(|s| match s.info.session_type {
+        .map(|info| match info.session_type {
             SessionType::ClaudeCode => "This will kill the Claude Code process.",
             SessionType::OpenAICodex => "This will kill the Codex process.",
             SessionType::Shell => "This will kill the shell process.",

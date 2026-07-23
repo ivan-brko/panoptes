@@ -308,6 +308,38 @@ mod tests {
         assert!(!contains_line(&lines, "Completions"), "{lines:?}");
     }
 
+    /// `Clear` does not clip, so a prompt wider or taller than the terminal is
+    /// a panic rather than an overflow. Every prompt must survive a terminal
+    /// smaller than its preferred size.
+    #[test]
+    fn test_prompts_survive_a_terminal_smaller_than_they_want() {
+        let state = AppState {
+            new_project_path: "/tmp/x".to_string(),
+            path_completions: vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")],
+            show_path_completions: true,
+            folder_input: "Acme".to_string(),
+            folder_completions: vec!["Acme".to_string()],
+            show_folder_completions: true,
+            pending_remove_folder: Some(vec!["Acme".to_string()]),
+            ..Default::default()
+        };
+        let store = crate::project::ProjectStore::new();
+
+        for width in [1_u16, 10, 20, 36, 44, 60] {
+            for height in [1_u16, 3, 8, 12] {
+                render_to_lines(width, height, |frame| {
+                    render_project_addition_dialog(frame, frame.size(), &state)
+                });
+                render_to_lines(width, height, |frame| {
+                    render_folder_move_dialog(frame, frame.size(), &state)
+                });
+                render_to_lines(width, height, |frame| {
+                    render_folder_remove_confirmation(frame, frame.size(), &state, &store)
+                });
+            }
+        }
+    }
+
     #[test]
     fn test_folder_move_prompt_shows_error_and_completions() {
         let state = AppState {

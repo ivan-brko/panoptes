@@ -17,9 +17,9 @@ use crate::claude_config::ClaudeConfigStore;
 use crate::codex_config::CodexConfigStore;
 use crate::config::{Config, NotificationMethod};
 use crate::logging::LogFileInfo;
-use crate::tui::panes::{side_mode, SideMode};
+use crate::tui::panes::SideMode;
 use crate::tui::theme::theme;
-use crate::tui::views::truncate_string;
+use crate::tui::views::{truncate_string, window_rows};
 use crate::tui::widgets::selection::{selection_prefix, selection_style_with_accent};
 
 /// The six editable notification rows, in list order
@@ -89,8 +89,15 @@ pub struct SettingsPaneContext<'a> {
 }
 
 /// Render pane 3's content into `area` (already inside the pane border)
-pub fn render_settings_pane(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext) {
-    let mode = side_mode(area.width);
+///
+/// `mode` is decided once by the caller from the *outer* pane width; see
+/// [`super::pane_projects::render_projects_pane`].
+pub fn render_settings_pane(
+    frame: &mut Frame,
+    area: Rect,
+    mode: SideMode,
+    ctx: &SettingsPaneContext,
+) {
     if mode == SideMode::Hidden || area.height == 0 {
         return;
     }
@@ -141,6 +148,7 @@ fn render_sections(frame: &mut Frame, area: Rect, state: &AppState) {
         })
         .collect();
 
+    let items = window_rows(items, state.settings_section_index, area.height);
     frame.render_widget(List::new(items), area);
 }
 
@@ -170,6 +178,7 @@ fn render_notifications(frame: &mut Frame, area: Rect, state: &AppState, config:
         })
         .collect();
 
+    let items = window_rows(items, state.notifications_index, area.height);
     frame.render_widget(List::new(items), area);
 }
 
@@ -287,8 +296,9 @@ mod tests {
             path: PathBuf::from("/tmp/panoptes/logs/panoptes-now.log"),
         };
         let ctx = context(state, config, &claude, &codex, &log);
+        let mode = crate::tui::panes::side_mode(width + 2);
         render_to_lines(width, 16, |frame| {
-            render_settings_pane(frame, frame.size(), &ctx)
+            render_settings_pane(frame, frame.size(), mode, &ctx)
         })
     }
 
@@ -357,7 +367,7 @@ mod tests {
         ctx.hook_healthy = false;
 
         let lines = render_to_lines(70, 16, |frame| {
-            render_settings_pane(frame, frame.size(), &ctx)
+            render_settings_pane(frame, frame.size(), SideMode::Full, &ctx)
         });
         assert!(contains_line(&lines, "STOPPED"), "{lines:?}");
     }

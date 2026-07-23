@@ -2391,7 +2391,7 @@ mod tests {
         assert_eq!(rows, terminal.height - 3 - 3 - 2);
 
         // The widest pane at this terminal is far narrower than the PTY
-        let (widths, _) = crate::tui::panes::pane_widths(terminal.width, 0);
+        let widths = crate::tui::panes::pane_widths(terminal.width, 0);
         assert!(
             widths[0] < cols,
             "the focused pane ({}) must not be what sizes the PTY ({cols})",

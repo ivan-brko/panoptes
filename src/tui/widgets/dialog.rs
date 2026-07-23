@@ -23,13 +23,20 @@ pub enum DialogSize {
 }
 
 impl DialogSize {
-    /// Resolve to a concrete dimension within `available`
+    /// Resolve to a concrete dimension that fits inside `available`
+    ///
+    /// The result never exceeds the area, whichever variant is used and
+    /// whatever `min` asks for. A `Percent` whose `min` is wider than the
+    /// terminal used to win, and the resulting rect reached past the buffer -
+    /// which `Clear` does not clip, so it panicked rather than overflowing
+    /// quietly. `min` is a preference; the terminal is not.
     fn resolve(self, available: u16, margin: u16) -> u16 {
+        let room = available.saturating_sub(margin);
         match self {
-            DialogSize::Fixed(size) => size.min(available.saturating_sub(margin)),
-            DialogSize::Percent { pct, min, max } => {
-                ((available as u32 * pct as u32 / 100) as u16).clamp(min, max)
-            }
+            DialogSize::Fixed(size) => size.min(room),
+            DialogSize::Percent { pct, min, max } => ((available as u32 * pct as u32 / 100) as u16)
+                .clamp(min, max)
+                .min(room),
         }
     }
 }
@@ -147,6 +154,33 @@ mod tests {
         let small = Rect::new(0, 0, 50, 100);
         // 60% of 50 = 30, clamped to min 40
         assert_eq!(centered_rect(small, size, size).width, 40);
+    }
+
+    /// A dialog that does not fit is shrunk, never drawn past the buffer:
+    /// `Clear` does not clip, so an oversized rect is a panic, not a smudge
+    #[test]
+    fn test_rect_never_escapes_a_tiny_area() {
+        let percent = DialogSize::Percent {
+            pct: 70,
+            min: 40,
+            max: 80,
+        };
+        for width in 0..=90u16 {
+            for height in [0u16, 1, 3, 8, 24] {
+                let area = Rect::new(0, 0, width, height);
+                for size in [percent, DialogSize::Fixed(60)] {
+                    let rect = centered_rect(area, size, size);
+                    assert!(
+                        rect.x + rect.width <= area.x + area.width,
+                        "{rect:?} escapes {area:?}"
+                    );
+                    assert!(
+                        rect.y + rect.height <= area.y + area.height,
+                        "{rect:?} escapes {area:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

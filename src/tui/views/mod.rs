@@ -189,6 +189,23 @@ pub(crate) fn visible_window(total: usize, selected: usize, max_visible: usize) 
     (start, start + max_visible)
 }
 
+/// Scroll a list so the selected row stays on screen
+///
+/// A pane is a fraction of the terminal, so a list that used to fit a
+/// full-width screen no longer does. Without this the selection walks off the
+/// bottom and `Enter` opens something the user cannot see.
+///
+/// `selected_row` counts rendered rows, not items: lists with section headings
+/// have more of the former than the latter.
+pub(crate) fn window_rows<T>(rows: Vec<T>, selected_row: usize, height: u16) -> Vec<T> {
+    let height = height as usize;
+    if height == 0 || rows.len() <= height {
+        return rows;
+    }
+    let (start, end) = visible_window(rows.len(), selected_row.min(rows.len() - 1), height);
+    rows.into_iter().take(end).skip(start).collect()
+}
+
 /// Format custom shortcuts for footer display (e.g., "v:VSCode e:vim | ")
 pub fn format_custom_shortcuts_hint(shortcuts: &[CustomShortcut]) -> String {
     if shortcuts.is_empty() {
@@ -299,6 +316,27 @@ mod tests {
         assert_eq!(status_parts(2, 0), vec!["2 active"]);
         assert_eq!(status_parts(0, 1), vec!["1 need attention"]);
         assert_eq!(status_parts(2, 1), vec!["2 active", "1 need attention"]);
+    }
+
+    #[test]
+    fn test_window_rows_keeps_the_selection_on_screen() {
+        let rows: Vec<usize> = (0..30).collect();
+
+        // Short enough to fit: untouched
+        assert_eq!(window_rows(rows.clone(), 0, 30).len(), 30);
+        assert_eq!(window_rows(rows.clone(), 29, 40), rows);
+
+        // A selection past the viewport scrolls it into view
+        let visible = window_rows(rows.clone(), 25, 10);
+        assert_eq!(visible.len(), 10);
+        assert!(visible.contains(&25), "{visible:?}");
+
+        let visible = window_rows(rows.clone(), 0, 10);
+        assert_eq!(visible, (0..10).collect::<Vec<_>>());
+
+        // A stale index past the end, and a zero-height pane, are survivable
+        assert!(window_rows(rows.clone(), 99, 10).len() == 10);
+        assert_eq!(window_rows(rows, 5, 0).len(), 30);
     }
 
     #[test]

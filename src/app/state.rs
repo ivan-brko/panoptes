@@ -295,10 +295,6 @@ pub struct AppState {
     pub project_settings_index: usize,
     /// Selected row in pane 3's notifications list
     pub notifications_index: usize,
-    /// Which session the session view is on, for digit jumps
-    ///
-    /// Indexes `SessionManager::session_order`, not any on-screen list.
-    pub session_cycle_index: usize,
     /// Session being viewed (in session view)
     pub active_session: Option<SessionId>,
     /// Pane the session view was opened from, restored when it is left

@@ -15,9 +15,9 @@ use crate::project::{
     ProjectStore, TreeRow,
 };
 use crate::session::SessionManager;
-use crate::tui::panes::{side_mode, SideMode};
+use crate::tui::panes::SideMode;
 use crate::tui::theme::theme;
-use crate::tui::views::{status_parts, truncate_string};
+use crate::tui::views::{status_parts, truncate_string, window_rows};
 use crate::tui::widgets::selection::{activity_style, selection_prefix, selection_style};
 
 /// The per-project settings rows, in list order
@@ -67,14 +67,18 @@ pub fn projects_breadcrumb(state: &AppState, project_store: &ProjectStore, width
 }
 
 /// Render pane 1's content into `area` (already inside the pane border)
+///
+/// `mode` is the pane's density, decided once by the caller from the *outer*
+/// pane width; recomputing it here from the inner rect would put the body two
+/// columns out of step with its own title.
 pub fn render_projects_pane(
     frame: &mut Frame,
     area: Rect,
     state: &AppState,
     project_store: &ProjectStore,
     sessions: &SessionManager,
+    mode: SideMode,
 ) {
-    let mode = side_mode(area.width);
     if mode == SideMode::Hidden || area.height == 0 {
         return;
     }
@@ -314,6 +318,9 @@ fn render_tree(
         })
         .collect();
 
+    // The tree row index is the rendered row index here, so it doubles as the
+    // scroll anchor
+    let items = window_rows(items, selected_index, area.height);
     frame.render_widget(List::new(items), area);
 }
 
@@ -401,6 +408,8 @@ fn render_branches(
 
     let mut items: Vec<ListItem> = Vec::new();
     let mut item_index = 0;
+    // Section headings are rows too, so the branch index is not the row index
+    let mut selected_row = 0;
 
     if let Some(branch) = local_checkout {
         if mode == SideMode::Full {
@@ -415,6 +424,9 @@ fn render_branches(
             String::new()
         };
 
+        if item_index == selected_index {
+            selected_row = items.len();
+        }
         items.push(branch_item(BranchItem {
             display_name: current_branch_display.as_deref().unwrap_or(&branch.name),
             number: item_index + 1,
@@ -460,6 +472,9 @@ fn render_branches(
                 String::new()
             };
 
+            if item_index == selected_index {
+                selected_row = items.len();
+            }
             items.push(branch_item(BranchItem {
                 display_name: &branch.name,
                 number: item_index + 1,
@@ -475,6 +490,7 @@ fn render_branches(
         }
     }
 
+    let items = window_rows(items, selected_row, area.height);
     frame.render_widget(List::new(items), area);
 }
 
@@ -569,6 +585,7 @@ fn render_branch_sessions(
         })
         .collect();
 
+    let items = window_rows(items, selected_index, area.height);
     frame.render_widget(List::new(items), area);
 }
 
@@ -619,6 +636,7 @@ fn render_project_settings(
         })
         .collect();
 
+    let items = window_rows(items, state.project_settings_index, area.height);
     frame.render_widget(List::new(items), area);
 }
 
@@ -695,8 +713,11 @@ mod tests {
     fn render_buffer(width: u16, state: &AppState, store: &ProjectStore) -> Buffer {
         let config = Config::default();
         let sessions = SessionManager::with_store(config, SessionStore::new());
+        // Mirror the caller: density comes from the *outer* pane width, which
+        // is two columns wider than the content rect a body is handed
+        let mode = crate::tui::panes::side_mode(width + 2);
         crate::tui::views::test_util::render_to_buffer(width, 12, |frame| {
-            render_projects_pane(frame, frame.size(), state, store, &sessions)
+            render_projects_pane(frame, frame.size(), state, store, &sessions, mode)
         })
     }
 
@@ -806,6 +827,33 @@ mod tests {
         // The count survives; the "1 project" wording does not
         assert!(contains_line(&lines, "Acme/ (1)"), "{lines:?}");
         assert!(!contains_line(&lines, "1 project)"), "{lines:?}");
+    }
+
+    /// A pane is a fraction of the terminal, so a list long enough to overflow
+    /// it must scroll - otherwise `Enter` opens something off-screen
+    #[test]
+    fn test_a_long_list_scrolls_to_keep_the_selection_visible() {
+        let names: Vec<String> = (0..40).map(|i| format!("project-{i:02}")).collect();
+        let entries: Vec<(&str, &[&str])> = names.iter().map(|n| (n.as_str(), &[][..])).collect();
+        let store = store_with(&entries);
+
+        // Selection at the top: the first rows are what shows
+        let state = AppState::default();
+        let lines = render(60, &state, &store);
+        assert!(contains_line(&lines, "project-00"), "{lines:?}");
+        assert!(!contains_line(&lines, "project-39"), "{lines:?}");
+
+        // Selection at the bottom: it must be on screen, and the top gone
+        let state = AppState {
+            selected_project_index: 39,
+            ..Default::default()
+        };
+        let lines = render(60, &state, &store);
+        assert!(
+            contains_line(&lines, "▶   project-39"),
+            "the selected row scrolled off: {lines:?}"
+        );
+        assert!(!contains_line(&lines, "project-00"), "{lines:?}");
     }
 
     #[test]

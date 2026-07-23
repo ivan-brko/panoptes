@@ -102,6 +102,7 @@ pub fn render_agent_config_list<C: AgentProfile>(
         })
         .collect();
 
+    let items = crate::tui::views::window_rows(items, selected_index, area.height);
     frame.render_widget(List::new(items), area);
 }
 

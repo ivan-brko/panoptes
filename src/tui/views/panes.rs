@@ -101,7 +101,7 @@ fn render_pane_row(frame: &mut Frame, area: Rect, ctx: &PaneContext) {
         ctx.widths
     } else {
         let focused = ctx.state.focus.tab().map(Tab::index).unwrap_or(0);
-        crate::tui::panes::pane_widths(area.width, focused).0
+        crate::tui::panes::pane_widths(area.width, focused)
     };
 
     let mut x = area.x;
@@ -127,6 +127,10 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
     // Density comes from the width this pane has *right now*, never from the
     // width it is heading for - which is what lets a pane cross
     // strip -> compact part-way through a transition
+    // One density for the whole pane, from the width it has *right now*.
+    // Measured on the outer rect, which is what `SIDE_COMPACT_MIN` and the
+    // sizing table are expressed in - the body is handed the same answer so a
+    // pane can never wear a full title over a strip.
     let mode = side_mode(area.width);
 
     // A title has this pane's width minus its two border corners
@@ -164,6 +168,7 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
             ctx.state,
             ctx.project_store,
             ctx.sessions,
+            mode,
         ),
         Tab::Sessions => super::pane_sessions::render_sessions_pane(
             frame,
@@ -171,10 +176,12 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
             ctx.state,
             ctx.project_store,
             ctx.sessions,
+            mode,
         ),
         Tab::Settings => super::pane_settings::render_settings_pane(
             frame,
             inner,
+            mode,
             &SettingsPaneContext {
                 state: ctx.state,
                 config: ctx.config,
@@ -331,7 +338,7 @@ mod tests {
 
     fn render(width: u16, state: &AppState, f: &Fixture) -> Vec<String> {
         let focused = state.focus.tab().map(|t| t.index()).unwrap_or(0);
-        let (widths, _) = pane_widths(width, focused);
+        let widths = pane_widths(width, focused);
         render_to_lines(width, 24, |frame| {
             render_panes(
                 frame,
@@ -418,6 +425,64 @@ mod tests {
                         line.chars().count() <= width as usize,
                         "row {line:?} overflows a {width}-column terminal"
                     );
+                }
+            }
+        }
+    }
+
+    /// A pane's title and its body must agree about density. They are two
+    /// columns apart - the border - so recomputing the mode from the inner
+    /// rect put full titles over strip bodies at the 88-column threshold.
+    #[test]
+    fn test_pane_title_and_body_agree_about_density() {
+        let f = fixture();
+
+        // 88 is the width at which three readable panes first fit: side panes
+        // are 22 columns, which is exactly `SIDE_COMPACT_MIN`
+        let lines = render(88, &AppState::default(), &f);
+        assert!(contains_line(&lines, "Sessions (0)"), "{lines:?}");
+        assert!(
+            !contains_line(&lines, "S 0"),
+            "a titled pane must not hold a strip body: {lines:?}"
+        );
+
+        // 87 is the other side of the discontinuity: strips, and no titles
+        let lines = render(87, &AppState::default(), &f);
+        assert!(contains_line(&lines, "S 0"), "{lines:?}");
+        assert!(!contains_line(&lines, "Sessions (0)"), "{lines:?}");
+    }
+
+    /// Overlays are anchored to the terminal, and `Clear` does not clip, so a
+    /// terminal too small for a dialog's minimum size used to panic
+    #[test]
+    fn test_a_tiny_terminal_never_panics() {
+        let f = fixture();
+        for width in [1_u16, 8, 20, 36, 59, 60, 88] {
+            for height in [1_u16, 3, 6, 8, 24] {
+                for tab in Tab::ALL {
+                    let state = AppState {
+                        focus: Focus::Panes(tab),
+                        ..Default::default()
+                    };
+                    let widths = pane_widths(width, tab.index());
+                    render_to_lines(width, height, |frame| {
+                        render_panes(
+                            frame,
+                            frame.size(),
+                            PaneContext {
+                                state: &state,
+                                project_store: &f.project_store,
+                                sessions: &f.sessions,
+                                config: &f.config,
+                                claude_config_store: &f.claude,
+                                codex_config_store: &f.codex,
+                                log_file_info: &f.log,
+                                widths,
+                                hook_port: 9999,
+                                hook_healthy: true,
+                            },
+                        )
+                    });
                 }
             }
         }

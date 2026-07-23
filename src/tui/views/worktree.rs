@@ -653,6 +653,63 @@ mod tests {
         assert!(lines[0].is_empty(), "{lines:?}");
     }
 
+    /// Same guard as `prompts.rs`: these are centred overlays with `Clear`,
+    /// which panics rather than clipping when the rect escapes the buffer
+    #[test]
+    fn test_worktree_overlays_survive_a_terminal_smaller_than_they_want() {
+        let (store, project_id) = store_with_project();
+        let sessions = SessionManager::with_store(Config::default(), SessionStore::new());
+        let config = Config::default();
+
+        let branch_id = store.branches_for_project_sorted(project_id)[0].id;
+        let mut state = AppState {
+            pending_delete_branch: Some(branch_id),
+            pending_delete_project: Some(project_id),
+            filtered_branch_refs: vec![BranchRef::new(WizardRefType::Local, "main".to_string())],
+            ..Default::default()
+        };
+        state.worktree_wizard.branch_name = "feature".to_string();
+        state.worktree_wizard.project_name = "panoptes".to_string();
+        state.worktree_wizard.search_text = "feat".to_string();
+
+        let project = store.get_project(project_id);
+        for width in [1_u16, 10, 20, 36, 44, 60] {
+            for height in [1_u16, 3, 8, 12] {
+                for mode in [
+                    InputMode::WorktreeSelectBranch,
+                    InputMode::WorktreeSelectBase,
+                    InputMode::WorktreeConfirm,
+                ] {
+                    state.input_mode = mode;
+                    render_to_lines(width, height, |frame| {
+                        render_worktree_wizard(frame, frame.size(), &state, &config)
+                    });
+                }
+                render_to_lines(width, height, |frame| {
+                    render_default_base_selector(frame, frame.size(), &state)
+                });
+                render_to_lines(width, height, |frame| {
+                    render_branch_delete_confirmation(
+                        frame,
+                        frame.size(),
+                        &state,
+                        &store,
+                        &sessions,
+                    )
+                });
+                render_to_lines(width, height, |frame| {
+                    render_project_delete_confirmation(
+                        frame,
+                        frame.size(),
+                        &state,
+                        project,
+                        &sessions,
+                    )
+                });
+            }
+        }
+    }
+
     #[test]
     fn test_select_base_reads_the_filtered_cache() {
         let mut state = AppState {
