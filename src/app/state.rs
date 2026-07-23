@@ -3,7 +3,7 @@
 //! Contains the main AppState struct and navigation helpers.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::claude_config::ClaudeConfig;
 use crate::project::{BranchId, ProjectId};
@@ -220,6 +220,61 @@ impl WorktreeWizardState {
     }
 }
 
+/// Frames of the loading spinner, cycled while an operation is in flight
+pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// How long each spinner frame is shown
+const SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(80);
+
+/// The "Working" overlay shown while an operation is in flight
+///
+/// Background jobs advance [`frame`](Self::frame) from the event loop so the
+/// spinner animates; operations that still block the loop simply render it
+/// once, with a static frame.
+#[derive(Debug, Clone)]
+pub struct LoadingOverlay {
+    /// What the operation is doing, e.g. "Fetching branches from remotes..."
+    pub message: String,
+    /// When the overlay appeared (drives the spinner)
+    pub started_at: Instant,
+    /// Whether Esc aborts the operation (also shown as a hint)
+    pub cancellable: bool,
+    /// Set once the user asked to cancel, until the job actually ends
+    pub cancelling: bool,
+    /// Index into [`SPINNER_FRAMES`]
+    pub frame: usize,
+}
+
+impl LoadingOverlay {
+    /// A new overlay for `message`, starting at the first spinner frame
+    pub fn new(message: impl Into<String>, cancellable: bool) -> Self {
+        Self {
+            message: message.into(),
+            started_at: Instant::now(),
+            cancellable,
+            cancelling: false,
+            frame: 0,
+        }
+    }
+
+    /// The spinner character for the current frame
+    pub fn spinner(&self) -> &'static str {
+        SPINNER_FRAMES[self.frame % SPINNER_FRAMES.len()]
+    }
+
+    /// Advance the spinner to the frame `now` calls for
+    ///
+    /// Returns whether the frame changed, i.e. whether a re-render is worth it.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        let frame = (now.saturating_duration_since(self.started_at).as_millis()
+            / SPINNER_FRAME_INTERVAL.as_millis()) as usize
+            % SPINNER_FRAMES.len();
+        let changed = frame != self.frame;
+        self.frame = frame;
+        changed
+    }
+}
+
 /// Application state
 #[derive(Default)]
 pub struct AppState {
@@ -325,8 +380,8 @@ pub struct AppState {
     /// Worktree creation wizard state (grouped together)
     pub worktree_wizard: WorktreeWizardState,
 
-    /// Loading message to display during blocking operations
-    pub loading_message: Option<String>,
+    /// Loading overlay shown while an operation is in flight
+    pub loading: Option<LoadingOverlay>,
     /// Focus state for homepage (projects vs sessions list)
     pub homepage_focus: HomepageFocus,
 

@@ -39,6 +39,7 @@ PTY Output → Session buffer → TUI render
 ### Key Modules
 
 - `app/` - Application orchestration, state, views, input modes
+- `app/background.rs` - Off-thread git jobs (fetch, worktree create/remove) with a cancellable loading overlay
 - `agent/` - Agent adapters (Claude Code, Codex, Shell) with hook setup
 - `session/` - Session lifecycle, PTY management, terminal emulation
 - `session/state_machine.rs` - Pure agent-event state machine (hook event → state transition)

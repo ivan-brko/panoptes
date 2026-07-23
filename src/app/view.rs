@@ -18,9 +18,9 @@ pub enum View {
     SessionView,
     /// Log viewer showing application logs
     LogViewer,
-    /// Claude configurations management
+    /// Claude configs management
     ClaudeConfigs,
-    /// Codex configurations management
+    /// Codex configs management
     CodexConfigs,
 }
 

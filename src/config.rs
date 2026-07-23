@@ -63,7 +63,7 @@ impl CustomShortcut {
 /// on one screen and something else on the next:
 /// - k: manage shortcuts (this feature), handled globally
 /// - g, G: jump to top/bottom in the log viewer
-/// - x: Codex configurations, from the overview and project views
+/// - x: Codex configs, from the overview and project views
 /// - n, s, d: new worktree/AI, shell, delete - bound in the branch/project views
 /// - 0-9: jump to session by number
 ///

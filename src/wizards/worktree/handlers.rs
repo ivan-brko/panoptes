@@ -251,77 +251,52 @@ pub fn handle_worktree_confirm_key(
             }
         }
         KeyCode::Enter => {
-            // Create or import the worktree
-            let result = match app.state.worktree_wizard.creation_type {
-                WorktreeCreationType::ExistingLocal => {
-                    // Create worktree from existing local branch (don't create branch)
-                    app.create_worktree(
-                        project_id,
-                        &app.state.worktree_wizard.branch_name.clone(),
-                        false,
-                        None,
-                    )
-                }
-                WorktreeCreationType::RemoteTracking => {
-                    // Create local tracking branch from remote, then worktree
-                    let base_ref = app
-                        .state
-                        .worktree_wizard
-                        .source_branch
-                        .as_ref()
-                        .map(|b| b.name.clone());
-                    app.create_worktree(
-                        project_id,
-                        &app.state.worktree_wizard.branch_name.clone(),
-                        true,
-                        base_ref.as_deref(),
-                    )
-                }
-                WorktreeCreationType::NewBranch => {
-                    // Create new branch from base, then worktree
-                    let base_ref = app
-                        .state
-                        .worktree_wizard
-                        .base_branch
-                        .as_ref()
-                        .map(|b| b.name.clone());
-                    app.create_worktree(
-                        project_id,
-                        &app.state.worktree_wizard.branch_name.clone(),
-                        true,
-                        base_ref.as_deref(),
-                    )
-                }
-                WorktreeCreationType::ImportExisting => {
-                    // Import existing git worktree that is not tracked by Panoptes
-                    app.import_existing_worktree(
-                        project_id,
-                        &app.state.worktree_wizard.branch_name.clone(),
-                    )
-                }
+            // Everything the wizard collected, before its state is cleared
+            let creation_type = app.state.worktree_wizard.creation_type;
+            let branch_name = app.state.worktree_wizard.branch_name.clone();
+            let base_ref = match creation_type {
+                // Create local tracking branch from the selected remote branch
+                WorktreeCreationType::RemoteTracking => app
+                    .state
+                    .worktree_wizard
+                    .source_branch
+                    .as_ref()
+                    .map(|b| b.name.clone()),
+                // Create a new branch from the selected base
+                WorktreeCreationType::NewBranch => app
+                    .state
+                    .worktree_wizard
+                    .base_branch
+                    .as_ref()
+                    .map(|b| b.name.clone()),
+                _ => None,
             };
 
-            // Capture branch_id before canceling wizard (which clears state)
-            let created_branch_id = match &result {
-                Ok(branch_id) => Some(*branch_id),
-                Err(e) => {
-                    tracing::error!("Failed to create worktree: {}", e);
-                    app.state.error_message = Some(format!("Failed to create worktree: {}", e));
-                    None
-                }
-            };
-
+            // The wizard is done either way: creating runs in the background
+            // (the loading overlay takes over), importing right here.
             cancel_worktree_wizard(app);
 
-            // Navigate to the newly created branch, possibly showing permissions dialog
-            if let Some(branch_id) = created_branch_id {
-                // Check if we should offer to copy Claude settings
-                if let Some(copy_state) = check_claude_settings_for_copy(app, project_id, branch_id)
-                {
-                    app.state.pending_claude_settings_copy = Some(copy_state);
-                    app.state.input_mode = InputMode::ConfirmingClaudeSettingsCopy;
-                } else {
-                    app.state.navigate_to_branch(project_id, branch_id);
+            if creation_type == WorktreeCreationType::ImportExisting {
+                // Import an existing git worktree that Panoptes does not track.
+                // No git work involved, so it stays on this thread.
+                match app.import_existing_worktree(project_id, &branch_name) {
+                    Ok(branch_id) => app.enter_new_worktree_branch(project_id, branch_id),
+                    Err(e) => {
+                        tracing::error!("Failed to import worktree: {:#}", e);
+                        app.state.error_message = Some(format!("Failed to import worktree: {}", e));
+                    }
+                }
+            } else {
+                // Only an existing local branch is checked out as-is
+                let create_branch = creation_type != WorktreeCreationType::ExistingLocal;
+                if let Err(e) = app.create_worktree(
+                    project_id,
+                    &branch_name,
+                    create_branch,
+                    base_ref.as_deref(),
+                ) {
+                    tracing::error!("Failed to create worktree: {:#}", e);
+                    app.state.error_message = Some(format!("Failed to create worktree: {}", e));
                 }
             }
         }
@@ -533,7 +508,7 @@ pub fn update_worktree_filtered_branches(app: &mut App) {
 /// that should be offered for copying to the new worktree. The file
 /// inspection itself lives in [`crate::claude_json::check_settings_for_copy`];
 /// this resolves the project's Claude config and packs the dialog state.
-fn check_claude_settings_for_copy(
+pub(crate) fn check_claude_settings_for_copy(
     app: &App,
     project_id: ProjectId,
     branch_id: crate::project::BranchId,

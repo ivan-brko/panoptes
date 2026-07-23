@@ -5,7 +5,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::app::AppState;
+use crate::app::{AppState, LoadingOverlay};
 use crate::session::{SessionManager, SessionType};
 use crate::tui::theme::theme;
 use crate::tui::widgets::dialog::{centered_rect, render_dialog, DialogSize, DialogSpec};
@@ -282,28 +282,50 @@ pub fn render_startup_notice_overlay(frame: &mut Frame, area: Rect, message: &st
 
 /// Render a loading indicator overlay
 ///
-/// Displays a centered dialog with a loading message during blocking operations.
-/// Uses cyan border to indicate informational/non-destructive status.
-pub fn render_loading_indicator(frame: &mut Frame, area: Rect, message: &str) {
+/// Displays a centered dialog with a spinner and the operation's message.
+/// Uses cyan border to indicate informational/non-destructive status. Work
+/// running in the background advances the spinner and adds a cancel hint;
+/// work that blocks the event loop shows a still frame and no hint.
+pub fn render_loading_indicator(frame: &mut Frame, area: Rect, loading: &LoadingOverlay) {
     let t = theme();
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
-        Line::from(vec![Span::styled(
-            message,
-            Style::default().fg(t.text).add_modifier(Modifier::BOLD),
-        )]),
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", loading.spinner()),
+                Style::default().fg(t.accent),
+            ),
+            Span::styled(
+                loading.message.as_str(),
+                Style::default().fg(t.text).add_modifier(Modifier::BOLD),
+            ),
+        ]),
     ];
+
+    let cancellable = loading.cancellable && !loading.cancelling;
+    if cancellable {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(t.cancel_key)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to cancel", Style::default().fg(t.text_muted)),
+        ]));
+    }
 
     render_dialog(
         frame,
         area,
         DialogSpec {
-            title: "Please Wait",
+            title: "Working",
             border_color: t.accent,
             alignment: Alignment::Center,
             width: DialogSize::Fixed(50),
-            height: DialogSize::Fixed(5),
+            height: DialogSize::Fixed(if cancellable { 7 } else { 5 }),
         },
         lines,
     );
@@ -482,12 +504,55 @@ mod tests {
     }
 
     #[test]
-    fn test_loading_indicator_shows_message() {
+    fn test_loading_indicator_shows_message_and_spinner() {
+        let loading = LoadingOverlay::new("Creating worktree...", false);
         let lines = render_to_lines(70, 20, |frame| {
-            render_loading_indicator(frame, frame.size(), "Creating worktree...")
+            render_loading_indicator(frame, frame.size(), &loading)
         });
 
-        assert!(contains_line(&lines, "Please Wait"), "{:?}", lines);
-        assert!(contains_line(&lines, "Creating worktree..."), "{:?}", lines);
+        assert!(contains_line(&lines, "Working"), "{:?}", lines);
+        assert!(
+            contains_line(
+                &lines,
+                &format!("{} Creating worktree...", loading.spinner())
+            ),
+            "{:?}",
+            lines
+        );
+        // A blocking operation cannot be called off
+        assert!(!contains_line(&lines, "to cancel"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_loading_indicator_offers_cancel_until_cancelling() {
+        let mut loading = LoadingOverlay::new("Fetching branches from remotes...", true);
+        let lines = render_to_lines(70, 20, |frame| {
+            render_loading_indicator(frame, frame.size(), &loading)
+        });
+        assert!(contains_line(&lines, "Esc to cancel"), "{:?}", lines);
+
+        // Once asked to cancel, there is nothing left to press
+        loading.cancelling = true;
+        let lines = render_to_lines(70, 20, |frame| {
+            render_loading_indicator(frame, frame.size(), &loading)
+        });
+        assert!(!contains_line(&lines, "to cancel"), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_loading_indicator_spinner_advances_over_time() {
+        use std::time::Duration;
+
+        let mut loading = LoadingOverlay::new("Fetching branches from remotes...", true);
+        let first = loading.spinner();
+
+        assert!(
+            loading.tick(loading.started_at + Duration::from_millis(240)),
+            "the spinner should have advanced by 240ms"
+        );
+        assert_ne!(first, loading.spinner());
+
+        // Ticking again within the same frame is not worth a re-render
+        assert!(!loading.tick(loading.started_at + Duration::from_millis(250)));
     }
 }

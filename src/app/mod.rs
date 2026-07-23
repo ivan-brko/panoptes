@@ -4,6 +4,7 @@
 //! that ties together session management, hook handling, and terminal UI.
 
 // Submodules
+mod background;
 mod input_mode;
 mod state;
 mod view;
@@ -12,7 +13,7 @@ mod view;
 pub use input_mode::InputMode;
 pub use state::{
     cycle_next, cycle_prev, AppState, ClaudeSettingsCopyState, ClaudeSettingsMigrateState,
-    FolderMoveTarget, HomepageFocus, SessionDraft, WorktreeWizardState,
+    FolderMoveTarget, HomepageFocus, LoadingOverlay, SessionDraft, WorktreeWizardState,
 };
 pub use view::View;
 
@@ -106,6 +107,8 @@ pub struct App {
     watched_transcripts: HashMap<SessionId, PathBuf>,
     /// When transcript watching was last reconciled against live sessions
     last_transcript_sync: Option<Instant>,
+    /// Git work running off the event loop (at most one at a time)
+    background_job: Option<background::BackgroundJob>,
 }
 
 /// How often to reconcile transcript watching against the live session list
@@ -229,6 +232,7 @@ impl App {
             transcripts,
             watched_transcripts: HashMap::new(),
             last_transcript_sync: None,
+            background_job: None,
         })
     }
 
@@ -283,8 +287,15 @@ impl App {
                         if self.state.startup_notice.is_some() {
                             self.state.startup_notice = None;
                         }
-                        crate::input::dispatcher::handle_key_event(self, key)?;
+                        if self.is_busy() {
+                            self.handle_key_while_busy(key);
+                        } else {
+                            crate::input::dispatcher::handle_key_event(self, key)?;
+                        }
                         self.state.needs_render = true;
+                    }
+                    Event::Paste(text) if self.is_busy() => {
+                        tracing::debug!("Ignoring paste of {} bytes while busy", text.len());
                     }
                     Event::Paste(text) => {
                         if let Err(e) = self.handle_paste_event(&text) {
@@ -311,6 +322,7 @@ impl App {
             }
 
             let mut dirty = false;
+            dirty |= self.tick_background_job();
             dirty |= self.tick_resize_debounce()?;
             dirty |= self.process_hook_events();
             dirty |= self.tick_output_polling();
@@ -963,8 +975,9 @@ impl App {
 
     /// Start the new worktree creation wizard (Step 1)
     ///
-    /// On failure the wizard is not entered; the caller surfaces the error to
-    /// the user.
+    /// Fetching the branch list runs in the background; the wizard opens from
+    /// [`Self::open_worktree_wizard`] once the refs arrive. On failure here the
+    /// wizard is not entered and the caller surfaces the error to the user.
     pub(crate) fn start_worktree_wizard(&mut self, project_id: ProjectId) -> Result<()> {
         // Clear all wizard state
         self.state.worktree_wizard = WorktreeWizardState::default();
@@ -987,7 +1000,8 @@ impl App {
             .map(|b| b.name.clone())
             .collect();
 
-        // Get existing git worktrees to detect untracked worktrees
+        // Get existing git worktrees to detect untracked worktrees. This is a
+        // local, fast read, so it stays on this thread.
         let git = crate::git::GitOps::open(&repo_path).context("Failed to open git repository")?;
         let git_worktree_branches: std::collections::HashSet<String> =
             match crate::git::worktree::list_worktrees(git.repository()) {
@@ -999,70 +1013,42 @@ impl App {
             };
         drop(git);
 
-        // Fetch remotes, list branch refs, and stamp on the wizard's
-        // tracking flags (which the git layer knows nothing about)
-        let refs = self
-            .fetch_branch_refs(project_id)
-            .context("Failed to list branches")?;
-        self.state.worktree_wizard.all_branches = refs
-            .into_iter()
-            .map(|mut r| {
-                r.is_already_tracked = tracked_branches.contains(&r.name);
-                // Branch has untracked git worktree if git knows about it but Panoptes doesn't track it
-                r.has_git_worktree =
-                    !r.is_already_tracked && git_worktree_branches.contains(&r.name);
-                r
-            })
-            .collect();
-        self.state.worktree_wizard.filtered_branches =
-            self.state.worktree_wizard.all_branches.clone();
-
-        // Transition to step 1
-        self.state.input_mode = InputMode::WorktreeSelectBranch;
-        Ok(())
+        self.spawn_branch_fetch(
+            project_id,
+            background::JobFollowUp::OpenWorktreeWizard {
+                tracked_branches,
+                git_worktree_branches,
+            },
+        )
     }
 
     /// Start default base branch selection flow
+    ///
+    /// Like the wizard, this waits on a background fetch; the selector opens
+    /// from [`Self::open_default_base_selector`].
     pub(crate) fn start_default_base_selection(&mut self, project_id: ProjectId) {
         self.state.new_branch_name.clear();
         self.state.base_branch_selector_index = 0;
         self.state.fetch_error = None;
 
-        // Fetch branches (synchronous for now)
-        self.fetch_and_populate_branch_refs(project_id);
-
-        // Transition to selection mode
-        self.state.input_mode = InputMode::SelectingDefaultBase;
-    }
-
-    /// Fetch remotes and populate branch refs for the default-base selector
-    ///
-    /// An empty list is a valid outcome (the selector renders empty); failures
-    /// are logged and degrade to that.
-    fn fetch_and_populate_branch_refs(&mut self, project_id: ProjectId) {
-        match self.fetch_branch_refs(project_id) {
-            Ok(refs) => {
-                self.state.available_branch_refs = refs;
-                self.state.filtered_branch_refs = self.state.available_branch_refs.clone();
-                // Select the default base branch
-                self.select_default_base_branch();
-            }
-            Err(e) => {
-                tracing::error!("Failed to list branches: {:#}", e);
-                self.state.available_branch_refs.clear();
-                self.state.filtered_branch_refs.clear();
-            }
+        if let Err(e) =
+            self.spawn_branch_fetch(project_id, background::JobFollowUp::OpenDefaultBaseSelector)
+        {
+            tracing::error!("Failed to list branches: {:#}", e);
+            self.state.error_message = Some(format!("Failed to list branches: {}", e));
         }
     }
 
-    /// Fetch remotes and list all branch refs for a project
+    /// Fetch remotes and list branch refs for a project on a worker thread
     ///
     /// The shared front half of the worktree wizard and the default-base
-    /// selector: shows a loading indicator, fetches all remotes (a fetch
-    /// failure only sets `fetch_error` - local refs still list fine offline),
-    /// and maps the git layer's refs into [`BranchRef`]s.
-    fn fetch_branch_refs(&mut self, project_id: ProjectId) -> Result<Vec<BranchRef>> {
-        // Get project info and clone what we need
+    /// selector. The fetch is cancellable with Esc: it only refreshes the refs
+    /// on disk, which list fine without it.
+    fn spawn_branch_fetch(
+        &mut self,
+        project_id: ProjectId,
+        follow_up: background::JobFollowUp,
+    ) -> Result<()> {
         let (repo_path, default_base_branch) = {
             let project = self
                 .project_store
@@ -1074,33 +1060,29 @@ impl App {
             )
         };
 
-        let git = crate::git::GitOps::open(&repo_path).context("Failed to open git repository")?;
-
-        // Try to fetch from remotes (may fail if offline, continue anyway)
-        self.show_loading("Fetching branches from remotes...");
-        if let Err(e) = git.fetch_all_remotes() {
-            tracing::warn!("Failed to fetch remotes: {}", e);
-            self.state.fetch_error = Some(format!("Fetch failed: {}", e));
-        }
-        self.clear_loading();
-
-        // Get all branch refs
-        let refs = git
-            .list_all_branch_refs(default_base_branch.as_deref())
-            .context("Failed to list branch refs")?;
-        Ok(refs.into_iter().map(BranchRef::from).collect())
+        self.spawn_git_job(
+            "Fetching branches from remotes...",
+            true,
+            background::GitTask::FetchAndListBranches {
+                repo_path,
+                default_base_branch,
+            },
+            follow_up,
+        );
+        Ok(())
     }
 
-    /// Create a worktree for a branch
+    /// Create a worktree for a branch on a worker thread
     ///
-    /// Returns the BranchId of the newly created branch on success.
+    /// The branch is registered and navigated to from
+    /// [`Self::register_created_worktree`] once git is done.
     pub(crate) fn create_worktree(
         &mut self,
         project_id: ProjectId,
         branch_name: &str,
         create_branch: bool,
         base_ref: Option<&str>,
-    ) -> Result<BranchId> {
+    ) -> Result<()> {
         // Get project info and clone what we need
         let (repo_path, project_name) = {
             let Some(project) = self.project_store.get_project(project_id) else {
@@ -1109,31 +1091,29 @@ impl App {
             (project.repo_path.clone(), project.name.clone())
         };
 
-        let git = crate::git::GitOps::open(&repo_path).context("Failed to open git repository")?;
         let worktree_path = crate::git::worktree::worktree_path_for_branch(
             &self.config.worktrees_dir,
             &project_name,
             branch_name,
         );
 
-        // Show loading indicator for worktree creation
-        self.show_loading(&format!("Creating worktree for '{}'...", branch_name));
-
-        crate::git::worktree::create_worktree(
-            git.repository(),
-            branch_name,
-            &worktree_path,
-            create_branch,
-            base_ref,
-        )
-        .with_context(|| format!("Failed to create worktree for '{}'", branch_name))?;
-
-        self.clear_loading();
-
-        let branch_id = self.register_worktree_branch(project_id, branch_name, worktree_path)?;
-        tracing::info!("Created worktree for branch: {}", branch_name);
-
-        Ok(branch_id)
+        self.spawn_git_job(
+            &format!("Creating worktree for '{}'...", branch_name),
+            false,
+            background::GitTask::CreateWorktree {
+                repo_path,
+                branch_name: branch_name.to_string(),
+                worktree_path: worktree_path.clone(),
+                create_branch,
+                base_ref: base_ref.map(String::from),
+            },
+            background::JobFollowUp::RegisterWorktree {
+                project_id,
+                branch_name: branch_name.to_string(),
+                worktree_path,
+            },
+        );
+        Ok(())
     }
 
     /// Import an existing git worktree that is not tracked by Panoptes
@@ -1660,9 +1640,10 @@ impl App {
     /// This is used before blocking operations to provide visual feedback
     /// to the user that something is happening. A failed render is only
     /// logged: the loading overlay is cosmetic and the blocking operation
-    /// should proceed regardless.
+    /// should proceed regardless. Its spinner cannot animate - the event loop
+    /// is busy - so prefer [`Self::spawn_git_job`] for anything slow.
     pub(crate) fn show_loading(&mut self, message: &str) {
-        self.state.loading_message = Some(message.to_string());
+        self.state.loading = Some(LoadingOverlay::new(message, false));
         if let Err(e) = self.render() {
             tracing::warn!("Failed to render loading indicator: {}", e);
         }
@@ -1670,7 +1651,284 @@ impl App {
 
     /// Clear the loading indicator
     pub(crate) fn clear_loading(&mut self) {
-        self.state.loading_message = None;
+        self.state.loading = None;
+    }
+
+    /// Whether a background job is running, i.e. the UI is showing its overlay
+    pub(crate) fn is_busy(&self) -> bool {
+        self.background_job.is_some()
+    }
+
+    /// Run `task` off the event loop, showing an overlay until it finishes
+    ///
+    /// Input is swallowed while the job runs (except Esc, when `cancellable`),
+    /// so at most one job can ever be in flight.
+    fn spawn_git_job(
+        &mut self,
+        message: &str,
+        cancellable: bool,
+        task: background::GitTask,
+        follow_up: background::JobFollowUp,
+    ) {
+        // Structurally impossible: every spawn site is reached from a key
+        // handler, and those do not run while a job holds the UI. Say so loudly
+        // if a future one slips the gate - the running job's result is lost.
+        debug_assert!(
+            self.background_job.is_none(),
+            "a background job is already running"
+        );
+        if self.background_job.is_some() {
+            tracing::error!("Starting a git job while another is still running");
+        }
+        self.state.loading = Some(LoadingOverlay::new(message, cancellable));
+        self.background_job = Some(background::BackgroundJob::spawn(task, follow_up));
+        self.state.needs_render = true;
+    }
+
+    /// Remove a branch's git worktree from disk on a worker thread
+    ///
+    /// Returns whether a job was spawned. When it was, the branch delete is
+    /// finished from the job's follow-up; when it was not (there is no project
+    /// to remove it from), the caller finishes the delete itself. Removal is
+    /// best-effort either way: a failure is surfaced but the branch still goes.
+    pub(crate) fn spawn_worktree_removal(&mut self, branch: &crate::project::Branch) -> bool {
+        let repo_path = self
+            .state
+            .view
+            .project_id()
+            .and_then(|project_id| self.project_store.get_project(project_id))
+            .map(|project| project.repo_path.clone());
+        let Some(repo_path) = repo_path else {
+            return false;
+        };
+
+        // The dialog is answered; don't leave it behind the overlay
+        self.state.input_mode = InputMode::Normal;
+        self.spawn_git_job(
+            &format!("Removing worktree '{}'...", branch.name),
+            false,
+            background::GitTask::RemoveWorktree {
+                repo_path,
+                branch_name: branch.name.clone(),
+            },
+            background::JobFollowUp::FinishBranchDelete {
+                branch: Box::new(branch.clone()),
+            },
+        );
+        true
+    }
+
+    /// Handle a keypress while a background job holds the UI
+    ///
+    /// Only Esc does anything, and only for a cancellable job: every other key
+    /// is swallowed so a queued keystroke cannot act on the state the job is
+    /// about to replace.
+    fn handle_key_while_busy(&mut self, key: KeyEvent) {
+        if key.kind != event::KeyEventKind::Press {
+            return;
+        }
+        if key.code == event::KeyCode::Esc {
+            self.cancel_background_job();
+        }
+    }
+
+    /// Ask a running cancellable job to stop
+    ///
+    /// The job still has to end on its own terms, so the overlay stays up
+    /// (relabelled) until its result comes back.
+    pub(crate) fn cancel_background_job(&mut self) {
+        let Some(job) = &self.background_job else {
+            return;
+        };
+        let Some(loading) = &mut self.state.loading else {
+            return;
+        };
+        if !loading.cancellable || loading.cancelling {
+            return;
+        }
+        loading.cancelling = true;
+        loading.message = "Cancelling...".to_string();
+        job.cancel();
+        self.state.needs_render = true;
+    }
+
+    /// Advance the loading spinner and apply a finished job's result
+    ///
+    /// Returns whether anything changed that is worth a re-render.
+    fn tick_background_job(&mut self) -> bool {
+        if self.background_job.is_none() {
+            return false;
+        }
+
+        let mut dirty = match &mut self.state.loading {
+            Some(loading) => loading.tick(Instant::now()),
+            None => false,
+        };
+
+        let poll = match &self.background_job {
+            Some(job) => job.poll(),
+            None => return dirty,
+        };
+
+        if let background::JobPoll::Finished(result) = poll {
+            self.background_job = None;
+            self.clear_loading();
+            if let Some(result) = result {
+                self.apply_job_result(result);
+            } else {
+                self.state.error_message =
+                    Some("Background git operation failed unexpectedly".to_string());
+            }
+            dirty = true;
+        }
+
+        dirty
+    }
+
+    /// Apply a finished job's output to the app state
+    fn apply_job_result(&mut self, result: background::JobResult) {
+        use background::{JobFollowUp, JobOutput};
+
+        match (result.output, result.follow_up) {
+            (
+                JobOutput::Branches { refs, fetch_error },
+                JobFollowUp::OpenWorktreeWizard {
+                    tracked_branches,
+                    git_worktree_branches,
+                },
+            ) => {
+                self.state.fetch_error = fetch_error;
+                match refs {
+                    Ok(refs) => {
+                        self.open_worktree_wizard(refs, &tracked_branches, &git_worktree_branches)
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to list branches: {:#}", e);
+                        self.state.error_message = Some(format!("Failed to list branches: {}", e));
+                    }
+                }
+            }
+            (JobOutput::Branches { refs, fetch_error }, JobFollowUp::OpenDefaultBaseSelector) => {
+                self.state.fetch_error = fetch_error;
+                // An empty list is a valid outcome (the selector renders
+                // empty), but a failure is not: an empty selector on its own
+                // reads as "this repo has no branches"
+                match refs {
+                    Ok(refs) => self.open_default_base_selector(refs),
+                    Err(e) => {
+                        tracing::error!("Failed to list branches: {:#}", e);
+                        self.state.error_message = Some(format!("Failed to list branches: {}", e));
+                    }
+                }
+            }
+            (
+                JobOutput::Completed(outcome),
+                JobFollowUp::RegisterWorktree {
+                    project_id,
+                    branch_name,
+                    worktree_path,
+                },
+            ) => {
+                self.register_created_worktree(outcome, project_id, &branch_name, worktree_path);
+            }
+            (JobOutput::Completed(outcome), JobFollowUp::FinishBranchDelete { branch }) => {
+                if let Err(e) = outcome {
+                    // Best-effort: the branch is deleted from Panoptes either way
+                    tracing::error!("Failed to remove worktree: {:#}", e);
+                    self.state.error_message = Some(format!("Failed to remove worktree: {}", e));
+                } else {
+                    tracing::info!("Removed worktree for branch: {}", branch.name);
+                }
+                crate::input::dialogs::finish_branch_delete(
+                    &mut self.state,
+                    &mut self.project_store,
+                    &self.claude_config_store,
+                    &branch,
+                );
+            }
+            _ => {
+                // The spawn sites pair each task with its own follow-up, so a
+                // mismatch here can only be a programming error.
+                tracing::error!("Background job produced a result its follow-up cannot use");
+            }
+        }
+    }
+
+    /// Open the worktree wizard on freshly fetched branch refs
+    ///
+    /// Stamps on the tracking flags the git layer knows nothing about: which
+    /// branches Panoptes already tracks, and which have a git worktree it does
+    /// not know about.
+    fn open_worktree_wizard(
+        &mut self,
+        refs: Vec<crate::git::BranchRefInfo>,
+        tracked_branches: &std::collections::HashSet<String>,
+        git_worktree_branches: &std::collections::HashSet<String>,
+    ) {
+        self.state.worktree_wizard.all_branches = refs
+            .into_iter()
+            .map(BranchRef::from)
+            .map(|mut r| {
+                r.is_already_tracked = tracked_branches.contains(&r.name);
+                r.has_git_worktree =
+                    !r.is_already_tracked && git_worktree_branches.contains(&r.name);
+                r
+            })
+            .collect();
+        self.state.worktree_wizard.filtered_branches =
+            self.state.worktree_wizard.all_branches.clone();
+
+        self.state.input_mode = InputMode::WorktreeSelectBranch;
+    }
+
+    /// Open the default-base-branch selector on freshly fetched branch refs
+    fn open_default_base_selector(&mut self, refs: Vec<crate::git::BranchRefInfo>) {
+        self.state.available_branch_refs = refs.into_iter().map(BranchRef::from).collect();
+        self.state.filtered_branch_refs = self.state.available_branch_refs.clone();
+        self.select_default_base_branch();
+        self.state.input_mode = InputMode::SelectingDefaultBase;
+    }
+
+    /// Finish worktree creation: register the branch and navigate to it
+    ///
+    /// The tail of [`Self::create_worktree`], run once git is done. Mirrors
+    /// what the wizard used to do inline, including the offer to copy Claude
+    /// settings into the new worktree.
+    fn register_created_worktree(
+        &mut self,
+        outcome: Result<()>,
+        project_id: ProjectId,
+        branch_name: &str,
+        worktree_path: PathBuf,
+    ) {
+        let branch_id = outcome
+            .and_then(|()| self.register_worktree_branch(project_id, branch_name, worktree_path));
+
+        match branch_id {
+            Ok(branch_id) => {
+                tracing::info!("Created worktree for branch: {}", branch_name);
+                self.enter_new_worktree_branch(project_id, branch_id);
+            }
+            Err(e) => {
+                tracing::error!("Failed to create worktree: {:#}", e);
+                self.state.error_message = Some(format!("Failed to create worktree: {}", e));
+            }
+        }
+    }
+
+    /// Navigate to a just-added worktree branch
+    ///
+    /// Offers to copy the main repo's Claude settings into it first, when
+    /// there are any worth copying.
+    pub(crate) fn enter_new_worktree_branch(&mut self, project_id: ProjectId, branch_id: BranchId) {
+        if let Some(copy_state) =
+            crate::wizards::worktree::check_claude_settings_for_copy(self, project_id, branch_id)
+        {
+            self.state.pending_claude_settings_copy = Some(copy_state);
+            self.state.input_mode = InputMode::ConfirmingClaudeSettingsCopy;
+        } else {
+            self.state.navigate_to_branch(project_id, branch_id);
+        }
     }
 
     /// Render the current state
@@ -1931,9 +2189,9 @@ impl App {
                 render_help_overlay(frame, area, &state.view);
             }
 
-            // Render loading overlay if a blocking operation is in progress
-            if let Some(message) = &state.loading_message {
-                render_loading_indicator(frame, area, message);
+            // Render loading overlay if an operation is in progress
+            if let Some(loading) = &state.loading {
+                render_loading_indicator(frame, area, loading);
             }
 
             // Dismissable overlays sit on top of everything so a message set

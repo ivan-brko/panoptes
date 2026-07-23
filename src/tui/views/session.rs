@@ -221,7 +221,7 @@ fn build_footer_text(
             InputMode::Session => {
                 "Suspended to save memory | Type to wake | PgUp: scroll history".to_string()
             }
-            _ => "Suspended to save memory | Enter: activate, then type to wake | \u{2191}\u{2193}/PgUp/Dn: scroll"
+            _ => "Suspended to save memory | Enter: session mode, then type to wake | \u{2191}\u{2193}/PgUp/Dn: scroll"
                 .to_string(),
         };
     }
@@ -229,10 +229,10 @@ fn build_footer_text(
     match state.input_mode {
         InputMode::Session => {
             if is_scrolled {
-                "Esc: deactivate | PgUp/PgDn: scroll | Ctrl+End: live view | Deactivate to copy text"
+                "Esc: exit session mode | PgUp/PgDn: scroll | Ctrl+End: live view | Exit to copy text"
                     .to_string()
             } else {
-                "Esc: deactivate | \u{21E7}Esc: send Esc | PgUp: scroll history | Deactivate to copy text"
+                "Esc: exit session mode | \u{21E7}Esc: send Esc | PgUp: scroll | Exit to copy text"
                     .to_string()
             }
         }
@@ -242,7 +242,7 @@ fn build_footer_text(
             let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
 
             let base = format!(
-                "{}{}Enter: activate | Tab: next | \u{2191}\u{2193}/PgUp/Dn: scroll | ?: help | Esc: back",
+                "{}{}Enter: session mode | Tab: next | \u{2191}\u{2193}/PgUp/Dn: scroll | ?: help | Esc: back",
                 scroll_hint, shortcuts_hint
             );
             footer_with_attention(base, sessions)
@@ -278,6 +278,6 @@ mod tests {
 
         assert!(contains_line(&lines, "Session not found"), "{:?}", lines);
         assert!(contains_line(&lines, "Panoptes > ? > ? > ?"), "{:?}", lines);
-        assert!(contains_line(&lines, "Enter: activate"), "{:?}", lines);
+        assert!(contains_line(&lines, "Enter: session mode"), "{:?}", lines);
     }
 }

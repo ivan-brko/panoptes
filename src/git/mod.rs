@@ -6,7 +6,23 @@ pub mod worktree;
 
 use anyhow::{Context, Result};
 use git2::{BranchType, Repository};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+/// How often a running `git fetch` is checked for exit and cancellation
+const FETCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How a fetch ended
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchOutcome {
+    /// `git fetch --all` ran to completion
+    Completed,
+    /// The caller cancelled the fetch before git finished
+    Cancelled,
+}
 
 /// Wrapper for git repository operations
 pub struct GitOps {
@@ -129,24 +145,66 @@ impl GitOps {
     /// Uses the system git command which handles SSH authentication natively
     /// via the user's SSH agent and configuration.
     pub fn fetch_all_remotes(&self) -> Result<()> {
+        let never = AtomicBool::new(false);
+        self.fetch_all_remotes_cancellable(&never).map(|_| ())
+    }
+
+    /// Fetch from all remotes, aborting as soon as `cancel` is set
+    ///
+    /// Same as [`fetch_all_remotes`](Self::fetch_all_remotes), but polls
+    /// `cancel` while `git fetch` runs and kills the child process when it
+    /// flips. Cancelling is not an error: the caller falls back to the refs
+    /// already on disk, exactly as it does when the fetch fails.
+    pub fn fetch_all_remotes_cancellable(&self, cancel: &AtomicBool) -> Result<FetchOutcome> {
         let workdir = self
             .workdir()
             .context("Repository has no working directory")?;
 
         tracing::debug!("Fetching all remotes via git CLI in {:?}", workdir);
 
-        let output = std::process::Command::new("git")
+        let mut child = Command::new("git")
             .args(["fetch", "--all"])
             .current_dir(workdir)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
             .context("Failed to execute git fetch. Is git installed and in PATH?")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        // Drain stderr on its own thread: git writes progress there, and a
+        // full pipe buffer would deadlock the child while we poll for exit.
+        let stderr_pipe = child.stderr.take();
+        let drain = std::thread::spawn(move || {
+            let mut buf = String::new();
+            if let Some(mut pipe) = stderr_pipe {
+                let _ = pipe.read_to_string(&mut buf);
+            }
+            buf
+        });
+
+        let status = loop {
+            if let Some(status) = child.try_wait().context("Failed to wait for git fetch")? {
+                break status;
+            }
+            if cancel.load(Ordering::Relaxed) {
+                tracing::info!("Cancelling git fetch in {:?}", workdir);
+                let _ = child.kill();
+                let _ = child.wait();
+                // Deliberately not joining the drain thread: a lingering
+                // credential helper or ssh child can hold the pipe open past
+                // git's own exit, and nothing needs the output any more.
+                return Ok(FetchOutcome::Cancelled);
+            }
+            std::thread::sleep(FETCH_POLL_INTERVAL);
+        };
+
+        let stderr = drain.join().unwrap_or_default();
+
+        if !status.success() {
             return Err(classify_fetch_error(stderr.trim()));
         }
 
-        Ok(())
+        Ok(FetchOutcome::Completed)
     }
 
     /// List all branch refs (local and remote) sorted for UI display
@@ -363,6 +421,35 @@ mod tests {
         }
 
         (temp_dir, repo)
+    }
+
+    #[test]
+    fn test_fetch_completes_on_a_repo_without_remotes() {
+        let (temp_dir, _repo) = create_test_repo();
+        let git_ops = GitOps::open(temp_dir.path()).unwrap();
+
+        let never = AtomicBool::new(false);
+        assert_eq!(
+            git_ops.fetch_all_remotes_cancellable(&never).unwrap(),
+            FetchOutcome::Completed
+        );
+    }
+
+    #[test]
+    fn test_cancelled_fetch_reports_cancellation_rather_than_failing() {
+        let (temp_dir, repo) = create_test_repo();
+        // A non-routable address, so the fetch hangs long enough to cancel
+        repo.remote("origin", "https://192.0.2.1/panoptes-test.git")
+            .unwrap();
+        let git_ops = GitOps::open(temp_dir.path()).unwrap();
+
+        let cancel = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        let outcome = git_ops.fetch_all_remotes_cancellable(&cancel).unwrap();
+
+        assert_eq!(outcome, FetchOutcome::Cancelled);
+        // Cancelling has to be prompt: the point is not making the user wait
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

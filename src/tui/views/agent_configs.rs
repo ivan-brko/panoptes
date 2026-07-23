@@ -1,6 +1,6 @@
-//! Agent configurations view (Claude Code and Codex accounts)
+//! Agent configs view (Claude Code and Codex accounts)
 //!
-//! Displays and manages agent configurations. Claude and Codex configs go
+//! Displays and manages agent configs. Claude and Codex configs go
 //! through identical screens - a list view, name/path input dialogs, a
 //! selector overlay, and a delete confirmation - differing only in wording
 //! and in which profile type they show. The render functions are written
@@ -27,13 +27,13 @@ use crate::tui::widgets::selection::{
 struct AgentConfigCopy {
     /// Breadcrumb segment (e.g. "Claude Configs")
     breadcrumb: &'static str,
-    /// List/empty-state title (e.g. "Claude Configurations")
+    /// List/empty-state title (e.g. "Claude Configs")
     list_title: &'static str,
     /// Empty state: nothing found line
     none_found: &'static str,
-    /// Empty state: what a configuration points at
+    /// Empty state: what a config points at
     dir_line: &'static str,
-    /// Empty state: what multiple configurations enable
+    /// Empty state: what multiple configs enable
     accounts_line: &'static str,
     /// Empty state: which directory is used by default
     default_note: &'static str,
@@ -47,10 +47,10 @@ struct AgentConfigCopy {
 
 const CLAUDE_COPY: AgentConfigCopy = AgentConfigCopy {
     breadcrumb: "Claude Configs",
-    list_title: "Claude Configurations",
-    none_found: "No Claude configurations found.",
-    dir_line: "Each configuration points to a different Claude config directory,",
-    accounts_line: "allowing you to use multiple Claude accounts.",
+    list_title: "Claude Configs",
+    none_found: "No Claude configs found.",
+    dir_line: "Each config points to a different Claude config directory,",
+    accounts_line: "so you can switch between Claude accounts.",
     default_note: "The default config (~/.claude) is used if you don't specify a path.",
     dir_prompt: "Enter the path to the Claude config directory:",
     default_dir_hint: "(Leave empty for default ~/.claude)",
@@ -59,10 +59,10 @@ const CLAUDE_COPY: AgentConfigCopy = AgentConfigCopy {
 
 const CODEX_COPY: AgentConfigCopy = AgentConfigCopy {
     breadcrumb: "Codex Configs",
-    list_title: "Codex Configurations",
-    none_found: "No Codex configurations found.",
-    dir_line: "Each configuration points to a different CODEX_HOME directory,",
-    accounts_line: "allowing you to use multiple Codex accounts.",
+    list_title: "Codex Configs",
+    none_found: "No Codex configs found.",
+    dir_line: "Each config points to a different CODEX_HOME directory,",
+    accounts_line: "so you can switch between Codex accounts.",
     default_note: "The default config (~/.codex) is used if you don't specify a path.",
     dir_prompt: "Enter the path to the CODEX_HOME directory:",
     default_dir_hint: "(Leave empty for default ~/.codex)",
@@ -77,7 +77,7 @@ fn copy_for(kind: AgentKind) -> &'static AgentConfigCopy {
     }
 }
 
-/// Render the agent configurations view
+/// Render the agent configs view
 pub fn render_agent_configs<C: AgentProfile>(
     frame: &mut Frame,
     area: Rect,
@@ -134,7 +134,7 @@ fn render_empty_state(frame: &mut Frame, area: Rect, copy: &AgentConfigCopy) {
         Line::from(Span::styled(copy.none_found, Style::default().fg(t.text))),
         Line::from(""),
         Line::from(Span::styled(
-            "Press 'n' to add a configuration.",
+            "Press 'n' to add a config.",
             Style::default().fg(t.text_muted),
         )),
         Line::from(""),
@@ -161,7 +161,7 @@ fn render_empty_state(frame: &mut Frame, area: Rect, copy: &AgentConfigCopy) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the list of configurations
+/// Render the list of configs
 fn render_config_list<C: AgentProfile>(
     frame: &mut Frame,
     area: Rect,
@@ -220,7 +220,7 @@ pub fn render_agent_config_name_input_dialog(
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "Enter a name for this configuration:",
+            "Enter a name for this config:",
             Style::default().fg(t.text),
         )),
         Line::from(""),
@@ -400,7 +400,7 @@ pub fn render_agent_config_selector<C: AgentProfile>(
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            format!("Select a {} configuration:", kind.label()),
+            format!("Select a {} config:", kind.label()),
             Style::default().fg(t.text),
         )),
         Line::from(""),
@@ -473,12 +473,12 @@ mod tests {
         let lines = render_view(AgentKind::Claude, &ClaudeConfigStore::new(), 0);
 
         assert!(
-            contains_line(&lines, "No Claude configurations found."),
+            contains_line(&lines, "No Claude configs found."),
             "{:?}",
             lines
         );
         assert!(
-            contains_line(&lines, "Press 'n' to add a configuration."),
+            contains_line(&lines, "Press 'n' to add a config."),
             "{:?}",
             lines
         );
@@ -499,7 +499,7 @@ mod tests {
         let lines = render_view(AgentKind::Codex, &CodexConfigStore::new(), 0);
 
         assert!(
-            contains_line(&lines, "No Codex configurations found."),
+            contains_line(&lines, "No Codex configs found."),
             "{:?}",
             lines
         );
@@ -525,11 +525,7 @@ mod tests {
 
         let lines = render_view(AgentKind::Claude, &store, 0);
 
-        assert!(
-            contains_line(&lines, "Claude Configurations (1)"),
-            "{:?}",
-            lines
-        );
+        assert!(contains_line(&lines, "Claude Configs (1)"), "{:?}", lines);
         // First (and only) config becomes the default and carries the star
         assert!(
             contains_line(&lines, "Work ★  /tmp/claude-work"),
@@ -548,11 +544,7 @@ mod tests {
 
         let lines = render_view(AgentKind::Codex, &store, 0);
 
-        assert!(
-            contains_line(&lines, "Codex Configurations (1)"),
-            "{:?}",
-            lines
-        );
+        assert!(contains_line(&lines, "Codex Configs (1)"), "{:?}", lines);
         assert!(
             contains_line(&lines, "Work ★  /tmp/codex-work"),
             "{:?}",
@@ -568,7 +560,7 @@ mod tests {
 
         assert!(contains_line(&lines, "New Claude Config"), "{:?}", lines);
         assert!(
-            contains_line(&lines, "Enter a name for this configuration:"),
+            contains_line(&lines, "Enter a name for this config:"),
             "{:?}",
             lines
         );
@@ -655,7 +647,7 @@ mod tests {
         });
 
         assert!(
-            contains_line(&lines, "Select a Claude configuration:"),
+            contains_line(&lines, "Select a Claude config:"),
             "{:?}",
             lines
         );

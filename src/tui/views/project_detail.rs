@@ -100,7 +100,7 @@ pub fn render_project_detail(
 fn footer_text(state: &AppState, sessions: &SessionManager) -> String {
     match state.input_mode {
         InputMode::ConfirmingBranchDelete => {
-            "w: toggle worktree deletion | y: confirm | n/Esc: cancel".to_string()
+            "w: toggle deleting the directory | y: confirm | n/Esc: cancel".to_string()
         }
         InputMode::WorktreeSelectBranch => {
             "Type to search/create | ↑/↓: navigate | Enter: select | Esc: cancel".to_string()
@@ -493,12 +493,14 @@ pub fn render_branch_delete_confirmation(
         ));
     }
 
-    // Non-worktree info (shown before confirmation prompt)
-    if !is_worktree {
-        notes.push("This branch is not a worktree (tracked branch only)".to_string());
+    // Whichever it is, the git branch itself survives - say so plainly
+    if is_worktree {
+        notes.push("The git branch itself is NOT deleted.".to_string());
+    } else {
+        notes.push("Not a worktree: this only removes it from Panoptes.".to_string());
     }
 
-    // Worktree deletion toggle (shown after confirmation prompt)
+    // Directory deletion toggle (shown after confirmation prompt)
     let mut extra_lines = Vec::new();
     if is_worktree {
         extra_lines.push(Line::from(""));
@@ -517,14 +519,14 @@ pub fn render_branch_delete_confirmation(
         extra_lines.push(Line::from(vec![
             Span::styled(checkbox, checkbox_style),
             Span::styled(
-                " Also delete worktree from disk",
+                " Also delete the worktree directory from disk",
                 Style::default().fg(t.text),
             ),
             Span::styled(" (press w to toggle)", Style::default().fg(t.text_muted)),
         ]));
         if state.delete_worktree_on_disk {
             extra_lines.push(Line::from(vec![Span::styled(
-                "    ⚠  This will permanently delete the directory!",
+                "    ⚠  This permanently deletes the directory!",
                 Style::default()
                     .fg(t.border_warning)
                     .add_modifier(Modifier::BOLD),
@@ -532,11 +534,12 @@ pub fn render_branch_delete_confirmation(
         }
     }
 
+    let item_label = if is_worktree { "worktree" } else { "branch" };
     let config = ConfirmDialogConfig {
         warnings,
         notes,
         extra_lines,
-        ..ConfirmDialogConfig::new("Confirm Delete", "branch", &branch_name)
+        ..ConfirmDialogConfig::new("Confirm Delete", item_label, &branch_name)
     };
     render_confirm_dialog(frame, area, config);
 }
@@ -1100,7 +1103,7 @@ mod tests {
         let lines = render_detail(&state, &store, project_id);
 
         assert!(
-            contains_line(&lines, "Delete branch: feature-x?"),
+            contains_line(&lines, "Delete worktree: feature-x?"),
             "{:?}",
             lines
         );
@@ -1109,10 +1112,16 @@ mod tests {
             "{:?}",
             lines
         );
+        // Deleting a worktree never deletes the git branch - the dialog says so
+        assert!(
+            contains_line(&lines, "The git branch itself is NOT deleted."),
+            "{:?}",
+            lines
+        );
         assert!(
             contains_line(
                 &lines,
-                "[ ] Also delete worktree from disk (press w to toggle)"
+                "[ ] Also delete the worktree directory from disk (press w to toggle)"
             ),
             "{:?}",
             lines

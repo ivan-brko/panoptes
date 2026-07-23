@@ -89,7 +89,7 @@ Shows branches within a selected project.
 | `x` | Set default Codex config for project |
 | `r` | Rename project |
 | `R` | Refresh branches (check for stale worktrees) |
-| `d` | Delete selected branch/worktree |
+| `d` | Delete selected worktree (never deletes the git branch) |
 | `Esc` | Return to Projects Overview |
 
 ## Branch Detail
@@ -142,7 +142,7 @@ Interacting directly with the session (Claude Code, Codex, or shell). Most keys 
 
 | Key | Action |
 |-----|--------|
-| `Esc` | Exit to Normal mode |
+| `Esc` | Exit Session mode |
 | `Shift+Esc` | Send Escape to the session |
 | `PageUp` | Scroll up through history |
 | `PageDown` | Scroll down through history |
@@ -168,7 +168,7 @@ Shows application logs for debugging.
 | `G` | Jump to bottom (enables auto-scroll) |
 | `Esc` | Return to Projects Overview |
 
-## Claude Configurations / Codex Configurations
+## Claude Configs / Codex Configs
 
 Manage multiple Claude Code accounts (`c` from Projects Overview) or Codex accounts (`x` from Projects Overview). Both views use the same keyboard shortcuts.
 
@@ -239,7 +239,7 @@ When prompted to confirm an action:
 |-----|--------|
 | `y` | Confirm |
 | `n` / `Esc` | Cancel |
-| `w` | (Branch delete) Toggle worktree deletion checkbox |
+| `w` | (Worktree delete) Toggle deleting the worktree directory from disk |
 
 ## Mouse Support
 

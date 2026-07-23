@@ -144,6 +144,26 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 2. Output is buffered (ring buffer, max 10K lines by default)
 3. TUI renders visible portion with ANSI color support
 
+### Background Git Work
+Git operations that can take seconds (`git fetch --all`, creating or removing a
+worktree) never run on the event-loop thread:
+
+1. The flow that needs one calls `App::spawn_git_job` with a `GitTask` (the git
+   work, self-contained enough to move to a worker thread) and a `JobFollowUp`
+   (what the app does with the result)
+2. A worker thread runs the task and sends the result back over a channel
+3. Meanwhile the event loop keeps rendering, hooks keep arriving, and the
+   "Working" overlay animates a spinner. Keys are swallowed while a job runs,
+   so nothing acts on state the job is about to replace
+4. `App::tick_background_job` polls the channel each pass and applies the
+   follow-up: opening the worktree wizard, opening the default-base selector,
+   registering a created worktree, or finishing a worktree delete
+
+Fetches are cancellable: `Esc` kills the `git fetch` child process and the flow
+continues with the refs already on disk (the same fallback as a failed fetch).
+Worktree create/remove are not - interrupting one halfway would leave the repo
+in a worse state than it started.
+
 ### State Updates (Hooks)
 1. Agent (Claude Code or Codex) executes hook scripts on events
 2. Hook script reads the agent's JSON payload from stdin

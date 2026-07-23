@@ -104,11 +104,11 @@ pub(crate) fn confirming_session_delete_key(
     Ok(())
 }
 
-/// Handle key when confirming branch/worktree deletion
+/// Handle key when confirming worktree deletion
 ///
 /// The 'y' arm is split into testable phases: [`begin_branch_delete`]
 /// (validate + destroy sessions), the on-disk worktree removal (the only part
-/// needing the full `App`, for the loading overlay), and
+/// needing the full `App`, as it runs in the background), and
 /// [`finish_branch_delete`] (permission cleanup + store removal).
 pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if key.kind != KeyEventKind::Press {
@@ -127,9 +127,15 @@ pub fn handle_confirming_branch_delete_key(app: &mut App, key: KeyEvent) -> Resu
                 return Ok(());
             };
 
-            // If user opted to delete worktree on disk
-            if app.state.delete_worktree_on_disk && branch.is_worktree {
-                app.remove_worktree_on_disk(&branch);
+            // If the user opted to delete the worktree on disk, that git call
+            // runs in the background and finishes the delete when it returns.
+            // When nothing is spawned (no project to remove it from) we fall
+            // through, so the branch still goes from Panoptes.
+            let removing = app.state.delete_worktree_on_disk
+                && branch.is_worktree
+                && app.spawn_worktree_removal(&branch);
+            if removing {
+                return Ok(());
             }
 
             finish_branch_delete(
@@ -277,50 +283,6 @@ pub(crate) fn finish_branch_delete(
 
     state.delete_worktree_on_disk = false;
     state.input_mode = InputMode::Normal;
-}
-
-impl App {
-    /// Remove a branch's git worktree directory on disk
-    ///
-    /// Best-effort: failures are logged and surfaced as an error message, and
-    /// the branch deletion continues regardless. Lives on `App` for the
-    /// loading overlay shown around the blocking git call.
-    fn remove_worktree_on_disk(&mut self, branch: &Branch) {
-        // Get the project to access the repo
-        let Some(project_id) = self.state.view.project_id() else {
-            return;
-        };
-        // Clone the repo_path to avoid borrow conflicts
-        let Some(repo_path) = self
-            .project_store
-            .get_project(project_id)
-            .map(|p| p.repo_path.clone())
-        else {
-            return;
-        };
-
-        // Show loading indicator
-        self.show_loading(&format!("Removing worktree '{}'...", branch.name));
-
-        match crate::git::GitOps::open(&repo_path) {
-            Ok(git) => {
-                if let Err(e) =
-                    crate::git::worktree::remove_worktree(git.repository(), &branch.name, true)
-                {
-                    tracing::error!("Failed to remove worktree: {}", e);
-                    self.state.error_message = Some(format!("Failed to remove worktree: {}", e));
-                } else {
-                    tracing::info!("Removed worktree for branch: {}", branch.name);
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to open git repo: {}", e);
-                self.state.error_message = Some(format!("Failed to open git repo: {}", e));
-            }
-        }
-
-        self.clear_loading();
-    }
 }
 
 /// Handle key when confirming project deletion
