@@ -22,7 +22,7 @@ Named after the hundred-eyed giant of Greek mythology.
 - **Permissions Sync** - Automatically copy Claude Code permissions to new worktrees and migrate unique permissions back before deletion (Codex planned)
 - **Project & Branch Organization** - Sessions organized by git repository and branch. Panoptes automatically creates isolated worktrees so each branch has its own working directory — no manual setup required
 - **Project Folders** - Group related projects into folders, nested up to 3 levels. A collapsed folder still shows how many sessions inside it are active or need you
-- **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Idle
+- **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Needs approval
 - **Attention System** - Get notified when sessions need your input, with visual badges and terminal bell alerts
 - **Keyboard-Driven Interface** - Arrow-key navigation, number shortcuts, and a `?` overlay listing the keys for whichever view you are in
 - **Shell Sessions** - Run normal shell sessions alongside Claude Code sessions and get notified when commands finish — useful for running tests, builds, or anything you'd rather not route through Claude, while still benefiting from Panoptes' automatic worktree handling
@@ -62,7 +62,7 @@ cargo build --release
 3. Press `n` to create a new session — select Claude Code or Codex
 4. Enter a name for the session and press `Enter`
 5. You're now in Session mode - type to interact with your AI agent
-6. Press `Shift+Escape` to exit Session mode
+6. Press `Esc` to exit Session mode (use `Shift+Escape` to send an Escape keypress to the agent)
 7. Press `Esc` to navigate back through the hierarchy
 
 ## Documentation
@@ -83,12 +83,11 @@ cargo build --release
 |-----|--------|
 | `?` | Show the keys for the current view |
 | `Enter` | Open selected item / Enter session mode |
-| `Esc` | Go back / Exit session mode |
+| `Esc` | Go back / Exit session mode (quits with confirmation at the Projects overview) |
 | `Shift+Esc` | Send Escape to the session (from session mode) |
 | `Space` | Jump to next session needing attention |
 | `Tab` | Switch to next session (in session view) |
 | `k` | Manage custom shortcuts |
-| `q` | Quit (with confirmation) |
 
 ### Project Management
 
@@ -145,11 +144,13 @@ See [Configuration Guide](docs/CONFIG_GUIDE.md) for all options.
 | State | Description |
 |-------|-------------|
 | **Starting** | Session is initializing |
-| **Thinking** | Claude is processing your request |
-| **Executing** | Claude is running a tool (editing files, running commands). Note: Codex sessions skip this state |
+| **Thinking** | Agent is processing your request |
+| **Executing** | Agent is running a tool (editing files, running commands) |
+| **Needs approval** | Agent is asking for permission to proceed |
 | **Waiting** | Agent is waiting for your input |
-| **Idle** | No recent activity |
+| **Suspended** | Session process suspended after inactivity (wakes on interaction) |
 | **Exited** | Session has ended |
+| **Resumable** | Session recovered from a previous run and can be resumed |
 
 ## Data Locations
 

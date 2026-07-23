@@ -251,9 +251,9 @@ The "Stop" or completion hook event wasn't received.
 
 1. Close unused sessions (select and press `d`)
 
-2. Reduce output buffer size:
+2. Reduce the scrollback buffer size (scrollback lines retained per session, default 10000):
    ```bash
-   echo 'max_output_lines = 5000' >> ~/.panoptes/config.toml
+   echo 'scrollback_lines = 5000' >> ~/.panoptes/config.toml
    ```
 
 3. Let exited sessions clean up faster:

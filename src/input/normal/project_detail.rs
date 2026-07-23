@@ -27,9 +27,6 @@ pub fn handle_project_detail_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Esc => {
             app.state.navigate_back();
         }
-        KeyCode::Char('q') => {
-            app.state.input_mode = InputMode::ConfirmingQuit;
-        }
         KeyCode::Down => {
             app.state.select_next(branch_count);
         }

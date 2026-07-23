@@ -184,6 +184,68 @@ pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
     );
 }
 
+/// Render a dismissable message overlay (errors and startup notices)
+///
+/// A centered box that renders over whatever view is active, so a message set
+/// from any view or dialog is actually seen. The message may span several lines
+/// (e.g. multiple startup warnings joined with newlines); the box grows to fit.
+/// Dismissed by any keypress, handled in the main event loop.
+fn render_message_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    border_color: Color,
+    message: &str,
+) {
+    let t = theme();
+
+    let mut lines = vec![Line::from("")];
+    for msg_line in message.lines() {
+        lines.push(Line::from(vec![Span::styled(
+            msg_line.to_string(),
+            Style::default().fg(t.text),
+        )]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "Press any key to dismiss",
+        Style::default().fg(t.text_muted),
+    )]));
+
+    // Height: borders (2) + blank + body + blank + hint
+    let body = message.lines().count().max(1) as u16;
+    let height = body + 5;
+
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title,
+            border_color,
+            alignment: Alignment::Center,
+            width: DialogSize::Percent {
+                pct: 70,
+                min: 30,
+                max: 70,
+            },
+            height: DialogSize::Fixed(height),
+        },
+        lines,
+    );
+}
+
+/// Render an error overlay, visible from any view
+pub fn render_error_overlay(frame: &mut Frame, area: Rect, message: &str) {
+    let t = theme();
+    render_message_overlay(frame, area, " Error ", t.border_warning, message);
+}
+
+/// Render a startup notice overlay (corrupt-file backups, etc.)
+pub fn render_startup_notice_overlay(frame: &mut Frame, area: Rect, message: &str) {
+    let t = theme();
+    render_message_overlay(frame, area, " Startup Notice ", t.border_warning, message);
+}
+
 /// Render a loading indicator overlay
 ///
 /// Displays a centered dialog with a loading message during blocking operations.
@@ -217,6 +279,48 @@ pub fn render_loading_indicator(frame: &mut Frame, area: Rect, message: &str) {
 mod tests {
     use super::*;
     use crate::tui::views::test_util::{contains_line, render_to_lines};
+
+    #[test]
+    fn test_error_overlay_shows_message_and_dismiss_hint() {
+        let lines = render_to_lines(70, 20, |frame| {
+            render_error_overlay(frame, frame.size(), "Could not resume: worktree missing")
+        });
+
+        assert!(contains_line(&lines, "Error"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "Could not resume: worktree missing"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Press any key to dismiss"),
+            "{:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_startup_notice_overlay_renders_each_warning_line() {
+        let lines = render_to_lines(70, 20, |frame| {
+            render_startup_notice_overlay(
+                frame,
+                frame.size(),
+                "config.toml was corrupt\nbacked up to config.toml.bak",
+            )
+        });
+
+        assert!(contains_line(&lines, "Startup Notice"), "{:?}", lines);
+        assert!(
+            contains_line(&lines, "config.toml was corrupt"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "backed up to config.toml.bak"),
+            "{:?}",
+            lines
+        );
+    }
 
     #[test]
     fn test_confirm_dialog_shows_warnings_notes_and_prompt() {

@@ -118,9 +118,9 @@ pub fn render_agent_configs<C: AgentProfile>(
 
     // Footer
     let footer_text = if configs.is_empty() {
-        "n: new config | Esc: back"
+        "n: new config | ?: help | Esc: back"
     } else {
-        "n: new | s: set default | d: delete | Esc: back"
+        "n: new | s: set default | d: delete | ?: help | Esc: back"
     };
     render_footer(frame, areas.footer(), footer_text);
 }
@@ -488,7 +488,7 @@ mod tests {
             lines
         );
         assert!(
-            contains_line(&lines, "n: new config | Esc: back"),
+            contains_line(&lines, "n: new config | ?: help | Esc: back"),
             "{:?}",
             lines
         );

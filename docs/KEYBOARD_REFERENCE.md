@@ -11,13 +11,12 @@ These shortcuts work in most views (except when in Session mode or text input di
 | `?` | Show the shortcuts for the current view (`?` or `Esc` closes it) |
 | `Space` | Jump to the next session needing attention |
 | `k` | Open the custom shortcuts manager |
-| `Esc` | Go back / Cancel current action |
-| `q` | Quit (with confirmation in Projects Overview) |
+| `Esc` | Go back one level / Cancel current action (quits with confirmation at the Projects Overview) |
 
 `?`, `Space`, and `k` are handled before the view sees the key, so they behave
 the same everywhere except in Session mode, where keys go to the agent.
 
-Navigation is by arrow key throughout. There are no vim-style `j`/`k` bindings.
+Navigation is by arrow key throughout. There are no `j`/`k` bindings.
 
 ## Projects Overview
 
@@ -64,7 +63,7 @@ active and attention counts without expanding.
 | `l` | Open log viewer |
 | `d` | Delete selected project or session (removes a folder when one is selected) |
 | `R` | Refresh git state for all projects |
-| `q` / `Esc` | Quit (prompts for confirmation) |
+| `Esc` | Quit (prompts for confirmation) |
 
 ## Project Detail
 
@@ -91,7 +90,7 @@ Shows branches within a selected project.
 | `r` | Rename project |
 | `R` | Refresh branches (check for stale worktrees) |
 | `d` | Delete selected branch/worktree |
-| `q` | Quit |
+| `Esc` | Return to Projects Overview |
 
 ## Branch Detail
 
@@ -104,7 +103,7 @@ Shows sessions for a specific branch.
 | `Down` | Move selection down |
 | `Up` | Move selection up |
 | `Enter` | Open selected session |
-| `Esc` / `q` | Return to Project Detail |
+| `Esc` | Return to Project Detail |
 
 ### Actions
 
@@ -129,7 +128,7 @@ Viewing a session without interacting with it.
 | `End` | Scroll to bottom (live view) |
 | `Tab` | Switch to next session |
 | `1-9` | Switch to session by number |
-| `Esc` / `q` | Return to previous view |
+| `Esc` | Return to previous view |
 
 ### Actions
 
@@ -167,7 +166,7 @@ Shows application logs for debugging.
 | `PageUp` | Page up |
 | `g` | Jump to top |
 | `G` | Jump to bottom (enables auto-scroll) |
-| `Esc` / `q` | Return to Projects Overview |
+| `Esc` | Return to Projects Overview |
 
 ## Claude Configurations / Codex Configurations
 
@@ -179,7 +178,7 @@ Manage multiple Claude Code accounts (`c` from Projects Overview) or Codex accou
 |-----|--------|
 | `Down` | Move selection down |
 | `Up` | Move selection up |
-| `Esc` / `q` | Return to Projects Overview |
+| `Esc` | Return to Projects Overview |
 
 ### Actions
 

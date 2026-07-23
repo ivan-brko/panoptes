@@ -16,7 +16,7 @@ pub fn handle_session_view_normal_key(app: &mut App, key: KeyEvent) -> Result<()
     }
 
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
             // Go back to the session's branch detail view
             app.state.return_from_session(&app.sessions);
             // Re-enable mouse capture when leaving session view

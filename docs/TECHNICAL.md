@@ -290,17 +290,17 @@ See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for the full reference.
 | `hooks_dir` | `~/.panoptes/hooks` | Where generated hook scripts are written |
 | `scrollback_lines` | 10,000 | Lines of history retained per session |
 | `state_timeout_secs` | 300 | Seconds before an in-flight tool is treated as stalled |
-| `suspend_after_secs` | 7200 (2h) | Idle seconds before an agent process is suspended; 0 disables |
+| `suspend_after_secs` | 7200 (2h) | Seconds a session may sit inactive before its agent process is suspended; 0 disables |
 | `log_agent_events` | false | Log raw agent transcript lines for debugging |
 | `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
 | `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
 
-`max_output_lines` and `esc_hold_threshold_ms` are still parsed so older config
-files load, but nothing reads them. `theme_preset` has been removed entirely;
-like any unknown key, it is ignored if left in the file. `notification_method`
-is validated on load: `bell`, `title`, or `none`, with unknown values logging a
-warning and falling back to `bell`.
+Several config keys from earlier versions — an output-line cap, an Escape-hold
+threshold, and `theme_preset` — have been removed from the `Config` struct. Like
+any unknown key, each is simply ignored if left in an older config file, so those
+files keep loading. `notification_method` is validated on load: `bell`, `title`,
+or `none`, with unknown values logging a warning and falling back to `bell`.
 
 ### Custom Shortcuts
 
@@ -320,7 +320,7 @@ command = "code . &"
 - Creates shell session using `SessionManager::create_shell_session_with_command()`
 
 **Key validation:**
-- Reserved keys are rejected (q, g, G, k, x, 0-9)
+- Reserved keys are rejected (g, G, k, x, n, s, d, 0-9)
 - Duplicate keys are rejected
 - Validation occurs in `config::is_reserved_key()` and `Config::add_shortcut()`
 
@@ -452,7 +452,7 @@ Setting `log_agent_events = true` writes every raw transcript line to
 can be checked against its input. Best effort throughout: it must never disturb
 the session it describes.
 
-### Suspending Idle Sessions
+### Suspending Inactive Sessions
 
 An idle Claude Code process measures around 565 MB - roughly 25x the whole
 Panoptes process, which sits at about 23 MB. A handful of forgotten sessions

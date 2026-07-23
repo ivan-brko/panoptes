@@ -37,7 +37,7 @@ At minimum, [Claude Code CLI](https://claude.ai/code) installed and configured. 
 3. Create a worktree for your branch with `n`
 4. Create a session with `n` from the branch view
 5. Work with Claude Code in session mode
-6. Press `Shift+Esc` to exit session mode, `Esc` to navigate back
+6. Press `Esc` to exit session mode, then `Esc` again to navigate back (`Shift+Esc` sends an Escape keypress to the agent instead)
 
 ---
 
@@ -59,7 +59,7 @@ Press `n` from Project Detail to open the worktree wizard:
 
 ### How do I delete a worktree without deleting the branch?
 
-When deleting a branch (press `d`), a confirmation dialog appears with a checkbox. By default, the worktree is deleted but the branch is preserved. Press `w` to toggle whether to also delete the git branch.
+Press `d` on a worktree in Project Detail. A confirmation dialog appears with a checkbox that `w` toggles to control whether the worktree's directory is removed from disk. Either way, deletion only removes the worktree — it never deletes the git branch itself.
 
 ### How do I use Panoptes with monorepos (session subdirectory)?
 
@@ -110,7 +110,7 @@ From Branch Detail, press `s`, enter a session name, and press Enter. Shell sess
 ### How do I enter/exit session mode?
 
 - **Enter**: Press Enter on a session, or when viewing a session in Normal mode
-- **Exit**: Press `Esc` or `Shift+Esc`
+- **Exit**: Press `Esc` (`Shift+Esc` does not exit — it sends an Escape keypress to the session)
 
 ### How do I send Escape to the session (not exit session mode)?
 
@@ -141,11 +141,13 @@ If you're in Normal mode (viewing but not interacting), press `Enter` to enter s
 | State | Meaning |
 |-------|---------|
 | Starting | Session is initializing |
-| Thinking | Claude is processing your request |
-| Executing | Claude is running a tool (editing files, commands) |
-| Waiting | Claude is waiting for your input |
-| Idle | No recent activity |
+| Thinking | Agent is processing your request |
+| Executing | Agent is running a tool (editing files, commands) |
+| Needs approval | Agent is asking for permission to proceed |
+| Waiting | Agent is waiting for your input |
+| Suspended | Session process suspended after inactivity (wakes on interaction) |
 | Exited | Session has ended |
+| Resumable | Session recovered from a previous run and can be resumed |
 
 Shell sessions show **Running** (command executing) or **Ready** (waiting for input).
 
@@ -232,7 +234,7 @@ in the file.
 
 ### Do I need to restart Panoptes after config changes?
 
-Yes. Press `q` to quit, then restart Panoptes.
+Yes. Press `Esc` at the Projects Overview to quit (confirm when prompted), then restart Panoptes.
 
 ---
 
@@ -263,14 +265,13 @@ The prompts are optional—you can decline each time. There's no global setting 
 | Key | Action |
 |-----|--------|
 | `Enter` | Open/Enter session mode |
-| `Esc` | Go back/Exit session mode |
+| `Esc` | Go back/Exit session mode; quit (with confirmation) at the Projects Overview |
 | `Shift+Esc` | Send Escape to active session |
 | `Space` | Jump to next session needing attention |
 | `Tab` | Switch to next session |
 | `n` | New (project/worktree/session depending on context) |
 | `s` | New shell session (from branch view) |
 | `d` | Delete selected item |
-| `q` | Quit |
 
 ### Navigation Keys
 
@@ -282,7 +283,7 @@ The prompts are optional—you can decline each time. There's no global setting 
 | `PageUp/Down` | Scroll history |
 | `?` | Show the keys for the current view |
 
-Navigation is by arrow key everywhere; there are no vim-style `j`/`k` bindings.
+Navigation is by arrow key everywhere; there are no `j`/`k` bindings.
 `k` opens the custom shortcuts manager.
 
 ### View Shortcuts

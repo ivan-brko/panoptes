@@ -411,10 +411,11 @@ pub(crate) fn adding_config_path_key<C: AgentProfile>(
                 // First Esc hides completions
                 clear_config_path_completions(state);
             } else {
-                // Second Esc cancels input
-                state.input_mode = InputMode::Normal;
-                state.config_draft.reset();
+                // Second Esc steps back to the name entry (keeping the name),
+                // consistent with Esc meaning "back one level" elsewhere
                 clear_config_path_completions(state);
+                state.config_draft.path.clear();
+                state.input_mode = kind.adding_name_mode();
             }
         }
         KeyCode::Tab => {
@@ -646,7 +647,7 @@ pub(crate) fn configs_view_key<C: AgentProfile>(
     let config_count = store.count();
 
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
             state.navigate_back();
         }
         KeyCode::Down => {

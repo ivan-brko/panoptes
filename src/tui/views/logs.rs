@@ -131,7 +131,7 @@ pub fn render_log_viewer(
     render_footer(
         frame,
         areas.footer(),
-        "↑/↓: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | Esc/q: back",
+        "↑/↓: scroll | g: top | G: bottom (auto) | PgUp/PgDn: page | ?: help | Esc: back",
     );
 }
 

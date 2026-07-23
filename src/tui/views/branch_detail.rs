@@ -162,7 +162,7 @@ pub fn render_branch_detail(
         _ => {
             let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
             let base = format!(
-                "n: new AI | s: shell | d: delete | {}k: shortcuts | ↑/↓: navigate | Enter: open/resume | Esc/q: back",
+                "n: new AI | s: shell | d: delete | {}Enter: open/resume | ?: help | Esc: back",
                 shortcuts_hint
             );
             footer_with_attention(base, sessions)
