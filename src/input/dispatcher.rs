@@ -3,7 +3,7 @@
 //! Routes keyboard events to appropriate handlers based on current mode.
 
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app::{App, AppState, Focus, InputMode, ProjectsNav, SettingsNav, Tab};
 
@@ -15,7 +15,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
     // Handle help overlay first - it captures all keys when visible
     if app.state.show_help_overlay {
         match key.code {
-            KeyCode::Char('?') | KeyCode::Esc => {
+            KeyCode::Char('?') | KeyCode::Esc if key.kind == KeyEventKind::Press => {
                 app.state.show_help_overlay = false;
             }
             _ => {} // Ignore other keys while overlay is visible
@@ -28,7 +28,9 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         // In Session mode, fall through to forward Ctrl+C to PTY
         if app.state.input_mode != InputMode::Session {
             // Show warning in all other modes
-            app.state.error_message = Some("Ctrl+C disabled. Press q to quit.".to_string());
+            if key.kind == KeyEventKind::Press {
+                app.state.error_message = Some("Ctrl+C disabled. Press q to quit.".to_string());
+            }
             return Ok(());
         }
     }
@@ -161,35 +163,75 @@ fn globals_apply(mode: InputMode) -> bool {
     mode == InputMode::Normal
 }
 
+/// What a global key event should do, independent of app state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlobalIntent {
+    /// A key release: act on nothing, so an action never runs twice.
+    /// Panoptes no longer asks the terminal for release events, but a
+    /// terminal may report them unasked
+    Ignore,
+    /// Tab / Shift+Tab: move pane focus
+    CyclePane { forward: bool },
+    /// `?`: open the help overlay
+    ShowHelp,
+    /// `q`: ask before quitting
+    ConfirmQuit,
+    /// `Space`: jump to the next session needing attention
+    JumpToAttention,
+    /// Not a global key: the mode handler owns it
+    NotGlobal,
+}
+
+/// Classify a key event against the global keys
+///
+/// A `Repeat` acts like a `Press` so held keys keep working; only a `Release`
+/// is dropped.
+fn global_intent(key: &KeyEvent) -> GlobalIntent {
+    if key.kind == KeyEventKind::Release {
+        return GlobalIntent::Ignore;
+    }
+    match key.code {
+        // kitty and Ghostty report Shift+Tab as Tab+SHIFT rather than
+        // BackTab, so direction comes from the modifier, not the code alone
+        KeyCode::Tab | KeyCode::BackTab => GlobalIntent::CyclePane {
+            forward: key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT),
+        },
+        KeyCode::Char('?') => GlobalIntent::ShowHelp,
+        KeyCode::Char('q') => GlobalIntent::ConfirmQuit,
+        KeyCode::Char(' ') => GlobalIntent::JumpToAttention,
+        _ => GlobalIntent::NotGlobal,
+    }
+}
+
 /// Keys that mean the same thing from every pane, in normal mode only
 ///
 /// Returns whether the key was consumed.
 fn handle_global_normal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
-    match key.code {
-        KeyCode::Tab | KeyCode::BackTab => {
+    match global_intent(&key) {
+        GlobalIntent::CyclePane { forward } => {
             // Cycling only makes sense while the panes are what is on screen
-            if app.state.cycle_pane(key.code == KeyCode::Tab) {
+            if app.state.cycle_pane(forward) {
                 app.sync_pane_focus();
             }
             Ok(true)
         }
-        KeyCode::Char('?') => {
+        GlobalIntent::ShowHelp => {
             app.state.show_help_overlay = true;
             Ok(true)
         }
         // Quit from every pane and from session-view normal mode. In session
         // *mode* this never runs, so `q` keeps reaching the agent.
-        KeyCode::Char('q') => {
+        GlobalIntent::ConfirmQuit => {
             app.state.input_mode = InputMode::ConfirmingQuit;
             Ok(true)
         }
         // Jump to the next session needing attention - except in the
         // Notifications section, where Space is the toggle
-        KeyCode::Char(' ') if !owns_space(&app.state) => {
+        GlobalIntent::JumpToAttention if !owns_space(&app.state) => {
             app.jump_to_next_attention()?;
             Ok(true)
         }
-        _ => Ok(false),
+        GlobalIntent::Ignore | GlobalIntent::JumpToAttention | GlobalIntent::NotGlobal => Ok(false),
     }
 }
 
@@ -311,6 +353,83 @@ fn validate_mode_focus_consistency(state: &mut AppState) {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
+        let mut key = KeyEvent::new(code, modifiers);
+        key.kind = kind;
+        key
+    }
+
+    /// The global keys, one event each, as iTerm2/kitty/Ghostty would send them
+    const GLOBAL_KEYS: [(KeyCode, KeyModifiers); 5] = [
+        (KeyCode::Tab, KeyModifiers::NONE),
+        (KeyCode::Tab, KeyModifiers::SHIFT),
+        (KeyCode::BackTab, KeyModifiers::SHIFT),
+        (KeyCode::Char('?'), KeyModifiers::NONE),
+        (KeyCode::Char('q'), KeyModifiers::NONE),
+    ];
+
+    #[test]
+    fn test_a_release_is_a_noop_for_every_global_key() {
+        for (code, modifiers) in GLOBAL_KEYS {
+            let event = key(code, modifiers, KeyEventKind::Release);
+            assert_eq!(
+                global_intent(&event),
+                GlobalIntent::Ignore,
+                "release of {code:?}+{modifiers:?} must not re-run the action"
+            );
+        }
+        let space = key(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        assert_eq!(global_intent(&space), GlobalIntent::Ignore);
+    }
+
+    /// Auto-repeat arrives as `Repeat` under the kitty protocol; a held Tab
+    /// must keep cycling
+    #[test]
+    fn test_a_repeat_acts_like_a_press() {
+        for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+            let event = key(KeyCode::Tab, KeyModifiers::NONE, kind);
+            assert_eq!(
+                global_intent(&event),
+                GlobalIntent::CyclePane { forward: true },
+                "for {kind:?}"
+            );
+        }
+    }
+
+    /// iTerm2 reports Shift+Tab as `BackTab`+SHIFT; kitty and Ghostty report
+    /// it as `Tab`+SHIFT. Both must cycle backwards, and only an unshifted
+    /// `Tab` cycles forwards.
+    #[test]
+    fn test_pane_cycle_direction_comes_from_the_modifier() {
+        let cases = [
+            (KeyCode::Tab, KeyModifiers::NONE, true),
+            (KeyCode::Tab, KeyModifiers::SHIFT, false),
+            (KeyCode::BackTab, KeyModifiers::SHIFT, false),
+            // Belt and braces: a BackTab without the modifier is still Shift+Tab
+            (KeyCode::BackTab, KeyModifiers::NONE, false),
+        ];
+        for (code, modifiers, forward) in cases {
+            let event = key(code, modifiers, KeyEventKind::Press);
+            assert_eq!(
+                global_intent(&event),
+                GlobalIntent::CyclePane { forward },
+                "{code:?}+{modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_global_keys_fall_through_to_the_mode_handler() {
+        for code in [KeyCode::Char('j'), KeyCode::Esc, KeyCode::Down] {
+            let event = key(code, KeyModifiers::NONE, KeyEventKind::Press);
+            assert_eq!(global_intent(&event), GlobalIntent::NotGlobal, "{code:?}");
+        }
+    }
 
     fn state_at(focus: Focus, mode: InputMode) -> AppState {
         AppState {

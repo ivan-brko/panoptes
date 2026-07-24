@@ -19,27 +19,18 @@ pub use theme::{theme, Theme};
 
 use anyhow::Result;
 use crossterm::{
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    terminal::{
-        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
-        LeaveAlternateScreen,
-    },
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use ratatui::prelude::*;
-use std::io::{self, stdout, Write};
-use std::time::Duration;
+use std::io::{self, stdout};
 
 /// Terminal UI wrapper
 ///
 /// Handles terminal setup, teardown, and provides the rendering surface.
 pub struct Tui {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
-    /// Whether keyboard enhancement (key release detection) is enabled
-    keyboard_enhancement_enabled: bool,
     /// Whether bracketed paste mode is enabled
     bracketed_paste_enabled: bool,
     /// Whether mouse capture is enabled
@@ -70,21 +61,6 @@ impl ErrorHandler {
     }
 }
 
-/// Disable keyboard enhancement and drain any pending terminal responses
-fn disable_keyboard_enhancement(handler: &ErrorHandler) {
-    if let Err(e) = stdout().execute(PopKeyboardEnhancementFlags) {
-        handler.handle("failed to pop keyboard enhancement flags", e);
-    }
-    if let Err(e) = stdout().flush() {
-        handler.handle("failed to flush stdout after keyboard enhancement", e);
-    }
-    // Drain any pending terminal responses (CSI u sequences)
-    while event::poll(Duration::from_millis(10)).unwrap_or(false) {
-        let _ = event::read();
-    }
-    handler.debug("Keyboard enhancement disabled");
-}
-
 /// Disable bracketed paste mode
 fn disable_bracketed_paste(handler: &ErrorHandler) {
     if let Err(e) = stdout().execute(DisableBracketedPaste) {
@@ -108,7 +84,6 @@ impl Tui {
         let terminal = Terminal::new(backend)?;
         Ok(Self {
             terminal,
-            keyboard_enhancement_enabled: false,
             bracketed_paste_enabled: false,
             mouse_capture_enabled: false,
         })
@@ -118,17 +93,6 @@ impl Tui {
     pub fn enter(&mut self) -> Result<()> {
         enable_raw_mode()?;
         stdout().execute(EnterAlternateScreen)?;
-
-        // Enable keyboard enhancement for key release detection (if supported)
-        if supports_keyboard_enhancement().unwrap_or(false)
-            && stdout()
-                .execute(PushKeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
-                ))
-                .is_ok()
-        {
-            self.keyboard_enhancement_enabled = true;
-        }
 
         // Enable bracketed paste mode so paste events are detected
         if stdout().execute(EnableBracketedPaste).is_ok() {
@@ -149,13 +113,6 @@ impl Tui {
     pub fn exit(&mut self) -> Result<()> {
         tracing::debug!("Starting TUI exit sequence");
         let handler = ErrorHandler::Tracing;
-
-        // Pop keyboard enhancement FIRST (while still in raw mode)
-        // The terminal may send a response sequence, which we need to consume
-        if self.keyboard_enhancement_enabled {
-            disable_keyboard_enhancement(&handler);
-            self.keyboard_enhancement_enabled = false;
-        }
 
         // Disable bracketed paste mode
         if self.bracketed_paste_enabled {
@@ -218,12 +175,6 @@ impl Drop for Tui {
         // Note: During drop, tracing may not be available, so errors go to stderr
         // for emergency diagnostics
         let handler = ErrorHandler::Stderr;
-
-        // Pop keyboard enhancement FIRST (while still in raw mode)
-        // The terminal may send a response sequence, which we need to consume
-        if self.keyboard_enhancement_enabled {
-            disable_keyboard_enhancement(&handler);
-        }
 
         // Disable bracketed paste mode
         if self.bracketed_paste_enabled {
