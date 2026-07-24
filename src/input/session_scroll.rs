@@ -7,7 +7,6 @@
 
 use crate::app::App;
 use crate::session::{Session, SessionId, SessionType};
-use crate::tui::frame::{FrameConfig, FrameLayout};
 
 /// Number of lines to scroll per arrow key press.
 const ARROW_SCROLL_STEP: usize = 3;
@@ -23,11 +22,16 @@ pub(crate) struct ScrollOutcome {
     pub(crate) fallback_offset: usize,
 }
 
+/// How many rows a page is: the content area the session view is drawing
+///
+/// Straight from [`App::session_frame_layout`], because a page has to be the
+/// page the reader can see. Guessing the header's height here made `PgUp`
+/// step one row further than the screen did, so a line of output fell through
+/// the seam on every press.
 fn viewport_height(app: &App) -> usize {
-    let terminal_size = app.tui.size().unwrap_or_default();
-    let frame_config = FrameConfig::default();
-    let layout = FrameLayout::calculate(terminal_size, &frame_config);
-    layout.content.height as usize
+    app.session_frame_layout()
+        .map(|layout| layout.content.height as usize)
+        .unwrap_or_default()
 }
 
 /// Scroll a session up (toward older content) by `amount` lines.

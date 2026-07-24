@@ -14,7 +14,6 @@ use crate::app::{
     MAX_PROJECT_PATH_LEN, MAX_SESSION_NAME_LEN,
 };
 use crate::session::{AgentAccount, NewSessionSpec};
-use crate::tui::frame::{FrameConfig, FrameLayout};
 
 /// Handle key while creating a new shell session
 pub fn handle_creating_shell_session_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -81,13 +80,7 @@ pub(crate) fn create_session(
     // Size the new PTY exactly like the session view renders it (and like
     // resize_active_session_pty computes it), so the session never starts
     // with briefly-wrong dimensions.
-    let (rows, cols) = if let Ok(size) = app.tui.size() {
-        let layout = FrameLayout::calculate(size, &FrameConfig::default());
-        let (rows, cols) = layout.pty_size();
-        (rows as usize, cols as usize)
-    } else {
-        (24, 80)
-    };
+    let (rows, cols) = app.session_pty_size();
 
     match app.sessions.create_session(
         agent,

@@ -10,6 +10,11 @@ use crate::tui::header::{Header, LogoKind};
 use crate::tui::views::Breadcrumb;
 
 /// Configuration for frame layout
+///
+/// Deliberately has no `Default`. A default would have to guess a header
+/// height, and every caller that guessed got a different content area than the
+/// one on screen — which is the whole bug class this type exists to prevent.
+/// Use [`FrameConfig::for_terminal`], or state the heights outright.
 #[derive(Debug, Clone)]
 pub struct FrameConfig {
     pub header_height: u16,
@@ -17,25 +22,15 @@ pub struct FrameConfig {
     pub title: Option<String>,
 }
 
-impl Default for FrameConfig {
-    fn default() -> Self {
-        Self {
-            header_height: 3, // Match existing Panoptes header
-            footer_height: 3, // Match existing Panoptes footer
-            title: None,
-        }
-    }
-}
-
 impl FrameConfig {
     /// The config the session view actually renders with on this terminal
     ///
     /// The session header is the wordmark, whose height depends on whether the
     /// terminal can afford the art. Everything that reasons about the session
-    /// content area off-screen — PTY sizing, mouse coordinate translation —
-    /// must use this, not `default()`: a header row the layout math doesn't
-    /// know about shifts every forwarded mouse click one row down and clips
-    /// the PTY's bottom row.
+    /// content area off-screen — PTY sizing, mouse coordinate translation,
+    /// how far a page scroll moves — must use this: a header row the layout
+    /// math doesn't know about shifts every forwarded mouse click one row
+    /// down, clips the PTY's bottom row, and makes a page scroll overshoot.
     pub fn for_terminal(terminal: Rect) -> Self {
         Self {
             header_height: Header::new(Breadcrumb::new())
@@ -154,10 +149,22 @@ pub fn render_pty_content(
 mod tests {
     use super::*;
 
+    /// A config with the heights stated outright, for the arithmetic tests
+    ///
+    /// These exercise `FrameLayout::calculate`, not the session view, so they
+    /// say what they mean rather than borrowing a real screen's numbers.
+    fn config(header_height: u16, footer_height: u16) -> FrameConfig {
+        FrameConfig {
+            header_height,
+            footer_height,
+            title: None,
+        }
+    }
+
     #[test]
     fn test_frame_layout_calculation() {
         let terminal_size = Rect::new(0, 0, 80, 24);
-        let config = FrameConfig::default();
+        let config = config(3, 3);
         let layout = FrameLayout::calculate(terminal_size, &config);
 
         // Header: y=0, height=3
@@ -197,12 +204,35 @@ mod tests {
     #[test]
     fn test_pty_size() {
         let terminal_size = Rect::new(0, 0, 80, 24);
-        let config = FrameConfig::default();
+        let config = config(3, 3);
         let layout = FrameLayout::calculate(terminal_size, &config);
         let (rows, cols) = layout.pty_size();
 
         // Content area dimensions
         assert_eq!(rows, 16);
         assert_eq!(cols, 78);
+    }
+
+    /// What a page scroll, a new PTY and a mouse click all have to agree on
+    ///
+    /// The guessed 3-row header was one row short of the wordmark the session
+    /// view actually draws, so anything sized from it was one row too tall -
+    /// a page scroll by that height stepped past a line of output every time.
+    #[test]
+    fn test_a_page_is_the_content_the_session_view_renders() {
+        let terminal = Rect::new(0, 0, 120, 40);
+        let rendered = FrameLayout::calculate(terminal, &FrameConfig::for_terminal(terminal));
+
+        // 4-row wordmark header, 3-row footer, and the frame's two border rows
+        assert_eq!(rendered.content.height, 40 - 4 - 3 - 2);
+
+        // The height the old guess produced, kept here to name the gap rather
+        // than leave it to arithmetic in a reader's head
+        let guessed = FrameLayout::calculate(terminal, &config(3, 3));
+        assert_eq!(
+            guessed.content.height,
+            rendered.content.height + 1,
+            "a guessed header height must not be mistaken for the real one"
+        );
     }
 }

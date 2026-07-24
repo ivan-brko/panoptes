@@ -15,7 +15,6 @@ use crate::app::App;
 use crate::config::CustomShortcut;
 use crate::project::{BranchId, ProjectId};
 use crate::session::{NewSessionSpec, SessionId};
-use crate::tui::frame::{FrameConfig, FrameLayout};
 
 /// Launch a shell session running a custom shortcut's command
 ///
@@ -37,12 +36,9 @@ pub(crate) fn launch_shortcut_session(
 ) -> Option<SessionId> {
     let session_name = shortcut.short_display_name();
 
-    // Get terminal size
-    let terminal_size = app.tui.size().unwrap_or_default();
-    let frame_config = FrameConfig::default();
-    let layout = FrameLayout::calculate(terminal_size, &frame_config);
-    let rows = layout.content.height as usize;
-    let cols = layout.content.width as usize;
+    // Size the PTY exactly like the session view renders it, so the shell
+    // never starts with dimensions the screen disagrees with
+    let (rows, cols) = app.session_pty_size();
 
     // Create shell session with command
     match app.sessions.create_session(

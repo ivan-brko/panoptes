@@ -1379,12 +1379,29 @@ impl App {
         Ok(self.session_frame_layout()?.content)
     }
 
+    /// The PTY dimensions a session created right now should start with
+    ///
+    /// The same answer [`App::resize_active_session_pty`] would give, so a new
+    /// session is never briefly the wrong size. Falls back to a conventional
+    /// 80x24 when the terminal cannot be measured at all - a session that
+    /// starts small and is resized on the next tick beats one started with
+    /// zero rows.
+    pub(crate) fn session_pty_size(&self) -> (usize, usize) {
+        self.session_frame_layout()
+            .map(|layout| {
+                let (rows, cols) = layout.pty_size();
+                (rows as usize, cols as usize)
+            })
+            .unwrap_or((24, 80))
+    }
+
     /// The frame layout the session view renders with, at the current size
     ///
     /// Everything that reasons about the session content area without a render
-    /// pass — PTY sizing, mouse coordinate translation — goes through here, so
-    /// it cannot drift from what is actually on screen.
-    fn session_frame_layout(&self) -> Result<FrameLayout> {
+    /// pass — PTY sizing, mouse coordinate translation, how far a page scroll
+    /// moves — goes through here, so it cannot drift from what is actually on
+    /// screen.
+    pub(crate) fn session_frame_layout(&self) -> Result<FrameLayout> {
         let size = self.tui.size()?;
         let area = ratatui::prelude::Rect::new(0, 0, size.width, size.height);
         Ok(FrameLayout::calculate(
