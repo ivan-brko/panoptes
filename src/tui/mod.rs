@@ -19,18 +19,27 @@ pub use theme::{theme, Theme};
 
 use anyhow::Result;
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
     ExecutableCommand,
 };
 use ratatui::prelude::*;
-use std::io::{self, stdout};
+use std::io::{self, stdout, Write};
+use std::time::Duration;
 
 /// Terminal UI wrapper
 ///
 /// Handles terminal setup, teardown, and provides the rendering surface.
 pub struct Tui {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    /// Whether `Esc` is being reported unambiguously (see [`Tui::enter`])
+    keyboard_enhancement_enabled: bool,
     /// Whether bracketed paste mode is enabled
     bracketed_paste_enabled: bool,
     /// Whether mouse capture is enabled
@@ -61,6 +70,21 @@ impl ErrorHandler {
     }
 }
 
+/// Return the keyboard to its legacy encoding, draining the terminal's reply
+fn disable_keyboard_enhancement(handler: &ErrorHandler) {
+    if let Err(e) = stdout().execute(PopKeyboardEnhancementFlags) {
+        handler.handle("failed to pop keyboard enhancement flags", e);
+    }
+    if let Err(e) = stdout().flush() {
+        handler.handle("failed to flush stdout after keyboard enhancement", e);
+    }
+    // Drain any pending terminal responses (CSI u sequences)
+    while event::poll(Duration::from_millis(10)).unwrap_or(false) {
+        let _ = event::read();
+    }
+    handler.debug("Keyboard enhancement disabled");
+}
+
 /// Disable bracketed paste mode
 fn disable_bracketed_paste(handler: &ErrorHandler) {
     if let Err(e) = stdout().execute(DisableBracketedPaste) {
@@ -84,6 +108,7 @@ impl Tui {
         let terminal = Terminal::new(backend)?;
         Ok(Self {
             terminal,
+            keyboard_enhancement_enabled: false,
             bracketed_paste_enabled: false,
             mouse_capture_enabled: false,
         })
@@ -93,6 +118,29 @@ impl Tui {
     pub fn enter(&mut self) -> Result<()> {
         enable_raw_mode()?;
         stdout().execute(EnterAlternateScreen)?;
+
+        // Ask for `Esc` to be reported as `CSI 27 u` rather than a bare 0x1B.
+        // A bare 0x1B is indistinguishable from the introducer of an escape
+        // sequence, and mouse capture has the terminal streaming those: press
+        // `Esc` while the pointer is moving and the two land back to back, at
+        // which point crossterm folds them into one `Esc` and delivers the
+        // mouse report's payload as ordinary characters - digits that the
+        // session view reads as "jump to session N".
+        //
+        // The same encoding is what carries `Esc`'s modifiers, so it is also
+        // what makes `Shift+Esc` (forward `Esc` to the agent) distinguishable
+        // from a plain one. Deliberately *only* this flag: the release events
+        // that `REPORT_EVENT_TYPES` invited are what PAN-9 removed, and they
+        // stay gone.
+        if supports_keyboard_enhancement().unwrap_or(false)
+            && stdout()
+                .execute(PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                ))
+                .is_ok()
+        {
+            self.keyboard_enhancement_enabled = true;
+        }
 
         // Enable bracketed paste mode so paste events are detected
         if stdout().execute(EnableBracketedPaste).is_ok() {
@@ -113,6 +161,13 @@ impl Tui {
     pub fn exit(&mut self) -> Result<()> {
         tracing::debug!("Starting TUI exit sequence");
         let handler = ErrorHandler::Tracing;
+
+        // Pop keyboard enhancement FIRST (while still in raw mode)
+        // The terminal may send a response sequence, which we need to consume
+        if self.keyboard_enhancement_enabled {
+            disable_keyboard_enhancement(&handler);
+            self.keyboard_enhancement_enabled = false;
+        }
 
         // Disable bracketed paste mode
         if self.bracketed_paste_enabled {
@@ -175,6 +230,12 @@ impl Drop for Tui {
         // Note: During drop, tracing may not be available, so errors go to stderr
         // for emergency diagnostics
         let handler = ErrorHandler::Stderr;
+
+        // Pop keyboard enhancement FIRST (while still in raw mode)
+        // The terminal may send a response sequence, which we need to consume
+        if self.keyboard_enhancement_enabled {
+            disable_keyboard_enhancement(&handler);
+        }
 
         // Disable bracketed paste mode
         if self.bracketed_paste_enabled {
