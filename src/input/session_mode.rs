@@ -5,7 +5,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::app::{App, InputMode};
+use crate::app::App;
 use crate::input::session_scroll;
 use crate::session::{SessionId, SessionManager};
 
@@ -142,7 +142,7 @@ fn handle_session_mode_esc(app: &mut App, key: KeyEvent) -> Result<()> {
         EscIntent::Ignore => {}
         EscIntent::ForwardToPty => forward_esc_to_pty(app)?,
         EscIntent::LeaveSessionMode => {
-            app.state.input_mode = InputMode::Normal;
+            app.state.leave_session_mode();
             // Disable mouse capture so user can select and copy text
             app.tui.disable_mouse_capture();
         }

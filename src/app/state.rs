@@ -586,6 +586,17 @@ impl AppState {
         self.session_click.reset();
     }
 
+    /// Detach from the session, leaving it on screen
+    ///
+    /// The caller drops mouse capture to hand selection back to the terminal,
+    /// which also means the release of a button held right now will never
+    /// arrive, so the selection has to end here. That is what keeps a drag
+    /// interrupted by `Esc` from freezing its session for good.
+    pub fn leave_session_mode(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.clear_selection();
+    }
+
     /// Drop the selection if the screen it was made against has moved on
     ///
     /// Two rules, both of which the highlight is deliberately too short-lived
@@ -1011,6 +1022,27 @@ mod tests {
         state.selection = Some(selection_for(session_id));
         assert!(state.expire_selection(&[]));
         assert!(state.selection.is_none());
+    }
+
+    /// Esc drops mouse capture, so the release of a button held right now
+    /// never arrives - and a drag left dragging would freeze its session for
+    /// good
+    #[test]
+    fn test_leaving_session_mode_ends_an_in_progress_drag() {
+        let session_id = uuid::Uuid::new_v4();
+        let mut state = AppState::default();
+        state.navigate_to_session(session_id);
+        state.selection = Some(selection_for(session_id));
+        assert_eq!(state.dragging_session(), Some(session_id));
+
+        state.leave_session_mode();
+
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.dragging_session(), None);
+        assert!(state.selection.is_none());
+        // The session itself is still on screen; only the mode changed
+        assert_eq!(state.active_session, Some(session_id));
+        assert_eq!(state.focus, Focus::Session);
     }
 
     #[test]
