@@ -202,18 +202,56 @@ pub fn render_session_delete_confirmation(
 ///
 /// Centered dialog asking user to confirm quitting the application.
 /// Uses the same styling as other confirmation dialogs.
-pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
+///
+/// Quitting is not symmetric across session types, and the asymmetry is only
+/// discoverable by losing something: agent sessions are recorded and come back
+/// on the next start, while shells are killed outright, taking whatever is
+/// running in them. So a run holding live shells says so, and the dialog grows
+/// to fit that; a run without them keeps the small prompt it has always been.
+pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect, shell_count: usize) {
     let t = theme();
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(vec![Span::styled(
             "Quit Panoptes?",
             Style::default().fg(t.text).add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
-        confirm_prompt_line(),
     ];
+
+    if shell_count > 0 {
+        let subject = if shell_count == 1 {
+            "1 shell session will be killed".to_string()
+        } else {
+            format!("{} shell sessions will be killed", shell_count)
+        };
+        lines.push(Line::from(vec![Span::styled(
+            format!("\u{26A0} {}", subject),
+            Style::default()
+                .fg(t.border_warning)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "along with anything running in them",
+            Style::default().fg(t.text),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "Agent sessions return on next start",
+            Style::default().fg(t.text_muted),
+        )]));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(confirm_prompt_line());
+
+    // Each warning line costs a row, and the wider box keeps them off the
+    // border - the paragraph does not wrap, so a line that overflows is cut
+    let (width, height) = if shell_count > 0 {
+        (DialogSize::Fixed(48), DialogSize::Fixed(11))
+    } else {
+        (DialogSize::Fixed(40), DialogSize::Fixed(7))
+    };
 
     render_dialog(
         frame,
@@ -222,8 +260,8 @@ pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect) {
             title: "Confirm Quit",
             border_color: t.border_warning,
             alignment: Alignment::Center,
-            width: DialogSize::Fixed(40),
-            height: DialogSize::Fixed(7),
+            width,
+            height,
         },
         lines,
     );
@@ -502,13 +540,60 @@ mod tests {
     #[test]
     fn test_quit_dialog_prompts_for_confirmation() {
         let lines = render_to_lines(70, 20, |frame| {
-            render_quit_confirm_dialog(frame, frame.size())
+            render_quit_confirm_dialog(frame, frame.size(), 0)
         });
 
         assert!(contains_line(&lines, "Confirm Quit"), "{:?}", lines);
         assert!(contains_line(&lines, "Quit Panoptes?"), "{:?}", lines);
         assert!(
             contains_line(&lines, "Press y to confirm, n or Esc to cancel"),
+            "{:?}",
+            lines
+        );
+        // Nothing is lost by quitting, so the dialog says nothing about it
+        assert!(!contains_line(&lines, "killed"), "{:?}", lines);
+    }
+
+    /// Quitting kills shells outright while agent sessions come back, and the
+    /// only way a user learns that is by losing a build - so the prompt says it
+    #[test]
+    fn test_quit_dialog_warns_that_live_shells_are_lost() {
+        let lines = render_to_lines(70, 20, |frame| {
+            render_quit_confirm_dialog(frame, frame.size(), 3)
+        });
+
+        assert!(
+            contains_line(&lines, "\u{26A0} 3 shell sessions will be killed"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "along with anything running in them"),
+            "{:?}",
+            lines
+        );
+        assert!(
+            contains_line(&lines, "Agent sessions return on next start"),
+            "{:?}",
+            lines
+        );
+        // The prompt must survive the taller dialog
+        assert!(
+            contains_line(&lines, "Press y to confirm, n or Esc to cancel"),
+            "{:?}",
+            lines
+        );
+    }
+
+    /// One shell is the common case; "1 shell sessions" reads as a bug
+    #[test]
+    fn test_quit_dialog_counts_a_single_shell_in_the_singular() {
+        let lines = render_to_lines(70, 20, |frame| {
+            render_quit_confirm_dialog(frame, frame.size(), 1)
+        });
+
+        assert!(
+            contains_line(&lines, "\u{26A0} 1 shell session will be killed"),
             "{:?}",
             lines
         );

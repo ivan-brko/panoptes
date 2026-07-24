@@ -83,6 +83,14 @@ pub struct SessionManager {
     /// inert until the user opens one, at which point the entry moves from here
     /// into `sessions`.
     recovered: HashMap<SessionId, SessionInfo>,
+    /// Run every session on a shell process, whatever its record says
+    ///
+    /// The one thing a test cannot do is launch a real Claude Code or Codex,
+    /// which would otherwise put every decision made *from* an agent's record -
+    /// what is persisted, what may be resumed - out of reach. This swaps the
+    /// process for one that exists on any machine and leaves the record alone.
+    #[cfg(test)]
+    spawn_as_shell: bool,
 }
 
 /// A session as it appears in a list
@@ -117,6 +125,8 @@ impl SessionManager {
     /// Tests must use this rather than `new`, which reads and writes the real
     /// `~/.panoptes/sessions.json` owned by any running Panoptes instance.
     pub fn with_store(config: Config, store: SessionStore) -> Self {
+        let mut store = store;
+        Self::drop_unpersistable(&mut store);
         let recovered = Self::reconcile(&store);
         Self {
             sessions: HashMap::new(),
@@ -124,6 +134,39 @@ impl SessionManager {
             config,
             store,
             recovered,
+            #[cfg(test)]
+            spawn_as_shell: false,
+        }
+    }
+
+    /// Evict records that should never have been written
+    ///
+    /// Shells were persisted by earlier versions, so an upgrade inherits a file
+    /// full of them. Filtering them out of the recovery list alone would leave
+    /// them on disk to be re-read every start, so they are dropped from the
+    /// store itself and the file is rewritten without them.
+    fn drop_unpersistable(store: &mut SessionStore) {
+        let stale: Vec<SessionId> = store
+            .sessions()
+            .filter(|info| !info.is_persistable())
+            .map(|info| info.id)
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+
+        for id in &stale {
+            store.remove(*id);
+        }
+        tracing::info!(count = stale.len(), "Dropped stored shell sessions");
+
+        // A failed rewrite costs nothing this run - they were filtered in
+        // memory already - so it is worth no more than a warning
+        if let Err(e) = store.save() {
+            tracing::warn!(
+                error = %e,
+                "Failed to rewrite the session store without its shell records"
+            );
         }
     }
 
@@ -396,10 +439,16 @@ impl SessionManager {
     /// Failure to persist never fails the operation that triggered it - losing
     /// the ability to recover a session later is strictly better than refusing
     /// to create it now.
+    ///
+    /// Sessions that cannot be brought back are not written at all; see
+    /// [`SessionInfo::is_persistable`].
     fn persist_session(&mut self, session_id: SessionId) {
         let Some(session) = self.sessions.get(&session_id) else {
             return;
         };
+        if !session.info.is_persistable() {
+            return;
+        }
         self.store.upsert(session.info.clone());
         if let Err(e) = self.store.save() {
             tracing::warn!(
@@ -521,6 +570,18 @@ impl SessionManager {
         Ok(session_id)
     }
 
+    /// The adapter that will spawn this agent
+    ///
+    /// Its own choice in production; see [`Self::spawn_as_shell`] for why tests
+    /// get to substitute one.
+    fn create_adapter(&self, agent: AgentType) -> Box<dyn crate::agent::AgentAdapter> {
+        #[cfg(test)]
+        if self.spawn_as_shell {
+            return AgentType::Shell.create_adapter();
+        }
+        agent.create_adapter()
+    }
+
     /// Spawn the agent process and take ownership of the resulting session
     ///
     /// The shared tail of every path that brings a process to life - create,
@@ -539,7 +600,7 @@ impl SessionManager {
         rows: usize,
         cols: usize,
     ) -> Result<SessionId> {
-        let adapter = agent.create_adapter();
+        let adapter = self.create_adapter(agent);
         let spawn_result = adapter
             .spawn(&self.config, &spawn)
             .with_context(|| format!("spawning {} in {}", agent, spawn.working_dir.display()))?;
@@ -1171,8 +1232,10 @@ impl SessionManager {
 
         // Refresh the durable records before tearing down, so the recovery list
         // reflects the final state of this run. Records are deliberately kept:
-        // quitting Panoptes is not the same as discarding your sessions.
-        for session in self.sessions.values() {
+        // quitting Panoptes is not the same as discarding your sessions. Shells
+        // are the exception - they have nothing to come back to, so the kill
+        // below is the end of them.
+        for session in self.sessions.values().filter(|s| s.info.is_persistable()) {
             self.store.upsert(session.info.clone());
         }
         if let Err(e) = self.store.save() {
@@ -1227,6 +1290,14 @@ impl SessionManager {
     /// Get total count of active sessions across all projects
     pub fn total_active_count(&self) -> usize {
         self.count_infos(|info| info.state.is_active())
+    }
+
+    /// Sessions that quitting would destroy rather than set aside
+    ///
+    /// Agent sessions come back after a restart; these do not, so the quit
+    /// prompt names them instead of letting the user find out afterwards.
+    pub fn unrecoverable_count(&self) -> usize {
+        self.count_infos(|info| !info.is_persistable())
     }
 
     /// Get all sessions needing attention, oldest first
@@ -1418,6 +1489,31 @@ mod tests {
                 80,
             )
             .expect("failed to create shell session")
+    }
+
+    /// A live agent session, whose record Panoptes does write
+    ///
+    /// A genuine `AgentType::ClaudeCode` session, taken through the same
+    /// `create_session` as any other; only the process it runs is swapped for a
+    /// shell, since no test can launch a real Claude Code.
+    fn create_persistable(manager: &mut SessionManager, name: &str) -> SessionId {
+        manager.spawn_as_shell = true;
+        manager
+            .create_session(
+                AgentType::ClaudeCode,
+                NewSessionSpec {
+                    name: name.to_string(),
+                    working_dir: PathBuf::from("/tmp"),
+                    project_id: Uuid::new_v4(),
+                    branch_id: Uuid::new_v4(),
+                    initial_prompt: None,
+                    account: None,
+                    auto_close: false,
+                },
+                24,
+                80,
+            )
+            .expect("failed to create agent session")
     }
 
     /// Reload a store from disk, asserting the file was not corrupted
@@ -2043,7 +2139,7 @@ mod tests {
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
 
-        let session_id = create_shell(&mut manager, "doomed");
+        let session_id = create_persistable(&mut manager, "doomed");
         assert!(manager.store().get(session_id).is_some());
 
         // The session exited longer ago than the retention window
@@ -2070,7 +2166,7 @@ mod tests {
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
 
-        let session_id = create_shell(&mut manager, "fresh");
+        let session_id = create_persistable(&mut manager, "fresh");
         let session = manager.get_mut(session_id).unwrap();
         session.kill().ok();
         session.set_state(SessionState::Exited);
@@ -2291,8 +2387,9 @@ mod tests {
 
     // Persistence lifecycle
     //
-    // These use shell sessions because they spawn without needing a Claude or
-    // Codex binary on PATH.
+    // These run on a shell process, which spawns without needing a Claude or
+    // Codex binary on PATH, relabelled as an agent - a shell's own record is
+    // deliberately never written. See `create_persistable`.
 
     #[test]
     fn test_creating_a_session_persists_its_record() {
@@ -2301,7 +2398,7 @@ mod tests {
         let mut manager =
             SessionManager::with_store(test_config(&temp_dir), SessionStore::with_path(store_path));
 
-        let session_id = create_shell(&mut manager, "persisted");
+        let session_id = create_persistable(&mut manager, "persisted");
 
         // Written immediately, not deferred to shutdown - a crash one second
         // after creation must still leave a usable record
@@ -2324,7 +2421,7 @@ mod tests {
             SessionStore::with_path(store_path.clone()),
         );
 
-        let session_id = create_shell(&mut manager, "survivor");
+        let session_id = create_persistable(&mut manager, "survivor");
         manager.shutdown_all();
 
         // Simulates the next Panoptes launch reading what the previous run left
@@ -2344,7 +2441,7 @@ mod tests {
             SessionStore::with_path(store_path.clone()),
         );
 
-        create_shell(&mut manager, "kept");
+        create_persistable(&mut manager, "kept");
 
         manager.shutdown_all();
 
@@ -2363,7 +2460,7 @@ mod tests {
             SessionStore::with_path(store_path.clone()),
         );
 
-        let session_id = create_shell(&mut manager, "discarded");
+        let session_id = create_persistable(&mut manager, "discarded");
         assert_eq!(manager.store().len(), 1);
 
         manager.destroy_session(session_id).unwrap();
@@ -2505,31 +2602,87 @@ mod tests {
         );
     }
 
+    /// Earlier versions wrote shell records, so an upgrade inherits a file of
+    /// them. They must not come back as recoverable sessions, and they must not
+    /// survive on disk to be re-read on every launch after this one.
     #[test]
-    fn test_shell_needs_no_conversation_id_to_be_resumable() {
+    fn test_stored_shell_records_are_dropped_on_load() {
         let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
         let store = store_with_record(&temp_dir, |info| {
             info.session_type = SessionType::Shell;
             info.agent_session_id = None;
         });
+        store.save().unwrap();
+
         let manager = SessionManager::with_store(test_config(&temp_dir), store);
 
-        // Shells are restored by respawning in the same directory
-        let recovered = manager.recovered().next().unwrap();
-        assert!(recovered.is_resumable(), "shell should be restorable");
+        assert_eq!(manager.recovered_count(), 0);
+        assert!(manager.store().is_empty());
+        assert!(
+            load_store(&store_path).is_empty(),
+            "the stale record must be rewritten out of the file, not just filtered"
+        );
+    }
+
+    /// The eviction rewrites the file, so it must leave the records it keeps
+    #[test]
+    fn test_dropping_shell_records_keeps_the_agent_ones() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut store = store_with_record(&temp_dir, |_| {});
+        let mut shell = SessionInfo::new(
+            "old-shell".to_string(),
+            temp_dir.path().to_path_buf(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        shell.session_type = SessionType::Shell;
+        store.upsert(shell);
+        store.save().unwrap();
+
+        let manager = SessionManager::with_store(test_config(&temp_dir), store);
+
+        assert_eq!(manager.recovered_count(), 1);
+        assert_eq!(manager.recovered().next().unwrap().name, "from-last-run");
+        assert_eq!(load_store(&store_path).len(), 1);
     }
 
     // Resume
 
+    /// A store holding one agent record, loaded as a recovered session
+    ///
+    /// The record is what a previous run would have left: a Claude Code session
+    /// with a conversation ID, in a directory that still exists. Resuming it
+    /// runs a shell instead of a real Claude Code, and nothing else differs -
+    /// the record, and every decision made from it, is the genuine article.
+    fn recoverable_agent(manager: &mut SessionManager, dir: &TempDir) -> SessionId {
+        let mut info = SessionInfo::new(
+            "from-last-run".to_string(),
+            dir.path().to_path_buf(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        info.session_type = SessionType::ClaudeCode;
+        info.state = SessionState::Resumable;
+        info.agent_session_id = Some(Uuid::new_v4().to_string());
+        let session_id = info.id;
+
+        manager.store.upsert(info.clone());
+        manager.store.save().expect("failed to seed the store");
+        manager.recovered.insert(session_id, info);
+        manager.spawn_as_shell = true;
+        session_id
+    }
+
     #[test]
-    fn test_resuming_a_shell_brings_it_back_as_a_live_session() {
+    fn test_resuming_brings_a_record_back_as_a_live_session() {
         let temp_dir = TempDir::new().unwrap();
-        let store = store_with_record(&temp_dir, |info| {
-            info.session_type = SessionType::Shell;
-            info.agent_session_id = None;
-        });
-        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
-        let session_id = manager.recovered().next().unwrap().id;
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+        let session_id = recoverable_agent(&mut manager, &temp_dir);
 
         let resumed = manager
             .resume_session(session_id, 24, 80, None, None)
@@ -2548,12 +2701,11 @@ mod tests {
     #[test]
     fn test_resumed_session_appears_once_and_as_live() {
         let temp_dir = TempDir::new().unwrap();
-        let store = store_with_record(&temp_dir, |info| {
-            info.session_type = SessionType::Shell;
-            info.agent_session_id = None;
-        });
-        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
-        let session_id = manager.recovered().next().unwrap().id;
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+        let session_id = recoverable_agent(&mut manager, &temp_dir);
 
         manager
             .resume_session(session_id, 24, 80, None, None)
@@ -2608,12 +2760,11 @@ mod tests {
     #[test]
     fn test_resuming_twice_fails_the_second_time() {
         let temp_dir = TempDir::new().unwrap();
-        let store = store_with_record(&temp_dir, |info| {
-            info.session_type = SessionType::Shell;
-            info.agent_session_id = None;
-        });
-        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
-        let session_id = manager.recovered().next().unwrap().id;
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+        let session_id = recoverable_agent(&mut manager, &temp_dir);
 
         manager
             .resume_session(session_id, 24, 80, None, None)
@@ -2628,24 +2779,29 @@ mod tests {
         manager.shutdown_all();
     }
 
+    /// Resuming must not lose the record: a crash right after resuming has to
+    /// leave the session recoverable again
     #[test]
     fn test_resumed_session_is_still_persisted() {
         let temp_dir = TempDir::new().unwrap();
         let store_path = temp_dir.path().join("sessions.json");
-        let store = store_with_record(&temp_dir, |info| {
-            info.session_type = SessionType::Shell;
-            info.agent_session_id = None;
-        });
-        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
-        let session_id = manager.recovered().next().unwrap().id;
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(store_path.clone()),
+        );
+        let session_id = recoverable_agent(&mut manager, &temp_dir);
 
         manager
             .resume_session(session_id, 24, 80, None, None)
             .unwrap();
 
-        // Resuming must not lose the record: a crash right after resuming has
-        // to leave the session recoverable again
-        assert!(load_store(&store_path).get(session_id).is_some());
+        let stored = load_store(&store_path);
+        let record = stored.get(session_id).expect("record must survive resume");
+        // The pointer the whole mechanism exists to keep
+        assert!(record.agent_session_id.is_some());
+        // The record was seeded as `Resumable`, so seeing the state resume sets
+        // is what distinguishes "rewritten" from "merely not deleted"
+        assert_eq!(record.state, SessionState::Starting);
 
         manager.shutdown_all();
     }
@@ -2678,7 +2834,7 @@ mod tests {
             SessionStore::with_path(store_path.clone()),
         );
 
-        let session_id = create_shell(&mut manager, "session");
+        let session_id = create_persistable(&mut manager, "session");
 
         assert!(manager.set_agent_session_id(session_id, "codex-abc".to_string()));
 
@@ -2701,7 +2857,7 @@ mod tests {
             SessionStore::with_path(temp_dir.path().join("sessions.json")),
         );
 
-        let session_id = create_shell(&mut manager, "session");
+        let session_id = create_persistable(&mut manager, "session");
 
         assert!(manager.set_agent_session_id(session_id, "codex-abc".to_string()));
         // Avoids rewriting the store on every scan once resolved
@@ -2721,19 +2877,42 @@ mod tests {
         assert!(!manager.set_agent_session_id(Uuid::new_v4(), "codex-abc".to_string()));
     }
 
+    /// A shell has no conversation, no transcript, and no state that outlives
+    /// its PTY, so a record of one would promise a restoration it cannot do
     #[test]
-    fn test_shell_sessions_have_no_agent_conversation_to_resume() {
+    fn test_shell_sessions_are_never_persisted() {
         let temp_dir = TempDir::new().unwrap();
         let store_path = temp_dir.path().join("sessions.json");
-        let mut manager =
-            SessionManager::with_store(test_config(&temp_dir), SessionStore::with_path(store_path));
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(store_path.clone()),
+        );
 
         let session_id = create_shell(&mut manager, "shell");
+        assert!(manager.store().get(session_id).is_none());
 
-        // Shells are restored by respawning in the same directory, not by
-        // resuming a conversation - there is nothing to resume
-        let record = manager.store().get(session_id).unwrap();
-        assert!(record.agent_session_id.is_none());
+        // Shutdown refreshes every record it keeps; a shell must not sneak in
+        manager.shutdown_all();
+        assert!(manager.store().is_empty());
+        assert!(load_store(&store_path).is_empty());
+    }
+
+    /// The quit prompt counts what quitting destroys rather than what it keeps
+    #[test]
+    fn test_unrecoverable_count_sees_shells_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+
+        assert_eq!(manager.unrecoverable_count(), 0);
+
+        create_shell(&mut manager, "one");
+        create_shell(&mut manager, "two");
+        create_persistable(&mut manager, "agent");
+
+        assert_eq!(manager.unrecoverable_count(), 2);
 
         manager.shutdown_all();
     }

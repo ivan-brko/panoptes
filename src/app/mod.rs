@@ -2140,7 +2140,7 @@ impl App {
                 // Centralized so the quit prompt is visible from any pane, not
                 // only where it is triggered
                 InputMode::ConfirmingQuit => {
-                    render_quit_confirm_dialog(frame, area);
+                    render_quit_confirm_dialog(frame, area, sessions.unrecoverable_count());
                 }
                 // Anything showing a list or a paragraph is an overlay
                 // anchored to the terminal, never to a pane: a list of paths

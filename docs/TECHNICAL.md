@@ -414,13 +414,19 @@ needed to relaunch it.
   still lacks an ID, so it costs nothing in the steady state. The notify hook
   cannot be used for this - it must not read stdin, or it stalls Codex's output
   pipeline and drops keystrokes.
-- **Shell**: has no conversation. Restoring one respawns a fresh shell in the
-  same directory; its scrollback is not recovered.
+- **Shell**: has no conversation, and is therefore **not persisted at all**. Its
+  state is the scrollback, the environment, and the processes it is running,
+  none of which survive the PTY; respawning `$SHELL` in the recorded directory
+  yields a blank prompt, which is what creating a new shell session on that
+  branch already gives you. A record would promise a restoration it cannot
+  perform, so none is written. Records left by earlier versions are dropped, and
+  the file rewritten without them, on the next load.
 
 Records are written on membership change (create, close), not on state change -
 live state describes a process that no longer exists and is discarded at load.
 Quitting Panoptes keeps records so sessions can be resumed; explicitly closing a
-session discards its record.
+session discards its record. Because shells are the one thing quitting destroys
+rather than sets aside, the quit prompt counts the live ones and says so.
 
 At startup every record is reconciled to `SessionState::Resumable` and listed
 inertly - nothing is spawned until the user opens it. A record whose working
