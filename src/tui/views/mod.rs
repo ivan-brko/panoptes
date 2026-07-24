@@ -7,7 +7,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::config::CustomShortcut;
-use crate::session::{SessionInfo, SessionManager, SessionState, SessionType};
+use crate::session::{AttentionReason, SessionInfo, SessionManager, SessionState, SessionType};
 use crate::tui::theme::theme;
 
 mod agent_configs;
@@ -127,8 +127,21 @@ pub fn attention_badge(info: &SessionInfo, needs_attention: bool) -> (&'static s
         return ("  ", t.text);
     }
     match &info.attention {
-        Some(reason) => ("● ", t.attention_color(reason)),
+        Some(reason) => (attention_symbol(reason), t.attention_color(reason)),
         None => ("● ", t.success),
+    }
+}
+
+/// The badge's glyph, per reason - so the badge survives a theme with no
+/// colour at all
+///
+/// A full circle is a finished turn waiting on nobody but you; a half circle
+/// is a turn stopped partway, blocked on you; a cross is a process that died.
+fn attention_symbol(reason: &AttentionReason) -> &'static str {
+    match reason {
+        AttentionReason::TurnComplete => "● ",
+        AttentionReason::Approval { .. } | AttentionReason::Stalled { .. } => "◐ ",
+        AttentionReason::Crashed { .. } => "✗ ",
     }
 }
 
@@ -340,6 +353,36 @@ pub(crate) fn elide_middle(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The badge's glyph carries the reason on its own, so state survives a
+    /// bad theme, a colourblind user, and a monochrome screenshot
+    #[test]
+    fn test_attention_badge_symbols_carry_the_reason_without_colour() {
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+
+        assert_eq!(attention_badge(&info, false).0, "  ");
+
+        info.attention = Some(AttentionReason::TurnComplete);
+        assert_eq!(attention_badge(&info, true).0, "● ");
+
+        info.attention = Some(AttentionReason::Approval { tool: None });
+        assert_eq!(attention_badge(&info, true).0, "◐ ");
+        info.attention = Some(AttentionReason::Stalled {
+            tool: "Bash".to_string(),
+            secs: 600,
+        });
+        assert_eq!(attention_badge(&info, true).0, "◐ ");
+
+        info.attention = Some(AttentionReason::Crashed {
+            reason: "signal 9".to_string(),
+        });
+        assert_eq!(attention_badge(&info, true).0, "✗ ");
+    }
 
     #[test]
     fn test_status_parts_only_names_what_is_happening() {

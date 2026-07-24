@@ -306,6 +306,7 @@ impl Theme {
     pub fn selected_style(&self) -> Style {
         Style::default()
             .fg(self.selected)
+            .bg(self.bg_surface)
             .add_modifier(Modifier::BOLD)
     }
 
