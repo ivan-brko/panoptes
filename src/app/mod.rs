@@ -554,47 +554,12 @@ impl App {
     /// visible history doesn't shift under the cursor, and for the length of
     /// a selection drag so the text cannot move out from under the pointer.
     fn tick_output_polling(&mut self) -> bool {
-        // A selection only ever belongs to the session on screen. Enforcing
-        // that here catches every way one can stop being on screen - closed,
-        // switched away from - without each of them having to remember.
-        if self
-            .state
-            .selection
-            .as_ref()
-            .is_some_and(|selection| Some(selection.session_id) != self.state.active_session)
-        {
-            self.state.clear_selection();
-        }
-
-        // The drag freeze is read from the live selection rather than a flag
-        // of its own, so a drag that ends abnormally cannot leave a session
-        // frozen forever. Output is not lost, only queued in the PTY.
-        let frozen_session = self.state.dragging_session().or_else(|| {
-            if self.state.session_scroll_offset > 0 {
-                self.state.active_session.and_then(|session_id| {
-                    self.sessions.get(session_id).and_then(|session| {
-                        (session.info.session_type == SessionType::OpenAICodex)
-                            .then_some(session_id)
-                    })
-                })
-            } else {
-                None
-            }
-        });
-        let with_output = self.sessions.poll_outputs_except(frozen_session);
-
+        let with_output = self
+            .sessions
+            .poll_outputs_except(frozen_session(&self.state, &self.sessions));
         // A highlight is anchored to the screen it was made against, and new
-        // output is a new screen. The copy has already happened, so this
-        // costs nothing - it is exactly tmux's feel.
-        if self
-            .state
-            .selection
-            .as_ref()
-            .is_some_and(|selection| with_output.contains(&selection.session_id))
-        {
-            self.state.clear_selection();
-        }
-
+        // output is a new screen
+        self.state.expire_selection(&with_output);
         self.forward_host_passthrough();
         !with_output.is_empty()
     }
@@ -2699,6 +2664,31 @@ fn should_forward_mouse_to_pty(input_mode: InputMode, mouse_enabled: bool) -> bo
     input_mode == InputMode::Session && mouse_enabled
 }
 
+/// The one session, if any, whose PTY is not read this tick
+///
+/// Two reasons to hold a session still, and both are about the screen not
+/// moving under the user. A drag freezes its session for as long as the button
+/// is down, so the text cannot shift out from under the pointer; and a Codex
+/// session scrolled up freezes so the history stays put. Nothing is lost
+/// either way - output queues in the PTY and is read on the next tick.
+///
+/// The drag half is derived from the live selection rather than a flag of its
+/// own, which is what makes it impossible for a drag that ended abnormally to
+/// leave a session frozen for good.
+fn frozen_session(state: &AppState, sessions: &SessionManager) -> Option<SessionId> {
+    if let Some(session_id) = state.dragging_session() {
+        return Some(session_id);
+    }
+    if state.session_scroll_offset == 0 {
+        return None;
+    }
+    state.active_session.filter(|&session_id| {
+        sessions
+            .get(session_id)
+            .is_some_and(|session| session.info.session_type == SessionType::OpenAICodex)
+    })
+}
+
 fn mouse_debug_enabled_from_env() -> bool {
     std::env::var("PANOPTES_MOUSE_DEBUG").ok().is_some_and(|v| {
         matches!(
@@ -2869,5 +2859,90 @@ mod tests {
         assert!(should_forward_mouse_to_pty(InputMode::Session, true));
         assert!(!should_forward_mouse_to_pty(InputMode::Session, false));
         assert!(!should_forward_mouse_to_pty(InputMode::Normal, true));
+    }
+
+    /// A session manager backed by a temp store, so tests never touch the
+    /// real `~/.panoptes/sessions.json`
+    fn test_sessions() -> (SessionManager, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manager = SessionManager::with_store(
+            Config::default(),
+            crate::session::SessionStore::with_path(dir.path().join("sessions.json")),
+        );
+        (manager, dir)
+    }
+
+    fn dragging_at(session_id: SessionId, anchor: (usize, u16)) -> SessionSelection {
+        SessionSelection::started(session_id, anchor, (0, 0))
+    }
+
+    /// The whole point of the freeze: while the button is down, that session's
+    /// PTY is not read, so the text cannot move out from under the pointer
+    #[test]
+    fn test_a_drag_freezes_its_session_and_release_lets_it_run_again() {
+        let (mut sessions, _dir) = test_sessions();
+        let session_id = sessions
+            .insert_test_session("dragging", Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+        let mut state = AppState {
+            active_session: Some(session_id),
+            ..Default::default()
+        };
+
+        // Nothing selected: every session is read
+        assert_eq!(frozen_session(&state, &sessions), None);
+
+        state.selection = Some(dragging_at(session_id, (0, 0)));
+        assert_eq!(frozen_session(&state, &sessions), Some(session_id));
+
+        // Release ends the freeze, even though the highlight is still up
+        state.selection.as_mut().unwrap().dragging = false;
+        assert_eq!(frozen_session(&state, &sessions), None);
+    }
+
+    /// The freeze is derived from the live selection, never a flag of its own:
+    /// a drag that ends abnormally cannot leave a session frozen for good
+    #[test]
+    fn test_dropping_the_selection_thaws_the_session() {
+        let (mut sessions, _dir) = test_sessions();
+        let session_id = sessions
+            .insert_test_session("dragging", Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+        let mut state = AppState {
+            active_session: Some(session_id),
+            selection: Some(dragging_at(session_id, (2, 4))),
+            ..Default::default()
+        };
+        assert_eq!(frozen_session(&state, &sessions), Some(session_id));
+
+        state.clear_selection();
+        assert_eq!(frozen_session(&state, &sessions), None);
+    }
+
+    /// The pre-existing freeze - a Codex session scrolled up - still holds,
+    /// and still applies to Codex alone
+    #[test]
+    fn test_a_scrolled_codex_session_is_still_frozen() {
+        let (mut sessions, _dir) = test_sessions();
+        let shell_id = sessions
+            .insert_test_session("shell", Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+        let mut state = AppState {
+            active_session: Some(shell_id),
+            session_scroll_offset: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            frozen_session(&state, &sessions),
+            None,
+            "a non-Codex session scrolls through vterm scrollback and keeps reading"
+        );
+
+        sessions.get_mut(shell_id).unwrap().info.session_type = SessionType::OpenAICodex;
+        assert_eq!(frozen_session(&state, &sessions), Some(shell_id));
+
+        // Back at the live view, nothing is frozen
+        state.session_scroll_offset = 0;
+        assert_eq!(frozen_session(&state, &sessions), None);
     }
 }

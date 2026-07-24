@@ -42,6 +42,7 @@ PTY Output → Session buffer → TUI render
 - `app/nav.rs` - `Focus` / `Tab` / `ProjectsNav` / `SettingsNav`: which pane owns
   the screen and how far each one is drilled in
 - `app/background.rs` - Off-thread git jobs (fetch, worktree create/remove) with a cancellable loading overlay
+- `app/selection.rs` - Mouse text selection: normalization, click counting, word/line expansion (pure; routed from `app/mod.rs`, painted by `tui/views/session.rs`)
 - `agent/` - Agent adapters (Claude Code, Codex, Shell) with hook setup
 - `session/` - Session lifecycle, PTY management, terminal emulation
 - `session/state_machine.rs` - Pure agent-event state machine (hook event → state transition)
@@ -65,6 +66,7 @@ PTY Output → Session buffer → TUI render
 - `claude_config/` - Claude Code multi-account configuration
 - `codex_config/` - Codex CLI multi-account configuration (CODEX_HOME)
 - `config.rs` - Configuration (~/.panoptes/)
+- `clipboard.rs` - Clipboard writes (`pbcopy` and friends, OSC 52 fallback)
 
 ## Conventions
 
