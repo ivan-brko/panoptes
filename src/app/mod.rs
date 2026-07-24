@@ -1221,7 +1221,8 @@ impl App {
             return false;
         };
 
-        let before = self.state.session_scroll_offset;
+        let before_view = self.session_view_position(session_id);
+        let before_offset = self.state.session_scroll_offset;
         match edge {
             selection::Edge::Above => {
                 session_scroll::scroll_up_by(self, session_id, SELECTION_SCROLL_STEP)
@@ -1230,14 +1231,31 @@ impl App {
                 session_scroll::scroll_down_by(self, session_id, SELECTION_SCROLL_STEP)
             }
         };
-        // Held against the oldest or newest line there is: nothing moved, and
-        // repainting an unchanged screen sixty times a second would be worse
-        // than doing nothing
-        if self.state.session_scroll_offset == before {
+        // Held against the oldest or newest line there is. The requested
+        // offset is put back rather than left to creep away from the history
+        // that actually exists, and an unchanged screen is not repainted
+        // sixty times a second.
+        if self.session_view_position(session_id) == before_view {
+            self.state.session_scroll_offset = before_offset;
             return false;
         }
         self.sync_selection_after_scroll(session_id);
         true
+    }
+
+    /// Where a session's view sits in its own history
+    ///
+    /// The vterm's scrollback offset, plus the Codex fallback buffer's - the
+    /// pair that actually decides what is on screen, unlike the app-level
+    /// offset, which tracks what was *asked* for and can outrun the history
+    /// that exists.
+    fn session_view_position(&self, session_id: SessionId) -> (usize, usize) {
+        self.sessions.get(session_id).map_or((0, 0), |session| {
+            (
+                session.vterm.scrollback_offset(),
+                session.fallback_scroll_offset(),
+            )
+        })
     }
 
     /// Alternate scroll: wheel notches become arrow keys for an
