@@ -525,12 +525,7 @@ impl App {
 
         // PTY dimensions come from the full terminal, not from a pane: the
         // session view is still full-screen, so the split must not leak here.
-        let frame_config = FrameConfig::default();
-        let layout = FrameLayout::calculate(
-            ratatui::prelude::Rect::new(0, 0, size.width, size.height),
-            &frame_config,
-        );
-        let (rows, cols) = layout.pty_size();
+        let (rows, cols) = self.session_frame_layout()?.pty_size();
         self.sessions.resize_all(cols, rows);
         Ok(true)
     }
@@ -1084,13 +1079,21 @@ impl App {
     }
 
     fn session_content_area(&self) -> Result<ratatui::prelude::Rect> {
-        let terminal_size = self.tui.size()?;
-        let frame_config = FrameConfig::default();
-        let layout = FrameLayout::calculate(
-            ratatui::prelude::Rect::new(0, 0, terminal_size.width, terminal_size.height),
-            &frame_config,
-        );
-        Ok(layout.content)
+        Ok(self.session_frame_layout()?.content)
+    }
+
+    /// The frame layout the session view renders with, at the current size
+    ///
+    /// Everything that reasons about the session content area without a render
+    /// pass — PTY sizing, mouse coordinate translation — goes through here, so
+    /// it cannot drift from what is actually on screen.
+    fn session_frame_layout(&self) -> Result<FrameLayout> {
+        let size = self.tui.size()?;
+        let area = ratatui::prelude::Rect::new(0, 0, size.width, size.height);
+        Ok(FrameLayout::calculate(
+            area,
+            &FrameConfig::for_terminal(area),
+        ))
     }
 
     fn log_codex_mouse_scroll(
@@ -1437,13 +1440,7 @@ impl App {
     /// consistency with how the session view is rendered.
     pub(crate) fn resize_active_session_pty(&mut self) -> Result<()> {
         if let Some(session_id) = self.state.active_session {
-            let size = self.tui.size()?;
-            let frame_config = FrameConfig::default();
-            let layout = FrameLayout::calculate(
-                ratatui::prelude::Rect::new(0, 0, size.width, size.height),
-                &frame_config,
-            );
-            let (rows, cols) = layout.pty_size();
+            let (rows, cols) = self.session_frame_layout()?.pty_size();
 
             if let Some(session) = self.sessions.get_mut(session_id) {
                 session.resize(cols, rows)?;
@@ -1712,13 +1709,7 @@ impl App {
         let (claude_config_dir, codex_home) =
             self.resolve_agent_config_dirs(session_id, claude_config_id, codex_config_id);
 
-        let size = self.tui.size()?;
-        let frame_config = FrameConfig::default();
-        let layout = FrameLayout::calculate(
-            ratatui::prelude::Rect::new(0, 0, size.width, size.height),
-            &frame_config,
-        );
-        let (rows, cols) = layout.pty_size();
+        let (rows, cols) = self.session_frame_layout()?.pty_size();
 
         self.sessions.resume_session(
             session_id,
@@ -1749,13 +1740,7 @@ impl App {
         let (claude_config_dir, codex_home) =
             self.resolve_agent_config_dirs(session_id, claude_config_id, codex_config_id);
 
-        let size = self.tui.size()?;
-        let frame_config = FrameConfig::default();
-        let layout = FrameLayout::calculate(
-            ratatui::prelude::Rect::new(0, 0, size.width, size.height),
-            &frame_config,
-        );
-        let (rows, cols) = layout.pty_size();
+        let (rows, cols) = self.session_frame_layout()?.pty_size();
 
         match self.sessions.wake_session(
             session_id,
@@ -2548,11 +2533,13 @@ mod tests {
     #[test]
     fn test_pty_size_is_the_full_terminal_not_a_pane() {
         let terminal = ratatui::prelude::Rect::new(0, 0, 200, 50);
-        let (rows, cols) = FrameLayout::calculate(terminal, &FrameConfig::default()).pty_size();
+        let (rows, cols) =
+            FrameLayout::calculate(terminal, &FrameConfig::for_terminal(terminal)).pty_size();
 
-        // Header, footer and the frame border, and nothing pane-shaped
+        // Wordmark header (4 rows on a terminal this size), footer and the
+        // frame border, and nothing pane-shaped
         assert_eq!(cols, terminal.width - 2);
-        assert_eq!(rows, terminal.height - 3 - 3 - 2);
+        assert_eq!(rows, terminal.height - 4 - 3 - 2);
 
         // The widest pane at this terminal is far narrower than the PTY
         let widths = crate::tui::panes::pane_widths(terminal.width, 0);
