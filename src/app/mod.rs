@@ -7,11 +7,13 @@
 mod background;
 mod input_mode;
 mod nav;
+pub mod selection;
 mod state;
 
 // Re-exports from submodules
 pub use input_mode::InputMode;
 pub use nav::{Focus, ProjectsNav, SettingsNav, Tab};
+pub use selection::SessionSelection;
 pub use state::{
     cycle_next, cycle_prev, AppState, ClaudeSettingsCopyState, ClaudeSettingsMigrateState,
     FolderMoveTarget, LoadingOverlay, SessionDraft, WorktreeWizardState,
@@ -75,6 +77,11 @@ pub const MAX_SHORTCUT_NAME_LEN: usize = 256;
 pub const MAX_SHORTCUT_COMMAND_LEN: usize = 4096;
 /// Mouse-wheel line step used by local scroll handlers
 const MOUSE_SCROLL_STEP: usize = 3;
+/// Lines the view creeps per tick while a selection is dragged off the edge
+///
+/// One line at the event loop's ~60Hz tick, which is fast enough to cross a
+/// screen in under half a second and slow enough to stop where you meant to.
+const SELECTION_SCROLL_STEP: usize = 1;
 
 /// Main application struct
 pub struct App {
@@ -364,6 +371,9 @@ impl App {
                         // PTY resizing is the expensive half, and stays debounced
                         self.state.last_resize = Some(Instant::now());
                         self.state.pending_resize = true;
+                        // A reflowed screen is a different screen: the cells
+                        // the selection named are no longer the same text
+                        self.state.clear_selection();
                         self.state.needs_render = true;
                     }
                     Event::Mouse(mouse) => {
@@ -376,6 +386,13 @@ impl App {
                     }
                     Event::FocusLost => {
                         self.terminal_focused = false;
+                        // The release of a button pressed here will be
+                        // delivered somewhere else, so a drag that outlives
+                        // focus would freeze its session for good
+                        if self.state.dragging_session().is_some() {
+                            self.state.clear_selection();
+                            self.state.needs_render = true;
+                        }
                     }
                 }
             }
@@ -386,6 +403,7 @@ impl App {
             dirty |= self.tick_background_job();
             dirty |= self.tick_resize_debounce()?;
             dirty |= self.process_hook_events();
+            dirty |= self.tick_selection_autoscroll();
             dirty |= self.tick_output_polling();
             dirty |= self.tick_crash_detection();
             // Give Codex sessions a resumable pointer as soon as their rollout
@@ -533,20 +551,52 @@ impl App {
     /// Poll session outputs - true if any session has new output.
     ///
     /// Freezes active session PTY reads while the user is scrolled up so the
-    /// visible history doesn't shift under the cursor.
+    /// visible history doesn't shift under the cursor, and for the length of
+    /// a selection drag so the text cannot move out from under the pointer.
     fn tick_output_polling(&mut self) -> bool {
-        let frozen_session = if self.state.session_scroll_offset > 0 {
-            self.state.active_session.and_then(|session_id| {
-                self.sessions.get(session_id).and_then(|session| {
-                    (session.info.session_type == SessionType::OpenAICodex).then_some(session_id)
+        // A selection only ever belongs to the session on screen. Enforcing
+        // that here catches every way one can stop being on screen - closed,
+        // switched away from - without each of them having to remember.
+        if self
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(|selection| Some(selection.session_id) != self.state.active_session)
+        {
+            self.state.clear_selection();
+        }
+
+        // The drag freeze is read from the live selection rather than a flag
+        // of its own, so a drag that ends abnormally cannot leave a session
+        // frozen forever. Output is not lost, only queued in the PTY.
+        let frozen_session = self.state.dragging_session().or_else(|| {
+            if self.state.session_scroll_offset > 0 {
+                self.state.active_session.and_then(|session_id| {
+                    self.sessions.get(session_id).and_then(|session| {
+                        (session.info.session_type == SessionType::OpenAICodex)
+                            .then_some(session_id)
+                    })
                 })
-            })
-        } else {
-            None
-        };
-        let had_output = !self.sessions.poll_outputs_except(frozen_session).is_empty();
+            } else {
+                None
+            }
+        });
+        let with_output = self.sessions.poll_outputs_except(frozen_session);
+
+        // A highlight is anchored to the screen it was made against, and new
+        // output is a new screen. The copy has already happened, so this
+        // costs nothing - it is exactly tmux's feel.
+        if self
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(|selection| with_output.contains(&selection.session_id))
+        {
+            self.state.clear_selection();
+        }
+
         self.forward_host_passthrough();
-        had_output
+        !with_output.is_empty()
     }
 
     /// Forward sequences agents addressed to the real terminal (clipboard
@@ -694,6 +744,14 @@ impl App {
         let suspended = self
             .sessions
             .suspend_idle_sessions(self.config.suspend_after_secs, self.state.active_session);
+        if self
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(|selection| suspended.contains(&selection.session_id))
+        {
+            self.state.clear_selection();
+        }
         !suspended.is_empty()
     }
 
@@ -943,6 +1001,7 @@ impl App {
         let is_codex_session = session.info.session_type == SessionType::OpenAICodex;
 
         if is_codex_session && self.handle_mouse_wheel(session_id, mouse.kind, true) {
+            self.sync_selection_after_scroll(session_id);
             return Ok(true);
         }
 
@@ -955,10 +1014,265 @@ impl App {
         }
 
         if !is_codex_session && self.handle_mouse_wheel(session_id, mouse.kind, false) {
+            self.sync_selection_after_scroll(session_id);
             return Ok(true);
         }
 
-        Ok(false)
+        // Last, so a child that grabbed the mouse and the wheel both keep
+        // priority: what is left is a drag over a plain shell or Codex,
+        // which is ours to turn into a selection
+        self.handle_selection_mouse_event(session_id, mouse)
+    }
+
+    /// Left-button events over a session that does not own the mouse
+    ///
+    /// This is the tmux answer to a captured mouse: the terminal cannot
+    /// select for us while mouse reporting is on, so Panoptes tracks the drag
+    /// itself, paints the highlight in its own render pass, and lifts the
+    /// text out of the vterm on release.
+    fn handle_selection_mouse_event(
+        &mut self,
+        session_id: SessionId,
+        mouse: MouseEvent,
+    ) -> Result<bool> {
+        use crossterm::event::MouseButton;
+
+        // Outside session mode the mouse is the terminal's own again (capture
+        // is dropped on Esc), so there is nothing here to do
+        if self.state.input_mode != InputMode::Session {
+            return Ok(false);
+        }
+        let content = self.session_content_area()?;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.begin_selection(session_id, mouse, content)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                Ok(self.extend_selection(session_id, mouse, content))
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.finish_selection(session_id),
+            // Other buttons and bare motion have no part in selection
+            _ => Ok(false),
+        }
+    }
+
+    /// Start a selection, or complete one outright on a double/triple click
+    fn begin_selection(
+        &mut self,
+        session_id: SessionId,
+        mouse: MouseEvent,
+        content: ratatui::prelude::Rect,
+    ) -> Result<bool> {
+        // A press on the frame or the header is not a selection, but it does
+        // end whatever was on screen
+        if !selection::contains(content, mouse.row, mouse.column) {
+            let had_selection = self.state.selection.is_some();
+            self.state.clear_selection();
+            return Ok(had_selection);
+        }
+        // Codex's plain-text fallback history is not the vterm's screen, so
+        // its rows have no cells to select. (Since the vendored vt100 saves
+        // region-scrolled lines to real scrollback this path is all but dead,
+        // but selecting text that maps to nothing would be worse than not
+        // selecting at all.)
+        if self.showing_fallback_history(session_id) {
+            self.state.clear_selection();
+            return Ok(false);
+        }
+
+        let ((view_row, view_col), _) = selection::locate(content, mouse.row, mouse.column);
+        let clicks = self
+            .state
+            .session_click
+            .press(Instant::now(), (view_row, view_col));
+
+        let Some(session) = self.sessions.get(session_id) else {
+            return Ok(false);
+        };
+        let vterm = &session.vterm;
+        let cell = (
+            selection::absolute_row(vterm.viewport_top_row(), view_row),
+            view_col,
+        );
+        let (rows, cols) = vterm.size();
+        let last_row = vterm.history_rows() + rows.saturating_sub(1);
+
+        let selection = match clicks {
+            // A double click takes the word, a triple the whole logical line.
+            // Both are complete the moment the button goes down, so they copy
+            // immediately and never enter the dragging state.
+            2 => {
+                let (start, end) = selection::word_at(cell, &|row| vterm.row_cells(row), &|row| {
+                    vterm.row_wrapped(row)
+                });
+                SessionSelection::completed(session_id, start, end, (view_row, view_col))
+            }
+            3 => {
+                let (start, end) = selection::logical_line_at(
+                    cell,
+                    &|row| vterm.row_wrapped(row),
+                    cols as u16,
+                    last_row,
+                );
+                SessionSelection::completed(session_id, start, end, (view_row, view_col))
+            }
+            _ => SessionSelection::started(session_id, cell, (view_row, view_col)),
+        };
+
+        let click_complete = !selection.dragging;
+        self.state.selection = Some(selection);
+        if click_complete {
+            self.copy_selection(session_id);
+        }
+        Ok(true)
+    }
+
+    /// Move the head of an in-progress drag to where the pointer is now
+    fn extend_selection(
+        &mut self,
+        session_id: SessionId,
+        mouse: MouseEvent,
+        content: ratatui::prelude::Rect,
+    ) -> bool {
+        let ((view_row, view_col), edge) = selection::locate(content, mouse.row, mouse.column);
+        let Some(viewport_top) = self
+            .sessions
+            .get(session_id)
+            .map(|session| session.vterm.viewport_top_row())
+        else {
+            return false;
+        };
+
+        match self.state.selection.as_mut() {
+            Some(sel) if sel.session_id == session_id && sel.dragging => {
+                sel.pointer = (view_row, view_col);
+                sel.edge = edge;
+                sel.head = (selection::absolute_row(viewport_top, view_row), view_col);
+                true
+            }
+            // A drag with nothing selected is not ours (the press landed on
+            // the chrome, or the selection was already cancelled)
+            _ => false,
+        }
+    }
+
+    /// End a drag: copy what it covers, and let the session run again
+    fn finish_selection(&mut self, session_id: SessionId) -> Result<bool> {
+        let copy = match self.state.selection.as_mut() {
+            Some(sel) if sel.session_id == session_id && sel.dragging => {
+                sel.dragging = false;
+                sel.edge = None;
+                // A press and release on one cell is a plain click; clobbering
+                // the user's clipboard with a stray one would be its own bug
+                !sel.is_single_cell()
+            }
+            _ => return Ok(false),
+        };
+        if copy {
+            self.copy_selection(session_id);
+        }
+        Ok(true)
+    }
+
+    /// Put the current selection's text on the clipboard
+    ///
+    /// A selection covering nothing but blanks extracts to an empty string,
+    /// which is left alone for the same reason a plain click is.
+    fn copy_selection(&mut self, session_id: SessionId) {
+        let Some(selection) = self.state.selection_for(session_id) else {
+            return;
+        };
+        let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
+        let Some(session) = self.sessions.get(session_id) else {
+            return;
+        };
+
+        let text = session
+            .vterm
+            .contents_between(start_row, start_col, end_row, end_col);
+        if text.is_empty() {
+            return;
+        }
+        if let Err(e) = crate::clipboard::copy(&text) {
+            tracing::warn!(error = %e, "Failed to copy selection to the clipboard");
+            self.state.error_message = Some(format!("Copy failed: {}", e));
+        }
+    }
+
+    /// Keep the selection true after the view scrolled under it
+    ///
+    /// The anchor is in absolute rows and cannot move, but the head follows
+    /// the pointer's place on *screen*: that is what turns a wheel notch or
+    /// an edge-held drag into a longer selection rather than a slipped one.
+    /// A finished highlight is dropped instead - it belongs to the screen it
+    /// was made against.
+    fn sync_selection_after_scroll(&mut self, session_id: SessionId) {
+        let Some(viewport_top) = self
+            .sessions
+            .get(session_id)
+            .map(|session| session.vterm.viewport_top_row())
+        else {
+            self.state.clear_selection();
+            return;
+        };
+
+        match self.state.selection.as_mut() {
+            Some(sel) if sel.session_id == session_id && sel.dragging => {
+                sel.head = (
+                    selection::absolute_row(viewport_top, sel.pointer.0),
+                    sel.pointer.1,
+                );
+            }
+            Some(_) => self.state.clear_selection(),
+            None => {}
+        }
+    }
+
+    /// Whether the session view is showing Codex's plain-text fallback
+    /// history rather than the vterm's own screen
+    fn showing_fallback_history(&self, session_id: SessionId) -> bool {
+        self.state.session_scroll_offset > 0
+            && self.sessions.get(session_id).is_some_and(|session| {
+                session.info.session_type == SessionType::OpenAICodex
+                    && session.vterm.scrollback_offset() == 0
+            })
+    }
+
+    /// Drive a drag that is being held past the top or bottom of the screen
+    ///
+    /// Drag events stop arriving the moment the pointer stops moving, so a
+    /// selection dragged off the edge has to be extended from the event loop
+    /// instead - which is what makes selections longer than a screenful
+    /// possible at all. Returns whether the view actually moved.
+    fn tick_selection_autoscroll(&mut self) -> bool {
+        use crate::input::session_scroll;
+
+        let Some((session_id, edge)) = self.state.selection.as_ref().and_then(|sel| {
+            sel.edge
+                .filter(|_| sel.dragging)
+                .map(|edge| (sel.session_id, edge))
+        }) else {
+            return false;
+        };
+
+        let before = self.state.session_scroll_offset;
+        match edge {
+            selection::Edge::Above => {
+                session_scroll::scroll_up_by(self, session_id, SELECTION_SCROLL_STEP)
+            }
+            selection::Edge::Below => {
+                session_scroll::scroll_down_by(self, session_id, SELECTION_SCROLL_STEP)
+            }
+        };
+        // Held against the oldest or newest line there is: nothing moved, and
+        // repainting an unchanged screen sixty times a second would be worse
+        // than doing nothing
+        if self.state.session_scroll_offset == before {
+            return false;
+        }
+        self.sync_selection_after_scroll(session_id);
+        true
     }
 
     /// Alternate scroll: wheel notches become arrow keys for an

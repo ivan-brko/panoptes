@@ -55,6 +55,7 @@ pub struct ClaudeSettingsMigrateState {
 
 use super::input_mode::InputMode;
 use super::nav::{Focus, ProjectsNav, SettingsNav, Tab};
+use super::selection::{ClickTracker, SessionSelection};
 
 /// Advance a wrap-around list selection, tolerating stale indices
 ///
@@ -375,6 +376,15 @@ pub struct AppState {
     /// Scroll offset for session view (0 = live view, >0 = scrolled back)
     pub session_scroll_offset: usize,
 
+    /// Mouse text selection in the session view, if there is one
+    ///
+    /// Only ever belongs to the active session, and only ever outlives the
+    /// screen it was made against by a moment: the copy happens on release,
+    /// so the highlight is free to evaporate on the next output.
+    pub selection: Option<SessionSelection>,
+    /// Counts repeat clicks, for double-click word and triple-click line
+    pub session_click: ClickTracker,
+
     /// Worktree creation wizard state (grouped together)
     pub worktree_wizard: WorktreeWizardState,
 
@@ -537,6 +547,9 @@ impl AppState {
         self.active_session = Some(session_id);
         // Reset scroll offset when entering session view
         self.session_scroll_offset = 0;
+        // A selection belongs to the screen it was made on, and this is a
+        // different screen
+        self.clear_selection();
         // Auto-activate session mode so keys go directly to PTY
         self.input_mode = InputMode::Session;
     }
@@ -558,6 +571,34 @@ impl AppState {
         self.focus = restored;
         self.active_session = None;
         self.input_mode = InputMode::Normal;
+        self.clear_selection();
+    }
+
+    /// Drop the mouse selection, highlight and all
+    ///
+    /// Deliberately ephemeral: the copy already happened on release, so an
+    /// evaporating highlight loses nothing and no selection ever has to
+    /// survive the content moving under it. Called on new output, a new
+    /// click, a wheel notch, a resize, a session switch, and on the way out
+    /// of the session view.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.session_click.reset();
+    }
+
+    /// The session whose PTY reads an in-progress drag is freezing, if any
+    pub fn dragging_session(&self) -> Option<SessionId> {
+        self.selection
+            .as_ref()
+            .filter(|selection| selection.dragging)
+            .map(|selection| selection.session_id)
+    }
+
+    /// The selection to draw for `session_id`, if the current one is its own
+    pub fn selection_for(&self, session_id: SessionId) -> Option<&SessionSelection> {
+        self.selection
+            .as_ref()
+            .filter(|selection| selection.session_id == session_id)
     }
 }
 

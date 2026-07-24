@@ -284,6 +284,63 @@ impl VirtualTerminal {
     pub fn mouse_protocol_mode(&self) -> vt100::MouseProtocolMode {
         self.parser.screen().mouse_protocol_mode()
     }
+
+    /// How many rows of history the terminal is holding right now
+    ///
+    /// The origin for the absolute row coordinates the other methods here
+    /// take: visible row `r` is absolute row `history_rows() - offset + r`,
+    /// where `offset` is [`Self::scrollback_offset`]. Anchoring a selection
+    /// in absolute rows is what lets it survive the view scrolling under it.
+    pub fn history_rows(&self) -> usize {
+        self.parser.screen().history_rows()
+    }
+
+    /// The absolute row of the top of the current viewport
+    ///
+    /// Convenience for the conversion above; `None` would mean a scrollback
+    /// offset deeper than the history, which the vterm clamps away.
+    pub fn viewport_top_row(&self) -> usize {
+        self.history_rows().saturating_sub(self.scrollback_offset())
+    }
+
+    /// The text selected between two cells, both ends inclusive
+    ///
+    /// Rows are absolute (see [`Self::history_rows`]), so a selection that
+    /// spans more than the viewport reads correctly. `end_col` is inclusive
+    /// here, unlike vt100's exclusive `contents_between`: a selection names
+    /// the last cell the pointer covered, not the one after it.
+    ///
+    /// Soft-wrapped rows are joined into one line, wide characters are not
+    /// split, and trailing blanks are dropped - all of which vt100 already
+    /// does for us.
+    pub fn contents_between(
+        &self,
+        start_row: usize,
+        start_col: u16,
+        end_row: usize,
+        end_col: u16,
+    ) -> String {
+        self.parser.screen().contents_between_absolute(
+            start_row,
+            start_col,
+            end_row,
+            end_col.saturating_add(1),
+        )
+    }
+
+    /// Whether an absolute row soft-wraps into the next one
+    ///
+    /// `true` means this row *continues* into the row below, which is how a
+    /// logical line is walked for word and line selection.
+    pub fn row_wrapped(&self, row: usize) -> bool {
+        self.parser.screen().row_wrapped_absolute(row)
+    }
+
+    /// The cells of an absolute row: text per column, `None` for the second
+    /// half of a wide character
+    pub fn row_cells(&self, row: usize) -> Vec<Option<String>> {
+        self.parser.screen().row_cells_absolute(row)
+    }
 }
 
 #[cfg(test)]
@@ -485,6 +542,120 @@ mod tests {
         assert!(!Rc::ptr_eq(&before, &after));
         // Only 10 rows exist after the resize
         assert_eq!(after.len(), 10);
+    }
+
+    // contents_between: the clipboard extraction behind drag-to-copy
+
+    /// The release cell is part of the selection, so the wrapper's `end_col`
+    /// is inclusive where vt100's own is exclusive
+    #[test]
+    fn test_contents_between_includes_the_cell_the_drag_ended_on() {
+        let mut vt = VirtualTerminal::new(24, 80);
+        vt.process(b"FIDELITY-42 and more");
+
+        let top = vt.viewport_top_row();
+        assert_eq!(vt.contents_between(top, 0, top, 10), "FIDELITY-42");
+        // A single cell is a one-character selection, not an empty one
+        assert_eq!(vt.contents_between(top, 0, top, 0), "F");
+    }
+
+    /// A soft-wrapped logical line is one line in the clipboard: the wrap is
+    /// the terminal's doing, not the text's
+    #[test]
+    fn test_contents_between_joins_a_soft_wrapped_line() {
+        let mut vt = VirtualTerminal::new(6, 10);
+        vt.process(b"abcdefghijKLMNO\r\nnext");
+
+        let top = vt.viewport_top_row();
+        assert_eq!(vt.contents_between(top, 0, top + 1, 4), "abcdefghijKLMNO");
+        // A hard newline is preserved
+        assert_eq!(
+            vt.contents_between(top, 0, top + 2, 3),
+            "abcdefghijKLMNO\nnext"
+        );
+    }
+
+    /// A wide character occupies two cells; releasing on either must copy the
+    /// whole character rather than half of it
+    #[test]
+    fn test_contents_between_does_not_split_wide_characters() {
+        let mut vt = VirtualTerminal::new(6, 20);
+        vt.process("日本語".as_bytes());
+
+        let top = vt.viewport_top_row();
+        assert_eq!(vt.contents_between(top, 0, top, 1), "日");
+        assert_eq!(vt.contents_between(top, 0, top, 5), "日本語");
+        assert_eq!(vt.contents_between(top, 2, top, 3), "本");
+    }
+
+    #[test]
+    fn test_contents_between_trims_trailing_blanks() {
+        let mut vt = VirtualTerminal::new(6, 20);
+        vt.process(b"hi\r\nthere");
+
+        let top = vt.viewport_top_row();
+        // The selection runs to the end of a mostly empty row: the blanks the
+        // user dragged over are not text
+        assert_eq!(vt.contents_between(top, 0, top + 1, 19), "hi\nthere");
+    }
+
+    /// Scrolled-back rows keep their absolute addresses, which is what makes
+    /// a selection survive the view moving under it
+    #[test]
+    fn test_contents_between_reads_scrollback_by_absolute_row() {
+        let mut vt = VirtualTerminal::with_scrollback(4, 20, 100);
+        for i in 0..10 {
+            vt.process(format!("line {}\r\n", i).as_bytes());
+        }
+
+        // Absolute row 4 is "line 4" whether or not the view is scrolled
+        assert_eq!(vt.contents_between(4, 0, 4, 5), "line 4");
+        vt.scroll_up(3);
+        assert_eq!(vt.contents_between(4, 0, 4, 5), "line 4");
+        // And a selection made while scrolled up extracts what is on screen
+        let top = vt.viewport_top_row();
+        assert_eq!(vt.contents_between(top, 0, top, 5), "line 4");
+
+        // A range taller than the viewport still resolves - the case that
+        // only exists because the drag scrolled the view along with it
+        assert_eq!(
+            vt.contents_between(0, 0, 5, 5),
+            "line 0\nline 1\nline 2\nline 3\nline 4\nline 5"
+        );
+    }
+
+    /// Backwards ranges never reach the wrapper (the selection is normalized
+    /// first), but must not panic or invent text if one ever does
+    #[test]
+    fn test_contents_between_rejects_a_backwards_range() {
+        let mut vt = VirtualTerminal::new(6, 20);
+        vt.process(b"hello");
+        let top = vt.viewport_top_row();
+
+        assert_eq!(vt.contents_between(top + 1, 0, top, 0), "");
+        assert_eq!(vt.contents_between(1000, 0, 1001, 5), "");
+    }
+
+    #[test]
+    fn test_row_cells_and_wrapping_report_the_row_shape() {
+        let mut vt = VirtualTerminal::new(4, 6);
+        vt.process("ab日x\r\n".as_bytes());
+        vt.process(b"cdefghIJ");
+
+        let top = vt.viewport_top_row();
+        let cells = vt.row_cells(top);
+        assert_eq!(cells.len(), 6);
+        assert_eq!(cells[0].as_deref(), Some("a"));
+        assert_eq!(cells[2].as_deref(), Some("\u{65e5}"));
+        // The wide character's second cell is not a character of its own
+        assert_eq!(cells[3], None);
+        assert_eq!(cells[4].as_deref(), Some("x"));
+
+        assert!(!vt.row_wrapped(top), "a hard newline does not wrap");
+        assert!(
+            vt.row_wrapped(top + 1),
+            "a row filled to the edge continues into the next"
+        );
     }
 
     #[test]

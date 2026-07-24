@@ -100,6 +100,14 @@ pub struct Theme {
     pub bg_base: Color,
     /// A surface one step above the base - the selected row's background
     pub bg_surface: Color,
+    /// Background of mouse-selected terminal text
+    pub text_selection_bg: Color,
+    /// Foreground of mouse-selected terminal text
+    ///
+    /// Selection replaces the text's own colours rather than tinting them:
+    /// agent output is already every colour there is, and a highlight that
+    /// only tinted would be invisible over half of it.
+    pub text_selection_fg: Color,
 
     // === Input Modes ===
     /// Color for input mode prompts
@@ -202,6 +210,11 @@ impl Theme {
             // Backgrounds: the user's terminal shows through in this tier
             bg_base: Color::Reset,
             bg_surface: Color::Reset,
+            // The one place this tier cannot leave the background to the
+            // terminal: a selection has to be visible over arbitrary agent
+            // output, so it takes a colour of its own
+            text_selection_bg: Color::Blue,
+            text_selection_fg: Color::White,
 
             // Input modes - using Magenta to avoid conflict with Yellow (thinking/idle)
             input_prompt: Color::Magenta,
@@ -246,6 +259,10 @@ impl Theme {
             text_faint: Color::Indexed(238),
             border_dim: Color::Indexed(238),
             bg_surface: Color::Indexed(236),
+            // A muted slate rather than the baseline's full blue: it has to
+            // sit under a whole screen of text without shouting
+            text_selection_bg: Color::Indexed(24),
+            text_selection_fg: Color::Indexed(255),
             // Off the text ramp: suspended is a state, not structure, and
             // must not be caught by the unfocused-pane dimmer's ramp check
             state_suspended: Color::Indexed(245),
@@ -263,6 +280,9 @@ impl Theme {
             text_faint: Color::Rgb(0x4e, 0x4e, 0x4e),
             border_dim: Color::Rgb(0x3a, 0x3f, 0x44),
             bg_surface: Color::Rgb(0x2c, 0x31, 0x36),
+            // See `ansi256`; the same slate, tuned
+            text_selection_bg: Color::Rgb(0x2d, 0x4f, 0x6d),
+            text_selection_fg: Color::Rgb(0xe6, 0xe6, 0xe6),
             // Off the text ramp; see `ansi256`
             state_suspended: Color::Rgb(0x87, 0x87, 0x87),
             ..Self::ansi16()
@@ -332,6 +352,13 @@ impl Theme {
     /// Style for warning banners
     pub fn warning_banner_style(&self) -> Style {
         Style::default().fg(self.warning_fg).bg(self.warning_bg)
+    }
+
+    /// Style for mouse-selected terminal text
+    pub fn text_selection_style(&self) -> Style {
+        Style::default()
+            .fg(self.text_selection_fg)
+            .bg(self.text_selection_bg)
     }
 
     /// Style for attention badge based on state

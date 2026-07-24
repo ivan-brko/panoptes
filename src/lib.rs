@@ -7,6 +7,7 @@ pub mod agent_profiles;
 pub mod app;
 pub mod claude_config;
 pub mod claude_json;
+pub mod clipboard;
 pub mod codex_config;
 pub mod config;
 pub mod git;

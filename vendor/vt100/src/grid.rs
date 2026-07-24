@@ -147,6 +147,21 @@ impl Grid {
         self.rows.iter()
     }
 
+    // PANOPTES PATCH: every row the grid holds, oldest scrollback first and
+    // the live screen last, so a row can be addressed by an index that does
+    // not move when the scrollback offset does. Selections that outgrow the
+    // viewport are anchored in these coordinates.
+    pub fn all_rows(&self) -> impl Iterator<Item = &crate::row::Row> {
+        self.scrollback.iter().chain(self.rows.iter())
+    }
+
+    // PANOPTES PATCH: how many rows of history exist right now, which is
+    // where `all_rows` crosses from scrollback into the live screen. Distinct
+    // from `scrollback_len`, which is the configured capacity.
+    pub fn history_rows(&self) -> usize {
+        self.scrollback.len()
+    }
+
     pub fn drawing_rows_mut(
         &mut self,
     ) -> impl Iterator<Item = &mut crate::row::Row> {
