@@ -8,8 +8,8 @@ pub mod tree;
 
 pub use store::ProjectStore;
 pub use tree::{
-    all_folder_paths, parent_row_index, row_at, row_count, row_index_of_folder,
-    row_index_of_project, visible_rows, FolderRow, ProjectRow, RowRef, TreeRow,
+    all_folder_paths, row_at, row_count, row_index_of_folder, row_index_of_project, visible_rows,
+    FolderRow, ProjectRow, RowRef, TreeRow,
 };
 
 use anyhow::{bail, Result};

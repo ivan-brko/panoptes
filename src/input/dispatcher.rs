@@ -152,13 +152,16 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
     }
 }
 
-/// Whether the global keys (`Tab`, `q`, `?`, `Space`) apply in this mode
+/// Whether the global keys (`Tab`, `←`/`→`, `q`, `?`, `Space`) apply in this mode
 ///
 /// `Tab` is the load-bearing one: it switches panes *only* in normal mode,
 /// which means every other input mode owns it completely - path autocomplete
 /// (`text_input`), config-path autocomplete (`agent_configs`), and Yes/No
 /// toggling in the Claude-settings dialogs all keep it. One rule, and it
 /// covers every existing consumer.
+///
+/// The same rule is what lets `←`/`→` be global: dialogs keep them for Yes/No
+/// and Session mode forwards them to the agent, because neither is normal mode.
 fn globals_apply(mode: InputMode) -> bool {
     mode == InputMode::Normal
 }
@@ -170,7 +173,7 @@ enum GlobalIntent {
     /// Panoptes no longer asks the terminal for release events, but a
     /// terminal may report them unasked
     Ignore,
-    /// Tab / Shift+Tab: move pane focus
+    /// Tab / Shift+Tab, or → / ←: move pane focus
     CyclePane { forward: bool },
     /// `?`: open the help overlay
     ShowHelp,
@@ -196,6 +199,10 @@ fn global_intent(key: &KeyEvent) -> GlobalIntent {
         KeyCode::Tab | KeyCode::BackTab => GlobalIntent::CyclePane {
             forward: key.code == KeyCode::Tab && !key.modifiers.contains(KeyModifiers::SHIFT),
         },
+        // Unconditional, matching the panes' left-to-right order: no pane
+        // claims the horizontal arrows any more, so there is no guard here
+        KeyCode::Right => GlobalIntent::CyclePane { forward: true },
+        KeyCode::Left => GlobalIntent::CyclePane { forward: false },
         KeyCode::Char('?') => GlobalIntent::ShowHelp,
         KeyCode::Char('q') => GlobalIntent::ConfirmQuit,
         KeyCode::Char(' ') => GlobalIntent::JumpToAttention,
@@ -209,7 +216,11 @@ fn global_intent(key: &KeyEvent) -> GlobalIntent {
 fn handle_global_normal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     match global_intent(&key) {
         GlobalIntent::CyclePane { forward } => {
-            // Cycling only makes sense while the panes are what is on screen
+            // Cycling only makes sense while the panes are what is on screen.
+            // In the full-terminal session view `cycle_pane` returns false and
+            // the key is swallowed - deliberate: that view scrolls with
+            // ↑↓/PgUp/PgDn/Home/End and has nothing for ←/→ to do. In session
+            // *mode* this never runs, so the arrows still reach the agent.
             if app.state.cycle_pane(forward) {
                 app.sync_pane_focus();
             }
@@ -361,13 +372,51 @@ mod tests {
     }
 
     /// The global keys, one event each, as iTerm2/kitty/Ghostty would send them
-    const GLOBAL_KEYS: [(KeyCode, KeyModifiers); 5] = [
+    const GLOBAL_KEYS: [(KeyCode, KeyModifiers); 7] = [
         (KeyCode::Tab, KeyModifiers::NONE),
         (KeyCode::Tab, KeyModifiers::SHIFT),
         (KeyCode::BackTab, KeyModifiers::SHIFT),
+        (KeyCode::Right, KeyModifiers::NONE),
+        (KeyCode::Left, KeyModifiers::NONE),
         (KeyCode::Char('?'), KeyModifiers::NONE),
         (KeyCode::Char('q'), KeyModifiers::NONE),
     ];
+
+    /// Every pane state a user can be sitting in: pane 1's four drill-down
+    /// levels, pane 2, and pane 3's six sections
+    fn every_pane_state() -> Vec<AppState> {
+        let project_id = Uuid::new_v4();
+        let branch_id = Uuid::new_v4();
+
+        let mut states = Vec::new();
+        for nav in [
+            ProjectsNav::Overview,
+            ProjectsNav::Project(project_id),
+            ProjectsNav::Branch(project_id, branch_id),
+            ProjectsNav::ProjectSettings(project_id),
+        ] {
+            let mut state = state_at(Focus::Panes(Tab::Projects), InputMode::Normal);
+            state.projects_nav = nav;
+            states.push(state);
+        }
+
+        states.push(state_at(Focus::Panes(Tab::Sessions), InputMode::Normal));
+
+        for nav in [
+            SettingsNav::Sections,
+            SettingsNav::ClaudeConfigs,
+            SettingsNav::CodexConfigs,
+            SettingsNav::Shortcuts,
+            SettingsNav::Notifications,
+            SettingsNav::About,
+        ] {
+            let mut state = state_at(Focus::Panes(Tab::Settings), InputMode::Normal);
+            state.settings_nav = nav;
+            states.push(state);
+        }
+
+        states
+    }
 
     #[test]
     fn test_a_release_is_a_noop_for_every_global_key() {
@@ -388,16 +437,18 @@ mod tests {
     }
 
     /// Auto-repeat arrives as `Repeat` under the kitty protocol; a held Tab
-    /// must keep cycling
+    /// or a held arrow must keep cycling
     #[test]
     fn test_a_repeat_acts_like_a_press() {
-        for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
-            let event = key(KeyCode::Tab, KeyModifiers::NONE, kind);
-            assert_eq!(
-                global_intent(&event),
-                GlobalIntent::CyclePane { forward: true },
-                "for {kind:?}"
-            );
+        for code in [KeyCode::Tab, KeyCode::Right] {
+            for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+                let event = key(code, KeyModifiers::NONE, kind);
+                assert_eq!(
+                    global_intent(&event),
+                    GlobalIntent::CyclePane { forward: true },
+                    "{code:?} for {kind:?}"
+                );
+            }
         }
     }
 
@@ -425,9 +476,121 @@ mod tests {
 
     #[test]
     fn test_non_global_keys_fall_through_to_the_mode_handler() {
-        for code in [KeyCode::Char('j'), KeyCode::Esc, KeyCode::Down] {
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Esc,
+            KeyCode::Down,
+            KeyCode::Up,
+            // The one action key: no pane could act on a selection if the
+            // dispatcher took Enter before the pane ever saw it
+            KeyCode::Enter,
+        ] {
             let event = key(code, KeyModifiers::NONE, KeyEventKind::Press);
             assert_eq!(global_intent(&event), GlobalIntent::NotGlobal, "{code:?}");
+        }
+    }
+
+    /// `→` is `Tab` and `←` is `Shift+Tab` - the same intent, so the same
+    /// `cycle_pane` argument, with no guard on where the user is
+    #[test]
+    fn test_the_horizontal_arrows_are_exactly_tab_and_shift_tab() {
+        let press = |code| key(code, KeyModifiers::NONE, KeyEventKind::Press);
+
+        assert_eq!(
+            global_intent(&press(KeyCode::Right)),
+            global_intent(&press(KeyCode::Tab)),
+        );
+        assert_eq!(
+            global_intent(&press(KeyCode::Left)),
+            global_intent(&press(KeyCode::BackTab)),
+        );
+        assert_eq!(
+            global_intent(&press(KeyCode::Right)),
+            GlobalIntent::CyclePane { forward: true },
+        );
+        assert_eq!(
+            global_intent(&press(KeyCode::Left)),
+            GlobalIntent::CyclePane { forward: false },
+        );
+    }
+
+    /// The arrows became global by first being freed everywhere, so they must
+    /// cycle from every pane state - Projects/Overview and
+    /// Settings/Notifications are the two that used to claim them
+    #[test]
+    fn test_arrows_cycle_from_every_pane_state() {
+        for mut state in every_pane_state() {
+            let tab = state.focus.tab().expect("a pane state");
+            let nav = (state.projects_nav, state.settings_nav);
+
+            assert!(state.cycle_pane(true), "→ from {tab:?}/{nav:?}");
+            assert_eq!(
+                state.focus,
+                Focus::Panes(tab.next()),
+                "→ from {tab:?}/{nav:?}"
+            );
+
+            // And straight back, so wrapping is covered in both directions
+            assert!(state.cycle_pane(false), "← from {tab:?}/{nav:?}");
+            assert_eq!(state.focus, Focus::Panes(tab), "← from {tab:?}/{nav:?}");
+
+            assert!(state.cycle_pane(false), "← from {tab:?}/{nav:?}");
+            assert_eq!(
+                state.focus,
+                Focus::Panes(tab.prev()),
+                "← from {tab:?}/{nav:?}"
+            );
+        }
+    }
+
+    /// Three panes, so three presses return to where you started
+    #[test]
+    fn test_arrows_wrap_all_the_way_round() {
+        for forward in [true, false] {
+            let mut state = state_at(Focus::Panes(Tab::Projects), InputMode::Normal);
+            for _ in 0..Tab::ALL.len() {
+                assert!(state.cycle_pane(forward));
+            }
+            assert_eq!(
+                state.focus,
+                Focus::Panes(Tab::Projects),
+                "forward={forward}"
+            );
+        }
+    }
+
+    /// The session view fills the terminal, so there is no pane to cycle to.
+    /// The key is still consumed rather than falling through - deliberate:
+    /// that view scrolls vertically and has nothing for `←`/`→` to do.
+    #[test]
+    fn test_an_arrow_is_swallowed_in_the_session_view() {
+        for forward in [true, false] {
+            let mut state = state_at(Focus::Session, InputMode::Normal);
+            assert!(!state.cycle_pane(forward));
+            assert_eq!(state.focus, Focus::Session);
+        }
+    }
+
+    /// Session *mode* is not normal mode, so the globals never run and the
+    /// arrows reach the agent
+    #[test]
+    fn test_globals_do_not_apply_in_session_mode() {
+        assert!(!globals_apply(InputMode::Session));
+        assert!(globals_apply(InputMode::Normal));
+    }
+
+    /// Dialogs use `←`/`→` for Yes/No, and every one of them is a non-normal
+    /// mode, so the global arrows cannot reach them
+    #[test]
+    fn test_dialog_modes_keep_the_arrows() {
+        for mode in [
+            InputMode::ConfirmingQuit,
+            InputMode::ConfirmingSessionDelete,
+            InputMode::ConfirmingProjectDelete,
+            InputMode::ConfirmingBranchDelete,
+            InputMode::ConfirmingFolderRemove,
+        ] {
+            assert!(!globals_apply(mode), "{mode:?}");
         }
     }
 

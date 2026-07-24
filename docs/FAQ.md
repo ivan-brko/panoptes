@@ -264,7 +264,8 @@ The prompts are optional—you can decline each time. There's no global setting 
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Switch pane (Projects → Sessions → Settings, wrapping) |
+| `→` / `←` | Switch pane (Projects → Sessions → Settings, wrapping) |
+| `Tab` / `Shift+Tab` | Same thing — switch to the next / previous pane |
 | `Enter` | Open / Enter session mode |
 | `Esc` | Back one level; at a pane's root, back out to the Projects pane. Never quits |
 | `q` | Quit (with confirmation) |

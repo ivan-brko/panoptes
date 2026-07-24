@@ -112,7 +112,7 @@ fn global_section() -> Vec<Line<'static>> {
     vec![
         empty_line(),
         section_header("Global"),
-        shortcut_line("Tab / ⇧Tab", "Switch pane (wraps)"),
+        shortcut_line("→ ← Tab ⇧Tab", "Switch pane (wraps)"),
         shortcut_line("Esc", "Back one level, then out to Projects"),
         shortcut_line("q", "Quit (asks to confirm)"),
         shortcut_line("Space", "Jump to next session needing attention"),
@@ -137,7 +137,6 @@ fn projects_shortcuts() -> Vec<Line<'static>> {
         vec![
             shortcut_line("↑ / ↓", "Move through the tree"),
             shortcut_line("Enter", "Open project, or expand/collapse folder"),
-            shortcut_line("→ / ←", "Expand folder / collapse or go to parent"),
             shortcut_line("n", "Add a project"),
             shortcut_line("d", "Delete project, or ungroup folder"),
             shortcut_line("m", "Move project or folder into a folder"),
@@ -239,8 +238,10 @@ fn settings_notifications_shortcuts() -> Vec<Line<'static>> {
         "Settings - Notifications",
         vec![
             shortcut_line("↑ / ↓", "Move through the rows"),
-            shortcut_line("Space", "Toggle the selected option"),
-            shortcut_line("← / →", "Change how you are notified"),
+            shortcut_line(
+                "Space / Enter",
+                "Toggle the row, or change how you are notified",
+            ),
             shortcut_line("Esc", "Back to the sections list"),
         ],
     )

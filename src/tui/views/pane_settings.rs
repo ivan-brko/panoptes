@@ -61,10 +61,10 @@ pub fn settings_description(state: &AppState, config: &Config) -> String {
 fn notification_description(state: &AppState, config: &Config) -> String {
     match state.notifications_index {
         0 => format!(
-            "←/→ to change · currently {}",
+            "Space/Enter to change · currently {}",
             method_label(config.notification_method)
         ),
-        1..=5 => "Space to toggle · takes effect on the next event".to_string(),
+        1..=5 => "Space/Enter to toggle · takes effect on the next event".to_string(),
         _ => String::new(),
     }
 }
@@ -414,9 +414,14 @@ mod tests {
 
         state.settings_nav = SettingsNav::Notifications;
         state.notifications_index = 0;
-        assert!(settings_description(&state, &config).contains("Bell"));
+        let method_row = settings_description(&state, &config);
+        assert!(method_row.contains("Bell"), "{method_row}");
+        // The description names the key that actually works here: the arrows
+        // cycle panes now, so advertising them would send the user away
+        assert!(method_row.contains("Space/Enter to change"), "{method_row}");
+
         state.notifications_index = 2;
-        assert!(settings_description(&state, &config).contains("Space to toggle"));
+        assert!(settings_description(&state, &config).contains("Space/Enter to toggle"));
     }
 
     #[test]

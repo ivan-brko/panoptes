@@ -260,7 +260,7 @@ fn footer_text(ctx: &PaneContext) -> String {
         None => String::new(),
     };
 
-    let global = "Tab: pane | q: quit | ?: help";
+    let global = "←→/Tab: pane | q: quit | ?: help";
     footer_with_attention(format!("{} | {}", base, global), ctx.sessions)
 }
 
@@ -310,7 +310,7 @@ fn projects_footer(state: &AppState, project_store: &ProjectStore, config: &Conf
                 Some(crate::project::RowRef::Folder { .. })
             );
             if on_folder {
-                "Enter/←→: expand/collapse | m: move | r: rename | d: ungroup".to_string()
+                "Enter: expand/collapse | m: move | r: rename | d: ungroup".to_string()
             } else {
                 "↑↓/Enter: open | n: new | d: delete | m: move | R: refresh".to_string()
             }
@@ -337,7 +337,7 @@ fn settings_footer(state: &AppState, config: &Config) -> String {
             "↑↓ | n: add | d: delete | s: set default | Esc: back"
         }
         SettingsNav::Shortcuts => "↑↓ | n: add | d: delete | Esc: back",
-        SettingsNav::Notifications => "↑↓ | Space/←→: change | Esc: back",
+        SettingsNav::Notifications => "↑↓ | Space/Enter: change | Esc: back",
         SettingsNav::About => "Esc: back",
     };
     let description = super::pane_settings::settings_description(state, config);
@@ -464,7 +464,7 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            contains_line(&lines, "Tab: pane | q: quit | ?: help"),
+            contains_line(&lines, "←→/Tab: pane | q: quit | ?: help"),
             "{lines:?}"
         );
     }

@@ -56,26 +56,8 @@ fn handle_overview_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.state.selected_project_index =
                 cycle_prev(app.state.selected_project_index, row_count);
         }
-        KeyCode::Right => {
-            if let Some(RowRef::Folder { path, expanded, .. }) = selected_row(app) {
-                if !expanded {
-                    set_folder_collapsed(app, &path, false);
-                }
-            }
-        }
-        KeyCode::Left => match selected_row(app) {
-            Some(RowRef::Folder { path, expanded, .. }) if expanded => {
-                set_folder_collapsed(app, &path, true);
-            }
-            Some(_) => {
-                if let Some(parent) =
-                    project::parent_row_index(&app.project_store, app.state.selected_project_index)
-                {
-                    app.state.selected_project_index = parent;
-                }
-            }
-            None => {}
-        },
+        // No `Left`/`Right` arm: the arrows are global pane cycling, and
+        // `Enter` below already toggles a folder
         KeyCode::Enter => match selected_row(app) {
             Some(RowRef::Project(project_id)) => app.state.navigate_to_project(project_id),
             Some(RowRef::Folder { path, expanded, .. }) => {
