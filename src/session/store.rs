@@ -15,6 +15,10 @@
 //! What is deliberately *not* recovered is the PTY scrollback. It is a buffer
 //! of rendered terminal cells with no semantic structure, and agents replay
 //! their own history into the TUI when resumed.
+//!
+//! Which is also why shell sessions are not indexed here at all: a shell has no
+//! transcript to replay, so a record of one would point at nothing. See
+//! [`SessionInfo::is_persistable`](super::SessionInfo::is_persistable).
 
 use super::{SessionId, SessionInfo};
 use crate::config::config_dir;

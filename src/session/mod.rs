@@ -427,19 +427,35 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
+    /// Whether this session is worth writing to the durable index
+    ///
+    /// Only a session that can genuinely be brought back is. An agent can:
+    /// its conversation lives in a transcript on disk, and the record is the
+    /// index that says which conversation this session was.
+    ///
+    /// A shell cannot. It has no transcript, and its state is the scrollback,
+    /// the environment, and the processes it is running - none of which
+    /// survive the PTY. Respawning `$SHELL` in the recorded directory yields a
+    /// blank prompt, which is what pressing `n` on the branch already gives
+    /// you, so a persisted shell offers a restoration it cannot perform.
+    pub fn is_persistable(&self) -> bool {
+        self.session_type != SessionType::Shell
+    }
+
     /// Why this session cannot be brought back, if it cannot
     ///
     /// Returns `None` when the session is resumable. A recovered session can
     /// become unusable between runs - its worktree may have been deleted, or an
     /// agent session may have died before ever recording a conversation ID -
     /// and the reason is worth showing rather than silently hiding the entry.
+    ///
+    /// Only agent sessions reach this: shells are never persisted, so they are
+    /// never recovered.
     pub fn resume_blocker(&self) -> Option<&'static str> {
         if !self.working_dir.exists() {
             return Some("working directory is missing");
         }
-        // Shells are restored by respawning in the same directory, so they have
-        // no conversation to reattach to and need no ID
-        if self.session_type != SessionType::Shell && self.agent_session_id.is_none() {
+        if self.agent_session_id.is_none() {
             return Some("no conversation was recorded");
         }
         None
@@ -451,15 +467,8 @@ impl SessionInfo {
     }
 
     /// The conversation cursor to hand a relaunched agent, if any
-    ///
-    /// A shell has no conversation to reattach to - it is restored by
-    /// respawning in the same directory - so it never carries a resume cursor.
-    /// Agents reattach via their recorded conversation ID.
     pub fn resume_cursor(&self) -> Option<String> {
-        match self.session_type {
-            SessionType::Shell => None,
-            _ => self.agent_session_id.clone(),
-        }
+        self.agent_session_id.clone()
     }
 
     /// Check if this session needs attention

@@ -217,4 +217,4 @@ The current version includes:
 - Project and branch persistence
 - Path autocomplete when adding projects
 
-Sessions are persisted to `sessions.json` and recovered across restarts - a recovered session shows as "Resumable" and can be resumed. Projects and branches are persisted as well.
+Agent sessions are persisted to `sessions.json` and recovered across restarts - a recovered session shows as "Resumable" and can be resumed. Shell sessions are not: a shell has no conversation to reattach to, and everything that made it worth keeping - its scrollback, its environment, whatever it was running - dies with the terminal. Quitting warns you when live shells are about to be killed. Projects and branches are persisted as well.
