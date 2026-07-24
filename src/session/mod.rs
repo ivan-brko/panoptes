@@ -59,6 +59,16 @@ impl SessionType {
         }
     }
 
+    /// The short tag without its brackets, for callers that bracket it
+    /// together with something else (e.g. `[CC · dot-lambda]`)
+    pub fn code(&self) -> &str {
+        match self {
+            SessionType::ClaudeCode => "CC",
+            SessionType::Shell => "SH",
+            SessionType::OpenAICodex => "CX",
+        }
+    }
+
     /// Check if this session type uses hooks for state tracking
     pub fn uses_hooks(&self) -> bool {
         matches!(self, SessionType::ClaudeCode | SessionType::OpenAICodex)
@@ -427,6 +437,17 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
+    /// The account this session runs as, whichever agent it is
+    ///
+    /// Each agent keeps its name in its own field, since the two account stores
+    /// are separate, but only one of them can be set on any given session -
+    /// callers displaying "who is this signed in as" want that one.
+    pub fn account_name(&self) -> Option<&str> {
+        self.claude_config_name
+            .as_deref()
+            .or(self.codex_config_name.as_deref())
+    }
+
     /// Whether this session is worth writing to the durable index
     ///
     /// Only a session that can genuinely be brought back is. An agent can:

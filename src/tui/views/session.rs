@@ -9,7 +9,7 @@ use ratatui::widgets::Paragraph;
 use crate::app::{AppState, InputMode};
 use crate::config::Config;
 use crate::project::ProjectStore;
-use crate::session::{Session, SessionManager, SessionState, SessionType};
+use crate::session::{Session, SessionInfo, SessionManager, SessionState, SessionType};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
 use crate::tui::header::{Header, LogoKind};
 use crate::tui::header_notifications::HeaderNotificationManager;
@@ -137,77 +137,86 @@ pub fn render_session_view(
     render_footer(frame, layout.footer, &help_text);
 }
 
+/// What the session header says after the breadcrumb
+///
+/// Everything the terminal below cannot say for itself, and nothing it can.
+fn header_suffix(info: &SessionInfo, mode: InputMode) -> String {
+    let mode_indicator = match mode {
+        InputMode::Session => "[SESSION]",
+        _ => "[NORMAL]",
+    };
+    // The terminal below is the status. A session that is Thinking or Executing
+    // is visibly doing so, and naming it again here only takes room from what
+    // the screen cannot say. The two states the scrollback cannot report are
+    // the ones that survive: a process that died, and one Panoptes killed to
+    // reclaim memory - both leave the output frozen mid-page, looking exactly
+    // like a session sitting at its prompt.
+    let state_display = match info.state {
+        SessionState::Exited => {
+            let reason = info
+                .exit_reason
+                .as_ref()
+                .map(|r| format!(" ({})", r))
+                .unwrap_or_default();
+            format!(" - Exited{}", reason)
+        }
+        SessionState::Suspended => " - Suspended".to_string(),
+        _ => String::new(),
+    };
+    // The agent and the account it runs as are one fact - "Claude Code, signed
+    // in as dot-lambda" - so they share a bracket rather than sitting either
+    // side of the state text that used to separate them
+    let agent_display = match info.account_name() {
+        Some(account) => format!("[{} \u{00b7} {}]", info.session_type.code(), account),
+        None => info.session_type.short_tag().to_string(),
+    };
+    // Token and rate-limit figures read from the agent's own transcript.
+    // Absent until the tailer has something to report, and absent for shells,
+    // which have no conversation to measure.
+    let usage_display = info
+        .usage
+        .summary()
+        .map(|summary| format!(" \u{00b7} {}", summary))
+        .unwrap_or_default();
+    let subagent_display = match info.subagents {
+        0 => String::new(),
+        1 => " \u{00b7} 1 subagent".to_string(),
+        n => format!(" \u{00b7} {} subagents", n),
+    };
+
+    format!(
+        "{}{}{}{} {}",
+        agent_display, state_display, subagent_display, usage_display, mode_indicator
+    )
+}
+
 /// Build breadcrumb and suffix for the session header
 fn build_header_breadcrumb(
     session: Option<&Session>,
     state: &AppState,
     project_store: &ProjectStore,
 ) -> (Breadcrumb, String) {
-    if let Some(session) = session {
-        let mode_indicator = match state.input_mode {
-            InputMode::Session => "[SESSION]",
-            _ => "[NORMAL]",
-        };
-        let exit_info = if session.info.state == SessionState::Exited {
-            session
-                .info
-                .exit_reason
-                .as_ref()
-                .map(|r| format!(" ({})", r))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        // Show Claude config name if present
-        let config_display = session
-            .info
-            .claude_config_name
-            .as_ref()
-            .map(|n| format!(" [{}]", n))
-            .unwrap_or_default();
-        let project_name = project_store
-            .get_project(session.info.project_id)
-            .map(|p| p.name.as_str())
-            .unwrap_or("?");
-        let branch_name = project_store
-            .get_branch(session.info.branch_id)
-            .map(|b| b.name.as_str())
-            .unwrap_or("?");
-        let breadcrumb = Breadcrumb::new()
-            .push(project_name)
-            .push(branch_name)
-            .push(&session.info.name);
-        // Token and rate-limit figures read from the agent's own transcript.
-        // Absent until the tailer has something to report, and absent for
-        // shells, which have no conversation to measure.
-        let usage_display = session
-            .info
-            .usage
-            .summary()
-            .map(|summary| format!(" · {}", summary))
-            .unwrap_or_default();
-        let subagent_display = match session.info.subagents {
-            0 => String::new(),
-            1 => " · 1 subagent".to_string(),
-            n => format!(" · {} subagents", n),
-        };
-        let suffix = format!(
-            "{} - {}{}{}{}{} {}",
-            session.info.session_type.short_tag(),
-            session.info.state.display_name(),
-            exit_info,
-            config_display,
-            subagent_display,
-            usage_display,
-            mode_indicator
-        );
-        (breadcrumb, suffix)
-    } else {
-        (
+    let Some(session) = session else {
+        return (
             Breadcrumb::new().push("?").push("?").push("?"),
             "- No session".to_string(),
-        )
-    }
+        );
+    };
+
+    let project_name = project_store
+        .get_project(session.info.project_id)
+        .map(|p| p.name.as_str())
+        .unwrap_or("?");
+    let branch_name = project_store
+        .get_branch(session.info.branch_id)
+        .map(|b| b.name.as_str())
+        .unwrap_or("?");
+    let breadcrumb = Breadcrumb::new()
+        .push(project_name)
+        .push(branch_name)
+        .push(&session.info.name);
+
+    (breadcrumb, header_suffix(&session.info, state.input_mode))
 }
 
 fn build_footer_text(
@@ -283,6 +292,104 @@ mod tests {
         assert!(contains_line(&lines, "Session not found"), "{:?}", lines);
         assert!(contains_line(&lines, "? > ? > ?"), "{:?}", lines);
         assert!(contains_line(&lines, "Enter: session mode"), "{:?}", lines);
+    }
+
+    fn info(session_type: SessionType) -> SessionInfo {
+        let mut info = SessionInfo::new(
+            "sess".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        info.session_type = session_type;
+        info
+    }
+
+    /// The user is looking at the terminal that is doing the work, so the
+    /// header naming the same thing costs a row and says nothing
+    #[test]
+    fn test_a_working_session_does_not_narrate_its_state() {
+        for state in [
+            SessionState::Starting,
+            SessionState::Thinking,
+            SessionState::Executing,
+            SessionState::AwaitingApproval,
+            SessionState::Waiting,
+        ] {
+            let mut info = info(SessionType::ClaudeCode);
+            info.state = state;
+
+            let suffix = header_suffix(&info, InputMode::Session);
+            assert_eq!(suffix, "[CC] [SESSION]", "{state:?} leaked into {suffix:?}");
+        }
+    }
+
+    /// Both of these leave the output frozen mid-page, which looks exactly like
+    /// a session sitting at its prompt - the header is the only thing that can
+    /// tell the user the process is gone
+    #[test]
+    fn test_a_session_with_no_process_still_says_so() {
+        let mut exited = info(SessionType::ClaudeCode);
+        exited.state = SessionState::Exited;
+        exited.exit_reason = Some("killed by signal 9".to_string());
+        assert_eq!(
+            header_suffix(&exited, InputMode::Session),
+            "[CC] - Exited (killed by signal 9) [SESSION]"
+        );
+
+        // A crash Panoptes could not explain still reports the crash
+        exited.exit_reason = None;
+        assert_eq!(
+            header_suffix(&exited, InputMode::Session),
+            "[CC] - Exited [SESSION]"
+        );
+
+        let mut suspended = info(SessionType::ClaudeCode);
+        suspended.state = SessionState::Suspended;
+        assert_eq!(
+            header_suffix(&suspended, InputMode::Session),
+            "[CC] - Suspended [SESSION]"
+        );
+    }
+
+    /// "Claude Code, signed in as dot-lambda" is one fact, so it gets one
+    /// bracket rather than two with unrelated text between them
+    #[test]
+    fn test_the_agent_and_its_account_share_a_bracket() {
+        let mut claude = info(SessionType::ClaudeCode);
+        claude.claude_config_name = Some("dot-lambda".to_string());
+        assert_eq!(
+            header_suffix(&claude, InputMode::Session),
+            "[CC \u{00b7} dot-lambda] [SESSION]"
+        );
+
+        // Codex keeps its account in its own field, and used to show nothing
+        let mut codex = info(SessionType::OpenAICodex);
+        codex.codex_config_name = Some("work".to_string());
+        assert_eq!(
+            header_suffix(&codex, InputMode::Session),
+            "[CX \u{00b7} work] [SESSION]"
+        );
+
+        // A session with no account named keeps the bare tag
+        assert_eq!(
+            header_suffix(&info(SessionType::Shell), InputMode::Session),
+            "[SH] [SESSION]"
+        );
+    }
+
+    /// Everything the terminal cannot report stays, and keeps its order
+    #[test]
+    fn test_the_suffix_keeps_what_the_screen_cannot_say() {
+        let mut info = info(SessionType::ClaudeCode);
+        info.claude_config_name = Some("dot-lambda".to_string());
+        info.state = SessionState::Suspended;
+        info.subagents = 2;
+
+        assert_eq!(
+            header_suffix(&info, InputMode::Normal),
+            "[CC \u{00b7} dot-lambda] - Suspended \u{00b7} 2 subagents [NORMAL]"
+        );
     }
 
     /// The session header wears the wordmark but not the tagline or version:
