@@ -113,7 +113,7 @@ fn global_section() -> Vec<Line<'static>> {
         empty_line(),
         section_header("Global"),
         shortcut_line("Tab / ⇧Tab", "Switch pane (wraps)"),
-        shortcut_line("Esc", "Back one level (nothing at a root)"),
+        shortcut_line("Esc", "Back one level, then out to Projects"),
         shortcut_line("q", "Quit (asks to confirm)"),
         shortcut_line("Space", "Jump to next session needing attention"),
         shortcut_line("?", "Toggle this help"),
@@ -193,6 +193,7 @@ fn sessions_shortcuts() -> Vec<Line<'static>> {
             shortcut_line("↑ / ↓ / 1-9", "Select a session (0 = 10)"),
             shortcut_line("Enter", "Open the session full-screen"),
             shortcut_line("d", "Delete the selected session"),
+            shortcut_line("Esc", "Back to the Projects pane"),
         ],
     )
 }
@@ -203,6 +204,7 @@ fn settings_shortcuts() -> Vec<Line<'static>> {
         vec![
             shortcut_line("↑ / ↓", "Move through the sections"),
             shortcut_line("Enter", "Open the selected section"),
+            shortcut_line("Esc", "Back to the Projects pane"),
         ],
     )
 }

@@ -37,7 +37,8 @@ fn handle_sections_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let count = SettingsNav::SECTIONS.len();
     match key.code {
         KeyCode::Esc => {
-            // Root of the pane: Esc is a no-op, deliberately
+            // Root of the pane: nothing left to pop, so back out to Projects
+            app.escape_back();
         }
         KeyCode::Down => {
             app.state.settings_section_index = cycle_next(app.state.settings_section_index, count);
@@ -68,7 +69,7 @@ fn handle_shortcuts_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let count = app.config.custom_shortcuts.len();
     match key.code {
         KeyCode::Esc => {
-            app.state.navigate_back();
+            app.escape_back();
         }
         KeyCode::Down => {
             app.state.custom_shortcuts_selected =
@@ -101,7 +102,7 @@ fn handle_notifications_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let count = NOTIFICATION_ROWS.len();
     match key.code {
         KeyCode::Esc => {
-            app.state.navigate_back();
+            app.escape_back();
             return Ok(());
         }
         KeyCode::Down => {
@@ -184,7 +185,7 @@ fn persist(app: &mut App) {
 
 fn handle_about_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if key.code == KeyCode::Esc {
-        app.state.navigate_back();
+        app.escape_back();
     }
     Ok(())
 }

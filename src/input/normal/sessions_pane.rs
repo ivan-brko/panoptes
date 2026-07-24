@@ -1,6 +1,6 @@
 //! Pane 2 input: the flat session list
 //!
-//! Nothing to drill into, so `Esc` is a no-op here by construction.
+//! Nothing to drill into, so `Esc` backs straight out to the Projects pane.
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -17,7 +17,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
     match key.code {
         KeyCode::Esc => {
-            // A flat list has no level to pop
+            // A flat list has no level to pop, so this backs out to Projects
+            app.escape_back();
         }
         KeyCode::Down => {
             app.state.sessions_pane_index =

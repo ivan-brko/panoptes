@@ -205,7 +205,9 @@ fn footer_text(ctx: &PaneContext) -> String {
 
     let base = match state.focus.tab() {
         Some(Tab::Projects) => projects_footer(state, ctx.project_store, ctx.config),
-        Some(Tab::Sessions) => "↑↓/1-9: select | Enter: open | d: delete".to_string(),
+        Some(Tab::Sessions) => {
+            "↑↓/1-9: select | Enter: open | d: delete | Esc: projects".to_string()
+        }
         Some(Tab::Settings) => settings_footer(state, ctx.config),
         None => String::new(),
     };
@@ -282,7 +284,7 @@ fn projects_footer(state: &AppState, project_store: &ProjectStore, config: &Conf
 /// Pane 3's keys, plus the description of whatever row is highlighted
 fn settings_footer(state: &AppState, config: &Config) -> String {
     let keys = match state.settings_nav {
-        SettingsNav::Sections => "↑↓/Enter",
+        SettingsNav::Sections => "↑↓/Enter | Esc: projects",
         SettingsNav::ClaudeConfigs | SettingsNav::CodexConfigs => {
             "↑↓ | n: add | d: delete | s: set default | Esc: back"
         }

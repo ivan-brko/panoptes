@@ -405,6 +405,17 @@ impl App {
         }
     }
 
+    /// `Esc` in a pane: pop one level, or back out to the Projects pane
+    ///
+    /// Backing out changes which pane is focused, and the accordion has to
+    /// follow the focus - pairing the two here is why this lives on `App`
+    /// rather than on [`AppState`].
+    pub(crate) fn escape_back(&mut self) {
+        if self.state.escape_back() {
+            self.sync_pane_focus();
+        }
+    }
+
     /// Safety net: Codex session mode requires mouse capture for wheel events.
     fn tick_mouse_capture_safety_net(&mut self) {
         if self.state.focus == Focus::Session

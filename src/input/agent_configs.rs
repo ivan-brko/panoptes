@@ -337,6 +337,13 @@ pub fn handle_confirming_config_delete_key(
 
 /// Handle key in a configs section of the settings pane (normal mode)
 pub fn handle_configs_section_key(app: &mut App, key: KeyEvent, kind: AgentKind) -> Result<()> {
+    // Esc goes through the App-level helper so that, should it ever back out
+    // of the pane, the accordion follows; the parts-based body below only has
+    // the state and cannot keep that pairing
+    if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
+        app.escape_back();
+        return Ok(());
+    }
     match kind {
         AgentKind::Claude => {
             configs_section_key(&mut app.state, &mut app.claude_config_store, kind, key)
@@ -647,9 +654,7 @@ pub(crate) fn configs_section_key<C: AgentProfile>(
     let config_count = store.count();
 
     match key.code {
-        KeyCode::Esc => {
-            state.navigate_back();
-        }
+        // Esc is consumed by `handle_configs_section_key` before it gets here
         KeyCode::Down => {
             let next = cycle_next(kind.view_selected_index(state), config_count);
             kind.set_view_selected_index(state, next);

@@ -17,7 +17,7 @@ a confirmation dialog, an autocomplete) owns these keys itself.
 | `q` | Quit (prompts for confirmation) |
 | `?` | Show the shortcuts for wherever you are (`?` or `Esc` closes it) |
 | `Space` | Jump to the next session needing attention |
-| `Esc` | Go back one level in the focused pane — never quits, and does nothing at a pane's root |
+| `Esc` | Go back one level in the focused pane; with nothing left to pop, back out to the Projects pane. Never quits |
 
 `Tab` switches panes **only** in normal mode. In a path input it completes a
 path; in Session mode it types a tab into the agent. In the Settings pane's
@@ -103,6 +103,7 @@ Every session, flat and sorted, with a pinned "Needs Attention" section on top.
 | `Up` / `Down` / `1-9` | Select a session (`0` = 10) |
 | `Enter` | Open the selected session full-screen |
 | `d` | Delete the selected session (prompts for confirmation) |
+| `Esc` | Back out to the Projects pane |
 
 ## Pane 3 — Settings
 
@@ -112,7 +113,7 @@ Five sections. The highlighted row's description shows in the footer.
 |-----|--------|
 | `Up` / `Down` | Move through the sections |
 | `Enter` | Open the selected section |
-| `Esc` | Back to the sections list (from inside a section) |
+| `Esc` | Back to the sections list from inside a section; from the sections list, out to the Projects pane |
 
 ### Claude configs / Codex configs
 

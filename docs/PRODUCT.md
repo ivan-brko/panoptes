@@ -51,8 +51,9 @@ Projects (tree)
                             └── Session (fullscreen)
 ```
 
-Navigate forward with `Enter`, back with `Esc`. `Esc` means exactly one thing
-everywhere — back one level — and does nothing at a pane's root. `q` quits.
+Navigate forward with `Enter`, back with `Esc`. `Esc` backs out: one level in
+the focused pane, and once there is nothing left to pop it returns you to the
+Projects pane — home. It never quits; `q` quits.
 
 Opening a session is the only thing that fills the terminal; `Esc` puts you back
 in the pane you opened it from.
