@@ -20,8 +20,9 @@ pub use theme::{theme, Theme};
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{
         disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
@@ -44,6 +45,12 @@ pub struct Tui {
     bracketed_paste_enabled: bool,
     /// Whether mouse capture is enabled
     mouse_capture_enabled: bool,
+    /// Whether focus-change reporting is enabled
+    ///
+    /// Needed so sessions that enable focus reporting (mode 1004) can be
+    /// told when the terminal window gains and loses focus, exactly as if
+    /// they were talking to the terminal directly.
+    focus_change_enabled: bool,
 }
 
 /// Error handler for terminal cleanup operations
@@ -111,6 +118,7 @@ impl Tui {
             keyboard_enhancement_enabled: false,
             bracketed_paste_enabled: false,
             mouse_capture_enabled: false,
+            focus_change_enabled: false,
         })
     }
 
@@ -152,6 +160,12 @@ impl Tui {
             self.mouse_capture_enabled = true;
         }
 
+        // Enable focus reporting so it can be relayed to sessions that ask
+        // for it (mode 1004)
+        if stdout().execute(EnableFocusChange).is_ok() {
+            self.focus_change_enabled = true;
+        }
+
         self.terminal.hide_cursor()?;
         self.terminal.clear()?;
         Ok(())
@@ -179,6 +193,14 @@ impl Tui {
         if self.mouse_capture_enabled {
             disable_mouse_capture_internal(&handler);
             self.mouse_capture_enabled = false;
+        }
+
+        // Disable focus reporting
+        if self.focus_change_enabled {
+            if let Err(e) = stdout().execute(DisableFocusChange) {
+                handler.handle("failed to disable focus change reporting", e);
+            }
+            self.focus_change_enabled = false;
         }
 
         // Now restore the terminal
@@ -245,6 +267,13 @@ impl Drop for Tui {
         // Disable mouse capture
         if self.mouse_capture_enabled {
             disable_mouse_capture_internal(&handler);
+        }
+
+        // Disable focus reporting
+        if self.focus_change_enabled {
+            if let Err(e) = stdout().execute(DisableFocusChange) {
+                handler.handle("failed to disable focus change reporting", e);
+            }
         }
 
         // Now restore the terminal

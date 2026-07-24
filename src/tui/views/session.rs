@@ -49,11 +49,12 @@ pub fn render_session_view(
         .with_attention_count(attention_count)
         .with_custom_style(custom_style);
 
-    // Pre-calculate layout using FrameLayout
+    // Pre-calculate layout using FrameLayout. The header height must come
+    // from the same answer `FrameConfig::for_terminal` gives the off-screen
+    // layout math (PTY sizing, mouse translation), or clicks land a row off.
     let frame_config = FrameConfig {
-        header_height: header.height(area),
-        footer_height: 3,
         title: Some("Output".to_string()),
+        ..FrameConfig::for_terminal(area)
     };
     let layout = FrameLayout::calculate(area, &frame_config);
 
@@ -240,10 +241,10 @@ fn build_footer_text(
     match state.input_mode {
         InputMode::Session => {
             if is_scrolled {
-                "Esc: exit session mode | PgUp/PgDn: scroll | Ctrl+End: live view | Exit to copy text"
+                "Esc: exit session mode | PgUp/PgDn: scroll | Ctrl+End: live view | \u{2325}drag: copy"
                     .to_string()
             } else {
-                "Esc: exit session mode | \u{21E7}Esc: send Esc | PgUp: scroll | Exit to copy text"
+                "Esc: exit session mode | \u{21E7}Esc: send Esc | PgUp: scroll | \u{2325}drag: copy"
                     .to_string()
             }
         }

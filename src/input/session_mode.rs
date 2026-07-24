@@ -16,23 +16,35 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         return handle_session_mode_esc(app, key);
     }
 
+    // An alternate-screen app (Claude Code's UI, vim, less) owns its own
+    // scrolling: there is no terminal scrollback behind it, so PgUp/PgDn
+    // belong to the app — exactly what a real terminal does. Local
+    // scrollback interception only applies to primary-screen sessions.
+    let alt_screen_owns_scrolling = app
+        .state
+        .active_session
+        .and_then(|id| app.sessions.get(id))
+        .is_some_and(|s| s.vterm.alternate_screen_active());
+
     // Intercept scroll keys - don't forward to PTY
     // Only handle Press events for scroll keys (not repeat) to prevent rapid scrolling
     match key.code {
-        KeyCode::PageUp if key.kind == KeyEventKind::Press => {
+        KeyCode::PageUp if !alt_screen_owns_scrolling && key.kind == KeyEventKind::Press => {
             if let Some(session_id) = app.state.active_session {
                 session_scroll::scroll_page_up(app, session_id);
             }
             return Ok(());
         }
-        KeyCode::PageDown if key.kind == KeyEventKind::Press => {
+        KeyCode::PageDown if !alt_screen_owns_scrolling && key.kind == KeyEventKind::Press => {
             if let Some(session_id) = app.state.active_session {
                 session_scroll::scroll_page_down(app, session_id);
             }
             return Ok(());
         }
         KeyCode::Home
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.kind == KeyEventKind::Press =>
+            if !alt_screen_owns_scrolling
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.kind == KeyEventKind::Press =>
         {
             // Ctrl+Home: scroll to top
             if let Some(session_id) = app.state.active_session {
@@ -41,7 +53,9 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
             return Ok(());
         }
         KeyCode::End
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.kind == KeyEventKind::Press =>
+            if !alt_screen_owns_scrolling
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.kind == KeyEventKind::Press =>
         {
             // Ctrl+End: scroll to bottom (live view)
             if let Some(session_id) = app.state.active_session {

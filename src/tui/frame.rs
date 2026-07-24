@@ -6,6 +6,9 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::tui::header::{Header, LogoKind};
+use crate::tui::views::Breadcrumb;
+
 /// Configuration for frame layout
 #[derive(Debug, Clone)]
 pub struct FrameConfig {
@@ -19,6 +22,26 @@ impl Default for FrameConfig {
         Self {
             header_height: 3, // Match existing Panoptes header
             footer_height: 3, // Match existing Panoptes footer
+            title: None,
+        }
+    }
+}
+
+impl FrameConfig {
+    /// The config the session view actually renders with on this terminal
+    ///
+    /// The session header is the wordmark, whose height depends on whether the
+    /// terminal can afford the art. Everything that reasons about the session
+    /// content area off-screen — PTY sizing, mouse coordinate translation —
+    /// must use this, not `default()`: a header row the layout math doesn't
+    /// know about shifts every forwarded mouse click one row down and clips
+    /// the PTY's bottom row.
+    pub fn for_terminal(terminal: Rect) -> Self {
+        Self {
+            header_height: Header::new(Breadcrumb::new())
+                .with_logo(LogoKind::Wordmark)
+                .height(terminal),
+            footer_height: 3,
             title: None,
         }
     }
@@ -154,6 +177,21 @@ mod tests {
         // Footer: y=21, height=3
         assert_eq!(layout.footer.y, 21);
         assert_eq!(layout.footer.height, 3);
+    }
+
+    /// The regression behind this constructor: mouse translation used
+    /// `default()` (3-row header) while the session view rendered a 4-row
+    /// wordmark header, so every click forwarded to the agent landed one row
+    /// below the pointer.
+    #[test]
+    fn test_for_terminal_matches_the_wordmark_header() {
+        // Room for the wordmark: header is its 3 art rows plus the border row
+        let wide = Rect::new(0, 0, 120, 40);
+        assert_eq!(FrameConfig::for_terminal(wide).header_height, 4);
+
+        // Too small for the art: falls back to the one-line header's 3 rows
+        let tiny = Rect::new(0, 0, 20, 10);
+        assert_eq!(FrameConfig::for_terminal(tiny).header_height, 3);
     }
 
     #[test]
