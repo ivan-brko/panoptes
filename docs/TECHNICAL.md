@@ -129,10 +129,25 @@ Panoptes includes a comprehensive logging system for debugging and diagnostics:
 
 The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
 
-- Semantic colors for UI elements (primary, secondary, success, warning, error)
-- State-specific colors for session states (thinking, executing, waiting, awaiting approval, suspended)
-- Reusable style definitions for borders, text, and highlights
-- Easy customization point for future theming support
+- Semantic tokens for everything a view draws - raw `Color::` literals in view
+  code are a bug, because they are invisible to a theme change
+- Tiered tokens where hierarchy matters: `text` / `text_dim` / `text_faint`,
+  `border_focus` / `border` / `border_dim`, `bg_base` / `bg_surface`
+- State-specific colors for session states (thinking, executing, waiting,
+  awaiting approval, suspended), plus `attention_color` for badge reasons
+- Three capability tiers - `truecolor()`, `ansi256()`, `ansi16()` - detected
+  from `COLORTERM`/`TERM` at startup and forceable with the `theme` config
+  key. The tiers agree on every chromatic token (the user's terminal palette
+  keeps deciding what "green" means) and differ only in the structural greys,
+  so the 16-colour baseline is exactly the classic appearance
+
+Focus is signalled by four channels at once, so it survives a colourblind
+user, a low-contrast theme, and a screenshot: border brightness
+(`border_focus` vs `border_dim`), border weight (thick vs rounded), an
+explicit title style, and `Modifier::DIM` over the unfocused pane's text
+ramp. Dimming carves out the signals - session state colours and attention
+badges hold full strength in every pane, focused or not, pinned by
+`test_signals_survive_an_unfocused_pane`.
 
 ## Communication Flow
 
@@ -341,6 +356,7 @@ See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for the full reference.
 | `log_agent_events` | false | Log raw agent transcript lines for debugging |
 | `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
 | `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
+| `theme` | `auto` | Colour-capability tier: `auto` / `truecolor` / `ansi256` / `ansi16` |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
 
 Several config keys from earlier versions — an output-line cap, an Escape-hold

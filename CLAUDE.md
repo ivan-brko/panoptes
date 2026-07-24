@@ -92,6 +92,10 @@ PTY Output → Session buffer → TUI render
   because branch names are slugified ticket titles and would otherwise
   collapse the whole row to an unidentifiable stub — the row's identity
   (index, session name, state) always stays whole
+- Every colour a view draws comes from a semantic token in `src/tui/theme.rs`;
+  raw `Color::` literals in view code are invisible to a theme change and are
+  a bug. The palette has three capability tiers (truecolor / 256 / 16-ANSI)
+  that agree on every chromatic token and differ only in the structural greys
 
 ## Error Handling
 
