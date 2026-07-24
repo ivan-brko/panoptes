@@ -1,8 +1,8 @@
 //! Pane 1 input: the project tree and its drill-downs
 //!
 //! One handler per level, dispatched on [`ProjectsNav`]. `Esc` pops one level
-//! and does nothing at the root - it never quits and never changes which pane
-//! is focused.
+//! and does nothing at the root: this pane is home, the place `Esc` backs out
+//! to from everywhere else, and it never quits.
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -42,7 +42,7 @@ fn handle_overview_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
     match key.code {
         KeyCode::Esc => {
-            // Root of the pane: Esc is a no-op, deliberately
+            // Root of the pane, and Esc's home: nowhere further to back out
         }
         KeyCode::Char('n') => {
             app.state.input_mode = InputMode::AddingProject;
@@ -163,7 +163,7 @@ fn handle_project_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Re
 
     match key.code {
         KeyCode::Esc => {
-            app.state.navigate_back();
+            app.escape_back();
         }
         KeyCode::Down => {
             app.state.selected_branch_index =
@@ -314,7 +314,7 @@ fn handle_branch_key(
 
     match key.code {
         KeyCode::Esc => {
-            app.state.navigate_back();
+            app.escape_back();
         }
         KeyCode::Down => {
             app.state.branch_session_index =
@@ -409,7 +409,7 @@ fn handle_project_settings_key(app: &mut App, key: KeyEvent, project_id: Project
 
     match key.code {
         KeyCode::Esc => {
-            app.state.navigate_back();
+            app.escape_back();
         }
         KeyCode::Down => {
             app.state.project_settings_index =

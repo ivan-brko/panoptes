@@ -87,7 +87,7 @@ in view.
 |-----|--------|
 | `Tab` / `Shift+Tab` | Switch pane (wraps around) |
 | `Enter` | Open selected item / Enter session mode |
-| `Esc` | Back one level — never quits, and does nothing at a pane's root |
+| `Esc` | Back one level; at a pane's root, back out to the Projects pane — never quits |
 | `q` | Quit (with confirmation) |
 | `Shift+Esc` | Send Escape to the session (from session mode) |
 | `Space` | Jump to next session needing attention |

@@ -459,8 +459,9 @@ impl AppState {
 
     /// Go back one level in the focused pane
     ///
-    /// At the root of a pane this does nothing at all - `Esc` never quits and
-    /// never changes which pane is focused. Returns whether anything moved.
+    /// At the root of a pane this does nothing at all and returns `false`;
+    /// [`AppState::escape_back`] is what turns that `false` into backing out
+    /// to the Projects pane. Returns whether anything moved.
     pub fn navigate_back(&mut self) -> bool {
         match self.focus {
             Focus::Panes(Tab::Projects) => match self.projects_nav.parent() {
@@ -480,6 +481,26 @@ impl AppState {
             // Pane 2 is a flat list with nothing to pop, and the session view
             // has its own two-step Esc in `handle_session_view_normal_key`
             Focus::Panes(Tab::Sessions) | Focus::Session => false,
+        }
+    }
+
+    /// `Esc` in a pane: pop one level, or back out to the Projects pane
+    ///
+    /// Projects is home, so once a pane has nothing left to pop, backing out
+    /// lands there - straight from Settings, not one pane at a time. Returns
+    /// whether the focused pane changed, which is the caller's cue to re-sync
+    /// the accordion ([`crate::app::App::escape_back`] pairs the two).
+    pub fn escape_back(&mut self) -> bool {
+        if self.navigate_back() {
+            return false;
+        }
+        match self.focus {
+            Focus::Panes(tab) if tab != Tab::Projects => {
+                self.focus = Focus::Panes(Tab::Projects);
+                true
+            }
+            // Already home, or in the session view, whose Esc lives elsewhere
+            _ => false,
         }
     }
 
@@ -844,33 +865,42 @@ mod tests {
     }
 
     #[test]
-    fn test_esc_pops_one_level_and_is_a_no_op_at_a_root() {
+    fn test_esc_pops_one_level_then_backs_out_to_projects() {
         let project_id = uuid::Uuid::new_v4();
         let branch_id = uuid::Uuid::new_v4();
 
+        // Pane 1 pops level by level, and its root is home: Esc stays put
         let mut state = AppState {
             projects_nav: ProjectsNav::Branch(project_id, branch_id),
             ..Default::default()
         };
-        assert!(state.navigate_back());
+        assert!(!state.escape_back());
         assert_eq!(state.projects_nav, ProjectsNav::Project(project_id));
-        assert!(state.navigate_back());
+        assert!(!state.escape_back());
         assert_eq!(state.projects_nav, ProjectsNav::Overview);
-        // At the root: nothing happens, and the focused pane does not change
-        assert!(!state.navigate_back());
+        assert!(!state.escape_back());
         assert_eq!(state.projects_nav, ProjectsNav::Overview);
         assert_eq!(state.focus, Focus::Panes(Tab::Projects));
 
-        // Pane 2 is flat, so Esc never has anywhere to go
+        // Pane 2 is flat, so Esc backs straight out to Projects
         state.focus = Focus::Panes(Tab::Sessions);
-        assert!(!state.navigate_back());
+        assert!(state.escape_back());
+        assert_eq!(state.focus, Focus::Panes(Tab::Projects));
 
-        // Pane 3 pops back to its sections list, then stops
+        // Pane 3 pops to its sections list first, then backs out - skipping
+        // over pane 2, because Esc goes home rather than one pane left
         state.focus = Focus::Panes(Tab::Settings);
         state.settings_nav = SettingsNav::About;
-        assert!(state.navigate_back());
+        assert!(!state.escape_back());
         assert_eq!(state.settings_nav, SettingsNav::Sections);
-        assert!(!state.navigate_back());
+        assert_eq!(state.focus, Focus::Panes(Tab::Settings));
+        assert!(state.escape_back());
+        assert_eq!(state.focus, Focus::Panes(Tab::Projects));
+
+        // The session view's Esc lives elsewhere; escape_back leaves it alone
+        state.focus = Focus::Session;
+        assert!(!state.escape_back());
+        assert_eq!(state.focus, Focus::Session);
     }
 
     #[test]
