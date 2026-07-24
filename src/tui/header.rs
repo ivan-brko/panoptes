@@ -233,10 +233,10 @@ impl<'a> Header<'a> {
 
     /// The rows of a header wearing the wordmark
     ///
-    /// The art owns a fixed column band on the left, so everything else is
-    /// placed by row: the badge beside the first row, the breadcrumb beside
-    /// the second, a notification beside the third, and - on the full mark -
-    /// the tagline and version on a fourth row of their own.
+    /// The art owns a fixed column band on the left and everything else is
+    /// right-aligned, so each row is a pairing across the header: the badge on
+    /// the first, the breadcrumb on the second, a notification on the third,
+    /// and - on the full mark - the tagline and version on a fourth row.
     fn logo_lines(&self, kind: LogoKind, width: usize) -> Vec<Line<'static>> {
         let t = theme();
         let art = Style::default().fg(t.accent).bold();
@@ -280,12 +280,14 @@ impl<'a> Header<'a> {
         lines
     }
 
-    /// One header row: `left` in the wordmark's column band, `mid` beside it,
-    /// `right` flush to the far edge, the whole thing clipped to `width`
+    /// One header row: `left` in the wordmark's column band, then `mid` and
+    /// `right` both flush to the far edge, the whole thing clipped to `width`
     ///
     /// `left` is padded out to the wordmark's width even when it is shorter
     /// than that - the tagline is - so every row's text starts in the same
-    /// column.
+    /// column. Everything else is right-aligned: the header is the art on one
+    /// side and the state of the app on the other, not a caption trailing the
+    /// wordmark.
     fn row(
         width: usize,
         left: Span<'static>,
@@ -316,12 +318,14 @@ impl<'a> Header<'a> {
         });
 
         let mid_len = mid_text.as_ref().map_or(0, |s| s.content.chars().count());
-        if let Some(span) = mid_text {
-            spans.push(span);
-        }
 
-        if right_len <= after_band.saturating_sub(mid_len) {
+        // The pad goes ahead of the text, not after it, so the row ends flush
+        // with the pane borders below rather than starting flush with the art
+        if right_len <= after_band {
             spans.push(Span::raw(" ".repeat(after_band - mid_len - right_len)));
+            if let Some(span) = mid_text {
+                spans.push(span);
+            }
             spans.extend(right);
         }
 
@@ -480,12 +484,10 @@ mod tests {
         assert!(text.starts_with("proj > main"), "{text:?}");
     }
 
-    /// Text beside the wordmark starts in a fixed column, so a row whose left
-    /// span is shorter than the art still lines up with the rows above it
+    /// The wordmark owns the left, everything else is flush right - and that
+    /// holds whatever the left span is, since the tagline is shorter than the art
     #[test]
-    fn test_rows_align_text_past_the_wordmark_band() {
-        let band = logo::WORDMARK_WIDTH as usize + LOGO_GAP as usize;
-
+    fn test_rows_right_align_the_text_beside_the_wordmark() {
         let art = Header::row(
             80,
             Span::raw(logo::WORDMARK[1]),
@@ -501,12 +503,24 @@ mod tests {
 
         for line in [art, tagline] {
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert_eq!(
-                text.chars().skip(band).take(6).collect::<String>(),
-                "beside",
-                "{text:?}"
-            );
+            assert_eq!(text.chars().count(), 80, "{text:?}");
+            assert!(text.ends_with("beside"), "{text:?}");
         }
+    }
+
+    /// A row carrying both keeps the pinned span outermost, with the message
+    /// tucked just inside it - neither drifts back to the wordmark
+    #[test]
+    fn test_a_pinned_span_stays_outside_the_message() {
+        let line = Header::row(
+            80,
+            Span::raw(logo::WORDMARK[0]),
+            Some(Span::raw("breadcrumb")),
+            vec![Span::raw("[2\u{25CF}]")],
+        );
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.chars().count(), 80, "{text:?}");
+        assert!(text.ends_with("breadcrumb[2\u{25CF}]"), "{text:?}");
     }
 
     /// The band is fixed, so a header only just wider than it has nothing left
