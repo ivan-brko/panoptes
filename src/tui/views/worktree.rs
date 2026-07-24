@@ -69,7 +69,7 @@ fn render_selector_overlay(
         List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(t.border_focused))
+                .border_style(Style::default().fg(t.border_focus))
                 .title(list_title),
         ),
         chunks[1],
@@ -113,7 +113,7 @@ fn branch_ref_item(
     } else if branch.is_default_base {
         Style::default().fg(t.accent)
     } else if dim_remote && branch.ref_type == BranchRefType::Remote {
-        Style::default().fg(t.text_muted)
+        Style::default().fg(t.text_dim)
     } else {
         Style::default().fg(t.text)
     };
@@ -165,7 +165,7 @@ fn render_select_branch(frame: &mut Frame, area: Rect, state: &AppState) {
                     branch.ref_type.prefix(),
                     branch.name
                 ))
-                .style(Style::default().fg(t.text_muted));
+                .style(Style::default().fg(t.text_dim));
             }
 
             let selected = i == wizard.list_index;
@@ -179,7 +179,7 @@ fn render_select_branch(frame: &mut Frame, area: Rect, state: &AppState) {
                     branch.name,
                     if branch.is_default_base { " *" } else { "" },
                 ))
-                .style(selection_style(selected, Color::Yellow));
+                .style(selection_style(selected, t.warning));
             }
 
             branch_ref_item(branch, selected, " *", true, t.selected_style())
@@ -195,7 +195,7 @@ fn render_select_branch(frame: &mut Frame, area: Rect, state: &AppState) {
                 selection_prefix(selected),
                 wizard.search_text
             ))
-            .style(selection_style(selected, Color::Green)),
+            .style(selection_style(selected, t.success)),
         );
     }
 
@@ -324,7 +324,7 @@ fn render_confirm(frame: &mut Frame, area: Rect, state: &AppState, config: &Conf
                 Style::default().fg(t.text),
             )));
             lines.push(Line::from(""));
-            lines.push(emphasis(&wizard.branch_name, Color::Yellow));
+            lines.push(emphasis(&wizard.branch_name, t.warning));
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 "This worktree already exists in git but is not tracked by",
@@ -554,7 +554,7 @@ pub fn render_branch_delete_confirmation(
                 .fg(t.border_warning)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(t.text_muted)
+            Style::default().fg(t.text_dim)
         };
         extra_lines.push(Line::from(vec![
             Span::styled(checkbox, checkbox_style),
@@ -562,7 +562,7 @@ pub fn render_branch_delete_confirmation(
                 " Also delete the worktree directory from disk",
                 Style::default().fg(t.text),
             ),
-            Span::styled(" (press w to toggle)", Style::default().fg(t.text_muted)),
+            Span::styled(" (press w to toggle)", Style::default().fg(t.text_dim)),
         ]));
         if state.delete_worktree_on_disk {
             extra_lines.push(Line::from(Span::styled(

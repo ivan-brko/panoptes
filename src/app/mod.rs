@@ -153,6 +153,9 @@ impl App {
         if let Some(warning) = config_warning {
             startup_warnings.push(warning);
         }
+        // Pin the palette tier before the first render; `auto` reads
+        // COLORTERM/TERM, the other modes force a tier
+        crate::tui::theme::init(config.theme);
         // A shortcut bound to a key that has since become reserved could never
         // fire - the built-in arm matches first - so it is dropped rather than
         // silently shadowed, and the user is told which ones went.

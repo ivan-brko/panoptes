@@ -313,19 +313,6 @@ impl AttentionReason {
             AttentionReason::Crashed { reason } => format!("crashed: {}", reason),
         }
     }
-
-    /// Badge colour for this reason
-    ///
-    /// Green means "done, your turn"; yellow means "blocked on you"; red means
-    /// something went wrong.
-    pub fn badge_color(&self) -> ratatui::style::Color {
-        use ratatui::style::Color;
-        match self {
-            AttentionReason::TurnComplete => Color::Green,
-            AttentionReason::Approval { .. } | AttentionReason::Stalled { .. } => Color::Yellow,
-            AttentionReason::Crashed { .. } => Color::Red,
-        }
-    }
 }
 
 /// Metadata for a session (without PTY details)

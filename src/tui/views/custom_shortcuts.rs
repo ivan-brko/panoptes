@@ -38,7 +38,7 @@ pub fn render_shortcuts_list(frame: &mut Frame, area: Rect, config: &Config, sel
                 "No custom shortcuts yet.\n\n\
                  Press 'n' to bind a key to a shell command.",
             )
-            .style(Style::default().fg(t.text_muted)),
+            .style(Style::default().fg(t.text_dim)),
             area,
         );
         return;
@@ -113,12 +113,12 @@ pub fn render_add_shortcut_key_dialog(frame: &mut Frame, area: Rect, state: &App
 
     lines.push(Line::from(Span::styled(
         format!("(Reserved: {})", reserved_keys_display()),
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Esc: cancel",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
 
     render_dialog(
@@ -147,7 +147,7 @@ pub fn render_add_shortcut_name_dialog(frame: &mut Frame, area: Rect, state: &Ap
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("Key: ", Style::default().fg(t.text_muted)),
+            Span::styled("Key: ", Style::default().fg(t.text_dim)),
             Span::styled(
                 &key_display,
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
@@ -165,7 +165,7 @@ pub fn render_add_shortcut_name_dialog(frame: &mut Frame, area: Rect, state: &Ap
         Line::from(""),
         Line::from(Span::styled(
             "Enter: continue | Esc: cancel",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )),
     ];
 
@@ -200,13 +200,13 @@ pub fn render_add_shortcut_command_dialog(frame: &mut Frame, area: Rect, state: 
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("Key: ", Style::default().fg(t.text_muted)),
+            Span::styled("Key: ", Style::default().fg(t.text_dim)),
             Span::styled(
                 &key_display,
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
             ),
             Span::raw("     "),
-            Span::styled("Name: ", Style::default().fg(t.text_muted)),
+            Span::styled("Name: ", Style::default().fg(t.text_dim)),
             Span::styled(&name_display, Style::default().fg(t.text)),
         ]),
         Line::from(""),
@@ -229,7 +229,7 @@ pub fn render_add_shortcut_command_dialog(frame: &mut Frame, area: Rect, state: 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter: save | Esc: cancel",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
 
     render_dialog(
@@ -263,17 +263,17 @@ pub fn render_add_shortcut_auto_close_dialog(frame: &mut Frame, area: Rect, stat
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("Key: ", Style::default().fg(t.text_muted)),
+            Span::styled("Key: ", Style::default().fg(t.text_dim)),
             Span::styled(
                 &key_display,
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
             ),
             Span::raw("     "),
-            Span::styled("Name: ", Style::default().fg(t.text_muted)),
+            Span::styled("Name: ", Style::default().fg(t.text_dim)),
             Span::styled(&name_display, Style::default().fg(t.text)),
         ]),
         Line::from(vec![
-            Span::styled("Cmd: ", Style::default().fg(t.text_muted)),
+            Span::styled("Cmd: ", Style::default().fg(t.text_dim)),
             Span::styled(&state.new_shortcut_command, Style::default().fg(t.text)),
         ]),
         Line::from(""),
@@ -286,7 +286,7 @@ pub fn render_add_shortcut_auto_close_dialog(frame: &mut Frame, area: Rect, stat
         Line::from(""),
         Line::from(Span::styled(
             "Tab: toggle | y/n: select | Enter: save | Esc: back",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )),
     ];
 
@@ -331,7 +331,7 @@ pub fn render_delete_shortcut_confirm_dialog(
         Line::from(""),
         Line::from(Span::styled(
             "y: confirm | n/Esc: cancel",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )),
     ];
 

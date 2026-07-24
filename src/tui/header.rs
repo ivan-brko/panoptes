@@ -240,7 +240,7 @@ impl<'a> Header<'a> {
     fn logo_lines(&self, kind: LogoKind, width: usize) -> Vec<Line<'static>> {
         let t = theme();
         let art = Style::default().fg(t.accent).bold();
-        let muted = Style::default().fg(t.text_muted);
+        let muted = Style::default().fg(t.text_dim);
         let breadcrumb_style = self.custom_style.unwrap_or_else(|| t.header_style());
 
         let breadcrumb = self.breadcrumb_text();

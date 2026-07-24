@@ -152,7 +152,7 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(Style::default().fg(if focused { t.border_focused } else { t.border }));
+        .border_style(Style::default().fg(if focused { t.border_focus } else { t.border }));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

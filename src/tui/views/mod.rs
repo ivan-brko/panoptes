@@ -122,12 +122,13 @@ fn base_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
 /// unreachable in practice. It stays as a defined answer rather than a panic:
 /// a badge is not worth taking the render down for.
 pub fn attention_badge(info: &SessionInfo, needs_attention: bool) -> (&'static str, Color) {
+    let t = theme();
     if !needs_attention {
-        return ("  ", Color::White);
+        return ("  ", t.text);
     }
     match &info.attention {
-        Some(reason) => ("● ", reason.badge_color()),
-        None => ("● ", Color::Green),
+        Some(reason) => ("● ", t.attention_color(reason)),
+        None => ("● ", t.success),
     }
 }
 

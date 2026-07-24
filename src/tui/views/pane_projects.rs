@@ -353,7 +353,7 @@ fn branch_item(item: BranchItem) -> ListItem<'static> {
 
     // Color precedence: stale > attention > active > selected > fallback
     let style = if item.stale {
-        selection_style(item.selected, Color::Red)
+        selection_style(item.selected, t.danger)
     } else {
         activity_style(
             item.selected,
