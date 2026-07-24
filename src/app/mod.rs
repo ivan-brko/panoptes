@@ -297,12 +297,17 @@ impl App {
                 match event::read()? {
                     Event::Key(key) => {
                         // Dismiss the error message and startup notice on any
-                        // keypress; the same key still performs its action
-                        if self.state.error_message.is_some() {
-                            self.state.error_message = None;
-                        }
-                        if self.state.startup_notice.is_some() {
-                            self.state.startup_notice = None;
+                        // keypress; the same key still performs its action. A
+                        // release must not count: a terminal reporting event
+                        // types unasked would otherwise dismiss the toast with
+                        // the release of the very key that set it
+                        if key.kind != crossterm::event::KeyEventKind::Release {
+                            if self.state.error_message.is_some() {
+                                self.state.error_message = None;
+                            }
+                            if self.state.startup_notice.is_some() {
+                                self.state.startup_notice = None;
+                            }
                         }
                         if self.is_busy() {
                             self.handle_key_while_busy(key);
