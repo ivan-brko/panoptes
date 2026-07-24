@@ -78,14 +78,15 @@ cargo build --release
 ## Keyboard Shortcuts
 
 Panoptes shows three panes at once — **Projects**, **Sessions**, **Settings** —
-and `Tab` cycles focus. The focused pane widens; the other two shrink but stay
-in view.
+and `→` / `←` (or `Tab` / `Shift+Tab`) cycle focus. The focused pane widens; the
+other two shrink but stay in view.
 
 ### Essential Navigation
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Switch pane (wraps around) |
+| `→` / `←` | Switch pane (wraps around) |
+| `Tab` / `Shift+Tab` | Same thing — switch to the next / previous pane |
 | `Enter` | Open selected item / Enter session mode |
 | `Esc` | Back one level; at a pane's root, back out to the Projects pane — never quits |
 | `q` | Quit (with confirmation) |

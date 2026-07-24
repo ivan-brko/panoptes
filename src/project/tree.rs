@@ -210,19 +210,6 @@ pub fn row_index_of_folder(store: &ProjectStore, path: &[String]) -> Option<usiz
         .position(|row| row.folder_path() == Some(path))
 }
 
-/// Index of the row holding the parent folder of the row at `index`
-pub fn parent_row_index(store: &ProjectStore, index: usize) -> Option<usize> {
-    let rows = visible_rows(store, store.collapsed_folders());
-    let depth = rows.get(index)?.depth();
-    if depth == 0 {
-        return None;
-    }
-    // The nearest preceding row one level shallower is the parent folder
-    rows[..index]
-        .iter()
-        .rposition(|row| row.depth() == depth - 1 && row.folder_path().is_some())
-}
-
 /// All distinct folder paths in the store, including intermediate folders
 ///
 /// Sorted case-insensitively by display path; used for move-target autocomplete.
@@ -379,26 +366,6 @@ mod tests {
 
         store.set_folder_collapsed(&["Acme".to_string()], true);
         assert_eq!(row_index_of_project(&store, id), None);
-    }
-
-    #[test]
-    fn test_parent_row_index_walks_up_one_level() {
-        let store = store_with(vec![project_in("web", &["Acme", "Platform"])]);
-        // rows: 0 Acme, 1 Platform, 2 web
-        assert_eq!(parent_row_index(&store, 0), None);
-        assert_eq!(parent_row_index(&store, 1), Some(0));
-        assert_eq!(parent_row_index(&store, 2), Some(1));
-    }
-
-    #[test]
-    fn test_parent_row_index_skips_sibling_subtrees() {
-        let store = store_with(vec![
-            project_in("first", &["Acme", "Alpha"]),
-            project_in("second", &["Acme", "Beta"]),
-        ]);
-        // rows: 0 Acme, 1 Alpha, 2 first, 3 Beta, 4 second
-        assert_eq!(parent_row_index(&store, 3), Some(0));
-        assert_eq!(parent_row_index(&store, 4), Some(3));
     }
 
     #[test]

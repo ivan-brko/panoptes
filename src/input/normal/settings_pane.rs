@@ -120,18 +120,8 @@ fn handle_notifications_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 return Ok(());
             }
         }
-        KeyCode::Left => {
-            if app.state.notifications_index != 0 {
-                return Ok(());
-            }
-            app.config.notification_method = prev_method(app.config.notification_method);
-        }
-        KeyCode::Right => {
-            if app.state.notifications_index != 0 {
-                return Ok(());
-            }
-            app.config.notification_method = next_method(app.config.notification_method);
-        }
+        // No `Left`/`Right` arm: the arrows are global pane cycling, and
+        // `Space`/`Enter` above already advance the method
         _ => return Ok(()),
     }
 
@@ -190,7 +180,7 @@ fn handle_about_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
-/// The notification methods in `←/→` order
+/// The notification methods in the order `Space`/`Enter` advance through
 const METHODS: [NotificationMethod; 3] = [
     NotificationMethod::Bell,
     NotificationMethod::Title,
@@ -202,17 +192,12 @@ fn next_method(method: NotificationMethod) -> NotificationMethod {
     METHODS[(index + 1) % METHODS.len()]
 }
 
-fn prev_method(method: NotificationMethod) -> NotificationMethod {
-    let index = METHODS.iter().position(|m| *m == method).unwrap_or(0);
-    METHODS[(index + METHODS.len() - 1) % METHODS.len()]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_method_cycles_both_ways_with_wraparound() {
+    fn test_method_cycles_forward_with_wraparound() {
         assert_eq!(
             next_method(NotificationMethod::Bell),
             NotificationMethod::Title
@@ -224,15 +209,6 @@ mod tests {
         assert_eq!(
             next_method(NotificationMethod::None),
             NotificationMethod::Bell
-        );
-
-        assert_eq!(
-            prev_method(NotificationMethod::Bell),
-            NotificationMethod::None
-        );
-        assert_eq!(
-            prev_method(NotificationMethod::None),
-            NotificationMethod::Title
         );
     }
 }

@@ -13,17 +13,26 @@ a confirmation dialog, an autocomplete) owns these keys itself.
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Switch to the next / previous pane (wraps around) |
+| `Right` / `Left` | Switch to the next / previous pane (wraps around) |
+| `Tab` / `Shift+Tab` | Same thing — switch to the next / previous pane |
 | `q` | Quit (prompts for confirmation) |
 | `?` | Show the shortcuts for wherever you are (`?` or `Esc` closes it) |
 | `Space` | Jump to the next session needing attention |
 | `Esc` | Go back one level in the focused pane; with nothing left to pop, back out to the Projects pane. Never quits |
 
-`Tab` switches panes **only** in normal mode. In a path input it completes a
-path; in Session mode it types a tab into the agent. In the Settings pane's
-Notifications section, `Space` toggles the highlighted option instead of jumping.
+`Right` / `Left` match the panes' left-to-right order, and are exact synonyms
+for `Tab` / `Shift+Tab`. No pane claims them for anything else, which is why
+they can be global without exceptions.
 
-Navigation is by arrow key throughout. There are no `j`/`k` bindings.
+These switch panes **only** in normal mode. In a path input `Tab` completes a
+path; in Session mode it types a tab into the agent, and the arrows go to the
+agent too. In a confirmation dialog `Left` / `Right` toggle Yes / No. In the
+Settings pane's Notifications section, `Space` toggles the highlighted option
+instead of jumping.
+
+Vertical navigation is by arrow key throughout: `Up` / `Down` move within a
+pane, and `Enter` is the only key that acts on what is selected. There are no
+`j`/`k` bindings.
 
 ## Pane 1 — Projects
 
@@ -35,8 +44,6 @@ The project tree, and three levels beneath it.
 |-----|--------|
 | `Up` / `Down` | Move selection |
 | `Enter` | Open selected project; expand/collapse selected folder |
-| `Right` | Expand selected folder |
-| `Left` | Collapse selected folder, or jump to its parent folder |
 | `n` | Add new project (opens the path prompt) |
 | `d` | Delete selected project — or ungroup a folder, which deletes nothing |
 | `m` | Move selected project (or folder subtree) into a folder |
@@ -145,8 +152,7 @@ written to `config.toml` immediately.
 | Key | Action |
 |-----|--------|
 | `Up` / `Down` | Move through the rows |
-| `Space` | Toggle the highlighted option |
-| `Left` / `Right` | Change how you are notified (Bell / Title / Silent) |
+| `Space` / `Enter` | Toggle the highlighted option — on the first row, advance how you are notified (Bell → Title → Silent, wrapping) |
 
 ### About / paths
 
@@ -167,6 +173,7 @@ Viewing a session without interacting with it.
 | `Up` / `Down` | Scroll (3 lines) |
 | `PageUp` / `PageDown` | Scroll a page |
 | `Home` / `End` | Scroll to top (oldest) / bottom (live view) |
+| `Left` / `Right` | Nothing — the session fills the terminal, so there is no pane to cycle to |
 | `1-9` | Switch to session by number (`0` = 10) |
 | any other key | Run a matching custom shortcut, if one is bound |
 
@@ -241,8 +248,8 @@ When prompted to confirm an action:
 
 Custom shortcuts cannot be bound to `q`, `n`, `s`, `d`, `,` or the digits `0-9`:
 those are built-in where custom shortcuts fire, so a shortcut on one could never
-run. `Space`, `Esc`, `Enter` and `Tab` are not characters and cannot be bound at
-all.
+run. `Space`, `Esc`, `Enter`, `Tab` and the arrow keys are not characters and
+cannot be bound at all.
 
 A shortcut bound to a key that has since become reserved is dropped when
 Panoptes starts, and a startup notice says which ones went.

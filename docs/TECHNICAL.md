@@ -153,9 +153,12 @@ badges hold full strength in every pane, focused or not, pinned by
 
 ### User Input
 1. Crossterm captures keyboard events
-2. In normal mode the global keys are handled first (`Tab`, `q`, `?`, `Space`);
-   every other input mode owns those keys itself, which is why `Tab` completes a
-   path in the add-project prompt and types a tab in Session mode
+2. In normal mode the global keys are handled first (`Tab`, `←`/`→`, `q`, `?`,
+   `Space`); every other input mode owns those keys itself, which is why `Tab`
+   completes a path in the add-project prompt and types a tab in Session mode,
+   and why `←`/`→` still toggle Yes/No in a dialog. `←`/`→` are exact synonyms
+   for `Shift+Tab`/`Tab`: because globals run *before* the mode handler, no pane
+   may claim them, which is why nothing in normal mode does
 3. Otherwise the key routes on `Focus` — one of the three panes, or a
    full-screen session — and then on that pane's own drill-down level
    (`ProjectsNav` / `SettingsNav`)
@@ -174,7 +177,7 @@ Two invariants hold at every frame, including mid-transition:
   a transition.
 
 A focus change retargets from wherever the panes currently are rather than
-queueing, so holding `Tab` never overshoots or builds up a backlog. Once a
+queueing, so holding `Tab` or `→` never overshoots or builds up a backlog. Once a
 transition lands, `PaneLayout::tick` stops asking for frames — idle Panoptes
 renders exactly as often as it did before the accordion existed.
 

@@ -29,9 +29,9 @@ Panoptes provides a unified interface where you can:
 
 ## Navigation Model
 
-Panoptes shows three panes at once. `Tab` and `Shift+Tab` cycle focus; the
-focused pane widens and the other two shrink, so whatever you are working on
-gets the room and the rest stay in view.
+Panoptes shows three panes at once. `→` and `←` cycle focus — `Tab` and
+`Shift+Tab` do the same — and the focused pane widens while the other two
+shrink, so whatever you are working on gets the room and the rest stay in view.
 
 ```
 ┌──────────────────────────┬─────────────────┬─────────────────────┐
@@ -114,7 +114,8 @@ Session views support scrollback through output history with PgUp/PgDn keys. The
 ### Keyboard-Driven Interface
 
 Everything is accessible via keyboard shortcuts. Number keys (1-9) for quick
-selection, `Tab` to cycle panes, and arrow keys for navigation.
+selection, `→`/`←` (or `Tab`/`Shift+Tab`) to cycle panes, `↑`/`↓` to move within
+one, and `Enter` as the single key that acts on whatever is selected.
 
 ### Session Naming
 
