@@ -250,28 +250,33 @@ impl<'a> Header<'a> {
         let mut lines = vec![
             Self::row(
                 width,
-                Span::styled(logo::WORDMARK[0], art),
+                vec![Span::styled(logo::WORDMARK[0], art)],
                 None,
                 self.badge_spans(),
             ),
             Self::row(
                 width,
-                Span::styled(logo::WORDMARK[1], art),
+                vec![Span::styled(logo::WORDMARK[1], art)],
                 breadcrumb,
                 vec![],
             ),
             Self::row(
                 width,
-                Span::styled(logo::WORDMARK[2], art),
+                vec![Span::styled(logo::WORDMARK[2], art)],
                 self.notification_span(),
                 vec![],
             ),
         ];
 
+        // The stem wears the art style so the P reads as one glyph down the
+        // rows; only the tagline beside it is muted
         if kind == LogoKind::Full {
             lines.push(Self::row(
                 width,
-                Span::styled(logo::TAGLINE, muted),
+                vec![
+                    Span::styled(logo::TAGLINE_STEM, art),
+                    Span::styled(format!(" {}", logo::TAGLINE), muted),
+                ],
                 None,
                 vec![Span::styled(logo::version(), muted)],
             ));
@@ -284,21 +289,22 @@ impl<'a> Header<'a> {
     /// `right` both flush to the far edge, the whole thing clipped to `width`
     ///
     /// `left` is padded out to the wordmark's width even when it is shorter
-    /// than that - the tagline is - so every row's text starts in the same
-    /// column. Everything else is right-aligned: the header is the art on one
-    /// side and the state of the app on the other, not a caption trailing the
-    /// wordmark.
+    /// than that - the tagline row is - so every row's text starts in the same
+    /// column. It takes several spans because that row mixes styles: the stem
+    /// in the art's, the tagline muted. Everything else is right-aligned: the
+    /// header is the art on one side and the state of the app on the other,
+    /// not a caption trailing the wordmark.
     fn row(
         width: usize,
-        left: Span<'static>,
+        left: Vec<Span<'static>>,
         mid: Option<Span<'static>>,
         right: Vec<Span<'static>>,
     ) -> Line<'static> {
         let band = logo::WORDMARK_WIDTH as usize;
-        let left_len = left.content.chars().count();
+        let left_len: usize = left.iter().map(|s| s.content.chars().count()).sum();
         let right_len: usize = right.iter().map(|s| s.content.chars().count()).sum();
 
-        let mut spans = vec![left];
+        let mut spans = left;
 
         // Everything after the band is optional, and a header narrow enough
         // that the band fills it keeps the art and drops the rest
@@ -485,18 +491,22 @@ mod tests {
     }
 
     /// The wordmark owns the left, everything else is flush right - and that
-    /// holds whatever the left span is, since the tagline is shorter than the art
+    /// holds whatever the left spans are, since the tagline row is shorter
+    /// than the art
     #[test]
     fn test_rows_right_align_the_text_beside_the_wordmark() {
         let art = Header::row(
             80,
-            Span::raw(logo::WORDMARK[1]),
+            vec![Span::raw(logo::WORDMARK[1])],
             Some(Span::raw("beside")),
             vec![],
         );
         let tagline = Header::row(
             80,
-            Span::raw(logo::TAGLINE),
+            vec![
+                Span::raw(logo::TAGLINE_STEM),
+                Span::raw(format!(" {}", logo::TAGLINE)),
+            ],
             Some(Span::raw("beside")),
             vec![],
         );
@@ -514,7 +524,7 @@ mod tests {
     fn test_a_pinned_span_stays_outside_the_message() {
         let line = Header::row(
             80,
-            Span::raw(logo::WORDMARK[0]),
+            vec![Span::raw(logo::WORDMARK[0])],
             Some(Span::raw("breadcrumb")),
             vec![Span::raw("[2\u{25CF}]")],
         );
@@ -529,7 +539,7 @@ mod tests {
     fn test_a_row_with_no_room_past_the_band_keeps_only_the_art() {
         let line = Header::row(
             logo::WORDMARK_WIDTH as usize,
-            Span::raw(logo::WORDMARK[0]),
+            vec![Span::raw(logo::WORDMARK[0])],
             Some(Span::raw("dropped")),
             vec![Span::raw("[1]")],
         );
@@ -544,7 +554,7 @@ mod tests {
         let width = logo::WORDMARK_WIDTH as usize + LOGO_GAP as usize + 10;
         let line = Header::row(
             width,
-            Span::raw(logo::WORDMARK[2]),
+            vec![Span::raw(logo::WORDMARK[2])],
             Some(Span::raw("a message far longer than ten columns")),
             vec![],
         );

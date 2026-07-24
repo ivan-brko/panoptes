@@ -18,6 +18,10 @@ pub const WORDMARK_WIDTH: u16 = 31;
 /// The tagline drawn under the wordmark
 pub const TAGLINE: &str = "the-all-seeing";
 
+/// The P's stem carried down into the tagline row, so the tagline sits
+/// indented beside it rather than flush with the header's edge
+pub const TAGLINE_STEM: &str = "\u{2588}";
+
 /// The wordmark spelled out, for headers too narrow or too short for the art
 pub const PLAIN: &str = "PANOPTES";
 
@@ -52,6 +56,19 @@ mod tests {
                 ratatui::text::Span::raw(row).width(),
                 row.chars().count(),
                 "row {row:?} renders wider than its character count"
+            );
+        }
+    }
+
+    /// The stem only reads as a continuation of the P if the column above it
+    /// is solid, so re-cutting the art cannot silently leave it floating
+    /// under empty space
+    #[test]
+    fn test_the_tagline_stem_continues_the_p() {
+        for row in [WORDMARK[1], WORDMARK[2]] {
+            assert!(
+                row.starts_with(TAGLINE_STEM),
+                "row {row:?} does not start with the stem glyph {TAGLINE_STEM:?}"
             );
         }
     }
