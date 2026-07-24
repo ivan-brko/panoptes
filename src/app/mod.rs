@@ -1341,17 +1341,14 @@ impl App {
         mouse: MouseEvent,
         is_codex_session: bool,
     ) -> Result<bool> {
-        // A suspended session has no PTY to forward to. Deliberately does not
-        // wake it either: scrolling back through a suspended session is the
-        // point, and a stray click should not relaunch an agent.
-        if self.sessions.is_suspended(session_id) {
-            return Ok(false);
-        }
-
         let mouse_enabled = self.sessions.get(session_id).is_some_and(|session| {
             session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None
         });
-        if !should_forward_mouse_to_pty(self.state.input_mode, mouse_enabled) {
+        if !should_forward_mouse_to_pty(
+            self.state.input_mode,
+            mouse_enabled,
+            self.sessions.is_suspended(session_id),
+        ) {
             return Ok(false);
         }
 
@@ -2695,8 +2692,20 @@ fn paste_into(field: &mut String, text: &str, max: usize) -> bool {
     was_truncated
 }
 
-fn should_forward_mouse_to_pty(input_mode: InputMode, mouse_enabled: bool) -> bool {
-    input_mode == InputMode::Session && mouse_enabled
+/// Whether a mouse event belongs to the child rather than to Panoptes
+///
+/// Three conditions, and the third is what makes a suspended session
+/// selectable: it has no PTY to forward to, and forwarding must not wake it
+/// either - reading back through a suspended session is the point, and a
+/// stray click should not relaunch an agent. Since nothing is forwarded, its
+/// drags fall through to Panoptes' own selection, which only ever reads the
+/// terminal emulator.
+fn should_forward_mouse_to_pty(
+    input_mode: InputMode,
+    mouse_enabled: bool,
+    suspended: bool,
+) -> bool {
+    !suspended && input_mode == InputMode::Session && mouse_enabled
 }
 
 /// The one session, if any, whose PTY is not read this tick
@@ -2891,9 +2900,28 @@ mod tests {
 
     #[test]
     fn test_should_forward_mouse_to_pty() {
-        assert!(should_forward_mouse_to_pty(InputMode::Session, true));
-        assert!(!should_forward_mouse_to_pty(InputMode::Session, false));
-        assert!(!should_forward_mouse_to_pty(InputMode::Normal, true));
+        assert!(should_forward_mouse_to_pty(InputMode::Session, true, false));
+        assert!(!should_forward_mouse_to_pty(
+            InputMode::Session,
+            false,
+            false
+        ));
+        assert!(!should_forward_mouse_to_pty(InputMode::Normal, true, false));
+    }
+
+    /// What makes a suspended session selectable: nothing is forwarded to it,
+    /// so its drags fall through to Panoptes' own selection - which only ever
+    /// reads the terminal emulator and so cannot wake the agent
+    #[test]
+    fn test_a_suspended_session_never_receives_forwarded_mouse_events() {
+        // Even a child that had asked for the mouse before it was suspended
+        assert!(!should_forward_mouse_to_pty(InputMode::Session, true, true));
+        assert!(!should_forward_mouse_to_pty(InputMode::Normal, true, true));
+        assert!(!should_forward_mouse_to_pty(
+            InputMode::Session,
+            false,
+            true
+        ));
     }
 
     /// A session manager backed by a temp store, so tests never touch the

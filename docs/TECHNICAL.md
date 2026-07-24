@@ -639,3 +639,28 @@ The project has 650+ unit tests covering:
 - Path completion
 
 Run tests with: `cargo test`
+
+### End-to-end mouse selection
+
+`tests/selection_e2e.rs` drives the **real binary**: it spawns Panoptes in a
+PTY, plays iTerm2 at the other end (answering the startup queries, sending SGR
+mouse reports exactly as a terminal does once mouse capture is on), and asserts
+on the *system clipboard*. A passing run exercises the whole chain, from an
+escape sequence arriving on stdin to text landing in `pbpaste`.
+
+These are `#[ignore]`d — they spawn processes and touch the developer's
+clipboard (which they save and restore), so they do not belong in a plain
+`cargo test`:
+
+```bash
+cargo test --test selection_e2e -- --ignored          # every scenario
+cargo test --test selection_e2e -- --ignored shell    # just one
+```
+
+Being a Cargo integration test rather than a loose script is what guarantees
+the binary under test is fresh: `CARGO_BIN_EXE_panoptes` is built before the
+test runs, so it is impossible to validate a stale build. The scenarios live in
+`tests/e2e/drive_selection.py` and need `python3` with
+[`pyte`](https://pypi.org/project/pyte/), which renders Panoptes' output so the
+harness knows where on screen to click. The `codex` scenario additionally needs
+an authenticated `~/.codex`.
