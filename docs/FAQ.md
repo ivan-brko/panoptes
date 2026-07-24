@@ -128,9 +128,18 @@ Press `Shift+Esc`. Regular `Esc` exits session mode; `Shift+Esc` sends the Escap
 - **Ctrl+Home/Ctrl+End**: Jump to top/bottom
 - Typing any key (except scroll keys) automatically scrolls back to live view
 
-### I can't copy text from the session - what's wrong?
+### How do I copy text out of a session?
 
-You're in session mode. Press `Esc` to exit session mode first, then use your terminal's native text selection (mouse drag or shift+arrow keys). Session mode forwards all input to the active session, which prevents normal terminal selection.
+Drag over it with the mouse. Panoptes highlights the selection and copies it to the clipboard when you release the button, the way tmux does — no need to leave session mode. Double-click selects a word, triple-click the whole line, and dragging past the top or bottom edge scrolls the view and keeps extending the selection.
+
+The highlight is deliberately short-lived: the copy has already happened when you release, so the highlight disappears on the session's next output, your next click, or a scroll.
+
+Two cases behave differently:
+
+- **The agent owns the mouse** (Claude Code's TUI, `vim` with `mouse=a`, `htop`). Your drag is forwarded to it, exactly as it would be in a normal terminal tab, so the agent does its own selection. Hold **⌥ (Option)** while dragging to bypass mouse reporting and use iTerm2's native selection instead. The footer says which one applies: `drag: copy` when the selection is Panoptes's, `⌥drag: copy` when it is the terminal's.
+- **Codex's fallback history** (very old sessions scrolled past what the terminal emulator kept) has no terminal cells behind it and cannot be selected. Exit session mode with `Esc` and use the terminal's own selection.
+
+Exiting session mode with `Esc` always works too: it releases mouse capture, giving you your terminal's native selection back.
 
 ### I can't scroll through the session output - what's wrong?
 

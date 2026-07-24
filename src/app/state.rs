@@ -55,6 +55,7 @@ pub struct ClaudeSettingsMigrateState {
 
 use super::input_mode::InputMode;
 use super::nav::{Focus, ProjectsNav, SettingsNav, Tab};
+use super::selection::{ClickTracker, SessionSelection};
 
 /// Advance a wrap-around list selection, tolerating stale indices
 ///
@@ -375,6 +376,15 @@ pub struct AppState {
     /// Scroll offset for session view (0 = live view, >0 = scrolled back)
     pub session_scroll_offset: usize,
 
+    /// Mouse text selection in the session view, if there is one
+    ///
+    /// Only ever belongs to the active session, and only ever outlives the
+    /// screen it was made against by a moment: the copy happens on release,
+    /// so the highlight is free to evaporate on the next output.
+    pub selection: Option<SessionSelection>,
+    /// Counts repeat clicks, for double-click word and triple-click line
+    pub session_click: ClickTracker,
+
     /// Worktree creation wizard state (grouped together)
     pub worktree_wizard: WorktreeWizardState,
 
@@ -537,6 +547,9 @@ impl AppState {
         self.active_session = Some(session_id);
         // Reset scroll offset when entering session view
         self.session_scroll_offset = 0;
+        // A selection belongs to the screen it was made on, and this is a
+        // different screen
+        self.clear_selection();
         // Auto-activate session mode so keys go directly to PTY
         self.input_mode = InputMode::Session;
     }
@@ -558,6 +571,66 @@ impl AppState {
         self.focus = restored;
         self.active_session = None;
         self.input_mode = InputMode::Normal;
+        self.clear_selection();
+    }
+
+    /// Drop the mouse selection, highlight and all
+    ///
+    /// Deliberately ephemeral: the copy already happened on release, so an
+    /// evaporating highlight loses nothing and no selection ever has to
+    /// survive the content moving under it. Called on new output, a new
+    /// click, a wheel notch, a resize, a session switch, and on the way out
+    /// of the session view.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.session_click.reset();
+    }
+
+    /// Detach from the session, leaving it on screen
+    ///
+    /// The caller drops mouse capture to hand selection back to the terminal,
+    /// which also means the release of a button held right now will never
+    /// arrive, so the selection has to end here. That is what keeps a drag
+    /// interrupted by `Esc` from freezing its session for good.
+    pub fn leave_session_mode(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.clear_selection();
+    }
+
+    /// Drop the selection if the screen it was made against has moved on
+    ///
+    /// Two rules, both of which the highlight is deliberately too short-lived
+    /// to argue with. A selection only ever belongs to the session on screen,
+    /// which catches every way one can stop being on screen - closed, switched
+    /// away from - without each such path having to remember. And a session
+    /// that produced output is showing something else now, so the cells the
+    /// selection named are no longer the text it named.
+    ///
+    /// Returns whether anything was dropped.
+    pub fn expire_selection(&mut self, sessions_with_output: &[SessionId]) -> bool {
+        let stale = self.selection.as_ref().is_some_and(|selection| {
+            Some(selection.session_id) != self.active_session
+                || sessions_with_output.contains(&selection.session_id)
+        });
+        if stale {
+            self.clear_selection();
+        }
+        stale
+    }
+
+    /// The session whose PTY reads an in-progress drag is freezing, if any
+    pub fn dragging_session(&self) -> Option<SessionId> {
+        self.selection
+            .as_ref()
+            .filter(|selection| selection.dragging)
+            .map(|selection| selection.session_id)
+    }
+
+    /// The selection to draw for `session_id`, if the current one is its own
+    pub fn selection_for(&self, session_id: SessionId) -> Option<&SessionSelection> {
+        self.selection
+            .as_ref()
+            .filter(|selection| selection.session_id == session_id)
     }
 }
 
@@ -901,6 +974,106 @@ mod tests {
         state.focus = Focus::Session;
         assert!(!state.escape_back());
         assert_eq!(state.focus, Focus::Session);
+    }
+
+    // Selection lifetime
+
+    fn selection_for(session_id: SessionId) -> SessionSelection {
+        SessionSelection::started(session_id, (3, 5), (0, 5))
+    }
+
+    /// The highlight belongs to the screen it was made against, and new output
+    /// is a new screen. The copy already happened on release, so this costs
+    /// the user nothing.
+    #[test]
+    fn test_new_output_clears_a_finished_selection() {
+        let session_id = uuid::Uuid::new_v4();
+        let mut state = AppState {
+            active_session: Some(session_id),
+            selection: Some(selection_for(session_id)),
+            ..Default::default()
+        };
+
+        // Another session's output leaves it alone
+        assert!(!state.expire_selection(&[uuid::Uuid::new_v4()]));
+        assert!(state.selection.is_some());
+
+        assert!(state.expire_selection(&[session_id]));
+        assert!(state.selection.is_none());
+        // And clearing an absent selection is not a change
+        assert!(!state.expire_selection(&[session_id]));
+    }
+
+    /// One invariant covers closing a session, switching away from one, and
+    /// leaving the session view, so no individual path has to remember
+    #[test]
+    fn test_a_selection_that_is_not_the_visible_session_expires() {
+        let session_id = uuid::Uuid::new_v4();
+        let mut state = AppState {
+            active_session: Some(uuid::Uuid::new_v4()),
+            selection: Some(selection_for(session_id)),
+            ..Default::default()
+        };
+        assert!(state.expire_selection(&[]));
+        assert!(state.selection.is_none());
+
+        // Leaving the session view entirely is the same story
+        state.active_session = None;
+        state.selection = Some(selection_for(session_id));
+        assert!(state.expire_selection(&[]));
+        assert!(state.selection.is_none());
+    }
+
+    /// Esc drops mouse capture, so the release of a button held right now
+    /// never arrives - and a drag left dragging would freeze its session for
+    /// good
+    #[test]
+    fn test_leaving_session_mode_ends_an_in_progress_drag() {
+        let session_id = uuid::Uuid::new_v4();
+        let mut state = AppState::default();
+        state.navigate_to_session(session_id);
+        state.selection = Some(selection_for(session_id));
+        assert_eq!(state.dragging_session(), Some(session_id));
+
+        state.leave_session_mode();
+
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.dragging_session(), None);
+        assert!(state.selection.is_none());
+        // The session itself is still on screen; only the mode changed
+        assert_eq!(state.active_session, Some(session_id));
+        assert_eq!(state.focus, Focus::Session);
+    }
+
+    #[test]
+    fn test_switching_sessions_drops_the_selection() {
+        let session_id = uuid::Uuid::new_v4();
+        let mut state = AppState::default();
+        state.navigate_to_session(session_id);
+        state.selection = Some(selection_for(session_id));
+
+        state.navigate_to_session(uuid::Uuid::new_v4());
+        assert!(state.selection.is_none());
+    }
+
+    #[test]
+    fn test_only_a_drag_freezes_and_only_the_visible_session_draws() {
+        let session_id = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let mut state = AppState {
+            active_session: Some(session_id),
+            selection: Some(selection_for(session_id)),
+            ..Default::default()
+        };
+
+        assert_eq!(state.dragging_session(), Some(session_id));
+        assert!(state.selection_for(session_id).is_some());
+        assert!(state.selection_for(other).is_none());
+
+        // A finished selection still draws, but no longer holds the session
+        state.selection.as_mut().unwrap().dragging = false;
+        assert_eq!(state.dragging_session(), None);
+        assert!(state.selection_for(session_id).is_some());
     }
 
     #[test]

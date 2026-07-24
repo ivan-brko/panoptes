@@ -25,6 +25,7 @@ Named after the hundred-eyed giant of Greek mythology.
 - **Real-Time State Tracking** - See what each session is doing: Thinking, Executing, Waiting for input, or Needs approval
 - **Attention System** - Get notified when sessions need your input, with visual badges and terminal bell alerts
 - **Keyboard-Driven Interface** - Arrow-key navigation, number shortcuts, and a `?` overlay listing the keys for whichever view you are in
+- **Drag to Copy** - Select session output with the mouse and it lands on the clipboard when you release, without leaving session mode. Double-click for a word, triple-click for a line, drag past the edge to keep going
 - **Shell Sessions** - Run normal shell sessions alongside Claude Code sessions and get notified when commands finish — useful for running tests, builds, or anything you'd rather not route through Claude, while still benefiting from Panoptes' automatic worktree handling
 - **Session Naming** - Name sessions for easy identification ("frontend-auth", "api-refactor")
 

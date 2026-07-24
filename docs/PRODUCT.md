@@ -111,6 +111,19 @@ whatever you already use for tailing files.
 
 Session views support scrollback through output history with PgUp/PgDn keys. The terminal maintains a 10,000-line scrollback buffer per session, allowing you to review past output even after it scrolls off screen.
 
+### Drag to Copy
+
+Drag over session output with the mouse and Panoptes highlights it, copying it
+to the clipboard when you release — without leaving session mode. Double-click
+takes a word, triple-click a whole line, and dragging past the top or bottom
+edge scrolls the view while the selection keeps growing. The session is paused
+for the length of the drag, so nothing shifts under the pointer.
+
+Agents that take over the mouse themselves (Claude Code's TUI, `vim`, `htop`)
+still get your drags, exactly as they would in a normal terminal tab; hold ⌥
+while dragging to select over them instead. The footer always says which of the
+two applies.
+
 ### Keyboard-Driven Interface
 
 Everything is accessible via keyboard shortcuts. Number keys (1-9) for quick

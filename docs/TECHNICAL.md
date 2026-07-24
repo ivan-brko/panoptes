@@ -164,6 +164,55 @@ badges hold full strength in every pane, focused or not, pinned by
    (`ProjectsNav` / `SettingsNav`)
 4. In Session mode, keystrokes are written to the PTY
 
+### Mouse Input and Text Selection
+Mouse capture stays on for the whole time a session is on screen — the wheel
+cannot drive local scrollback otherwise — and mouse reporting is a single
+terminal-wide switch, so the terminal's own drag-selection is off while it is.
+`App::handle_mouse_event` therefore routes every mouse event itself, in this
+order:
+
+1. Wheel notches over a Codex session become local scrollback
+2. If the child enabled a mouse protocol (Claude Code's TUI, `vim` with
+   `mouse=a`, `htop`), the event is encoded and forwarded to the PTY, and the
+   child does its own selection — the same as in a real terminal tab, where
+   ⌥drag is the way past it
+3. Alternate-screen apps that did *not* enable a mouse protocol get wheel
+   notches translated to arrow keys, as iTerm2 does
+4. Wheel notches over anything else become local scrollback
+5. What is left — left-button press, drag and release over a plain shell or
+   Codex — becomes a Panoptes selection
+
+Selection (`app/selection.rs`, painted by `tui/views/session.rs`) is modelled
+on tmux:
+
+- **Press** anchors the selection and *freezes that session's PTY reads*
+  (`tick_output_polling` already excludes one session; the drag adds itself to
+  that condition). The screen is a snapshot for as long as the button is down,
+  so nothing can shift under the pointer. Output queues in the PTY and resumes
+  on release. The freeze is read from the live selection state, never a flag
+  of its own, so a drag that ends abnormally cannot leak it.
+- **Release** extracts the text via `VirtualTerminal::contents_between` and
+  copies it (`clipboard.rs`: a helper such as `pbcopy` first, OSC 52 as the
+  fallback — iTerm2 ships with OSC 52 clipboard access disabled). A press and
+  release on one cell is a plain click and never touches the clipboard.
+- **Double- and triple-click** select a word and a logical line. crossterm
+  reports no click count, so `ClickTracker` derives one from presses landing
+  within 400 ms and one cell of each other. Both follow soft-wraps.
+- **The highlight is ephemeral**: it survives release (the copy already
+  happened) but is dropped by the session's next output, the next click, a
+  wheel notch, a resize, a session switch, or leaving the view.
+
+Coordinates are *absolute rows* — row 0 is the oldest line of scrollback and
+`history_rows()` is the top of the live screen — rather than rows of the
+current view. That is what lets a drag held past the top or bottom edge scroll
+the view (driven from the event-loop tick, because drag events stop arriving
+when the pointer stops moving) and keep extending across more than a
+screenful. Extraction over such a range needs `contents_between_absolute` on
+the vendored vt100, added beside the existing `PANOPTES PATCH` marks.
+
+Selection works on suspended sessions too: it only ever reads the terminal
+emulator, and never writes to or wakes a PTY.
+
 ### Pane Layout
 The three panes are sized by `tui/panes.rs`. `pane_widths(total, focused)` is a
 pure function of the terminal width and the focused pane; `PaneLayout` eases

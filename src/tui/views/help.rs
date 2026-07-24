@@ -277,6 +277,9 @@ fn session_shortcuts() -> Vec<Line<'static>> {
         shortcut_line("\u{21E7}Esc", "Send Esc to the agent"),
         shortcut_line("Ctrl+Home/End", "Scroll without detaching"),
         shortcut_line("Mouse scroll", "Scroll when the PTY supports it"),
+        shortcut_line("Mouse drag", "Select and copy; \u{2325}drag when the agent"),
+        shortcut_line("", "owns the mouse (claude, vim, htop)"),
+        shortcut_line("Double/triple click", "Select a word / a whole line"),
         empty_line(),
         footer_hint(),
     ]

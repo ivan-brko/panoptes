@@ -6,7 +6,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::app::{AppState, InputMode};
+use crate::app::{selection, AppState, InputMode, SessionSelection};
 use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionInfo, SessionManager, SessionState, SessionType};
@@ -115,6 +115,13 @@ pub fn render_session_view(
                 Some(cursor_pos),
                 cursor_visible,
             );
+
+            // Painted over the rendered cells, never baked into them:
+            // `visible_styled_lines` is cached per viewport and scroll offset,
+            // and a highlight folded into that cache would outlive the drag
+            if let Some(selection) = state.selection_for(session.info.id) {
+                paint_selection(frame.buffer_mut(), layout.content, session, selection);
+            }
         }
     } else {
         let empty = Paragraph::new("Session not found").style(Style::default().fg(t.error_bg));
@@ -132,8 +139,58 @@ pub fn render_session_view(
         })
         .unwrap_or(false);
     let suspended = session.is_some_and(|s| s.info.state == SessionState::Suspended);
-    let help_text = build_footer_text(state, is_scrolled, suspended, sessions, config);
+    // Who owns the mouse decides which drag copies: when the child asked for
+    // mouse reporting its own selection is what a drag drives, exactly as in
+    // a real terminal tab, and \u{2325}drag is the way past it
+    let child_owns_mouse =
+        session.is_some_and(|s| s.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None);
+    let help_text = build_footer_text(
+        state,
+        is_scrolled,
+        suspended,
+        child_owns_mouse,
+        sessions,
+        config,
+    );
     render_footer(frame, layout.footer, &help_text);
+}
+
+/// Paint the mouse selection over the rendered terminal content
+///
+/// Stream shape, like every terminal's selection and nothing like a
+/// rectangle: the first row runs from the anchor column to the end of the
+/// line, whole rows follow, and the last row stops at the head column. Rows
+/// that the view has scrolled past are simply not drawn - the selection is
+/// anchored in absolute rows, so it can be larger than the screen.
+fn paint_selection(buf: &mut Buffer, area: Rect, session: &Session, selection: &SessionSelection) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let style = theme().text_selection_style();
+    let last_col = area.width - 1;
+    let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
+
+    // Only the rows on screen are worth walking: a selection dragged through
+    // a long scrollback can be thousands of rows tall
+    let viewport_top = session.vterm.viewport_top_row();
+    let first_row = start_row.max(viewport_top);
+    let last_row = end_row.min(viewport_top + usize::from(area.height) - 1);
+    if last_row < first_row {
+        return;
+    }
+
+    for row in first_row..=last_row {
+        let Some(view_row) = selection::view_row(viewport_top, row, area.height) else {
+            continue;
+        };
+        let first = if row == start_row { start_col } else { 0 };
+        let last = if row == end_row { end_col } else { last_col };
+
+        let y = area.y + view_row;
+        for x in first..=last.min(last_col) {
+            buf.get_mut(area.x + x, y).set_style(style);
+        }
+    }
 }
 
 /// What the session header says after the breadcrumb
@@ -222,6 +279,7 @@ fn build_footer_text(
     state: &AppState,
     is_scrolled: bool,
     suspended: bool,
+    child_owns_mouse: bool,
     sessions: &SessionManager,
     config: &Config,
 ) -> String {
@@ -240,12 +298,19 @@ fn build_footer_text(
 
     match state.input_mode {
         InputMode::Session => {
-            if is_scrolled {
-                "Esc: exit session mode | PgUp/PgDn: scroll | Ctrl+End: live view | \u{2325}drag: copy"
-                    .to_string()
+            // Panoptes selects for itself while the mouse is ours; when the
+            // child asked for mouse reporting the drag belongs to it, and
+            // \u{2325}drag - which the terminal handles natively, without
+            // ever reaching us - is what copies
+            let drag = if child_owns_mouse {
+                "\u{2325}drag: copy"
             } else {
-                "Esc: exit session mode | \u{21E7}Esc: send Esc | PgUp: scroll | \u{2325}drag: copy"
-                    .to_string()
+                "drag: copy"
+            };
+            if is_scrolled {
+                format!("Esc: exit session mode | PgUp/PgDn: scroll | Ctrl+End: live view | {drag}")
+            } else {
+                format!("Esc: exit session mode | \u{21E7}Esc: send Esc | PgUp: scroll | {drag}")
             }
         }
         _ => {
@@ -266,7 +331,7 @@ fn build_footer_text(
 mod tests {
     use super::*;
     use crate::session::store::SessionStore;
-    use crate::tui::views::test_util::{contains_line, render_to_lines};
+    use crate::tui::views::test_util::{contains_line, render_to_buffer, render_to_lines};
 
     #[test]
     fn test_missing_session_renders_placeholder() {
@@ -433,6 +498,149 @@ mod tests {
                 .iter()
                 .any(|l| l.starts_with(crate::tui::logo::WORDMARK[1]) && l.contains("? > ? > ?")),
             "{lines:?}"
+        );
+    }
+
+    // Mouse selection
+
+    /// A session manager holding one live session showing `text` on its first
+    /// row, plus the state that puts it on screen in session mode
+    fn session_showing(text: &str) -> (AppState, SessionManager, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config::default();
+        let mut sessions = SessionManager::with_store(
+            config,
+            SessionStore::with_path(dir.path().join("sessions.json")),
+        );
+        let session_id = sessions
+            .insert_test_session("selected", uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .unwrap();
+        sessions
+            .get_mut(session_id)
+            .unwrap()
+            .vterm
+            .process(text.as_bytes());
+
+        let mut state = AppState::default();
+        state.navigate_to_session(session_id);
+        (state, sessions, dir)
+    }
+
+    fn render_session(state: &AppState, sessions: &SessionManager) -> ratatui::buffer::Buffer {
+        let config = Config::default();
+        let store = ProjectStore::new();
+        let header_notifications = HeaderNotificationManager::default();
+        render_to_buffer(80, 24, |frame| {
+            render_session_view(
+                frame,
+                frame.size(),
+                state,
+                sessions,
+                &store,
+                &config,
+                &header_notifications,
+            )
+        })
+    }
+
+    /// The cell the drag covered is highlighted and the one past it is not -
+    /// which is also how the user sees where the copy will stop
+    #[test]
+    fn test_the_selection_is_painted_over_exactly_the_cells_it_covers() {
+        let (mut state, sessions, _dir) = session_showing("FIDELITY-42 and more");
+        let session_id = state.active_session.unwrap();
+        state.selection = Some(SessionSelection::completed(
+            session_id,
+            (0, 0),
+            (0, 7),
+            (0, 7),
+        ));
+
+        let buffer = render_session(&state, &sessions);
+        let content = FrameLayout::calculate(
+            Rect::new(0, 0, 80, 24),
+            &FrameConfig::for_terminal(Rect::new(0, 0, 80, 24)),
+        )
+        .content;
+        let selected = theme().text_selection_style();
+
+        let row = content.y;
+        for col in 0..8 {
+            let cell = buffer.get(content.x + col, row);
+            assert_eq!(cell.style().bg, selected.bg, "column {col}: {:?}", cell);
+        }
+        // "FIDELITY" ends at column 7; the hyphen after it is not selected
+        let after = buffer.get(content.x + 8, row);
+        assert_eq!(after.symbol(), "-");
+        assert_ne!(after.style().bg, selected.bg, "{after:?}");
+    }
+
+    /// A selection whose rows have all scrolled out of view paints nothing -
+    /// and must not paint the wrong rows instead
+    #[test]
+    fn test_an_off_screen_selection_paints_nothing() {
+        let (mut state, sessions, _dir) = session_showing("FIDELITY-42 and more");
+        let session_id = state.active_session.unwrap();
+        // Absolute rows far below the live screen
+        state.selection = Some(SessionSelection::completed(
+            session_id,
+            (900, 0),
+            (900, 7),
+            (0, 7),
+        ));
+
+        let buffer = render_session(&state, &sessions);
+        let selected = theme().text_selection_style();
+        let painted = (0..buffer.area.height)
+            .any(|y| (0..buffer.area.width).any(|x| buffer.get(x, y).style().bg == selected.bg));
+        assert!(!painted, "nothing on screen is part of the selection");
+    }
+
+    /// Another session's selection is never drawn over this one's output
+    #[test]
+    fn test_a_selection_from_another_session_is_not_drawn() {
+        let (mut state, sessions, _dir) = session_showing("FIDELITY-42 and more");
+        state.selection = Some(SessionSelection::completed(
+            uuid::Uuid::new_v4(),
+            (0, 0),
+            (0, 7),
+            (0, 7),
+        ));
+
+        let buffer = render_session(&state, &sessions);
+        let selected = theme().text_selection_style();
+        let painted = (0..buffer.area.height)
+            .any(|y| (0..buffer.area.width).any(|x| buffer.get(x, y).style().bg == selected.bg));
+        assert!(!painted);
+    }
+
+    /// The footer says whose drag it is: Panoptes selects while the mouse is
+    /// ours, and \u{2325}drag is the way past a child that took it
+    #[test]
+    fn test_the_footer_names_the_drag_that_copies() {
+        let state = AppState {
+            input_mode: InputMode::Session,
+            ..Default::default()
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config::default();
+        let sessions = SessionManager::with_store(
+            config.clone(),
+            SessionStore::with_path(dir.path().join("sessions.json")),
+        );
+
+        let ours = build_footer_text(&state, false, false, false, &sessions, &config);
+        assert!(ours.contains("drag: copy"), "{ours}");
+        assert!(!ours.contains('\u{2325}'), "{ours}");
+
+        let theirs = build_footer_text(&state, false, false, true, &sessions, &config);
+        assert!(theirs.contains("\u{2325}drag: copy"), "{theirs}");
+
+        // Scrolled up says the same thing, alongside the scroll keys
+        let scrolled = build_footer_text(&state, true, false, false, &sessions, &config);
+        assert!(
+            scrolled.contains("Ctrl+End: live view | drag: copy"),
+            "{scrolled}"
         );
     }
 }

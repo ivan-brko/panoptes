@@ -174,34 +174,15 @@ impl Screen {
         match start_row.cmp(&end_row) {
             std::cmp::Ordering::Less => {
                 let (_, cols) = self.size();
-                let mut contents = String::new();
-                for (i, row) in self
-                    .grid()
-                    .visible_rows()
-                    .enumerate()
-                    .skip(usize::from(start_row))
-                    .take(usize::from(end_row) - usize::from(start_row) + 1)
-                {
-                    if i == usize::from(start_row) {
-                        row.write_contents(
-                            &mut contents,
-                            start_col,
-                            cols - start_col,
-                            false,
-                        );
-                        if !row.wrapped() {
-                            contents.push('\n');
-                        }
-                    } else if i == usize::from(end_row) {
-                        row.write_contents(&mut contents, 0, end_col, false);
-                    } else {
-                        row.write_contents(&mut contents, 0, cols, false);
-                        if !row.wrapped() {
-                            contents.push('\n');
-                        }
-                    }
-                }
-                contents
+                // PANOPTES PATCH: the row walk moved into `write_row_span` so
+                // `contents_between_absolute` can share it verbatim
+                write_row_span(
+                    self.grid().visible_rows().skip(usize::from(start_row)),
+                    usize::from(end_row) - usize::from(start_row) + 1,
+                    cols,
+                    start_col,
+                    end_col,
+                )
             }
             std::cmp::Ordering::Equal => {
                 if start_col < end_col {
@@ -214,6 +195,97 @@ impl Screen {
             }
             std::cmp::Ordering::Greater => String::new(),
         }
+    }
+
+    /// PANOPTES PATCH: [`Self::contents_between`], addressing rows absolutely
+    ///
+    /// Row `0` is the oldest line of scrollback and row
+    /// [`history_rows`](Self::history_rows) is the top of the live screen, so
+    /// a range means the same lines whatever the current scrollback offset is
+    /// - and may be taller than the screen, which is what a selection dragged
+    /// past the edge of the viewport needs. `end_col` is exclusive, exactly as
+    /// in [`Self::contents_between`].
+    #[must_use]
+    pub fn contents_between_absolute(
+        &self,
+        start_row: usize,
+        start_col: u16,
+        end_row: usize,
+        end_col: u16,
+    ) -> String {
+        match start_row.cmp(&end_row) {
+            std::cmp::Ordering::Less => {
+                let (_, cols) = self.size();
+                write_row_span(
+                    self.grid().all_rows().skip(start_row),
+                    end_row - start_row + 1,
+                    cols,
+                    start_col,
+                    end_col,
+                )
+            }
+            std::cmp::Ordering::Equal => {
+                let mut contents = String::new();
+                if start_col < end_col {
+                    if let Some(row) = self.grid().all_rows().nth(start_row) {
+                        row.write_contents(
+                            &mut contents,
+                            start_col,
+                            end_col - start_col,
+                            false,
+                        );
+                    }
+                }
+                contents
+            }
+            std::cmp::Ordering::Greater => String::new(),
+        }
+    }
+
+    /// PANOPTES PATCH: how many rows of scrollback the grid currently holds
+    ///
+    /// The origin the absolute row addressing of
+    /// [`Self::contents_between_absolute`] is counted from: visible row `r`
+    /// is absolute row `history_rows() - scrollback() + r`.
+    #[must_use]
+    pub fn history_rows(&self) -> usize {
+        self.grid().history_rows()
+    }
+
+    /// PANOPTES PATCH: whether an absolutely-addressed row soft-wraps into
+    /// the next one
+    ///
+    /// The absolute counterpart of [`Self::row_wrapped`], for walking the
+    /// logical line a cell belongs to.
+    #[must_use]
+    pub fn row_wrapped_absolute(&self, row: usize) -> bool {
+        self.grid()
+            .all_rows()
+            .nth(row)
+            .map_or(false, crate::row::Row::wrapped)
+    }
+
+    /// PANOPTES PATCH: the cells of an absolutely-addressed row
+    ///
+    /// One entry per column: the cell's text, or `None` where the second half
+    /// of a wide character sits. Column-accurate by construction, which is
+    /// what word-boundary expansion needs to walk out from a clicked cell.
+    #[must_use]
+    pub fn row_cells_absolute(&self, row: usize) -> Vec<Option<String>> {
+        let (_, cols) = self.size();
+        self.grid().all_rows().nth(row).map_or_else(Vec::new, |row| {
+            (0..cols)
+                .map(|col| {
+                    row.get(col).and_then(|cell| {
+                        if cell.is_wide_continuation() {
+                            None
+                        } else {
+                            Some(cell.contents().to_string())
+                        }
+                    })
+                })
+                .collect()
+        })
     }
 
     /// Return escape codes sufficient to reproduce the entire contents of the
@@ -1342,6 +1414,37 @@ impl Screen {
     pub(crate) fn decstbm(&mut self, (top, bottom): (u16, u16)) {
         self.grid_mut().set_scroll_region(top - 1, bottom - 1);
     }
+}
+
+/// PANOPTES PATCH: the row walk shared by `contents_between` and
+/// `contents_between_absolute`
+///
+/// `rows` must already be positioned on the first row of the span, and
+/// `row_count` must be at least 2 - the single-row case writes one column
+/// range and has no wrapping to consider, so each caller handles it directly.
+fn write_row_span<'a>(
+    rows: impl Iterator<Item = &'a crate::row::Row>,
+    row_count: usize,
+    cols: u16,
+    start_col: u16,
+    end_col: u16,
+) -> String {
+    let mut contents = String::new();
+    for (i, row) in rows.take(row_count).enumerate() {
+        if i == 0 {
+            row.write_contents(&mut contents, start_col, cols - start_col, false);
+        } else if i == row_count - 1 {
+            row.write_contents(&mut contents, 0, end_col, false);
+        } else {
+            row.write_contents(&mut contents, 0, cols, false);
+        }
+        // A soft-wrapped row continues into the next one, so the logical line
+        // stays a single line in the copied text
+        if i + 1 < row_count && !row.wrapped() {
+            contents.push('\n');
+        }
+    }
+    contents
 }
 
 fn u16_to_u8(i: u16) -> Option<u8> {
