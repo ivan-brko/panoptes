@@ -61,10 +61,26 @@ subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
                 "commit", "-q", "--allow-empty", "-m", "init"], cwd=REPO, check=True)
 
 if SCENARIO == "codex":
-    codex_home = os.path.join(REAL_HOME, ".codex")
-    if not os.path.exists(codex_home):
+    # Borrow the developer's Codex *credentials* and nothing else.
+    #
+    # Symlinking the whole `~/.codex` would be far easier and is what an
+    # earlier harness did - and it is destructive. Panoptes rewrites
+    # `$CODEX_HOME/config.toml` to install its notify hook, and Codex records
+    # trusted projects and session rollouts there, so every run would edit the
+    # developer's real config: chaining a notify command that points at this
+    # run's temp directory, which is deleted seconds later. Runs nest, and the
+    # damage survives the test.
+    #
+    # So: a real scratch directory, with only the auth files copied in.
+    real_codex = os.path.join(REAL_HOME, ".codex")
+    if not os.path.exists(os.path.join(real_codex, "auth.json")):
         sys.exit("the codex scenario needs an authenticated ~/.codex")
-    os.symlink(codex_home, os.path.join(HOME, ".codex"))
+    scratch_codex = os.path.join(HOME, ".codex")
+    os.makedirs(scratch_codex)
+    for name in ("auth.json", "installation_id"):
+        source = os.path.join(real_codex, name)
+        if os.path.exists(source):
+            shutil.copy(source, os.path.join(scratch_codex, name))
 
 # The OSC 52 scenario needs every clipboard helper to fail. Shadowing `pbcopy`
 # with a shim that exits non-zero is enough: the others are not on macOS at
