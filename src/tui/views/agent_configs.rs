@@ -61,6 +61,7 @@ pub fn render_agent_config_list<C: AgentProfile>(
     area: Rect,
     config_store: &ProfileStore<C>,
     selected_index: usize,
+    focused: bool,
 ) {
     let t = theme();
     let configs = config_store.configs_sorted();
@@ -79,7 +80,7 @@ pub fn render_agent_config_list<C: AgentProfile>(
         .iter()
         .enumerate()
         .map(|(i, config)| {
-            let is_selected = i == selected_index;
+            let is_selected = i == selected_index && focused;
             let is_default = default_id == Some(config.id());
 
             let line = Line::from(vec![
@@ -350,8 +351,27 @@ mod tests {
 
     fn render_list<C: AgentProfile>(store: &ProfileStore<C>, selected: usize) -> Vec<String> {
         render_to_lines(60, 12, |frame| {
-            render_agent_config_list(frame, frame.size(), store, selected)
+            render_agent_config_list(frame, frame.size(), store, selected, true)
         })
+    }
+
+    /// Selection is a focus affordance: an unfocused pane's list must not
+    /// keep a bright "selected" row that reads as a second focus
+    #[test]
+    fn test_selection_marker_needs_focus() {
+        let mut store = ClaudeConfigStore::new();
+        store.add(ClaudeConfig::new(
+            "Work".to_string(),
+            Some(PathBuf::from("/tmp/work")),
+        ));
+
+        let focused = render_list(&store, 0);
+        assert!(contains_line(&focused, "▶ "), "{focused:?}");
+
+        let unfocused = render_to_lines(60, 12, |frame| {
+            render_agent_config_list(frame, frame.size(), &store, 0, false)
+        });
+        assert!(!contains_line(&unfocused, "▶ "), "{unfocused:?}");
     }
 
     #[test]

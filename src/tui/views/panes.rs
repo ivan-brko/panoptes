@@ -214,20 +214,23 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
     }
 
     if !focused {
-        dim_pane_body(frame.buffer_mut(), inner);
+        dim_pane_body(frame.buffer_mut(), inner, t);
     }
 }
 
 /// Recess an unfocused pane's body without silencing its signals
 ///
 /// Only the text ramp dims - plain, dim and faint text, which is the pane's
-/// structure. Anything chromatic keeps full strength: session state colours,
+/// structure. Everything else keeps full strength: session state colours,
 /// attention badges, the warning border around "Needs Attention". A
 /// monitoring dashboard that dimmed *those* because the pane is not focused
 /// would have broken its one job; `test_signals_survive_an_unfocused_pane`
 /// pins this.
-fn dim_pane_body(buf: &mut Buffer, area: Rect) {
-    let t = theme();
+///
+/// The check is by colour value, which is why the richer tiers give the
+/// suspended state its own grey off the ramp. The 16-colour baseline cannot:
+/// there, suspended shares `text_dim`'s value and recesses with it.
+fn dim_pane_body(buf: &mut Buffer, area: Rect, t: &crate::tui::theme::Theme) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = buf.get_mut(x, y);
@@ -674,6 +677,34 @@ mod tests {
         let style = style_of_row_with(&buf, "Sessions (0)");
         assert_eq!(style.fg, Some(t.accent));
         assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// Suspended is the one state colour that is a grey. On the richer tiers
+    /// it has its own grey, off the text ramp, so the dimmer never catches
+    /// it; only the 16-colour baseline - one grey for everything - has to
+    /// let a suspended row recess with the ramp.
+    #[test]
+    fn test_suspended_state_survives_dimming_on_richer_tiers() {
+        use crate::tui::theme::Theme;
+
+        for t in [Theme::truecolor(), Theme::ansi256()] {
+            let area = Rect::new(0, 0, 4, 1);
+
+            let mut buf = Buffer::empty(area);
+            buf.set_string(0, 0, "susp", Style::default().fg(t.state_suspended));
+            dim_pane_body(&mut buf, area, &t);
+            assert!(
+                !buf.get(0, 0).style().add_modifier.contains(Modifier::DIM),
+                "a suspended row must not dim on {:?}",
+                t.state_suspended
+            );
+
+            // ...while the text ramp around it does recess
+            let mut buf = Buffer::empty(area);
+            buf.set_string(0, 0, "text", Style::default().fg(t.text_dim));
+            dim_pane_body(&mut buf, area, &t);
+            assert!(buf.get(0, 0).style().add_modifier.contains(Modifier::DIM));
+        }
     }
 
     /// The carve-out from body dimming, pinned: state colours and the

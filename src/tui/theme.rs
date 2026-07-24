@@ -179,6 +179,10 @@ impl Theme {
             state_waiting: Color::Green,
             // Distinct from thinking's plain Yellow: this one is on you
             state_awaiting_approval: Color::LightYellow,
+            // Shares the tier's only grey with `text_dim`, which the
+            // unfocused-pane dimmer cannot tell apart - so in this tier alone
+            // a suspended row recesses with the ramp. The richer tiers give
+            // suspended its own grey precisely to avoid that.
             state_suspended: Color::DarkGray,
             state_exited: Color::Red,
             // Magenta is unused by the live states, so a recoverable session
@@ -242,6 +246,9 @@ impl Theme {
             text_faint: Color::Indexed(238),
             border_dim: Color::Indexed(238),
             bg_surface: Color::Indexed(236),
+            // Off the text ramp: suspended is a state, not structure, and
+            // must not be caught by the unfocused-pane dimmer's ramp check
+            state_suspended: Color::Indexed(245),
             ..Self::ansi16()
         }
     }
@@ -256,6 +263,8 @@ impl Theme {
             text_faint: Color::Rgb(0x4e, 0x4e, 0x4e),
             border_dim: Color::Rgb(0x3a, 0x3f, 0x44),
             bg_surface: Color::Rgb(0x2c, 0x31, 0x36),
+            // Off the text ramp; see `ansi256`
+            state_suspended: Color::Rgb(0x87, 0x87, 0x87),
             ..Self::ansi16()
         }
     }
@@ -408,13 +417,16 @@ mod tests {
             assert_eq!(tier.cancel_key, base.cancel_key);
             assert_eq!(tier.default_marker, base.default_marker);
             assert_eq!(tier.bg_base, base.bg_base);
+            // Suspended is deliberately absent: it is a structural grey, and
+            // the greys are exactly what the tiers refine. On the baseline it
+            // has to share the one grey with `text_dim`; the richer tiers
+            // give it its own so the unfocused-pane dimmer never catches it.
             for state in [
                 crate::session::SessionState::Starting,
                 crate::session::SessionState::Thinking,
                 crate::session::SessionState::Executing,
                 crate::session::SessionState::AwaitingApproval,
                 crate::session::SessionState::Waiting,
-                crate::session::SessionState::Suspended,
                 crate::session::SessionState::Exited,
                 crate::session::SessionState::Resumable,
             ] {
@@ -438,6 +450,15 @@ mod tests {
         // and the surface stays the terminal's own background
         assert_eq!(Theme::ansi16().text_faint, Theme::ansi16().text_dim);
         assert_eq!(Theme::ansi16().bg_surface, Color::Reset);
+
+        // Suspended sits off the text ramp wherever the palette allows, so
+        // the unfocused-pane dimmer - which recesses the ramp by value -
+        // never catches the one state colour that is a grey
+        for tier in [Theme::ansi256(), Theme::truecolor()] {
+            assert_ne!(tier.state_suspended, tier.text);
+            assert_ne!(tier.state_suspended, tier.text_dim);
+            assert_ne!(tier.state_suspended, tier.text_faint);
+        }
     }
 
     #[test]
