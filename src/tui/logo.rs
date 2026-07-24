@@ -16,7 +16,7 @@ pub const WORDMARK: [&str; 3] = [
 pub const WORDMARK_WIDTH: u16 = 31;
 
 /// The tagline drawn under the wordmark
-pub const TAGLINE: &str = "all-seeing";
+pub const TAGLINE: &str = "the-all-seeing";
 
 /// The wordmark spelled out, for headers too narrow or too short for the art
 pub const PLAIN: &str = "PANOPTES";
