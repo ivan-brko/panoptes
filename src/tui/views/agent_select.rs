@@ -34,7 +34,7 @@ pub fn render_agent_type_selector(frame: &mut Frame, area: Rect, selected_index:
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "[Enter] Select  [Esc] Cancel",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
 
     render_dialog(

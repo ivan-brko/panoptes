@@ -29,7 +29,13 @@ const NARROW: DialogSize = DialogSize::Percent {
 ///
 /// The pane owns the border and title, so this draws rows only. Fields are
 /// dropped whole as the pane narrows rather than truncating one long string.
-pub fn render_shortcuts_list(frame: &mut Frame, area: Rect, config: &Config, selected: usize) {
+pub fn render_shortcuts_list(
+    frame: &mut Frame,
+    area: Rect,
+    config: &Config,
+    selected: usize,
+    focused: bool,
+) {
     let t = theme();
 
     if config.custom_shortcuts.is_empty() {
@@ -38,7 +44,7 @@ pub fn render_shortcuts_list(frame: &mut Frame, area: Rect, config: &Config, sel
                 "No custom shortcuts yet.\n\n\
                  Press 'n' to bind a key to a shell command.",
             )
-            .style(Style::default().fg(t.text_muted)),
+            .style(Style::default().fg(t.text_dim)),
             area,
         );
         return;
@@ -52,7 +58,7 @@ pub fn render_shortcuts_list(frame: &mut Frame, area: Rect, config: &Config, sel
         .iter()
         .enumerate()
         .map(|(i, shortcut)| {
-            let is_selected = i == selected;
+            let is_selected = i == selected && focused;
             let name_display = if shortcut.name.is_empty() {
                 "-".to_string()
             } else {
@@ -113,12 +119,12 @@ pub fn render_add_shortcut_key_dialog(frame: &mut Frame, area: Rect, state: &App
 
     lines.push(Line::from(Span::styled(
         format!("(Reserved: {})", reserved_keys_display()),
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Esc: cancel",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
 
     render_dialog(
@@ -147,7 +153,7 @@ pub fn render_add_shortcut_name_dialog(frame: &mut Frame, area: Rect, state: &Ap
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("Key: ", Style::default().fg(t.text_muted)),
+            Span::styled("Key: ", Style::default().fg(t.text_dim)),
             Span::styled(
                 &key_display,
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
@@ -165,7 +171,7 @@ pub fn render_add_shortcut_name_dialog(frame: &mut Frame, area: Rect, state: &Ap
         Line::from(""),
         Line::from(Span::styled(
             "Enter: continue | Esc: cancel",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )),
     ];
 
@@ -200,13 +206,13 @@ pub fn render_add_shortcut_command_dialog(frame: &mut Frame, area: Rect, state: 
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("Key: ", Style::default().fg(t.text_muted)),
+            Span::styled("Key: ", Style::default().fg(t.text_dim)),
             Span::styled(
                 &key_display,
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
             ),
             Span::raw("     "),
-            Span::styled("Name: ", Style::default().fg(t.text_muted)),
+            Span::styled("Name: ", Style::default().fg(t.text_dim)),
             Span::styled(&name_display, Style::default().fg(t.text)),
         ]),
         Line::from(""),
@@ -229,7 +235,7 @@ pub fn render_add_shortcut_command_dialog(frame: &mut Frame, area: Rect, state: 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter: save | Esc: cancel",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
 
     render_dialog(
@@ -263,17 +269,17 @@ pub fn render_add_shortcut_auto_close_dialog(frame: &mut Frame, area: Rect, stat
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("Key: ", Style::default().fg(t.text_muted)),
+            Span::styled("Key: ", Style::default().fg(t.text_dim)),
             Span::styled(
                 &key_display,
                 Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
             ),
             Span::raw("     "),
-            Span::styled("Name: ", Style::default().fg(t.text_muted)),
+            Span::styled("Name: ", Style::default().fg(t.text_dim)),
             Span::styled(&name_display, Style::default().fg(t.text)),
         ]),
         Line::from(vec![
-            Span::styled("Cmd: ", Style::default().fg(t.text_muted)),
+            Span::styled("Cmd: ", Style::default().fg(t.text_dim)),
             Span::styled(&state.new_shortcut_command, Style::default().fg(t.text)),
         ]),
         Line::from(""),
@@ -286,7 +292,7 @@ pub fn render_add_shortcut_auto_close_dialog(frame: &mut Frame, area: Rect, stat
         Line::from(""),
         Line::from(Span::styled(
             "Tab: toggle | y/n: select | Enter: save | Esc: back",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )),
     ];
 
@@ -331,7 +337,7 @@ pub fn render_delete_shortcut_confirm_dialog(
         Line::from(""),
         Line::from(Span::styled(
             "y: confirm | n/Esc: cancel",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )),
     ];
 
@@ -398,7 +404,7 @@ mod tests {
     #[test]
     fn test_shortcuts_list_empty_state_points_at_the_add_key() {
         let lines = render_to_lines(40, 10, |frame| {
-            render_shortcuts_list(frame, frame.size(), &Config::default(), 0)
+            render_shortcuts_list(frame, frame.size(), &Config::default(), 0, true)
         });
 
         assert!(
@@ -421,17 +427,42 @@ mod tests {
             ));
 
         let wide = render_to_lines(60, 10, |frame| {
-            render_shortcuts_list(frame, frame.size(), &config, 0)
+            render_shortcuts_list(frame, frame.size(), &config, 0, true)
         });
         assert!(contains_line(&wide, "v  VSCode  code . & [AC]"), "{wide:?}");
 
         let narrow = render_to_lines(24, 10, |frame| {
-            render_shortcuts_list(frame, frame.size(), &config, 0)
+            render_shortcuts_list(frame, frame.size(), &config, 0, true)
         });
         assert!(contains_line(&narrow, "v  VSCode [AC]"), "{narrow:?}");
         for line in &narrow {
             assert!(line.chars().count() <= 24, "{line:?}");
         }
+    }
+
+    /// Selection is a focus affordance: an unfocused pane's list must not
+    /// keep a bright "selected" row that reads as a second focus
+    #[test]
+    fn test_selection_marker_needs_focus() {
+        let mut config = Config::default();
+        config
+            .custom_shortcuts
+            .push(crate::config::CustomShortcut::new(
+                'v',
+                "VSCode".to_string(),
+                "code . &".to_string(),
+                false,
+            ));
+
+        let focused = render_to_lines(60, 10, |frame| {
+            render_shortcuts_list(frame, frame.size(), &config, 0, true)
+        });
+        assert!(contains_line(&focused, "▶ "), "{focused:?}");
+
+        let unfocused = render_to_lines(60, 10, |frame| {
+            render_shortcuts_list(frame, frame.size(), &config, 0, false)
+        });
+        assert!(!contains_line(&unfocused, "▶ "), "{unfocused:?}");
     }
 
     #[test]

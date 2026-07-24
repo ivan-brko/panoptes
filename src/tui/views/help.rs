@@ -103,7 +103,7 @@ fn footer_hint() -> Line<'static> {
     let t = theme();
     Line::from(vec![Span::styled(
         "Press ? or Esc to close",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )])
 }
 

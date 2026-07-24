@@ -86,7 +86,7 @@ pub fn yes_no_line(selected_yes: bool, lead: &'static str) -> Line<'static> {
 
     let yes_style = if selected_yes {
         Style::default()
-            .fg(Color::Black)
+            .fg(t.text_inverted)
             .bg(t.confirm_key)
             .add_modifier(Modifier::BOLD)
     } else {
@@ -95,7 +95,7 @@ pub fn yes_no_line(selected_yes: bool, lead: &'static str) -> Line<'static> {
 
     let no_style = if !selected_yes {
         Style::default()
-            .fg(Color::Black)
+            .fg(t.text_inverted)
             .bg(t.cancel_key)
             .add_modifier(Modifier::BOLD)
     } else {

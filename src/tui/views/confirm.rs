@@ -122,7 +122,7 @@ pub fn render_confirm_dialog(frame: &mut Frame, area: Rect, config: ConfirmDialo
     for note in &config.notes {
         lines.push(Line::from(vec![Span::styled(
             note.as_str(),
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )]));
         lines.push(Line::from(""));
     }
@@ -238,7 +238,7 @@ pub fn render_quit_confirm_dialog(frame: &mut Frame, area: Rect, shell_count: us
         )]));
         lines.push(Line::from(vec![Span::styled(
             "Agent sessions return on next start",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )]));
         lines.push(Line::from(""));
     }
@@ -292,7 +292,7 @@ fn render_message_overlay(
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
         "Press any key to dismiss",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )]));
 
     // Height: borders (2) + blank + body + blank + hint
@@ -362,7 +362,7 @@ pub fn render_loading_indicator(frame: &mut Frame, area: Rect, loading: &Loading
                     .fg(t.cancel_key)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" to cancel", Style::default().fg(t.text_muted)),
+            Span::styled(" to cancel", Style::default().fg(t.text_dim)),
         ]));
     }
 

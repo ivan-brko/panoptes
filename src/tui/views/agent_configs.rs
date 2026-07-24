@@ -61,6 +61,7 @@ pub fn render_agent_config_list<C: AgentProfile>(
     area: Rect,
     config_store: &ProfileStore<C>,
     selected_index: usize,
+    focused: bool,
 ) {
     let t = theme();
     let configs = config_store.configs_sorted();
@@ -79,7 +80,7 @@ pub fn render_agent_config_list<C: AgentProfile>(
         .iter()
         .enumerate()
         .map(|(i, config)| {
-            let is_selected = i == selected_index;
+            let is_selected = i == selected_index && focused;
             let is_default = default_id == Some(config.id());
 
             let line = Line::from(vec![
@@ -94,7 +95,7 @@ pub fn render_agent_config_list<C: AgentProfile>(
                 ),
                 Span::styled(
                     format!("  {}", config.home_dir_display()),
-                    Style::default().fg(t.text_muted),
+                    Style::default().fg(t.text_dim),
                 ),
             ]);
 
@@ -130,7 +131,7 @@ pub fn render_agent_config_name_input_dialog(
         Line::from(""),
         Line::from(Span::styled(
             "[Enter] Continue  [Esc] Cancel",
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )),
     ];
 
@@ -181,7 +182,7 @@ pub fn render_agent_config_path_input_dialog(
         Line::from(Span::styled(copy.dir_prompt, Style::default().fg(t.text))),
         Line::from(Span::styled(
             copy.default_dir_hint,
-            Style::default().fg(t.text_muted),
+            Style::default().fg(t.text_dim),
         )),
         Line::from(""),
         Line::from(vec![
@@ -213,7 +214,7 @@ pub fn render_agent_config_path_input_dialog(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "[Tab] Complete  [Enter] Confirm  [Esc] Cancel",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
 
     render_dialog(
@@ -262,7 +263,7 @@ pub fn render_agent_config_delete_dialog(
         if affected_projects.len() > 5 {
             body_lines.push(Line::from(Span::styled(
                 format!("  ... and {} more", affected_projects.len() - 5),
-                Style::default().fg(t.text_muted),
+                Style::default().fg(t.text_dim),
             )));
         }
         body_lines.push(Line::from(Span::styled(
@@ -323,7 +324,7 @@ pub fn render_agent_config_selector<C: AgentProfile>(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "[Enter] Select  [Esc] Cancel",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
 
     render_dialog(
@@ -350,8 +351,27 @@ mod tests {
 
     fn render_list<C: AgentProfile>(store: &ProfileStore<C>, selected: usize) -> Vec<String> {
         render_to_lines(60, 12, |frame| {
-            render_agent_config_list(frame, frame.size(), store, selected)
+            render_agent_config_list(frame, frame.size(), store, selected, true)
         })
+    }
+
+    /// Selection is a focus affordance: an unfocused pane's list must not
+    /// keep a bright "selected" row that reads as a second focus
+    #[test]
+    fn test_selection_marker_needs_focus() {
+        let mut store = ClaudeConfigStore::new();
+        store.add(ClaudeConfig::new(
+            "Work".to_string(),
+            Some(PathBuf::from("/tmp/work")),
+        ));
+
+        let focused = render_list(&store, 0);
+        assert!(contains_line(&focused, "▶ "), "{focused:?}");
+
+        let unfocused = render_to_lines(60, 12, |frame| {
+            render_agent_config_list(frame, frame.size(), &store, 0, false)
+        });
+        assert!(!contains_line(&unfocused, "▶ "), "{unfocused:?}");
     }
 
     #[test]

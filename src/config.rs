@@ -150,6 +150,14 @@ pub struct Config {
     #[serde(default)]
     pub attention_on_idle: bool,
 
+    /// Which colour-capability tier the UI palette uses
+    ///
+    /// `auto` (the default) detects it from `COLORTERM`/`TERM`; the other
+    /// values force a tier for when detection is wrong - `ansi16` is the
+    /// always-safe baseline.
+    #[serde(default)]
+    pub theme: ThemeMode,
+
     // Everything below serialises as a TOML table or array-of-tables. TOML has
     // no way to express a bare key after a table header, so any scalar field
     // added later must go ABOVE this line or it will be silently swallowed into
@@ -202,6 +210,48 @@ impl<'de> Deserialize<'de> for NotificationMethod {
                     "Unknown notification_method in config; defaulting to bell"
                 );
                 Self::Bell
+            }
+        })
+    }
+}
+
+/// Which colour-capability tier the palette should use
+///
+/// Serialises as the lowercase strings `auto`, `truecolor`, `ansi256`,
+/// `ansi16`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    /// Detect from `COLORTERM`/`TERM`
+    #[default]
+    Auto,
+    /// Force the 24-bit RGB tier
+    TrueColor,
+    /// Force the 256-colour indexed tier
+    Ansi256,
+    /// Force the 16-colour baseline
+    Ansi16,
+}
+
+/// Unknown values fall back to `Auto` rather than failing the whole load:
+/// a typo in a hand-edited config should cost the typo, not the file.
+impl<'de> Deserialize<'de> for ThemeMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "auto" => Self::Auto,
+            "truecolor" => Self::TrueColor,
+            "ansi256" | "256" => Self::Ansi256,
+            "ansi16" | "16" => Self::Ansi16,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    "Unknown theme in config; defaulting to auto"
+                );
+                Self::Auto
             }
         })
     }
@@ -301,6 +351,7 @@ impl Default for Config {
             suspend_after_secs: default_suspend_after(),
             log_agent_events: false,
             attention_on_idle: false,
+            theme: ThemeMode::default(),
             notify_on: NotifyOn::default(),
             custom_shortcuts: Vec::new(),
         }

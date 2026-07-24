@@ -38,11 +38,11 @@ pub fn render_claude_settings_copy_dialog(
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  From: ", Style::default().fg(t.text_muted)),
+            Span::styled("  From: ", Style::default().fg(t.text_dim)),
             Span::styled(source_display, Style::default().fg(t.text)),
         ]),
         Line::from(vec![
-            Span::styled("  To:   ", Style::default().fg(t.text_muted)),
+            Span::styled("  To:   ", Style::default().fg(t.text_dim)),
             Span::styled(target_display, Style::default().fg(t.accent)),
         ]),
         Line::from(""),
@@ -59,7 +59,7 @@ pub fn render_claude_settings_copy_dialog(
 
     if !sources.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("  Sources: ", Style::default().fg(t.text_muted)),
+            Span::styled("  Sources: ", Style::default().fg(t.text_dim)),
             Span::styled(sources.join(", "), Style::default().fg(t.text)),
         ]));
     }
@@ -75,7 +75,7 @@ pub fn render_claude_settings_copy_dialog(
             let display_tool = truncate_string(tool, 50);
             lines.push(Line::from(vec![
                 Span::raw("    "),
-                Span::styled(display_tool, Style::default().fg(Color::Green)),
+                Span::styled(display_tool, Style::default().fg(t.success)),
             ]));
         }
 
@@ -85,7 +85,7 @@ pub fn render_claude_settings_copy_dialog(
                 Span::raw("    "),
                 Span::styled(
                     format!("...and {} more", remaining),
-                    Style::default().fg(t.text_muted),
+                    Style::default().fg(t.text_dim),
                 ),
             ]));
         }
@@ -97,7 +97,7 @@ pub fn render_claude_settings_copy_dialog(
             Span::raw("  "),
             Span::styled(
                 "MCP servers will also be copied",
-                Style::default().fg(t.text_muted),
+                Style::default().fg(t.text_dim),
             ),
         ]));
     }
@@ -110,7 +110,7 @@ pub fn render_claude_settings_copy_dialog(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter: confirm | Left/Right: toggle | Esc: skip",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
 
     render_dialog(
@@ -176,7 +176,7 @@ pub fn render_claude_settings_migrate_dialog(
 
     if !sources.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("  Sources: ", Style::default().fg(t.text_muted)),
+            Span::styled("  Sources: ", Style::default().fg(t.text_dim)),
             Span::styled(sources.join(", "), Style::default().fg(t.text)),
         ]));
     }
@@ -192,7 +192,7 @@ pub fn render_claude_settings_migrate_dialog(
             let display_tool = truncate_string(tool, 50);
             lines.push(Line::from(vec![
                 Span::raw("    "),
-                Span::styled(display_tool, Style::default().fg(Color::Yellow)),
+                Span::styled(display_tool, Style::default().fg(t.warning)),
             ]));
         }
 
@@ -202,7 +202,7 @@ pub fn render_claude_settings_migrate_dialog(
                 Span::raw("    "),
                 Span::styled(
                     format!("...and {} more", remaining),
-                    Style::default().fg(t.text_muted),
+                    Style::default().fg(t.text_dim),
                 ),
             ]));
         }
@@ -216,7 +216,7 @@ pub fn render_claude_settings_migrate_dialog(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter: continue | Left/Right: toggle | Esc: cancel",
-        Style::default().fg(t.text_muted),
+        Style::default().fg(t.text_dim),
     )));
 
     render_dialog(

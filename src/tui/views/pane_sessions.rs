@@ -49,6 +49,20 @@ pub fn render_sessions_pane(
         return;
     }
 
+    // The state summary strip: what makes the screen *look* different when
+    // things are on fire versus when everything is calm, without reading a
+    // single row. It only earns its row when there is height to spare.
+    let area = if !sessions.is_empty() && area.height >= 6 {
+        render_summary_strip(frame, Rect { height: 1, ..area }, sessions);
+        Rect {
+            y: area.y + 1,
+            height: area.height - 1,
+            ..area
+        }
+    } else {
+        area
+    };
+
     let attention = sessions.sessions_needing_attention();
     // The pinned section only earns its rows when there is something in it and
     // enough height left for a list underneath
@@ -174,6 +188,61 @@ fn branch_name_of<'a>(store: &'a ProjectStore, info: &crate::session::SessionInf
         .unwrap_or("?")
 }
 
+/// One line of coloured state counts: `2 waiting · 1 thinking · 1 exec`
+///
+/// States are listed most-urgent first - what is blocked on you before what
+/// is working before what is dead - and each count wears its state's colour,
+/// so the strip reads at a glance even from across the room.
+fn render_summary_strip(frame: &mut Frame, area: Rect, sessions: &SessionManager) {
+    use crate::session::SessionState;
+
+    let t = theme();
+    let order = [
+        SessionState::AwaitingApproval,
+        SessionState::Waiting,
+        SessionState::Thinking,
+        SessionState::Executing,
+        SessionState::Starting,
+        SessionState::Resumable,
+        SessionState::Suspended,
+        SessionState::Exited,
+    ];
+
+    let list = sessions.sessions_in_order();
+    let mut spans: Vec<Span> = Vec::new();
+    for state in order {
+        let count = list.iter().filter(|s| s.info.state == state).count();
+        if count == 0 {
+            continue;
+        }
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", t.muted_style()));
+        }
+        spans.push(Span::styled(
+            format!("{} {}", count, summary_label(&state)),
+            Style::default().fg(t.session_state_color(&state)),
+        ));
+    }
+
+    let line = clamp_line(Line::from(spans), area.width as usize);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// The strip's compact, lowercase name for a state
+fn summary_label(state: &crate::session::SessionState) -> &'static str {
+    use crate::session::SessionState;
+    match state {
+        SessionState::Starting => "starting",
+        SessionState::Thinking => "thinking",
+        SessionState::Executing => "exec",
+        SessionState::AwaitingApproval => "approval",
+        SessionState::Waiting => "waiting",
+        SessionState::Suspended => "suspended",
+        SessionState::Exited => "exited",
+        SessionState::Resumable => "resumable",
+    }
+}
+
 /// The whole pane in ten columns: `S 7●2`
 fn render_strip(frame: &mut Frame, area: Rect, sessions: &SessionManager) {
     let attention = sessions.total_attention_count();
@@ -201,7 +270,7 @@ fn render_attention_section(
         .iter()
         .map(|session| {
             let info = &session.info;
-            let (_, badge_color) = super::attention_badge(info, true);
+            let (badge, badge_color) = super::attention_badge(info, true);
             let state_text = super::session_state_display(info, now);
 
             // Two leading spans, seven columns: "● " plus the agent tag
@@ -221,7 +290,7 @@ fn render_attention_section(
             );
 
             let line = Line::from(vec![
-                Span::styled("● ", Style::default().fg(badge_color)),
+                Span::styled(badge, Style::default().fg(badge_color)),
                 Span::styled(
                     format!("{} ", info.session_type.short_tag()),
                     t.muted_style(),
@@ -530,6 +599,38 @@ mod tests {
         assert_eq!(split_budget(77, 8, 66), (58, 8));
         // Both long: an even split, first field getting the odd column
         assert_eq!(split_budget(50, 60, 33), (17, 16));
+    }
+
+    /// The summary strip: coloured counts that make a busy screen look
+    /// different from a calm one without reading a single row
+    #[test]
+    fn test_summary_strip_counts_states() {
+        let temp = TempDir::new().unwrap();
+        let sessions = sessions_with(&temp, &["a", "b"]);
+
+        let lines = render(60, &sessions);
+
+        // Test sessions sit in their initial state
+        assert!(contains_line(&lines, "2 starting"), "{lines:?}");
+    }
+
+    /// The strip never costs a row the list cannot spare
+    #[test]
+    fn test_summary_strip_gives_way_on_a_short_pane() {
+        let temp = TempDir::new().unwrap();
+        let sessions = sessions_with(&temp, &["a", "b"]);
+        let store = ProjectStore::new();
+        let state = AppState {
+            focus: crate::app::Focus::Panes(Tab::Sessions),
+            ..Default::default()
+        };
+        let mode = crate::tui::panes::side_mode(62);
+        let lines = render_to_lines(60, 4, |frame| {
+            render_sessions_pane(frame, frame.size(), &state, &store, &sessions, mode)
+        });
+
+        assert!(!contains_line(&lines, "2 starting"), "{lines:?}");
+        assert!(contains_line(&lines, "1:"), "{lines:?}");
     }
 
     #[test]

@@ -76,7 +76,7 @@ fn render_prompt_overlay(
             List::new(completions).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(t.border_focused))
+                    .border_style(Style::default().fg(t.border_focus))
                     .title(completions_title),
             ),
             chunks[1],

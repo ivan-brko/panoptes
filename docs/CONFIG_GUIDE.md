@@ -56,6 +56,10 @@ notification_method = "bell"
 # Whether Claude's periodic "you have been idle" notification raises attention
 attention_on_idle = false
 
+# Colour-capability tier for the UI palette
+# Options: "auto" (detect from COLORTERM/TERM), "truecolor", "ansi256", "ansi16"
+theme = "auto"
+
 # Which attention reasons produce a notification
 [notify_on]
 approval = true       # a permission dialog is blocking a turn
@@ -269,6 +273,30 @@ is why Panoptes once treated the two alike and rang for both.
 With this off, the idle reminder is ignored entirely: a session you already
 know is waiting does not need to keep telling you. Turn it on if you want the
 reminder back.
+
+---
+
+### theme
+
+| Property | Value |
+|----------|-------|
+| Default | `"auto"` |
+| Type | String: `"auto"`, `"truecolor"`, `"ansi256"`, `"ansi16"` |
+
+Which colour-capability tier the UI palette uses. The tiers agree on every
+colour that carries meaning - session states, attention badges, the accent -
+and differ only in the structural greys: the richer tiers can dim unfocused
+pane chrome and tint the selected row, where 16 colours cannot.
+
+- `auto` detects the tier from `COLORTERM` (`truecolor` / `24bit`) with
+  `TERM` as the backstop (`*-256color`, `*-direct`)
+- `truecolor` / `ansi256` / `ansi16` force a tier, for when detection is wrong
+
+`ansi16` is the always-safe baseline and exactly the classic appearance; use
+it if the UI looks off over SSH or in an unusual terminal.
+
+**When to change:** Only if auto-detection picks the wrong tier - for example
+a terminal that supports truecolor but does not advertise it.
 
 ---
 

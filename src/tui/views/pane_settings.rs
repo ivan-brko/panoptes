@@ -106,6 +106,10 @@ pub fn render_settings_pane(
         return;
     }
 
+    // Selection is only shown while this pane has focus, like every other
+    // list - a bright selected row inside a dimmed pane reads as a second
+    // focus
+    let focused = ctx.state.is_focused(Tab::Settings);
     match ctx.state.settings_nav {
         SettingsNav::Sections => render_sections(frame, area, ctx.state),
         SettingsNav::ClaudeConfigs => super::render_agent_config_list(
@@ -113,18 +117,21 @@ pub fn render_settings_pane(
             area,
             ctx.claude_config_store,
             ctx.state.claude_configs_selected_index,
+            focused,
         ),
         SettingsNav::CodexConfigs => super::render_agent_config_list(
             frame,
             area,
             ctx.codex_config_store,
             ctx.state.codex_configs_selected_index,
+            focused,
         ),
         SettingsNav::Shortcuts => super::render_shortcuts_list(
             frame,
             area,
             ctx.config,
             ctx.state.custom_shortcuts_selected,
+            focused,
         ),
         SettingsNav::Notifications => render_notifications(frame, area, ctx.state, ctx.config),
         SettingsNav::About => render_about(frame, area, ctx),

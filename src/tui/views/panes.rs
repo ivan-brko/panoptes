@@ -4,8 +4,9 @@
 //! transition never has to be replayed here: whatever widths arrive are the
 //! widths drawn, and each pane picks its own density from the width it got.
 
+use ratatui::buffer::Buffer;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders};
+use ratatui::widgets::{Block, BorderType, Borders};
 
 use crate::app::{AppState, InputMode, ProjectsNav, SettingsNav, Tab};
 use crate::claude_config::ClaudeConfigStore;
@@ -149,10 +150,29 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
     // across the border into its neighbour
     let title = truncate_string(&title, title_width);
 
+    // Focus rides four signals at once - border brightness, border weight,
+    // title style, and body dimming below - so it survives a colourblind
+    // user, a low-contrast theme, and a screenshot
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(if focused {
+            BorderType::Thick
+        } else {
+            BorderType::Rounded
+        })
+        .border_style(Style::default().fg(if focused {
+            t.border_focus
+        } else {
+            t.border_dim
+        }))
         .title(title)
-        .border_style(Style::default().fg(if focused { t.border_focused } else { t.border }));
+        // Explicit, not inherited: the title used to keep the border colour
+        // only because nothing ever set a title style over it
+        .title_style(if focused {
+            t.header_style()
+        } else {
+            Style::default().fg(t.text_dim)
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -191,6 +211,34 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
                 hook_healthy: ctx.hook_healthy,
             },
         ),
+    }
+
+    if !focused {
+        dim_pane_body(frame.buffer_mut(), inner, t);
+    }
+}
+
+/// Recess an unfocused pane's body without silencing its signals
+///
+/// Only the text ramp dims - plain, dim and faint text, which is the pane's
+/// structure. Everything else keeps full strength: session state colours,
+/// attention badges, the warning border around "Needs Attention". A
+/// monitoring dashboard that dimmed *those* because the pane is not focused
+/// would have broken its one job; `test_signals_survive_an_unfocused_pane`
+/// pins this.
+///
+/// The check is by colour value, which is why the richer tiers give the
+/// suspended state its own grey off the ramp. The 16-colour baseline cannot:
+/// there, suspended shares `text_dim`'s value and recesses with it.
+fn dim_pane_body(buf: &mut Buffer, area: Rect, t: &crate::tui::theme::Theme) {
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = buf.get_mut(x, y);
+            let fg = cell.style().fg.unwrap_or(Color::Reset);
+            if fg == Color::Reset || fg == t.text || fg == t.text_dim || fg == t.text_faint {
+                cell.set_style(Style::default().add_modifier(Modifier::DIM));
+            }
+        }
     }
 }
 
@@ -306,7 +354,10 @@ mod tests {
     use crate::app::Focus;
     use crate::session::store::SessionStore;
     use crate::tui::panes::pane_widths;
-    use crate::tui::views::test_util::{contains_line, render_to_lines};
+    use crate::tui::views::test_util::{
+        contains_line, render_to_buffer, render_to_lines, style_of_row_with,
+    };
+    use ratatui::buffer::Buffer;
     use std::path::PathBuf;
 
     struct Fixture {
@@ -335,6 +386,29 @@ mod tests {
                 path: PathBuf::from("/tmp/panoptes.log"),
             },
         }
+    }
+
+    fn render_buf(width: u16, state: &AppState, f: &Fixture) -> Buffer {
+        let focused = state.focus.tab().map(|t| t.index()).unwrap_or(0);
+        let widths = pane_widths(width, focused);
+        render_to_buffer(width, 24, |frame| {
+            render_panes(
+                frame,
+                frame.size(),
+                PaneContext {
+                    state,
+                    project_store: &f.project_store,
+                    sessions: &f.sessions,
+                    config: &f.config,
+                    claude_config_store: &f.claude,
+                    codex_config_store: &f.codex,
+                    log_file_info: &f.log,
+                    widths,
+                    hook_port: 9999,
+                    hook_healthy: true,
+                },
+            )
+        })
     }
 
     fn render(width: u16, state: &AppState, f: &Fixture) -> Vec<String> {
@@ -560,6 +634,124 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Focus must not depend on colour alone: the focused pane wears thick
+    /// corners, the unfocused ones rounded, so the signal survives a
+    /// colourblind user and a screenshot
+    #[test]
+    fn test_focus_is_carried_by_border_weight_too() {
+        let f = fixture();
+        let lines = render(160, &AppState::default(), &f);
+
+        assert!(
+            lines.iter().any(|l| l.contains('┏')),
+            "no thick corner anywhere: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains('╭')),
+            "no rounded corner anywhere: {lines:?}"
+        );
+    }
+
+    /// The title's style is declared, not inherited from the border - it
+    /// used to keep the border colour only because nothing ever set a title
+    /// style over it
+    #[test]
+    fn test_titles_declare_focus_explicitly() {
+        let f = fixture();
+        let t = theme();
+
+        let buf = render_buf(160, &AppState::default(), &f);
+        assert_eq!(
+            style_of_row_with(&buf, "Sessions (0)").fg,
+            Some(t.text_dim),
+            "an unfocused title must drop to the dim tier"
+        );
+
+        let state = AppState {
+            focus: Focus::Panes(Tab::Sessions),
+            ..Default::default()
+        };
+        let buf = render_buf(160, &state, &f);
+        let style = style_of_row_with(&buf, "Sessions (0)");
+        assert_eq!(style.fg, Some(t.accent));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// Suspended is the one state colour that is a grey. On the richer tiers
+    /// it has its own grey, off the text ramp, so the dimmer never catches
+    /// it; only the 16-colour baseline - one grey for everything - has to
+    /// let a suspended row recess with the ramp.
+    #[test]
+    fn test_suspended_state_survives_dimming_on_richer_tiers() {
+        use crate::tui::theme::Theme;
+
+        for t in [Theme::truecolor(), Theme::ansi256()] {
+            let area = Rect::new(0, 0, 4, 1);
+
+            let mut buf = Buffer::empty(area);
+            buf.set_string(0, 0, "susp", Style::default().fg(t.state_suspended));
+            dim_pane_body(&mut buf, area, &t);
+            assert!(
+                !buf.get(0, 0).style().add_modifier.contains(Modifier::DIM),
+                "a suspended row must not dim on {:?}",
+                t.state_suspended
+            );
+
+            // ...while the text ramp around it does recess
+            let mut buf = Buffer::empty(area);
+            buf.set_string(0, 0, "text", Style::default().fg(t.text_dim));
+            dim_pane_body(&mut buf, area, &t);
+            assert!(buf.get(0, 0).style().add_modifier.contains(Modifier::DIM));
+        }
+    }
+
+    /// The carve-out from body dimming, pinned: state colours and the
+    /// attention badge hold exactly the same style whether their pane has
+    /// focus or not. Dim the structure, never the signal - a dashboard that
+    /// hides "needs attention" because the pane is not focused has broken
+    /// its one job.
+    #[test]
+    fn test_signals_survive_an_unfocused_pane() {
+        let mut f = fixture();
+        let id = f
+            .sessions
+            .insert_test_session("burning", uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .unwrap();
+        f.sessions.get_mut(id).unwrap().info.attention =
+            Some(crate::session::AttentionReason::TurnComplete);
+
+        // "● [CC]" is a session row's badge plus agent tag; the header's
+        // blinking count renders as "[1●]" and cannot match it
+        let focused = render_buf(
+            160,
+            &AppState {
+                focus: Focus::Panes(Tab::Sessions),
+                ..Default::default()
+            },
+            &f,
+        );
+        let unfocused = render_buf(160, &AppState::default(), &f);
+
+        let badge_focused = style_of_row_with(&focused, "● [CC]");
+        let badge_unfocused = style_of_row_with(&unfocused, "● [CC]");
+        assert_eq!(
+            badge_focused, badge_unfocused,
+            "the attention badge must not change with pane focus"
+        );
+        assert!(!badge_unfocused.add_modifier.contains(Modifier::DIM));
+        assert_eq!(badge_unfocused.fg, Some(theme().success));
+
+        // The structure around the badge does dim: the agent tag sits on the
+        // text ramp, and an unfocused pane recesses it
+        let tag_focused = style_of_row_with(&focused, "[CC]");
+        let tag_unfocused = style_of_row_with(&unfocused, "[CC]");
+        assert!(!tag_focused.add_modifier.contains(Modifier::DIM));
+        assert!(
+            tag_unfocused.add_modifier.contains(Modifier::DIM),
+            "an unfocused pane's structure must recess"
+        );
     }
 
     #[test]

@@ -1,12 +1,20 @@
 //! Helper functions for consistent selection rendering across all menus.
 //!
 //! This module provides utilities to render selected items in lists with a consistent
-//! visual style: arrow prefix, bold text, and appropriate colors. No background highlighting
-//! is used to maintain a clean, professional appearance.
+//! visual style: arrow prefix, bold text, appropriate colors, and a subtle
+//! `bg_surface` tint under the selected row.
+//!
+//! The background is a deliberate reversal of this module's original "no
+//! background highlighting" stance. That stance was the right call against a
+//! 16-colour palette, where the only backgrounds available are garish - and
+//! it still holds there: the 16-colour tier defines `bg_surface` as `Reset`,
+//! so the baseline looks exactly as it always did. The richer tiers get the
+//! strongest selection affordance available without giving up the clean
+//! appearance the stance was protecting.
 
 use ratatui::style::{Color, Modifier, Style, Stylize};
 
-use crate::tui::theme::Theme;
+use crate::tui::theme::{theme, Theme};
 
 /// Returns the selection prefix for a list item.
 ///
@@ -41,7 +49,10 @@ pub fn selection_prefix(is_selected: bool) -> &'static str {
 /// ```
 pub fn selection_style(is_selected: bool, base_color: Color) -> Style {
     if is_selected {
-        Style::default().fg(base_color).bold()
+        Style::default()
+            .fg(base_color)
+            .bg(theme().bg_surface)
+            .bold()
     } else {
         Style::default().fg(base_color)
     }
@@ -62,7 +73,10 @@ pub fn selection_style(is_selected: bool, base_color: Color) -> Style {
 /// ```
 pub fn selection_style_with_accent(is_selected: bool, theme: &Theme) -> Style {
     if is_selected {
-        Style::default().fg(theme.accent).bold()
+        Style::default()
+            .fg(theme.accent)
+            .bg(theme.bg_surface)
+            .bold()
     } else {
         Style::default().fg(theme.text)
     }
@@ -171,5 +185,28 @@ mod tests {
         // Only selected should be bold
         assert!(selected.add_modifier.contains(Modifier::BOLD));
         assert!(!unselected.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// The selected row's background tint exists only where the palette can
+    /// afford a subtle one: the richer tiers surface it, the 16-colour
+    /// baseline stays flat - the original no-background stance, preserved
+    /// exactly where it was decided
+    #[test]
+    fn test_selection_background_scales_with_the_tier() {
+        let rich = Theme::truecolor();
+        let selected = selection_style_with_accent(true, &rich);
+        assert_eq!(selected.bg, Some(rich.bg_surface));
+        assert!(matches!(rich.bg_surface, ratatui::style::Color::Rgb(..)));
+
+        // Unselected rows never carry a background
+        assert_eq!(selection_style_with_accent(false, &rich).bg, None);
+
+        // The baseline's surface is the terminal's own background
+        let base = Theme::ansi16();
+        assert_eq!(base.bg_surface, ratatui::style::Color::Reset);
+        assert_eq!(
+            selection_style_with_accent(true, &base).bg,
+            Some(ratatui::style::Color::Reset)
+        );
     }
 }

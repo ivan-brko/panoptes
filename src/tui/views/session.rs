@@ -37,9 +37,7 @@ pub fn render_session_view(
     let (breadcrumb, suffix) = build_header_breadcrumb(session, state, project_store);
 
     // Session header has custom coloring based on session state
-    let header_color = session
-        .map(|s| s.info.state.color())
-        .unwrap_or(t.text_muted);
+    let header_color = session.map(|s| s.info.state.color()).unwrap_or(t.text_dim);
     let custom_style = Style::default().fg(header_color).bold();
 
     // The wordmark only, without the tagline and version the pane screen
@@ -65,7 +63,7 @@ pub fn render_session_view(
     let frame_color = if state.input_mode == InputMode::Session {
         t.active
     } else {
-        t.text_muted
+        t.text_dim
     };
 
     // Build title with scroll indicator
