@@ -1223,6 +1223,11 @@ impl SessionManager {
         self.sessions.iter()
     }
 
+    /// Get mutable iterator over sessions
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&SessionId, &mut Session)> {
+        self.sessions.iter_mut()
+    }
+
     /// Shutdown all sessions, killing any that are still alive
     ///
     /// This should be called when the application is exiting to ensure

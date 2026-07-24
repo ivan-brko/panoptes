@@ -259,6 +259,24 @@ impl VirtualTerminal {
         !self.parser.screen().hide_cursor()
     }
 
+    /// Whether the child is currently in the alternate screen
+    ///
+    /// Decides scroll semantics: an alternate-screen app owns its own
+    /// scrolling (there is no terminal scrollback to show), so scroll input
+    /// belongs to the app, exactly as in a real terminal.
+    pub fn alternate_screen_active(&self) -> bool {
+        self.parser.screen().alternate_screen()
+    }
+
+    /// Whether the child enabled application cursor keys (DECCKM)
+    ///
+    /// Decides the encoding of synthesized arrow keys (`ESC O A` vs
+    /// `ESC [ A`), e.g. when a wheel notch is translated to arrows for an
+    /// alternate-screen app.
+    pub fn application_cursor_keys(&self) -> bool {
+        self.parser.screen().application_cursor()
+    }
+
     /// Check if the terminal application has enabled mouse reporting
     ///
     /// Returns the mouse protocol mode that the application has requested.
@@ -342,6 +360,47 @@ mod tests {
         vt.process(b"\x1b[?2004h");
         vt.process(b"\x1b[?2004l");
         assert!(!vt.bracketed_paste_enabled());
+    }
+
+    /// The Codex CLI pattern: a DECSTBM region pinning a footer at the bottom
+    /// while history scrolls out of the top. Real terminals feed those lines
+    /// into scrollback; upstream vt100 discarded them (our vendored patch
+    /// restores the real behavior). Without this, Codex sessions had no
+    /// scrollback at all and needed a plain-text fallback buffer.
+    #[test]
+    fn test_lines_scrolled_out_of_a_top_anchored_region_reach_scrollback() {
+        let mut vt = VirtualTerminal::with_scrollback(6, 40, 100);
+        // Region rows 1..=4, footer pinned on rows 5-6
+        vt.process(b"\x1b[1;4r");
+        vt.process(b"\x1b[6;1HFOOTER");
+        // Print into the region: 10 lines through a 4-row window
+        vt.process(b"\x1b[1;1H");
+        for i in 0..10 {
+            vt.process(format!("line-{}\r\n", i).as_bytes());
+        }
+
+        // The footer must not have moved
+        let live = vt.visible_lines(6);
+        assert_eq!(live[5], "FOOTER");
+
+        // Lines pushed out of the region's top are in scrollback
+        vt.scroll_up(3);
+        let scrolled = vt.visible_lines(6);
+        assert!(
+            scrolled[0].starts_with("line-"),
+            "history must survive region scrolling: {:?}",
+            scrolled
+        );
+
+        // A region that does NOT start at the top row still discards, exactly
+        // like a real terminal
+        let mut vt = VirtualTerminal::with_scrollback(6, 40, 100);
+        vt.process(b"\x1b[2;5r\x1b[2;1H");
+        for i in 0..10 {
+            vt.process(format!("mid-{}\r\n", i).as_bytes());
+        }
+        vt.scroll_up(5);
+        assert_eq!(vt.scrollback_offset(), 0, "no scrollback should exist");
     }
 
     // VirtualTerminal scrollback tests

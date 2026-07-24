@@ -114,6 +114,18 @@ pub struct App {
     last_transcript_sync: Option<Instant>,
     /// Git work running off the event loop (at most one at a time)
     background_job: Option<background::BackgroundJob>,
+    /// Whether the real terminal window currently has focus
+    ///
+    /// Fed by the terminal's focus reports; assumed focused until told
+    /// otherwise, which is also correct for terminals that never report.
+    terminal_focused: bool,
+    /// The session that last received a focus-in event, if any
+    ///
+    /// In a real terminal, an app knows when its tab gains and loses focus.
+    /// The equivalent here: a session "has focus" while it fills the screen
+    /// and the terminal itself is focused. This tracks the last state told to
+    /// the children so transitions send exactly one `CSI I`/`CSI O` pair.
+    child_focus: Option<SessionId>,
 }
 
 /// How often to reconcile transcript watching against the live session list
@@ -253,11 +265,25 @@ impl App {
             watched_transcripts: HashMap::new(),
             last_transcript_sync: None,
             background_job: None,
+            terminal_focused: true,
+            child_focus: None,
         })
     }
 
     /// Run the main application loop
     pub async fn run(&mut self) -> Result<()> {
+        // Learn the real terminal's identity and colors before the TUI owns
+        // the screen: agent queries (XTVERSION, OSC 10/11) are answered with
+        // these instead of guesses. Raw mode must be on so the replies arrive
+        // unbuffered and unechoed; `Tui::enter` re-enables it harmlessly.
+        {
+            use crossterm::tty::IsTty;
+            if std::io::stdout().is_tty() && crossterm::terminal::enable_raw_mode().is_ok() {
+                let host = crate::session::proxy::probe_host_terminal();
+                crate::session::proxy::set_host_terminal(host);
+            }
+        }
+
         // Enter TUI mode
         self.tui.enter()?;
 
@@ -345,13 +371,17 @@ impl App {
                             self.state.needs_render = true;
                         }
                     }
-                    // Focus reporting is not enabled, so these do not arrive;
-                    // the arms exist only to keep the match exhaustive
-                    Event::FocusGained | Event::FocusLost => {}
+                    Event::FocusGained => {
+                        self.terminal_focused = true;
+                    }
+                    Event::FocusLost => {
+                        self.terminal_focused = false;
+                    }
                 }
             }
 
             let mut dirty = false;
+            dirty |= self.tick_child_focus();
             dirty |= self.tick_pane_transition();
             dirty |= self.tick_background_job();
             dirty |= self.tick_resize_debounce()?;
@@ -519,7 +549,74 @@ impl App {
         } else {
             None
         };
-        !self.sessions.poll_outputs_except(frozen_session).is_empty()
+        let had_output = !self.sessions.poll_outputs_except(frozen_session).is_empty();
+        self.forward_host_passthrough();
+        had_output
+    }
+
+    /// Forward sequences agents addressed to the real terminal (clipboard
+    /// writes via OSC 52) — but only from the session the user is looking
+    /// at. In a real terminal any tab can write the clipboard; here a
+    /// background agent silently replacing the clipboard would read as
+    /// corruption, so only the visible session's copies are honored.
+    fn forward_host_passthrough(&mut self) {
+        use std::io::Write;
+
+        let active = self.state.active_session;
+        let mut to_forward: Vec<u8> = Vec::new();
+        for (&session_id, session) in self.sessions.iter_mut() {
+            // Drain every session so buffers cannot grow unbounded
+            let bytes = session.take_host_passthrough();
+            if Some(session_id) == active {
+                to_forward.extend_from_slice(&bytes);
+            }
+        }
+        if !to_forward.is_empty() {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(&to_forward);
+            let _ = out.flush();
+        }
+    }
+
+    /// Tell children about focus changes, the way a terminal tells its tabs
+    ///
+    /// A session "has focus" while it fills the screen and the terminal
+    /// window itself is focused. On every transition, the session that lost
+    /// it gets `CSI O` and the one that gained it gets `CSI I` — but only if
+    /// it enabled focus reporting (mode 1004), exactly like a real terminal.
+    fn tick_child_focus(&mut self) -> bool {
+        let focused_now = if self.terminal_focused && self.state.focus == Focus::Session {
+            self.state.active_session
+        } else {
+            None
+        };
+        if focused_now == self.child_focus {
+            return false;
+        }
+
+        if let Some(old) = self.child_focus {
+            self.send_focus_report(old, false);
+        }
+        if let Some(new) = focused_now {
+            self.send_focus_report(new, true);
+        }
+        self.child_focus = focused_now;
+        false
+    }
+
+    /// Write a focus report to a session's PTY, if it subscribed to them
+    fn send_focus_report(&mut self, session_id: SessionId, gained: bool) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            if session.modes.focus_reporting() {
+                let report: &[u8] = if gained { b"\x1b[I" } else { b"\x1b[O" };
+                // Straight to the PTY: a focus report is the terminal
+                // talking, not the user, so it must not bump the engagement
+                // clock that keeps sessions from suspending
+                if let Err(e) = session.pty.write(report) {
+                    tracing::debug!(error = %e, "Failed to write focus report");
+                }
+            }
+        }
     }
 
     /// Check for dead sessions and notify about crashes
@@ -858,11 +955,59 @@ impl App {
             return Ok(true);
         }
 
+        if self.handle_alternate_scroll(session_id, mouse.kind)? {
+            return Ok(true);
+        }
+
         if !is_codex_session && self.handle_mouse_wheel(session_id, mouse.kind, false) {
             return Ok(true);
         }
 
         Ok(false)
+    }
+
+    /// Alternate scroll: wheel notches become arrow keys for an
+    /// alternate-screen app that did not enable a mouse protocol
+    ///
+    /// This is what iTerm does by default ("Scroll wheel sends arrow keys
+    /// when in alternate screen mode"): the app owns the whole screen, there
+    /// is no scrollback behind it, so the wheel drives the app's own
+    /// scrolling. Three lines per notch, matching the local scroll step.
+    fn handle_alternate_scroll(
+        &mut self,
+        session_id: SessionId,
+        kind: MouseEventKind,
+    ) -> Result<bool> {
+        let arrow_letter = match kind {
+            MouseEventKind::ScrollUp => b'A',
+            MouseEventKind::ScrollDown => b'B',
+            _ => return Ok(false),
+        };
+        // A suspended session has no process; scrolling must not wake it
+        if self.sessions.is_suspended(session_id) {
+            return Ok(false);
+        }
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return Ok(false);
+        };
+        if !session.vterm.alternate_screen_active()
+            || session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+        {
+            return Ok(false);
+        }
+
+        let prefix: &[u8] = if session.vterm.application_cursor_keys() {
+            b"\x1bO"
+        } else {
+            b"\x1b["
+        };
+        let mut bytes = Vec::with_capacity(9);
+        for _ in 0..MOUSE_SCROLL_STEP {
+            bytes.extend_from_slice(prefix);
+            bytes.push(arrow_letter);
+        }
+        session.write(&bytes)?;
+        Ok(true)
     }
 
     /// Scroll the session in response to a mouse wheel event

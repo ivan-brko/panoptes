@@ -362,10 +362,92 @@ impl PtyHandle {
     }
 }
 
+/// The kitty/xterm modifier parameter for a key event: `1 + bits`, where
+/// shift=1, alt=2, ctrl=4, super=8. A value of 1 means "no modifiers".
+fn modifier_param(modifiers: KeyModifiers) -> u8 {
+    let mut bits = 0;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        bits |= 1;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        bits |= 2;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        bits |= 4;
+    }
+    if modifiers.contains(KeyModifiers::SUPER) {
+        bits |= 8;
+    }
+    1 + bits
+}
+
+/// Convert a key event to bytes, honoring the kitty keyboard flags the
+/// child pushed (if any)
+///
+/// Both Claude Code and Codex push kitty "disambiguate" flags at startup —
+/// against the virtual terminal, so the encoding they expect is decided by
+/// what *they* negotiated, not by what the real terminal supports. The
+/// biggest visible casualty of ignoring this was Shift+Enter: legacy
+/// encoding collapses it to a bare `\r`, so "insert newline" became
+/// "submit prompt".
+///
+/// Deliberately conservative: CSI-u encodings are used only where the
+/// legacy encoding is lossy (modified Enter/Tab/Backspace, forwarded Esc).
+/// Everything with an exact legacy encoding keeps it — kitty-mode apps
+/// parse those too, and staying close to the legacy path avoids breaking
+/// keys over spec subtleties.
+pub fn key_event_to_bytes_with_modes(key: KeyEvent, kitty_flags: Option<u16>) -> Vec<u8> {
+    let disambiguate = kitty_flags.is_some_and(|flags| flags & 1 != 0);
+    let mods = modifier_param(key.modifiers);
+
+    if disambiguate && mods > 1 {
+        // Keys whose modifiers vanish in legacy encoding
+        let codepoint: Option<u32> = match key.code {
+            KeyCode::Enter => Some(13),
+            KeyCode::Tab => Some(9),
+            KeyCode::Backspace => Some(127),
+            _ => None,
+        };
+        if let Some(cp) = codepoint {
+            return format!("\x1b[{};{}u", cp, mods).into_bytes();
+        }
+    }
+    if disambiguate && key.code == KeyCode::Esc {
+        // A bare 0x1b is exactly the ambiguity the child asked its terminal
+        // to remove; give it the unambiguous form it negotiated for
+        return format!("\x1b[27;{}u", mods).into_bytes();
+    }
+
+    key_event_to_bytes(key)
+}
+
 /// Convert a crossterm KeyEvent to terminal escape sequence bytes
 fn key_event_to_bytes(key: KeyEvent) -> Vec<u8> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let mods = modifier_param(key.modifiers);
+
+    // Arrows and navigation keys carry their modifiers in the standard
+    // xterm parameter form; without this, Shift/Ctrl/Alt+arrow all
+    // collapsed to plain arrows
+    if mods > 1 {
+        let modified: Option<Vec<u8>> = match key.code {
+            KeyCode::Up => Some(format!("\x1b[1;{}A", mods).into_bytes()),
+            KeyCode::Down => Some(format!("\x1b[1;{}B", mods).into_bytes()),
+            KeyCode::Right => Some(format!("\x1b[1;{}C", mods).into_bytes()),
+            KeyCode::Left => Some(format!("\x1b[1;{}D", mods).into_bytes()),
+            KeyCode::Home => Some(format!("\x1b[1;{}H", mods).into_bytes()),
+            KeyCode::End => Some(format!("\x1b[1;{}F", mods).into_bytes()),
+            KeyCode::PageUp => Some(format!("\x1b[5;{}~", mods).into_bytes()),
+            KeyCode::PageDown => Some(format!("\x1b[6;{}~", mods).into_bytes()),
+            KeyCode::Insert => Some(format!("\x1b[2;{}~", mods).into_bytes()),
+            KeyCode::Delete => Some(format!("\x1b[3;{}~", mods).into_bytes()),
+            _ => None,
+        };
+        if let Some(bytes) = modified {
+            return bytes;
+        }
+    }
 
     match key.code {
         // Basic keys
@@ -559,6 +641,78 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('é'), KeyModifiers::NONE);
         let bytes = key_event_to_bytes(key);
         assert_eq!(bytes, "é".as_bytes());
+    }
+
+    /// The flagship kitty fix: a child that pushed disambiguate flags must
+    /// see Shift+Enter as `CSI 13;2u`, not a bare `\r` that submits
+    #[test]
+    fn test_modified_enter_is_csi_u_under_kitty() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(key_event_to_bytes_with_modes(key, Some(1)), b"\x1b[13;2u");
+        // Codex pushes flags 7; bit 1 is still set
+        assert_eq!(key_event_to_bytes_with_modes(key, Some(7)), b"\x1b[13;2u");
+        // Without kitty, legacy parity: a bare CR, exactly like xterm
+        assert_eq!(key_event_to_bytes_with_modes(key, None), b"\r");
+    }
+
+    #[test]
+    fn test_plain_keys_stay_legacy_under_kitty() {
+        // Disambiguate does not move text keys or unmodified specials
+        for (key, expected) in [
+            (
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                b"\r".to_vec(),
+            ),
+            (
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                b"\t".to_vec(),
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                b"a".to_vec(),
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                vec![0x03],
+            ),
+            (
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                b"\x1b[A".to_vec(),
+            ),
+        ] {
+            assert_eq!(
+                key_event_to_bytes_with_modes(key, Some(1)),
+                expected,
+                "{key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_forwarded_esc_is_unambiguous_under_kitty() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(key_event_to_bytes_with_modes(key, Some(1)), b"\x1b[27;1u");
+        assert_eq!(key_event_to_bytes_with_modes(key, None), vec![0x1b]);
+    }
+
+    /// Modified arrows and navigation keys carry their modifiers in the
+    /// xterm parameter form instead of silently dropping them
+    #[test]
+    fn test_modified_arrows_and_nav_keys_keep_their_modifiers() {
+        let shift_up = KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT);
+        assert_eq!(key_event_to_bytes(shift_up), b"\x1b[1;2A");
+
+        let ctrl_left = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(key_event_to_bytes(ctrl_left), b"\x1b[1;5D");
+
+        let alt_shift_end = KeyEvent::new(KeyCode::End, KeyModifiers::ALT | KeyModifiers::SHIFT);
+        assert_eq!(key_event_to_bytes(alt_shift_end), b"\x1b[1;4F");
+
+        let ctrl_pgup = KeyEvent::new(KeyCode::PageUp, KeyModifiers::CONTROL);
+        assert_eq!(key_event_to_bytes(ctrl_pgup), b"\x1b[5;5~");
+
+        let shift_del = KeyEvent::new(KeyCode::Delete, KeyModifiers::SHIFT);
+        assert_eq!(key_event_to_bytes(shift_del), b"\x1b[3;2~");
     }
 
     /// Poll a PTY until its accumulated output contains `needle` or the

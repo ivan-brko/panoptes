@@ -240,10 +240,10 @@ fn build_footer_text(
     match state.input_mode {
         InputMode::Session => {
             if is_scrolled {
-                "Esc: exit session mode | PgUp/PgDn: scroll | Ctrl+End: live view | Exit to copy text"
+                "Esc: exit session mode | PgUp/PgDn: scroll | Ctrl+End: live view | \u{2325}drag: copy"
                     .to_string()
             } else {
-                "Esc: exit session mode | \u{21E7}Esc: send Esc | PgUp: scroll | Exit to copy text"
+                "Esc: exit session mode | \u{21E7}Esc: send Esc | PgUp: scroll | \u{2325}drag: copy"
                     .to_string()
             }
         }

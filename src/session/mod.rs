@@ -4,12 +4,14 @@
 //! and session state tracking.
 
 pub mod manager;
+pub mod proxy;
 pub mod pty;
 pub mod state_machine;
 pub mod store;
 pub mod vterm;
 
 pub use manager::{AgentAccount, NewSessionSpec, SessionManager};
+pub use proxy::{HostTerminal, ModeTracker, Osc52Extractor, QueryResponder, SyncFrameGate};
 pub use pty::{mouse_event_to_bytes, ExitInfo, PtyHandle, PtyWriteTimedOut};
 pub use store::{sessions_file_path, SessionStore};
 pub use vterm::{VirtualTerminal, DEFAULT_SCROLLBACK_ROWS};
@@ -899,51 +901,6 @@ impl CodexFallback {
     }
 }
 
-/// Responds to DSR (Device Status Report) queries from the child process.
-///
-/// Some programs (e.g. Codex CLI) send `\x1b[6n` at startup to query cursor
-/// position and crash if no CPR response arrives in time. A query can be
-/// split across PTY reads, so a rolling tail of the previous read is kept to
-/// match sequences that straddle a chunk boundary.
-#[derive(Debug, Default)]
-struct DsrResponder {
-    /// Rolling tail (last 3 bytes) of previously seen output.
-    tail: Vec<u8>,
-}
-
-impl DsrResponder {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    /// Scan `bytes` (prefixed with the tail of the previous read) for DSR
-    /// queries. Returns the CPR response bytes to write back to the child,
-    /// one response per query, or `None` if no query was seen.
-    ///
-    /// `cursor` is the current (row, col) cursor position, 0-based; the CPR
-    /// reply is 1-based.
-    fn respond(&mut self, bytes: &[u8], cursor: (u16, u16)) -> Option<Vec<u8>> {
-        let mut combined = Vec::with_capacity(self.tail.len() + bytes.len());
-        combined.extend_from_slice(&self.tail);
-        combined.extend_from_slice(bytes);
-
-        let dsr_count = combined.windows(4).filter(|w| *w == b"\x1b[6n").count();
-
-        // Keep the last 3 bytes: long enough to complete a split "\x1b[6n",
-        // short enough that an already-matched query (4 bytes) can never be
-        // counted twice.
-        let keep_from = combined.len().saturating_sub(3);
-        self.tail = combined[keep_from..].to_vec();
-
-        if dsr_count == 0 {
-            return None;
-        }
-        let (row, col) = cursor;
-        let response = format!("\x1b[{};{}R", row + 1, col + 1);
-        Some(response.repeat(dsr_count).into_bytes())
-    }
-}
-
 /// A full session with PTY and virtual terminal
 pub struct Session {
     /// Session metadata
@@ -955,22 +912,26 @@ pub struct Session {
     /// Codex-only fallback state for cases where terminal-emulator scrollback
     /// is unavailable.
     codex_fallback: Option<CodexFallback>,
-    /// Responder for DSR cursor-position queries from the child process.
-    dsr: DsrResponder,
+    /// Terminal modes the child enabled that vt100 does not track
+    /// (kitty keyboard flags, focus reporting). Drives input encoding.
+    pub modes: ModeTracker,
+    /// Answers the terminal queries the child sends (DSR, DA1, XTVERSION,
+    /// kitty, DECRQM, OSC 10/11) the way the real terminal would.
+    queries: QueryResponder,
+    /// Holds output between synchronized-output markers so the vterm only
+    /// ingests whole frames.
+    frame_gate: SyncFrameGate,
+    /// Finds clipboard writes (OSC 52) for forwarding to the real terminal.
+    osc52: Osc52Extractor,
+    /// Sequences waiting to be forwarded to the real terminal (clipboard
+    /// writes). Drained by the app for the active session.
+    host_passthrough: Vec<u8>,
 }
 
 impl Session {
     /// Create a new session with the given info, PTY, and terminal dimensions
     pub fn new(info: SessionInfo, pty: PtyHandle, rows: usize, cols: usize) -> Self {
-        let codex_fallback = (info.session_type == SessionType::OpenAICodex)
-            .then(|| CodexFallback::new(DEFAULT_SCROLLBACK_ROWS));
-        Self {
-            info,
-            pty,
-            vterm: VirtualTerminal::new(rows, cols),
-            codex_fallback,
-            dsr: DsrResponder::new(),
-        }
+        Self::with_scrollback(info, pty, rows, cols, DEFAULT_SCROLLBACK_ROWS)
     }
 
     /// Create a new session with the given info, PTY, terminal dimensions, and scrollback
@@ -988,7 +949,11 @@ impl Session {
             pty,
             vterm: VirtualTerminal::with_scrollback(rows, cols, scrollback_rows),
             codex_fallback,
-            dsr: DsrResponder::new(),
+            modes: ModeTracker::default(),
+            queries: QueryResponder::default(),
+            frame_gate: SyncFrameGate::default(),
+            osc52: Osc52Extractor::default(),
+            host_passthrough: Vec::new(),
         }
     }
 
@@ -997,19 +962,22 @@ impl Session {
     pub fn poll_output(&mut self) -> bool {
         match self.pty.try_read() {
             Ok(Some(bytes)) => {
-                self.vterm.process(&bytes);
+                // Mode changes are tracked on the raw stream: they must be
+                // seen even while a synchronized frame is being buffered.
+                self.modes.scan(&bytes);
 
-                if let Some(fallback) = self.codex_fallback.as_mut() {
-                    fallback.ingest(&bytes);
-                }
+                // Whole frames only: what a supporting terminal shows the
+                // user is never a half-drawn screen, so neither is the vterm.
+                let committed = self.frame_gate.push(&bytes);
+                self.ingest_committed(&committed);
 
-                // Respond to DSR (Device Status Report) queries from the child process.
-                // Some programs (e.g. Codex CLI) send \x1b[6n at startup to query cursor
-                // position and crash if no CPR response arrives in time.
+                // Queries are answered as the real terminal would; the reply
+                // uses the cursor as of everything ingested so far.
                 let cursor = self.vterm.cursor_position();
-                if let Some(response) = self.dsr.respond(&bytes, cursor) {
+                let kitty = self.modes.kitty_flags();
+                if let Some(response) = self.queries.respond(&bytes, cursor, kitty) {
                     if let Err(e) = self.pty.write(&response) {
-                        tracing::debug!(error = %e, "Failed to write DSR response");
+                        tracing::debug!(error = %e, "Failed to write query response");
                     }
                 }
 
@@ -1017,7 +985,17 @@ impl Session {
 
                 true
             }
-            Ok(None) => false,
+            Ok(None) => {
+                // The stream is quiet: release anything the frame gate was
+                // holding for a frame end that is not coming.
+                let stale = self.frame_gate.flush_stale();
+                if stale.is_empty() {
+                    false
+                } else {
+                    self.ingest_committed(&stale);
+                    true
+                }
+            }
             Err(e) => {
                 // PTY read error - log and store the reason
                 let reason = format!("PTY read error: {}", e);
@@ -1032,6 +1010,29 @@ impl Session {
                 false
             }
         }
+    }
+
+    /// Feed frame-complete bytes to everything that consumes child output
+    fn ingest_committed(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.vterm.process(bytes);
+
+        // Clipboard writes belong to the real terminal, not the emulator
+        for seq in self.osc52.extract(bytes) {
+            self.host_passthrough.extend_from_slice(&seq);
+        }
+
+        if let Some(fallback) = self.codex_fallback.as_mut() {
+            fallback.ingest(bytes);
+        }
+    }
+
+    /// Take any sequences the child addressed to the real terminal
+    /// (clipboard writes). The app forwards these for the active session.
+    pub fn take_host_passthrough(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.host_passthrough)
     }
 
     /// Get visible styled lines for rendering (with colors)
@@ -1151,15 +1152,29 @@ impl Session {
     }
 
     /// Send a key event to the PTY
+    ///
+    /// Encoding honors the kitty keyboard flags this child pushed: it
+    /// negotiated them against the virtual terminal, so what it expects to
+    /// receive is decided here, not by the real terminal.
     pub fn send_key(&mut self, key: crossterm::event::KeyEvent) -> anyhow::Result<()> {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
 
         self.note_user_input();
-        let result = self.pty.send_key(key);
+        let bytes = pty::key_event_to_bytes_with_modes(key, self.modes.kitty_flags());
+        let result = if bytes.is_empty() {
+            Ok(())
+        } else {
+            self.pty.write(&bytes)
+        };
 
         // Only guess a turn once the write actually succeeded; a dropped
-        // Enter never reached the agent.
-        if result.is_ok() && key.code == KeyCode::Enter {
+        // Enter never reached the agent. A *modified* Enter is not a
+        // submission either: Shift+Enter inserts a newline in both agents.
+        let plain_enter = key.code == KeyCode::Enter
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL);
+        if result.is_ok() && plain_enter {
             self.guess_turn_started();
         }
         self.tolerate_full_buffer(result)
@@ -1991,45 +2006,7 @@ mod tests {
         assert!(ansi_remainder.is_empty());
     }
 
-    #[test]
-    fn test_dsr_responder_whole_sequence_in_one_read() {
-        let mut dsr = DsrResponder::new();
-        let response = dsr.respond(b"\x1b[6n", (4, 9));
-        // CPR is 1-based
-        assert_eq!(response.as_deref(), Some(b"\x1b[5;10R".as_ref()));
-    }
-
-    #[test]
-    fn test_dsr_responder_sequence_split_across_reads() {
-        let mut dsr = DsrResponder::new();
-        assert_eq!(dsr.respond(b"startup noise\x1b[", (0, 0)), None);
-        let response = dsr.respond(b"6n", (0, 0));
-        assert_eq!(response.as_deref(), Some(b"\x1b[1;1R".as_ref()));
-    }
-
-    #[test]
-    fn test_dsr_responder_ignores_unrelated_escape_sequences() {
-        let mut dsr = DsrResponder::new();
-        assert_eq!(dsr.respond(b"\x1b[31mred\x1b[0m\x1b[6m", (0, 0)), None);
-        // The tail of the previous read must not conjure a match either
-        assert_eq!(dsr.respond(b"more text", (0, 0)), None);
-    }
-
-    #[test]
-    fn test_dsr_responder_does_not_double_count_across_reads() {
-        let mut dsr = DsrResponder::new();
-        // A fully matched query leaves only 3 tail bytes, so it can never be
-        // re-matched by the next read.
-        assert!(dsr.respond(b"\x1b[6n", (0, 0)).is_some());
-        assert_eq!(dsr.respond(b"plain output", (0, 0)), None);
-    }
-
-    #[test]
-    fn test_dsr_responder_multiple_queries_in_one_chunk() {
-        let mut dsr = DsrResponder::new();
-        let response = dsr.respond(b"\x1b[6nabc\x1b[6n", (0, 0));
-        assert_eq!(response.as_deref(), Some(b"\x1b[1;1R\x1b[1;1R".as_ref()));
-    }
+    // DSR/query answering now lives in `proxy::QueryResponder`, tested there.
 
     #[test]
     fn test_codex_fallback_reassembles_two_byte_char_split_across_reads() {
