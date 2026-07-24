@@ -313,6 +313,29 @@ pub(crate) fn truncate_string(s: &str, max_len: usize) -> String {
     format!("{}...", head)
 }
 
+/// Truncate a string for display, keeping both ends
+///
+/// Branch names are slugified ticket titles, so two of them can agree for
+/// dozens of characters at either end; a middle ellipsis keeps `pan-10-...`
+/// and `pan-11-...` distinguishable where a head or tail cut would not. The
+/// head gets the odd column. `max_len` is measured in characters and the
+/// result never exceeds it, ellipsis included; below five columns there is
+/// no room for both ends, so this degrades to a head-truncate.
+pub(crate) fn elide_middle(s: &str, max_len: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
+        return s.to_string();
+    }
+    if max_len <= 4 {
+        return truncate_string(s, max_len);
+    }
+    let kept = max_len - 3;
+    let head_len = (kept + 1) / 2;
+    let head: String = s.chars().take(head_len).collect();
+    let tail: String = s.chars().skip(char_count - (kept - head_len)).collect();
+    format!("{}...{}", head, tail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +453,40 @@ mod tests {
         assert!(truncated.ends_with("..."));
         assert_eq!(truncated.chars().count(), 10);
         assert_eq!(truncated, "héllo w...");
+    }
+
+    #[test]
+    fn test_elide_middle_short_passes_through() {
+        assert_eq!(elide_middle("pan-12-a-bug", 50), "pan-12-a-bug");
+    }
+
+    /// Two branch slugs that differ only in their ticket number must stay
+    /// distinguishable after elision - both ends survive, head gets the odd
+    /// column
+    #[test]
+    fn test_elide_middle_keeps_both_ends() {
+        assert_eq!(elide_middle("abcdefghijklm", 8), "abc...lm");
+        assert_ne!(
+            elide_middle("pan-10-esc-backs-out-to-the-projects-pane", 20),
+            elide_middle("pan-11-esc-backs-out-to-the-projects-pane", 20),
+        );
+    }
+
+    #[test]
+    fn test_elide_middle_never_exceeds_the_width_it_was_given() {
+        for max_len in 0..=8 {
+            assert!(elide_middle("abcdefghij", max_len).chars().count() <= max_len);
+        }
+        // Below five columns there is no room for two ends and an ellipsis
+        assert_eq!(elide_middle("abcdefghij", 4), "a...");
+        assert_eq!(elide_middle("abcdefghij", 5), "a...j");
+    }
+
+    #[test]
+    fn test_elide_middle_multibyte_does_not_panic() {
+        let s = "héllo wörld héllo wörld";
+        let elided = elide_middle(s, 10);
+        assert_eq!(elided.chars().count(), 10);
+        assert_eq!(elided, "héll...rld");
     }
 }

@@ -95,7 +95,12 @@ PTY Output → Session buffer → TUI render
   an animating pane cannot resize it mid-typing; **if it is one line you type
   into, it is inline** in the pane that owns it
 - Pane rows drop fields whole as the pane narrows rather than truncating one
-  long string, and are truncated against the pane's *current* width
+  long string, and are truncated against the pane's *current* width. One
+  deliberate exception: the session row's project and branch middle-elide
+  (longer field first, with a floor) before the row gives up its full form,
+  because branch names are slugified ticket titles and would otherwise
+  collapse the whole row to an unidentifiable stub — the row's identity
+  (index, session name, state) always stays whole
 
 ## Error Handling
 
