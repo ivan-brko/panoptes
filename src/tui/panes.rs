@@ -2,7 +2,10 @@
 //!
 //! The focused pane is widened and the other two shrink. How aggressively
 //! depends on the terminal: the accordion exists to fight scarcity, so it
-//! backs off toward equal thirds once there is room for everyone.
+//! backs off once there is room for everyone - but only as far as the side
+//! panes need. Session rows carry branch names slugified from ticket titles,
+//! so the focused pane keeps half the terminal once the sides can hold the
+//! full row format ([`SIDE_FULL_MIN`]) at a quarter each.
 //!
 //! | terminal width | focused | each side |
 //! |---|---|---|
@@ -10,7 +13,7 @@
 //! | 60-87          | total - 20  | 10         |
 //! | 88-139         | 50%         | 25%        |
 //! | 140-199        | 45%         | ~27%       |
-//! | >= 200         | 40%         | 30%        |
+//! | >= 200         | 50%         | 25%        |
 //!
 //! Density is deliberately not a fifth column of this table. It follows from
 //! the width a pane ends up with, via [`side_mode`]: a side pane is a strip up
@@ -90,9 +93,13 @@ fn focused_width(total: u16) -> u16 {
     } else if total < 140 {
         total / 2
     } else if total < 200 {
+        // Half the terminal here would push the sides below SIDE_FULL_MIN
         (total as u32 * 45 / 100) as u16
     } else {
-        (total as u32 * 40 / 100) as u16
+        // From 200 columns the sides keep the full row format at 25% each,
+        // so the focused pane - whose session rows are the longest content
+        // in the application - takes half rather than backing further off
+        total / 2
     }
 }
 
@@ -293,7 +300,8 @@ mod tests {
             (100, [50, 25, 25]),
             (120, [60, 30, 30]),
             (160, [72, 44, 44]),
-            (220, [88, 66, 66]),
+            (200, [100, 50, 50]),
+            (220, [110, 55, 55]),
         ];
         for (total, expected) in cases {
             assert_eq!(
@@ -311,8 +319,19 @@ mod tests {
             assert_eq!(widths[focused], 72, "focused pane {focused}");
             assert_eq!(widths.iter().sum::<u16>(), 160);
         }
-        // Pane 1 focused at 220: 88 in the middle, 66 either side
-        assert_eq!(pane_widths(220, 1), [66, 88, 66]);
+        // Pane 1 focused at 220: 110 in the middle, 55 either side
+        assert_eq!(pane_widths(220, 1), [55, 110, 55]);
+    }
+
+    /// The half-share at >= 200 is only affordable because the sides never
+    /// drop below the full row format there
+    #[test]
+    fn test_wide_terminals_keep_full_sides() {
+        for total in 200..=400u16 {
+            let widths = pane_widths(total, 0);
+            assert_eq!(side_mode(widths[1]), SideMode::Full, "at {total} columns");
+            assert_eq!(side_mode(widths[2]), SideMode::Full, "at {total} columns");
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::session::SessionManager;
 use crate::tui::panes::SideMode;
 use crate::tui::theme::theme;
 use crate::tui::views::pane_projects::{clamp_line, compact_state};
-use crate::tui::views::window_rows;
+use crate::tui::views::{elide_middle, window_rows};
 use crate::tui::widgets::selection::{selection_prefix, selection_style};
 
 /// Rows the attention section may take, borders included
@@ -74,17 +74,89 @@ pub fn render_sessions_pane(
     render_session_list(frame, list_area, state, project_store, sessions, mode);
 }
 
-/// Pick the densest session row that actually fits
+/// Below this many columns an elided field is noise, not a name
+const ELIDE_MIN: usize = 12;
+
+/// The fields a session row is assembled from
 ///
-/// The full row leads with project and branch, which is context worth having
-/// until it costs the session's own name - so a full row that would be cut
-/// falls back to the compact one whole, rather than truncating into nonsense.
-/// This is what keeps a long project name from eating the entire row.
-fn session_body(mode: SideMode, room: usize, full: &str, compact: &str) -> String {
-    if mode == SideMode::Full && full.chars().count() <= room {
-        full.to_string()
+/// `prefix` is the selection index (`"4: "`) in the numbered list and empty
+/// in the attention section. It is part of the row's identity: the digit is
+/// how the session is selected, so no degradation may drop it.
+struct SessionRow<'a> {
+    prefix: &'a str,
+    project: &'a str,
+    branch: &'a str,
+    name: &'a str,
+    state: &'a str,
+}
+
+/// Build the densest session row that fits in `room` columns
+///
+/// The row's identity - index, session name, state - stays whole at every
+/// density. When the full row does not fit, the shortfall is charged to the
+/// context fields alone: project and branch share what is left, the longer
+/// one elided first, middle-ellipsis so branch slugs that agree at one end
+/// stay distinguishable at the other. This is a deliberate exception to the
+/// drop-fields-whole convention: eliding only the offending field keeps four
+/// fields readable instead of discarding them all to protect one. Below
+/// [`ELIDE_MIN`] an elided field is noise, so the row falls back to the
+/// compact form whole - which keeps its index too.
+fn session_body(mode: SideMode, room: usize, row: &SessionRow) -> String {
+    let compact = format!("{}{} [{}]", row.prefix, row.name, compact_state(row.state));
+    if mode != SideMode::Full {
+        return compact;
+    }
+    let full = format!(
+        "{}{} / {} / {} [{}]",
+        row.prefix, row.project, row.branch, row.name, row.state
+    );
+    if full.chars().count() <= room {
+        return full;
+    }
+
+    // Everything but project and branch is kept whole; the 9 is the two
+    // " / " separators plus " [" and "]"
+    let fixed = [row.prefix, row.name, row.state]
+        .iter()
+        .map(|s| s.chars().count())
+        .sum::<usize>()
+        + 9;
+    let budget = room.saturating_sub(fixed);
+    let (project_max, branch_max) = split_budget(
+        row.project.chars().count(),
+        row.branch.chars().count(),
+        budget,
+    );
+    let too_short = |len: usize, max: usize| max < len && max < ELIDE_MIN;
+    if too_short(row.project.chars().count(), project_max)
+        || too_short(row.branch.chars().count(), branch_max)
+    {
+        return compact;
+    }
+    format!(
+        "{}{} / {} / {} [{}]",
+        row.prefix,
+        elide_middle(row.project, project_max),
+        elide_middle(row.branch, branch_max),
+        row.name,
+        row.state
+    )
+}
+
+/// Share `budget` columns between two fields, charging the longer one first
+///
+/// A field that fits in half the budget keeps its full length and the other
+/// takes the remainder; when both exceed half, they split it, first field
+/// getting the odd column.
+fn split_budget(a: usize, b: usize, budget: usize) -> (usize, usize) {
+    if a + b <= budget {
+        (a, b)
+    } else if a <= budget / 2 {
+        (a, budget - a)
+    } else if b <= budget / 2 {
+        (budget - b, b)
     } else {
-        compact.to_string()
+        (budget - budget / 2, budget / 2)
     }
 }
 
@@ -132,18 +204,20 @@ fn render_attention_section(
             let (_, badge_color) = super::attention_badge(info, true);
             let state_text = super::session_state_display(info, now);
 
-            // Two leading spans, five columns: "● " plus the agent tag
+            // Two leading spans, seven columns: "● " plus the agent tag
+            // ("[CC] "). An elided body fills its room exactly, so an
+            // undercount here is not slack - it is two columns for
+            // clamp_line to cut off the row's tail
             let body = session_body(
                 mode,
-                width.saturating_sub(5),
-                &format!(
-                    "{} / {} / {} [{}]",
-                    project_name_of(project_store, info),
-                    branch_name_of(project_store, info),
-                    info.name,
-                    state_text
-                ),
-                &format!("{} [{}]", info.name, compact_state(&state_text)),
+                width.saturating_sub(7),
+                &SessionRow {
+                    prefix: "",
+                    project: project_name_of(project_store, info),
+                    branch: branch_name_of(project_store, info),
+                    name: &info.name,
+                    state: &state_text,
+                },
             );
 
             let line = Line::from(vec![
@@ -200,19 +274,20 @@ fn render_session_list(
             let (badge, badge_color) = super::attention_badge(info, info.needs_attention());
             let state_display = super::session_state_display(info, now);
 
-            // Three leading spans, seven columns: marker, badge, agent tag
+            // Three leading spans, nine columns: selection marker (2),
+            // badge (2), agent tag "[CC] " (5). An elided body fills its
+            // room exactly, so an undercount here is not slack - it is
+            // columns for clamp_line to cut off the row's tail
             let body = session_body(
                 mode,
-                width.saturating_sub(7),
-                &format!(
-                    "{}: {} / {} / {} [{}]",
-                    i + 1,
-                    project_name_of(project_store, info),
-                    branch_name_of(project_store, info),
-                    info.name,
-                    state_display
-                ),
-                &format!("{} [{}]", info.name, compact_state(&state_display)),
+                width.saturating_sub(9),
+                &SessionRow {
+                    prefix: &format!("{}: ", i + 1),
+                    project: project_name_of(project_store, info),
+                    branch: branch_name_of(project_store, info),
+                    name: &info.name,
+                    state: &state_display,
+                },
             );
 
             let line = Line::from(vec![
@@ -261,15 +336,72 @@ mod tests {
     }
 
     fn render(width: u16, sessions: &SessionManager) -> Vec<String> {
-        let store = ProjectStore::new();
+        render_with(width, sessions, &ProjectStore::new())
+    }
+
+    fn render_with(width: u16, sessions: &SessionManager, store: &ProjectStore) -> Vec<String> {
         let state = AppState {
             focus: crate::app::Focus::Panes(Tab::Sessions),
             ..Default::default()
         };
         let mode = crate::tui::panes::side_mode(width + 2);
         render_to_lines(width, 12, |frame| {
-            render_sessions_pane(frame, frame.size(), &state, &store, sessions, mode)
+            render_sessions_pane(frame, frame.size(), &state, store, sessions, mode)
         })
+    }
+
+    /// The PAN-12 rows through the real render pipeline, leading spans and
+    /// clamp_line included. An elided body fills the room it is given
+    /// exactly, so this holds only while the room subtracted at the call
+    /// site matches the true width of the leading spans - undercount it and
+    /// clamp_line replaces the row's tail, state and all, with an ellipsis
+    #[test]
+    fn test_a_long_branch_elides_end_to_end_without_losing_the_row_tail() {
+        let temp = TempDir::new().unwrap();
+
+        let mut store = ProjectStore::new();
+        let project = crate::project::Project::new(
+            "panoptes".to_string(),
+            temp.path().to_path_buf(),
+            "main".to_string(),
+        );
+        let branch = crate::project::Branch::new(
+            project.id,
+            "pan-10-esc-backs-out-to-the-projects-pane-once-a-pane-has-nothing-left-to-pop"
+                .to_string(),
+            temp.path().to_path_buf(),
+            false,
+            true,
+        );
+        let config = Config {
+            worktrees_dir: temp.path().join("worktrees"),
+            hooks_dir: temp.path().join("hooks"),
+            ..Config::default()
+        };
+        let mut sessions = SessionManager::with_store(
+            config,
+            SessionStore::with_path(temp.path().join("sessions.json")),
+        );
+        sessions
+            .insert_test_session("feature", project.id, branch.id)
+            .unwrap();
+        store.add_branch(branch);
+        store.add_project(project);
+
+        // Full density, but well short of the ~105-column full row
+        let lines = render_with(93, &sessions, &store);
+        let row = lines
+            .iter()
+            .map(|l| l.trim_end())
+            .find(|l| l.contains("feature"))
+            .expect("the session row rendered");
+
+        // Identity and the branch's head survive...
+        assert!(row.contains("1: panoptes / pan-10-esc"), "{row:?}");
+        // ...as do the branch's tail, the name, and the whole state
+        assert!(row.contains("left-to-pop / feature ["), "{row:?}");
+        assert!(row.ends_with(']'), "{row:?}");
+        assert!(row.chars().count() <= 93, "{row:?}");
     }
 
     #[test]
@@ -283,13 +415,13 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_density_keeps_only_the_name_and_state() {
+    fn test_compact_density_keeps_the_index_name_and_state() {
         let temp = TempDir::new().unwrap();
         let sessions = sessions_with(&temp, &["review"]);
 
         let lines = render(30, &sessions);
 
-        assert!(contains_line(&lines, "review ["), "{lines:?}");
+        assert!(contains_line(&lines, "1: review ["), "{lines:?}");
         assert!(!contains_line(&lines, "? / ?"), "{lines:?}");
     }
 
@@ -319,17 +451,85 @@ mod tests {
         }
     }
 
-    /// A full row that would be cut falls back to the compact one whole: a
-    /// long project name must not eat the session's own name
-    #[test]
-    fn test_full_row_falls_back_to_compact_rather_than_being_cut() {
-        let full = "1: a-very-long-project / a-very-long-branch / review [Waiting]";
-        let compact = "review [Waiting]";
+    /// The offending rows from PAN-12: a worktree branch slugified from a
+    /// ticket title, on a pane that is 19 columns too narrow for it
+    fn pan_12_row() -> SessionRow<'static> {
+        SessionRow {
+            prefix: "4: ",
+            project: "panoptes",
+            branch: "pan-10-esc-backs-out-to-the-projects-pane-once-a-pane-has-nothing-left-to-pop",
+            name: "feature",
+            state: "Thinking",
+        }
+    }
 
-        assert_eq!(session_body(SideMode::Full, 80, full, compact), full);
-        assert_eq!(session_body(SideMode::Full, 20, full, compact), compact);
+    #[test]
+    fn test_a_full_row_that_fits_is_untouched() {
+        let row = pan_12_row();
+        assert_eq!(
+            session_body(SideMode::Full, 200, &row),
+            "4: panoptes / pan-10-esc-backs-out-to-the-projects-pane-once-a-pane-has-nothing-left-to-pop / feature [Thinking]"
+        );
+    }
+
+    /// A row that does not fit charges the shortfall to the long field: the
+    /// index, project, name and state all survive, and the elided branch
+    /// keeps both of its ends
+    #[test]
+    fn test_a_long_branch_is_elided_rather_than_the_row_collapsing() {
+        let row = pan_12_row();
+
+        let body = session_body(SideMode::Full, 93, &row);
+
+        assert_eq!(body.chars().count(), 93);
+        assert!(body.starts_with("4: panoptes / pan-10-esc"), "{body}");
+        assert!(body.ends_with("left-to-pop / feature [Thinking]"), "{body}");
+        assert!(body.contains("..."), "{body}");
+    }
+
+    /// Two sessions whose branch slugs differ only in the ticket number must
+    /// not elide into the same row
+    #[test]
+    fn test_sibling_branches_stay_distinguishable_after_elision() {
+        let pan_10 = pan_12_row();
+        let pan_11 = SessionRow {
+            branch: "pan-11-esc-backs-out-to-the-projects-pane-once-a-pane-has-nothing-left-to-pop",
+            ..pan_12_row()
+        };
+
+        assert_ne!(
+            session_body(SideMode::Full, 93, &pan_10),
+            session_body(SideMode::Full, 93, &pan_11),
+        );
+    }
+
+    /// A field elided below the floor is noise, so the row falls back to the
+    /// compact form whole - which keeps the digit that selects the session,
+    /// because two numberless identical stubs are the worst outcome available
+    #[test]
+    fn test_below_the_elision_floor_compact_keeps_its_index() {
+        let row = pan_12_row();
+
+        assert_eq!(
+            session_body(SideMode::Full, 40, &row),
+            "4: feature [Thinking]"
+        );
         // Compact density never reaches for the full row at all
-        assert_eq!(session_body(SideMode::Compact, 200, full, compact), compact);
+        assert_eq!(
+            session_body(SideMode::Compact, 200, &row),
+            "4: feature [Thinking]"
+        );
+    }
+
+    #[test]
+    fn test_split_budget_charges_the_longer_field_first() {
+        // Both fit: untouched
+        assert_eq!(split_budget(8, 10, 30), (8, 10));
+        // The short one keeps itself whole, the long one takes the rest
+        assert_eq!(split_budget(8, 77, 66), (8, 58));
+        assert_eq!(split_budget(77, 8, 66), (58, 8));
+        // Both long: an even split, first field getting the odd column
+        assert_eq!(split_budget(50, 60, 33), (17, 16));
     }
 
     #[test]
