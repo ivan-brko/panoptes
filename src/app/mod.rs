@@ -483,19 +483,21 @@ impl App {
         }
     }
 
-    /// Handle a mouse event, logging scroll diagnostics when enabled
+    /// Handle a mouse event, logging diagnostics when enabled
+    ///
+    /// `PANOPTES_MOUSE_DEBUG=1` logs every mouse event, not only the wheel:
+    /// which modifiers survived the terminal is the question that decides
+    /// whether a chord like \u{21E7}drag can be given a meaning at all, and
+    /// the wheel never carries one.
     ///
     /// Returns true if the event caused a state change requiring re-render.
     fn handle_mouse_event_logged(&mut self, mouse: MouseEvent) -> Result<bool> {
-        let is_scroll_event = matches!(
-            mouse.kind,
-            MouseEventKind::ScrollUp
-                | MouseEventKind::ScrollDown
-                | MouseEventKind::ScrollLeft
-                | MouseEventKind::ScrollRight
-        );
+        // Bare motion is the one kind worth dropping: a terminal in
+        // any-motion mode sends one per cell crossed, which would bury
+        // everything else
+        let worth_logging = !matches!(mouse.kind, MouseEventKind::Moved);
 
-        if self.mouse_debug_enabled && is_scroll_event {
+        if self.mouse_debug_enabled && worth_logging {
             tracing::info!(
                 target: "panoptes::mouse",
                 kind = ?mouse.kind,
@@ -506,17 +508,18 @@ impl App {
                 input_mode = ?self.state.input_mode,
                 mouse_capture_enabled = self.tui.is_mouse_capture_enabled(),
                 active_session = ?self.state.active_session,
-                "Received mouse scroll event"
+                child_owns_mouse = self.active_session_owns_mouse(),
+                "Received mouse event"
             );
         }
 
         let handled = self.handle_mouse_event(mouse)?;
-        if self.mouse_debug_enabled && is_scroll_event {
+        if self.mouse_debug_enabled && worth_logging {
             tracing::info!(
                 target: "panoptes::mouse",
                 handled,
                 session_scroll_offset = self.state.session_scroll_offset,
-                "Processed mouse scroll event"
+                "Processed mouse event"
             );
         }
 
@@ -1274,6 +1277,19 @@ impl App {
             // the screen it was made against, and this is no longer it
             self.state.clear_selection();
         }
+    }
+
+    /// Whether the visible session's child asked for mouse reporting
+    ///
+    /// When it has, drags belong to it - the same as in a real terminal tab -
+    /// and Panoptes' own selection stays out of the way.
+    fn active_session_owns_mouse(&self) -> bool {
+        self.state
+            .active_session
+            .and_then(|session_id| self.sessions.get(session_id))
+            .is_some_and(|session| {
+                session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+            })
     }
 
     /// Whether the session view is showing Codex's plain-text fallback
