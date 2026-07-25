@@ -38,6 +38,11 @@ hooks_dir = "/Users/you/.panoptes/hooks"
 # Maximum scrollback lines per session (for terminal history)
 scrollback_lines = 10000
 
+# Mouse selection: what a double-click treats as part of a word (beyond
+# alphanumerics), and how long a second click may take to still count as one
+selection_word_characters = "/-+\\~_."
+multi_click_ms = 400
+
 # Seconds before a tool still in flight is treated as stalled and evicted
 # (handles cases where hook events are missed)
 state_timeout_secs = 300
@@ -139,6 +144,34 @@ Maximum number of scrollback lines to retain in the terminal emulator for each s
 Each 1000 lines uses approximately 10KB of memory per session.
 
 **When to change:** Increase if you need to scroll back further in session history; decrease if you have many concurrent sessions and want to reduce memory usage.
+
+---
+
+### selection_word_characters
+
+| Property | Value |
+|----------|-------|
+| Default | `"/-+\\~_."` |
+| Type | String |
+
+Which characters a double-click treats as part of a word, on top of letters and digits. The default is iTerm2's own set, which is what makes double-clicking `src/app/mod.rs` or `--no-verify` take the whole thing instead of stopping at the first slash or dash.
+
+Note that this is a TOML string, so a backslash has to be written `\\`.
+
+**When to change:** Add characters your work is full of — `@` for email addresses or scoped npm packages, `:` for `host:port` pairs — or empty it (`""`) to make a double-click take only the alphanumeric run.
+
+---
+
+### multi_click_ms
+
+| Property | Value |
+|----------|-------|
+| Default | `400` |
+| Type | Integer (milliseconds) |
+
+How long after a click a second one still counts as a double-click, and a third as a triple-click. A repeat also has to land within one cell of the previous click.
+
+**When to change:** Match it to your system's double-click speed if double-clicking to select a word feels like it needs hurrying, or if ordinary separate clicks keep being read as one gesture.
 
 ---
 

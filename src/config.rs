@@ -126,6 +126,21 @@ pub struct Config {
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: usize,
 
+    /// Characters a double-click treats as part of a word, beyond alphanumerics
+    ///
+    /// Defaults to iTerm2's own set, which is what makes double-clicking a
+    /// path or a flag take the whole thing instead of stopping at the first
+    /// slash or dash.
+    #[serde(default = "default_selection_word_characters")]
+    pub selection_word_characters: String,
+
+    /// How long after a click a second one still counts as a double-click
+    ///
+    /// Milliseconds. Match it to the system's double-click speed if the
+    /// default feels quick or slow.
+    #[serde(default = "default_multi_click_ms")]
+    pub multi_click_ms: u64,
+
     /// Seconds a session may sit idle before its agent process is suspended
     ///
     /// Suspending kills the child process and keeps the scrollback; the session
@@ -334,6 +349,14 @@ fn default_scrollback_lines() -> usize {
     10_000
 }
 
+fn default_selection_word_characters() -> String {
+    "/-+\\~_.".to_string()
+}
+
+fn default_multi_click_ms() -> u64 {
+    400
+}
+
 fn default_suspend_after() -> u64 {
     7200 // 2 hours
 }
@@ -348,6 +371,8 @@ impl Default for Config {
             exited_retention_secs: default_exited_retention(),
             notification_method: NotificationMethod::default(),
             scrollback_lines: default_scrollback_lines(),
+            selection_word_characters: default_selection_word_characters(),
+            multi_click_ms: default_multi_click_ms(),
             suspend_after_secs: default_suspend_after(),
             log_agent_events: false,
             attention_on_idle: false,

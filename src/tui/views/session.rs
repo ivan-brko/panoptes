@@ -526,6 +526,18 @@ mod tests {
         (state, sessions, dir)
     }
 
+    /// A selection covering `span`, with the button already released
+    fn finished(
+        session_id: uuid::Uuid,
+        span: (selection::Cell, selection::Cell),
+        pointer: (u16, u16),
+    ) -> SessionSelection {
+        let mut sel =
+            SessionSelection::started(session_id, span, selection::Granularity::Cell, pointer);
+        sel.dragging = false;
+        sel
+    }
+
     fn render_session(state: &AppState, sessions: &SessionManager) -> ratatui::buffer::Buffer {
         let config = Config::default();
         let store = ProjectStore::new();
@@ -549,12 +561,7 @@ mod tests {
     fn test_the_selection_is_painted_over_exactly_the_cells_it_covers() {
         let (mut state, sessions, _dir) = session_showing("FIDELITY-42 and more");
         let session_id = state.active_session.unwrap();
-        state.selection = Some(SessionSelection::completed(
-            session_id,
-            (0, 0),
-            (0, 7),
-            (0, 7),
-        ));
+        state.selection = Some(finished(session_id, ((0, 0), (0, 7)), (0, 7)));
 
         let buffer = render_session(&state, &sessions);
         let content = FrameLayout::calculate(
@@ -582,12 +589,7 @@ mod tests {
         let (mut state, sessions, _dir) = session_showing("FIDELITY-42 and more");
         let session_id = state.active_session.unwrap();
         // Absolute rows far below the live screen
-        state.selection = Some(SessionSelection::completed(
-            session_id,
-            (900, 0),
-            (900, 7),
-            (0, 7),
-        ));
+        state.selection = Some(finished(session_id, ((900, 0), (900, 7)), (0, 7)));
 
         let buffer = render_session(&state, &sessions);
         let selected = theme().text_selection_style();
@@ -600,12 +602,7 @@ mod tests {
     #[test]
     fn test_a_selection_from_another_session_is_not_drawn() {
         let (mut state, sessions, _dir) = session_showing("FIDELITY-42 and more");
-        state.selection = Some(SessionSelection::completed(
-            uuid::Uuid::new_v4(),
-            (0, 0),
-            (0, 7),
-            (0, 7),
-        ));
+        state.selection = Some(finished(uuid::Uuid::new_v4(), ((0, 0), (0, 7)), (0, 7)));
 
         let buffer = render_session(&state, &sessions);
         let selected = theme().text_selection_style();

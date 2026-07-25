@@ -979,7 +979,12 @@ mod tests {
     // Selection lifetime
 
     fn selection_for(session_id: SessionId) -> SessionSelection {
-        SessionSelection::started(session_id, (3, 5), (0, 5))
+        SessionSelection::started(
+            session_id,
+            ((3, 5), (3, 5)),
+            crate::app::selection::Granularity::Cell,
+            (0, 5),
+        )
     }
 
     /// The highlight belongs to the screen it was made against, and new output

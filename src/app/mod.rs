@@ -85,11 +85,6 @@ const MOUSE_SCROLL_STEP: usize = 3;
 /// choice is between dropping a half-made selection and growing a buffer
 /// without limit.
 const MAX_HELD_OUTPUT: usize = 8 * 1024 * 1024;
-/// Lines the view creeps per tick while a selection is dragged off the edge
-///
-/// One line at the event loop's ~60Hz tick, which is fast enough to cross a
-/// screen in under half a second and slow enough to stop where you meant to.
-const SELECTION_SCROLL_STEP: usize = 1;
 
 /// Main application struct
 pub struct App {
@@ -1088,53 +1083,68 @@ impl App {
         }
 
         let ((view_row, view_col), _) = selection::locate(content, mouse.row, mouse.column);
-        let clicks = self
-            .state
-            .session_click
-            .press(Instant::now(), (view_row, view_col));
+        let clicks = self.state.session_click.press(
+            Instant::now(),
+            (view_row, view_col),
+            Duration::from_millis(self.config.multi_click_ms),
+        );
+        let granularity = selection::Granularity::for_click_count(clicks);
 
-        let Some(session) = self.sessions.get(session_id) else {
+        let Some(span) = self.span_at(session_id, view_row, view_col, granularity) else {
             return Ok(false);
         };
-        let vterm = &session.vterm;
+        self.state.selection = Some(SessionSelection::started(
+            session_id,
+            span,
+            granularity,
+            (view_row, view_col),
+        ));
+        Ok(true)
+    }
+
+    /// The cells one click covers, at the granularity it asked for
+    ///
+    /// A single click is the cell under the pointer; a double click the word
+    /// or run of whitespace around it; a triple click its whole logical line.
+    fn span_at(
+        &self,
+        session_id: SessionId,
+        view_row: u16,
+        view_col: u16,
+        granularity: selection::Granularity,
+    ) -> Option<(selection::Cell, selection::Cell)> {
+        let vterm = &self.sessions.get(session_id)?.vterm;
         let cell = (
             selection::absolute_row(vterm.viewport_top_row(), view_row),
             view_col,
         );
-        let (rows, cols) = vterm.size();
-        let last_row = vterm.history_rows() + rows.saturating_sub(1);
 
-        let selection = match clicks {
-            // A double click takes the word, a triple the whole logical line.
-            // Both are complete the moment the button goes down, so they copy
-            // immediately and never enter the dragging state.
-            2 => {
-                let (start, end) = selection::word_at(cell, &|row| vterm.row_cells(row), &|row| {
-                    vterm.row_wrapped(row)
-                });
-                SessionSelection::completed(session_id, start, end, (view_row, view_col))
-            }
-            3 => {
-                let (start, end) = selection::logical_line_at(
+        Some(match granularity {
+            selection::Granularity::Cell => (cell, cell),
+            selection::Granularity::Word => selection::word_at(
+                cell,
+                &|row| vterm.row_cells(row),
+                &|row| vterm.row_wrapped(row),
+                &self.config.selection_word_characters,
+            ),
+            selection::Granularity::Line => {
+                let (rows, cols) = vterm.size();
+                selection::logical_line_at(
                     cell,
                     &|row| vterm.row_wrapped(row),
                     cols as u16,
-                    last_row,
-                );
-                SessionSelection::completed(session_id, start, end, (view_row, view_col))
+                    vterm.history_rows() + rows.saturating_sub(1),
+                )
             }
-            _ => SessionSelection::started(session_id, cell, (view_row, view_col)),
-        };
-
-        let click_complete = !selection.dragging;
-        self.state.selection = Some(selection);
-        if click_complete {
-            self.copy_selection(session_id);
-        }
-        Ok(true)
+        })
     }
 
     /// Move the head of an in-progress drag to where the pointer is now
+    ///
+    /// At word or line granularity the head takes the whole word or line the
+    /// pointer is over, and the anchor holds the far side of the one the drag
+    /// began in - so a double-click-and-drag grows by whole words in either
+    /// direction, which is what every other terminal does.
     fn extend_selection(
         &mut self,
         session_id: SessionId,
@@ -1142,25 +1152,32 @@ impl App {
         content: ratatui::prelude::Rect,
     ) -> bool {
         let ((view_row, view_col), edge) = selection::locate(content, mouse.row, mouse.column);
-        let Some(viewport_top) = self
-            .sessions
-            .get(session_id)
-            .map(|session| session.vterm.viewport_top_row())
-        else {
+        let dragging = self
+            .state
+            .selection
+            .as_ref()
+            .is_some_and(|sel| sel.session_id == session_id && sel.dragging);
+        if !dragging {
+            // A drag with nothing selected is not ours (the press landed on
+            // the chrome, or the selection was already cancelled)
+            return false;
+        }
+        let granularity = self
+            .state
+            .selection
+            .as_ref()
+            .map(|sel| sel.granularity)
+            .unwrap_or_default();
+        let Some(span) = self.span_at(session_id, view_row, view_col, granularity) else {
             return false;
         };
 
-        match self.state.selection.as_mut() {
-            Some(sel) if sel.session_id == session_id && sel.dragging => {
-                sel.pointer = (view_row, view_col);
-                sel.edge = edge;
-                sel.head = (selection::absolute_row(viewport_top, view_row), view_col);
-                true
-            }
-            // A drag with nothing selected is not ours (the press landed on
-            // the chrome, or the selection was already cancelled)
-            _ => false,
+        if let Some(sel) = self.state.selection.as_mut() {
+            sel.pointer = (view_row, view_col);
+            sel.edge = edge;
+            sel.extend_to(span);
         }
+        true
     }
 
     /// End a drag: copy what it covers, and let the session run again
@@ -1170,8 +1187,10 @@ impl App {
                 sel.dragging = false;
                 sel.edge = None;
                 // A press and release on one cell is a plain click; clobbering
-                // the user's clipboard with a stray one would be its own bug
-                !sel.is_single_cell()
+                // the user's clipboard with a stray one would be its own bug.
+                // A double click that landed on a one-letter word is not that
+                // - the user asked for the letter.
+                !sel.is_bare_click()
             }
             _ => return Ok(false),
         };
@@ -1200,15 +1219,23 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Say what was taken. The highlight is gone by the next output, so
+        // without this a copy that worked and a copy that silently failed
+        // look exactly alike.
+        let told = describe_copy(&text);
+
         // A selection dragged through a long scrollback can be megabytes, and
         // writing that to a helper waits on the helper. Big copies go to
         // their own thread; small ones stay inline, where a failure can still
         // be put in front of the user rather than only in the log.
         if text.len() > crate::clipboard::INLINE_LIMIT {
             crate::clipboard::copy_in_background(text);
+            self.state.header_notifications.push(told);
         } else if let Err(e) = crate::clipboard::copy(&text) {
             tracing::warn!(error = %e, "Failed to copy selection to the clipboard");
             self.state.error_message = Some(format!("Copy failed: {}", e));
+        } else {
+            self.state.header_notifications.push(told);
         }
     }
 
@@ -1270,12 +1297,14 @@ impl App {
 
         let before_view = self.session_view_position(session_id);
         let before_offset = self.state.session_scroll_offset;
-        match edge {
-            selection::Edge::Above => {
-                session_scroll::scroll_up_by(self, session_id, SELECTION_SCROLL_STEP)
-            }
-            selection::Edge::Below => {
-                session_scroll::scroll_down_by(self, session_id, SELECTION_SCROLL_STEP)
+        // The further past the edge the pointer is held, the faster the view
+        // follows - a pointer parked just outside is nudging, one thrown to
+        // the top of the screen is asking to get somewhere
+        let step = edge.scroll_step();
+        match edge.direction {
+            selection::EdgeDirection::Above => session_scroll::scroll_up_by(self, session_id, step),
+            selection::EdgeDirection::Below => {
+                session_scroll::scroll_down_by(self, session_id, step)
             }
         };
         // Held against the oldest or newest line there is. The requested
@@ -2773,6 +2802,23 @@ fn scrolled_codex_session(state: &AppState, sessions: &SessionManager) -> Option
     })
 }
 
+/// What to tell the user a copy took
+///
+/// Sized in whatever unit the selection is really made of: a line count for
+/// something spanning lines, a character count for a fragment of one - so
+/// "Copied 3 lines" and "Copied 11 characters" both say something the user
+/// can check against what they dragged over.
+fn describe_copy(text: &str) -> String {
+    let lines = text.lines().count();
+    if lines > 1 {
+        return format!("Copied {} lines", lines);
+    }
+    match text.chars().count() {
+        1 => "Copied 1 character".to_string(),
+        n => format!("Copied {} characters", n),
+    }
+}
+
 fn mouse_debug_enabled_from_env() -> bool {
     std::env::var("PANOPTES_MOUSE_DEBUG").ok().is_some_and(|v| {
         matches!(
@@ -2976,7 +3022,12 @@ mod tests {
     }
 
     fn dragging_at(session_id: SessionId, anchor: (usize, u16)) -> SessionSelection {
-        SessionSelection::started(session_id, anchor, (0, 0))
+        SessionSelection::started(
+            session_id,
+            (anchor, anchor),
+            selection::Granularity::Cell,
+            (0, 0),
+        )
     }
 
     /// Which session a drag holds, and that release lets it through again
@@ -3009,6 +3060,18 @@ mod tests {
         assert_eq!(state.dragging_session(), Some(session_id));
         state.clear_selection();
         assert_eq!(state.dragging_session(), None);
+    }
+
+    /// The highlight is gone by the next output, so a copy that worked and a
+    /// copy that silently failed would otherwise look identical
+    #[test]
+    fn test_a_copy_says_what_it_took() {
+        assert_eq!(describe_copy("FIDELITY-42"), "Copied 11 characters");
+        assert_eq!(describe_copy("x"), "Copied 1 character");
+        assert_eq!(describe_copy("one\ntwo\nthree"), "Copied 3 lines");
+        // Sized in characters, not bytes: a count the user can check against
+        // what they dragged over
+        assert_eq!(describe_copy("日本語"), "Copied 3 characters");
     }
 
     /// A scrolled-up Codex session is skipped rather than held: that can last
