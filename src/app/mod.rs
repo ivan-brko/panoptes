@@ -1152,29 +1152,39 @@ impl App {
         content: ratatui::prelude::Rect,
     ) -> bool {
         let ((view_row, view_col), edge) = selection::locate(content, mouse.row, mouse.column);
-        let dragging = self
-            .state
-            .selection
-            .as_ref()
-            .is_some_and(|sel| sel.session_id == session_id && sel.dragging);
-        if !dragging {
+        match self.state.selection.as_mut() {
+            Some(sel) if sel.session_id == session_id && sel.dragging => {
+                sel.pointer = (view_row, view_col);
+                sel.edge = edge;
+            }
             // A drag with nothing selected is not ours (the press landed on
             // the chrome, or the selection was already cancelled)
-            return false;
+            _ => return false,
         }
-        let granularity = self
+        self.track_pointer(session_id)
+    }
+
+    /// Re-derive the moving end of a drag from where the pointer is
+    ///
+    /// The one place a drag's head is worked out, so a pointer that moved and
+    /// a view that scrolled under a still pointer give the same answer. That
+    /// matters most at word and line granularity, where the head has to take
+    /// the whole word under the pointer: computing it anywhere else would let
+    /// an auto-scrolled drag end mid-word.
+    fn track_pointer(&mut self, session_id: SessionId) -> bool {
+        let Some((pointer, granularity)) = self
             .state
             .selection
             .as_ref()
-            .map(|sel| sel.granularity)
-            .unwrap_or_default();
-        let Some(span) = self.span_at(session_id, view_row, view_col, granularity) else {
+            .filter(|sel| sel.session_id == session_id && sel.dragging)
+            .map(|sel| (sel.pointer, sel.granularity))
+        else {
             return false;
         };
-
+        let Some(span) = self.span_at(session_id, pointer.0, pointer.1, granularity) else {
+            return false;
+        };
         if let Some(sel) = self.state.selection.as_mut() {
-            sel.pointer = (view_row, view_col);
-            sel.edge = edge;
             sel.extend_to(span);
         }
         true
@@ -1247,24 +1257,19 @@ impl App {
     /// A finished highlight is dropped instead - it belongs to the screen it
     /// was made against.
     fn sync_selection_after_scroll(&mut self, session_id: SessionId) {
-        let Some(viewport_top) = self
-            .sessions
-            .get(session_id)
-            .map(|session| session.vterm.viewport_top_row())
-        else {
+        if self.sessions.get(session_id).is_none() {
             self.state.clear_selection();
             return;
-        };
-
-        match self.state.selection.as_mut() {
-            Some(sel) if sel.session_id == session_id && sel.dragging => {
-                sel.head = (
-                    selection::absolute_row(viewport_top, sel.pointer.0),
-                    sel.pointer.1,
-                );
-            }
-            Some(_) => self.state.clear_selection(),
-            None => {}
+        }
+        // Same derivation a real drag event gets, so a selection extended by
+        // the view moving under a still pointer keeps its granularity
+        if self.track_pointer(session_id) {
+            return;
+        }
+        if self.state.selection.is_some() {
+            // Not a drag of this session's: a finished highlight belongs to
+            // the screen it was made against, and this is no longer it
+            self.state.clear_selection();
         }
     }
 

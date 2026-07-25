@@ -369,6 +369,28 @@ def scenario_shell():
     check(f"the selection grew past one screenful ({len(lines)} lines)", len(lines) > ROWS)
     send(b"\x1b[F", 0.5)
 
+    # A drag that began as a double click keeps taking whole words, including
+    # while the edge is scrolling the view under a pointer that is not moving
+    send("for i in $(seq 1 200); do echo \"AAA-$i BBB-$i\"; done\r", 3.0)
+    if check("word-boundary history printed", wait_for(r"AAA-200", 8.0, "word history")):
+        wrow, wcol = find("AAA-200", last=True)
+        pbcopy("CLIPBOARD-UNTOUCHED")
+        # Double click in the middle of a token, then hold past the top edge
+        press(wrow, wcol + 2, 0.06)
+        release(wrow, wcol + 2, 0.06)
+        press(wrow, wcol + 2, 0.06)
+        motion(1, wcol + 2)
+        drain(0.8)
+        release(1, wcol + 2)
+        drain(0.5)
+        pasted = pbpaste()
+        tokens = pasted.split()
+        broken = [t for t in tokens if not re.fullmatch(r"(AAA|BBB)-\d+", t)]
+        check(f"an auto-scrolled word drag stops on word boundaries "
+              f"({len(tokens)} tokens, first {tokens[:1]})",
+              tokens and not broken)
+    send(b"\x1b[F", 0.5)
+
     # A child that takes the mouse keeps its own drags - what claude, vim and
     # htop do, without needing one of them here.
     #
