@@ -928,8 +928,8 @@ pub struct Session {
     host_passthrough: Vec<u8>,
     /// Whether new output is being held back from the terminal
     output_hold: bool,
-    /// Output read while the hold is on, replayed when it is released
-    held_output: Vec<u8>,
+    /// Reads taken while the hold is on, replayed one by one when released
+    held_output: Vec<Vec<u8>>,
 }
 
 /// What one [`Session::poll_output`] call did
@@ -999,31 +999,14 @@ impl Session {
                 // then. From the child's side that is what it already looked
                 // like; the difference is that its writes never block.
                 if self.output_hold {
-                    self.held_output.extend_from_slice(&bytes);
+                    // Kept as separate reads, not appended into one buffer:
+                    // the replay has to be able to answer a query with the
+                    // cursor as of *its* read, exactly as the live path does
+                    self.held_output.push(bytes);
                     return PollOutcome::Held;
                 }
 
-                // Mode changes are tracked on the raw stream: they must be
-                // seen even while a synchronized frame is being buffered.
-                self.modes.scan(&bytes);
-
-                // Whole frames only: what a supporting terminal shows the
-                // user is never a half-drawn screen, so neither is the vterm.
-                let committed = self.frame_gate.push(&bytes);
-                self.ingest_committed(&committed);
-
-                // Queries are answered as the real terminal would; the reply
-                // uses the cursor as of everything ingested so far.
-                let cursor = self.vterm.cursor_position();
-                let kitty = self.modes.kitty_flags();
-                if let Some(response) = self.queries.respond(&bytes, cursor, kitty) {
-                    if let Err(e) = self.pty.write(&response) {
-                        tracing::debug!(error = %e, "Failed to write query response");
-                    }
-                }
-
-                self.note_output_activity();
-
+                self.ingest_read(&bytes);
                 PollOutcome::Ingested
             }
             Ok(None) => {
@@ -1056,32 +1039,51 @@ impl Session {
         }
     }
 
+    /// Everything one PTY read does once it is allowed to reach the terminal
+    ///
+    /// The single definition of "a read arrived", used both live and when a
+    /// hold is released. Replaying held reads through this, one at a time,
+    /// is what makes a hold indistinguishable from the reads simply having
+    /// happened later - including the cursor a query is answered with, which
+    /// must be the one as of that read and not as of the whole backlog.
+    fn ingest_read(&mut self, bytes: &[u8]) {
+        // Mode changes are tracked on the raw stream: they must be seen even
+        // while a synchronized frame is being buffered.
+        self.modes.scan(bytes);
+
+        // Whole frames only: what a supporting terminal shows the user is
+        // never a half-drawn screen, so neither is the vterm.
+        let committed = self.frame_gate.push(bytes);
+        self.ingest_committed(&committed);
+
+        // Queries are answered as the real terminal would; the reply uses
+        // the cursor as of everything ingested so far.
+        let cursor = self.vterm.cursor_position();
+        let kitty = self.modes.kitty_flags();
+        if let Some(response) = self.queries.respond(bytes, cursor, kitty) {
+            if let Err(e) = self.pty.write(&response) {
+                tracing::debug!(error = %e, "Failed to write query response");
+            }
+        }
+
+        self.note_output_activity();
+    }
+
     /// Hold new output back from the terminal, or let it through again
     ///
     /// Holding keeps reading the PTY - the child never blocks on a full
-    /// buffer - while the screen stays exactly as it was. Releasing feeds
-    /// everything held back through in one step, so nothing is lost and the
-    /// order is unchanged.
+    /// buffer - while the screen stays exactly as it was. Releasing replays
+    /// every held read through [`Session::ingest_read`] in order, so nothing
+    /// is lost, nothing is reordered, and each read is processed against the
+    /// state the one before it left behind.
     pub fn set_output_hold(&mut self, hold: bool) {
         if self.output_hold == hold {
             return;
         }
         self.output_hold = hold;
         if !hold {
-            let held = std::mem::take(&mut self.held_output);
-            if !held.is_empty() {
-                self.modes.scan(&held);
-                let committed = self.frame_gate.push(&held);
-                self.ingest_committed(&committed);
-
-                let cursor = self.vterm.cursor_position();
-                let kitty = self.modes.kitty_flags();
-                if let Some(response) = self.queries.respond(&held, cursor, kitty) {
-                    if let Err(e) = self.pty.write(&response) {
-                        tracing::debug!(error = %e, "Failed to write query response");
-                    }
-                }
-                self.note_output_activity();
+            for read in std::mem::take(&mut self.held_output) {
+                self.ingest_read(&read);
             }
         }
     }
@@ -1091,7 +1093,7 @@ impl Session {
     /// The caller's cue to stop holding: a drag over a session producing
     /// output faster than anyone can read it must not grow this forever.
     pub fn held_output_len(&self) -> usize {
-        self.held_output.len()
+        self.held_output.iter().map(Vec::len).sum()
     }
 
     /// Feed frame-complete bytes to everything that consumes child output
@@ -2242,5 +2244,25 @@ mod tests {
         // A repeated hold must not discard what is already held
         session.set_output_hold(true);
         assert_eq!(session.held_output_len(), held);
+    }
+
+    /// Held reads stay separate reads
+    ///
+    /// Flattening them into one buffer would be simpler and wrong: the replay
+    /// answers a terminal query with the cursor as of the read it arrived in,
+    /// so a query buried mid-drag must not be answered with the position the
+    /// cursor reached at the end of it.
+    #[test]
+    fn test_held_output_keeps_its_read_boundaries() {
+        let mut session = spawn_chatty_session(400);
+        session.set_output_hold(true);
+        drain_for(&mut session, std::time::Duration::from_millis(600));
+
+        assert!(
+            session.held_output.len() > 1,
+            "a drag over a chatty child spans several reads: {}",
+            session.held_output.len()
+        );
+        assert!(session.held_output.iter().all(|read| !read.is_empty()));
     }
 }
