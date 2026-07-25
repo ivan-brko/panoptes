@@ -77,6 +77,14 @@ pub const MAX_SHORTCUT_NAME_LEN: usize = 256;
 pub const MAX_SHORTCUT_COMMAND_LEN: usize = 4096;
 /// Mouse-wheel line step used by local scroll handlers
 const MOUSE_SCROLL_STEP: usize = 3;
+/// How much output a drag may hold back before the selection is abandoned
+///
+/// A drag lasts a second or two, and an agent in full flood writes tens of
+/// kilobytes in that time, so this is generous for every honest drag. It
+/// exists for the dishonest one - a button held down over `yes` - where the
+/// choice is between dropping a half-made selection and growing a buffer
+/// without limit.
+const MAX_HELD_OUTPUT: usize = 8 * 1024 * 1024;
 /// Lines the view creeps per tick while a selection is dragged off the edge
 ///
 /// One line at the event loop's ~60Hz tick, which is fast enough to cross a
@@ -550,18 +558,51 @@ impl App {
 
     /// Poll session outputs - true if any session has new output.
     ///
-    /// Freezes active session PTY reads while the user is scrolled up so the
-    /// visible history doesn't shift under the cursor, and for the length of
-    /// a selection drag so the text cannot move out from under the pointer.
+    /// Two ways a session's screen can be made to stand still, and they are
+    /// not the same thing. A drag *holds*: the PTY is still drained, so the
+    /// child keeps running, and the bytes are replayed on release. A Codex
+    /// session scrolled up is *skipped*: that can last as long as the user
+    /// likes, and letting the child block on a full buffer is the right
+    /// backpressure for a read that may never end.
     fn tick_output_polling(&mut self) -> bool {
+        let dragging = self.state.dragging_session();
+        self.sessions.set_output_hold(dragging);
+
         let with_output = self
             .sessions
-            .poll_outputs_except(frozen_session(&self.state, &self.sessions));
+            .poll_outputs_except(scrolled_codex_session(&self.state, &self.sessions));
         // A highlight is anchored to the screen it was made against, and new
         // output is a new screen
         self.state.expire_selection(&with_output);
+        self.release_an_overlong_hold(dragging);
         self.forward_host_passthrough();
         !with_output.is_empty()
+    }
+
+    /// End a drag that has held back more output than it is worth holding
+    ///
+    /// A drag over a session in full flood cannot buffer forever. The
+    /// selection goes rather than the output: dropping the selection releases
+    /// the hold on the next tick, and the copy has not happened yet, so
+    /// nothing the user asked for is lost - only a highlight they were still
+    /// drawing.
+    fn release_an_overlong_hold(&mut self, dragging: Option<SessionId>) {
+        let Some(session_id) = dragging else {
+            return;
+        };
+        let held = self.sessions.held_output_len(session_id);
+        if held <= MAX_HELD_OUTPUT {
+            return;
+        }
+        tracing::info!(
+            session_id = %session_id,
+            held_bytes = held,
+            "Cancelling a selection that was holding back too much output"
+        );
+        self.state.clear_selection();
+        self.state
+            .header_notifications
+            .push("Selection cancelled: the session had too much to say");
     }
 
     /// Forward sequences agents addressed to the real terminal (clipboard
@@ -1159,7 +1200,13 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if let Err(e) = crate::clipboard::copy(&text) {
+        // A selection dragged through a long scrollback can be megabytes, and
+        // writing that to a helper waits on the helper. Big copies go to
+        // their own thread; small ones stay inline, where a failure can still
+        // be put in front of the user rather than only in the log.
+        if text.len() > crate::clipboard::INLINE_LIMIT {
+            crate::clipboard::copy_in_background(text);
+        } else if let Err(e) = crate::clipboard::copy(&text) {
             tracing::warn!(error = %e, "Failed to copy selection to the clipboard");
             self.state.error_message = Some(format!("Copy failed: {}", e));
         }
@@ -2708,21 +2755,14 @@ fn should_forward_mouse_to_pty(
     !suspended && input_mode == InputMode::Session && mouse_enabled
 }
 
-/// The one session, if any, whose PTY is not read this tick
+/// The one session, if any, whose PTY is not read at all this tick
 ///
-/// Two reasons to hold a session still, and both are about the screen not
-/// moving under the user. A drag freezes its session for as long as the button
-/// is down, so the text cannot shift out from under the pointer; and a Codex
-/// session scrolled up freezes so the history stays put. Nothing is lost
-/// either way - output queues in the PTY and is read on the next tick.
-///
-/// The drag half is derived from the live selection rather than a flag of its
-/// own, which is what makes it impossible for a drag that ended abnormally to
-/// leave a session frozen for good.
-fn frozen_session(state: &AppState, sessions: &SessionManager) -> Option<SessionId> {
-    if let Some(session_id) = state.dragging_session() {
-        return Some(session_id);
-    }
+/// A Codex session the user has scrolled up in: the history has to stay put,
+/// and a scroll-up can last as long as the reader likes. Letting the child
+/// block on a full PTY buffer is the right backpressure for that - unlike a
+/// drag, which lasts a second and *holds* its output instead
+/// ([`SessionManager::set_output_hold`]).
+fn scrolled_codex_session(state: &AppState, sessions: &SessionManager) -> Option<SessionId> {
     if state.session_scroll_offset == 0 {
         return None;
     }
@@ -2939,10 +2979,12 @@ mod tests {
         SessionSelection::started(session_id, anchor, (0, 0))
     }
 
-    /// The whole point of the freeze: while the button is down, that session's
-    /// PTY is not read, so the text cannot move out from under the pointer
+    /// Which session a drag holds, and that release lets it through again
+    ///
+    /// Derived from the live selection, never a flag of its own, so a drag
+    /// that ends abnormally cannot leave a session holding for good.
     #[test]
-    fn test_a_drag_freezes_its_session_and_release_lets_it_run_again() {
+    fn test_a_drag_holds_its_own_session_and_only_while_the_button_is_down() {
         let (mut sessions, _dir) = test_sessions();
         let session_id = sessions
             .insert_test_session("dragging", Uuid::new_v4(), Uuid::new_v4())
@@ -2952,40 +2994,28 @@ mod tests {
             ..Default::default()
         };
 
-        // Nothing selected: every session is read
-        assert_eq!(frozen_session(&state, &sessions), None);
+        // Nothing selected: nothing held
+        assert_eq!(state.dragging_session(), None);
 
         state.selection = Some(dragging_at(session_id, (0, 0)));
-        assert_eq!(frozen_session(&state, &sessions), Some(session_id));
+        assert_eq!(state.dragging_session(), Some(session_id));
 
-        // Release ends the freeze, even though the highlight is still up
+        // Release ends the hold, even though the highlight is still up
         state.selection.as_mut().unwrap().dragging = false;
-        assert_eq!(frozen_session(&state, &sessions), None);
-    }
+        assert_eq!(state.dragging_session(), None);
 
-    /// The freeze is derived from the live selection, never a flag of its own:
-    /// a drag that ends abnormally cannot leave a session frozen for good
-    #[test]
-    fn test_dropping_the_selection_thaws_the_session() {
-        let (mut sessions, _dir) = test_sessions();
-        let session_id = sessions
-            .insert_test_session("dragging", Uuid::new_v4(), Uuid::new_v4())
-            .unwrap();
-        let mut state = AppState {
-            active_session: Some(session_id),
-            selection: Some(dragging_at(session_id, (2, 4))),
-            ..Default::default()
-        };
-        assert_eq!(frozen_session(&state, &sessions), Some(session_id));
-
+        // And dropping the selection outright ends it too
+        state.selection = Some(dragging_at(session_id, (2, 4)));
+        assert_eq!(state.dragging_session(), Some(session_id));
         state.clear_selection();
-        assert_eq!(frozen_session(&state, &sessions), None);
+        assert_eq!(state.dragging_session(), None);
     }
 
-    /// The pre-existing freeze - a Codex session scrolled up - still holds,
-    /// and still applies to Codex alone
+    /// A scrolled-up Codex session is skipped rather than held: that can last
+    /// as long as the reader likes, and a child blocked on a full buffer is
+    /// the right backpressure for a read with no end in sight
     #[test]
-    fn test_a_scrolled_codex_session_is_still_frozen() {
+    fn test_only_a_scrolled_codex_session_goes_unread() {
         let (mut sessions, _dir) = test_sessions();
         let shell_id = sessions
             .insert_test_session("shell", Uuid::new_v4(), Uuid::new_v4())
@@ -2996,16 +3026,20 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            frozen_session(&state, &sessions),
+            scrolled_codex_session(&state, &sessions),
             None,
             "a non-Codex session scrolls through vterm scrollback and keeps reading"
         );
 
         sessions.get_mut(shell_id).unwrap().info.session_type = SessionType::OpenAICodex;
-        assert_eq!(frozen_session(&state, &sessions), Some(shell_id));
+        assert_eq!(scrolled_codex_session(&state, &sessions), Some(shell_id));
 
-        // Back at the live view, nothing is frozen
+        // Back at the live view, nothing goes unread
         state.session_scroll_offset = 0;
-        assert_eq!(frozen_session(&state, &sessions), None);
+        assert_eq!(scrolled_codex_session(&state, &sessions), None);
+
+        // A drag never makes a session go unread - it holds instead
+        state.selection = Some(dragging_at(shell_id, (0, 0)));
+        assert_eq!(scrolled_codex_session(&state, &sessions), None);
     }
 }

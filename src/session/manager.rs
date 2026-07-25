@@ -19,8 +19,8 @@ use crate::hooks::HookEvent;
 use crate::project::{BranchId, ProjectId};
 
 use super::{
-    state_machine, AttentionReason, Session, SessionId, SessionInfo, SessionState, SessionStore,
-    SessionType,
+    state_machine, AttentionReason, PollOutcome, Session, SessionId, SessionInfo, SessionState,
+    SessionStore, SessionType,
 };
 
 /// Everything needed to create a brand-new session
@@ -730,6 +730,25 @@ impl SessionManager {
     ///
     /// This is useful when the active session is scrolled up in history and the
     /// UI should "freeze" that view while still polling other sessions.
+    /// Hold output back from one session, and from no other
+    ///
+    /// The held session keeps draining its PTY, so its child never blocks on
+    /// a full buffer, but nothing reaches its screen until the hold is
+    /// released. Passing `None` - or a different session - releases whoever
+    /// was holding, feeding everything held back through at once.
+    pub fn set_output_hold(&mut self, held: Option<SessionId>) {
+        for (&session_id, session) in &mut self.sessions {
+            session.set_output_hold(held == Some(session_id));
+        }
+    }
+
+    /// How much output a session is holding back right now
+    pub fn held_output_len(&self, session_id: SessionId) -> usize {
+        self.sessions
+            .get(&session_id)
+            .map_or(0, |session| session.held_output_len())
+    }
+
     pub fn poll_outputs_except(&mut self, excluded: Option<SessionId>) -> Vec<SessionId> {
         let mut sessions_with_output = Vec::new();
 
@@ -743,15 +762,19 @@ impl SessionManager {
             if !session.info.state.has_process() {
                 continue;
             }
-            let mut had_output = false;
-            // Drain available PTY data, up to a per-tick budget
+            let mut screen_moved = false;
+            // Drain available PTY data, up to a per-tick budget. A held
+            // session keeps draining - that is the point of holding rather
+            // than skipping - but its screen has not moved, so it is not
+            // reported as having output.
             for _ in 0..Self::POLL_BUDGET_PER_SESSION_PER_TICK {
-                if !session.poll_output() {
+                let outcome = session.poll_output();
+                if !outcome.read_something() {
                     break;
                 }
-                had_output = true;
+                screen_moved |= outcome == PollOutcome::Ingested;
             }
-            if had_output {
+            if screen_moved {
                 sessions_with_output.push(session_id);
             }
         }

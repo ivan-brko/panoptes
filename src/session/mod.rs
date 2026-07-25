@@ -926,6 +926,33 @@ pub struct Session {
     /// Sequences waiting to be forwarded to the real terminal (clipboard
     /// writes). Drained by the app for the active session.
     host_passthrough: Vec<u8>,
+    /// Whether new output is being held back from the terminal
+    output_hold: bool,
+    /// Output read while the hold is on, replayed when it is released
+    held_output: Vec<u8>,
+}
+
+/// What one [`Session::poll_output`] call did
+///
+/// Reading and *showing* are separate answers, because a held session keeps
+/// draining its PTY while its screen stands still. Callers that want to know
+/// whether there is more to read look at `Idle`; callers that want to know
+/// whether the screen moved look at `Ingested`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollOutcome {
+    /// Nothing was read, and nothing was left over to flush
+    Idle,
+    /// Bytes were read and held back; the screen is unchanged
+    Held,
+    /// Bytes reached the terminal; the screen may have moved
+    Ingested,
+}
+
+impl PollOutcome {
+    /// Whether the PTY had something to give, and so may have more
+    pub fn read_something(self) -> bool {
+        self != PollOutcome::Idle
+    }
 }
 
 impl Session {
@@ -954,14 +981,28 @@ impl Session {
             frame_gate: SyncFrameGate::default(),
             osc52: Osc52Extractor::default(),
             host_passthrough: Vec::new(),
+            output_hold: false,
+            held_output: Vec::new(),
         }
     }
 
     /// Poll PTY for new output and process through virtual terminal
     /// Returns true if any output was read
-    pub fn poll_output(&mut self) -> bool {
+    pub fn poll_output(&mut self) -> PollOutcome {
         match self.pty.try_read() {
             Ok(Some(bytes)) => {
+                // Held back, not left unread: the screen has to stand still
+                // for the length of a drag, but the child must not be made to
+                // stand still with it. Everything below - mode scanning,
+                // frame gating, the vterm, query replies - runs when the hold
+                // is released, in one go, exactly as if the read had happened
+                // then. From the child's side that is what it already looked
+                // like; the difference is that its writes never block.
+                if self.output_hold {
+                    self.held_output.extend_from_slice(&bytes);
+                    return PollOutcome::Held;
+                }
+
                 // Mode changes are tracked on the raw stream: they must be
                 // seen even while a synchronized frame is being buffered.
                 self.modes.scan(&bytes);
@@ -983,17 +1024,20 @@ impl Session {
 
                 self.note_output_activity();
 
-                true
+                PollOutcome::Ingested
             }
             Ok(None) => {
                 // The stream is quiet: release anything the frame gate was
                 // holding for a frame end that is not coming.
+                if self.output_hold {
+                    return PollOutcome::Idle;
+                }
                 let stale = self.frame_gate.flush_stale();
                 if stale.is_empty() {
-                    false
+                    PollOutcome::Idle
                 } else {
                     self.ingest_committed(&stale);
-                    true
+                    PollOutcome::Ingested
                 }
             }
             Err(e) => {
@@ -1007,9 +1051,47 @@ impl Session {
                 );
                 self.info.exit_reason = Some(reason);
                 self.set_state(SessionState::Exited);
-                false
+                PollOutcome::Idle
             }
         }
+    }
+
+    /// Hold new output back from the terminal, or let it through again
+    ///
+    /// Holding keeps reading the PTY - the child never blocks on a full
+    /// buffer - while the screen stays exactly as it was. Releasing feeds
+    /// everything held back through in one step, so nothing is lost and the
+    /// order is unchanged.
+    pub fn set_output_hold(&mut self, hold: bool) {
+        if self.output_hold == hold {
+            return;
+        }
+        self.output_hold = hold;
+        if !hold {
+            let held = std::mem::take(&mut self.held_output);
+            if !held.is_empty() {
+                self.modes.scan(&held);
+                let committed = self.frame_gate.push(&held);
+                self.ingest_committed(&committed);
+
+                let cursor = self.vterm.cursor_position();
+                let kitty = self.modes.kitty_flags();
+                if let Some(response) = self.queries.respond(&held, cursor, kitty) {
+                    if let Err(e) = self.pty.write(&response) {
+                        tracing::debug!(error = %e, "Failed to write query response");
+                    }
+                }
+                self.note_output_activity();
+            }
+        }
+    }
+
+    /// How many bytes are being held back from the terminal right now
+    ///
+    /// The caller's cue to stop holding: a drag over a session producing
+    /// output faster than anyone can read it must not grow this forever.
+    pub fn held_output_len(&self) -> usize {
+        self.held_output.len()
     }
 
     /// Feed frame-complete bytes to everything that consumes child output
@@ -2047,5 +2129,118 @@ mod tests {
         fallback.ingest(b"a\xc3");
         fallback.ingest(b"b");
         assert_eq!(fallback.partial_output_line, "a\u{FFFD}b");
+    }
+
+    // Holding output back
+
+    /// A session wrapping a shell that prints `lines` numbered lines and stays
+    /// alive, so its PTY keeps having something to give
+    fn spawn_chatty_session(lines: usize) -> Session {
+        use std::collections::HashMap;
+
+        let script = format!(
+            "i=1; while [ $i -le {} ]; do echo line-$i; i=$((i+1)); done; echo line-END; sleep 30",
+            lines
+        );
+        let pty = PtyHandle::spawn(
+            "sh",
+            &["-c", &script],
+            &std::path::PathBuf::from("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .expect("failed to spawn PTY");
+        let info = SessionInfo::new(
+            "held".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        Session::new(info, pty, 24, 80)
+    }
+
+    /// Drain the PTY for a while, reporting whether anything reached the screen
+    fn drain_for(session: &mut Session, duration: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + duration;
+        let mut ingested = false;
+        while std::time::Instant::now() < deadline {
+            match session.poll_output() {
+                PollOutcome::Ingested => ingested = true,
+                PollOutcome::Held => {}
+                PollOutcome::Idle => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+        ingested
+    }
+
+    /// The whole point of holding rather than skipping: the screen stands
+    /// still while the PTY keeps being drained, so the child never blocks on
+    /// a full buffer - and on release the screen catches up in one step
+    #[test]
+    fn test_held_output_keeps_draining_without_reaching_the_screen() {
+        let mut session = spawn_chatty_session(200);
+
+        session.set_output_hold(true);
+        let ingested = drain_for(&mut session, std::time::Duration::from_millis(600));
+
+        assert!(!ingested, "nothing may reach the screen while held");
+        assert!(
+            session.held_output_len() > 0,
+            "the PTY must still be drained while held"
+        );
+        let screen_while_held = session.vterm.visible_lines(24);
+        assert!(
+            screen_while_held.iter().all(|line| line.trim().is_empty()),
+            "the screen must not have moved: {screen_while_held:?}"
+        );
+
+        // Releasing feeds everything held through at once
+        session.set_output_hold(false);
+        assert_eq!(session.held_output_len(), 0, "release must drain the hold");
+        let after = session.vterm.visible_lines(24);
+        assert!(
+            after.iter().any(|line| line.contains("line-")),
+            "the screen must catch up on release: {after:?}"
+        );
+    }
+
+    /// Held output is replayed in order, not merely dumped: a session that
+    /// was scrolling when the hold began must land where it would have landed
+    #[test]
+    fn test_releasing_a_hold_lands_on_the_same_screen_as_never_holding() {
+        let mut held = spawn_chatty_session(60);
+        held.set_output_hold(true);
+        drain_for(&mut held, std::time::Duration::from_millis(800));
+        held.set_output_hold(false);
+        // Anything that arrived after the release
+        drain_for(&mut held, std::time::Duration::from_millis(300));
+
+        let mut plain = spawn_chatty_session(60);
+        drain_for(&mut plain, std::time::Duration::from_millis(1100));
+
+        assert_eq!(
+            held.vterm.visible_lines(24),
+            plain.vterm.visible_lines(24),
+            "holding must not change where the output lands, only when"
+        );
+    }
+
+    #[test]
+    fn test_holding_is_idempotent_and_release_without_a_hold_is_harmless() {
+        let mut session = spawn_chatty_session(20);
+
+        session.set_output_hold(false);
+        assert_eq!(session.held_output_len(), 0);
+
+        session.set_output_hold(true);
+        session.set_output_hold(true);
+        drain_for(&mut session, std::time::Duration::from_millis(400));
+        let held = session.held_output_len();
+        assert!(held > 0);
+
+        // A repeated hold must not discard what is already held
+        session.set_output_hold(true);
+        assert_eq!(session.held_output_len(), held);
     }
 }

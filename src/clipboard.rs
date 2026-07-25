@@ -24,6 +24,36 @@ const HELPERS: &[(&str, &[&str])] = &[
     ("xsel", &["--clipboard", "--input"]),
 ];
 
+/// The largest copy worth doing on the thread that draws the screen
+///
+/// A pipe holds 64 KB, so below this `write_all` cannot block: the bytes go
+/// into the pipe and the helper drains them at its leisure, leaving the
+/// inline cost at one process spawn. Above it the write waits on the helper,
+/// which is not something to do while a frame is due - see
+/// [`copy_in_background`].
+pub const INLINE_LIMIT: usize = 64 * 1024;
+
+/// Put `text` on the system clipboard, on another thread
+///
+/// For a selection too large to write inline. Nothing waits for the result,
+/// so a failure can only be logged - which is the trade the size makes
+/// necessary, and is why [`INLINE_LIMIT`] is set where a write can still be
+/// known to complete promptly.
+pub fn copy_in_background(text: String) {
+    std::thread::Builder::new()
+        .name("clipboard".to_string())
+        .spawn(move || {
+            if let Err(e) = copy(&text) {
+                tracing::warn!(error = %e, bytes = text.len(), "Background clipboard copy failed");
+            }
+        })
+        .map(|_| ())
+        .unwrap_or_else(|e| {
+            // A machine that cannot spawn a thread will not do better inline
+            tracing::warn!(error = %e, "Failed to spawn the clipboard thread");
+        });
+}
+
 /// Put `text` on the system clipboard
 ///
 /// Tries the platform's clipboard helper first and falls back to OSC 52,
