@@ -305,7 +305,7 @@ impl Screen {
         self.grid()
             .all_rows()
             .nth(row)
-            .map_or(false, crate::row::Row::wrapped)
+            .is_some_and(crate::row::Row::wrapped)
     }
 
     /// PANOPTES PATCH: the cells of an absolutely-addressed row

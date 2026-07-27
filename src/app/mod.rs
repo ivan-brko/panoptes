@@ -2843,14 +2843,20 @@ fn block_shape_requested(mouse: &MouseEvent) -> selection::Shape {
 
 /// Whether Shift is being held, which claims the event for Panoptes
 ///
-/// One rule, applied before anything is forwarded: a shift-held mouse event is
-/// the terminal's business, not the child's. That is what real terminals do
-/// with an application that has enabled mouse reporting, and it is the only
-/// way to select out of one - a drag over Claude Code's TUI otherwise belongs
-/// to Claude Code.
+/// One rule, applied before the event is *encoded and written to the PTY*: a
+/// shift-held mouse event is the terminal's business, not the child's. That is
+/// what real terminals do with an application that has enabled mouse
+/// reporting, and it is the only way to select out of one - a drag over Claude
+/// Code's TUI otherwise belongs to Claude Code.
 ///
 /// It costs the child nothing, because a child that wanted shift-drag could
 /// not have had it anyway: the terminal is the first thing to see the report.
+///
+/// Deliberately *not* applied to [`App::handle_alternate_scroll`], which
+/// translates wheel notches into arrow keys for an alternate-screen program
+/// that never asked for the mouse - `less`, say. Claiming those would leave
+/// shift-wheel doing nothing at all, because vt100 keeps no scrollback behind
+/// an alternate screen for Panoptes to scroll instead.
 fn shift_claims_event(mouse: &MouseEvent) -> bool {
     mouse
         .modifiers
