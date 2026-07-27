@@ -1,10 +1,13 @@
 //! Frame layout and rendering utilities
 //!
-//! This module provides pre-calculated frame layouts and rendering functions
-//! for the session view. Based on the proven claude-wrapper architecture.
+//! The session view is a header, the agent's screen, and a footer. There is
+//! no border around the middle: the header draws its own rule underneath and
+//! the footer its own above, which is every line the screen needs, and two
+//! rows and two columns that a box would have taken belong to the agent
+//! instead.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::tui::header::{Header, LogoKind};
 use crate::tui::views::Breadcrumb;
@@ -19,7 +22,6 @@ use crate::tui::views::Breadcrumb;
 pub struct FrameConfig {
     pub header_height: u16,
     pub footer_height: u16,
-    pub title: Option<String>,
 }
 
 impl FrameConfig {
@@ -37,17 +39,19 @@ impl FrameConfig {
                 .with_logo(LogoKind::Wordmark)
                 .height(terminal),
             footer_height: 3,
-            title: None,
         }
     }
 }
 
 /// Pre-calculated layout areas
+///
+/// Three, and they tile the terminal exactly: the content runs edge to edge
+/// between the header and the footer. There is no fourth "frame" rect, because
+/// there is no border to inset it from.
 #[derive(Debug, Clone, Copy)]
 pub struct FrameLayout {
     pub header: Rect,
-    pub frame: Rect,
-    pub content: Rect, // Inside frame border
+    pub content: Rect,
     pub footer: Rect,
 }
 
@@ -56,7 +60,7 @@ impl FrameLayout {
         let header_height = config.header_height;
         let footer_height = config.footer_height;
 
-        let frame_height = terminal_size
+        let content_height = terminal_size
             .height
             .saturating_sub(header_height)
             .saturating_sub(footer_height);
@@ -68,31 +72,26 @@ impl FrameLayout {
             height: header_height,
         };
 
-        let frame = Rect {
+        // Everything between the header and the footer is the agent's, to the
+        // edges. Whatever is inset here is taken off the PTY and shifts every
+        // forwarded mouse click, so the two must be the same rectangle - the
+        // bug class that put clicks a row off when they disagreed.
+        let content = Rect {
             x: terminal_size.x,
             y: terminal_size.y + header_height,
             width: terminal_size.width,
-            height: frame_height,
-        };
-
-        // Content is inside the frame border (1 char on each side)
-        let content = Rect {
-            x: frame.x + 1,
-            y: frame.y + 1,
-            width: frame.width.saturating_sub(2),
-            height: frame_height.saturating_sub(2),
+            height: content_height,
         };
 
         let footer = Rect {
             x: terminal_size.x,
-            y: terminal_size.y + header_height + frame_height,
+            y: terminal_size.y + header_height + content_height,
             width: terminal_size.width,
             height: footer_height,
         };
 
         Self {
             header,
-            frame,
             content,
             footer,
         }
@@ -104,25 +103,7 @@ impl FrameLayout {
     }
 }
 
-/// Render frame border separately from content
-pub fn render_frame_border(
-    frame: &mut Frame,
-    area: Rect,
-    border_color: Color,
-    title: Option<&str>,
-) {
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
-
-    if let Some(title) = title {
-        block = block.title(title);
-    }
-
-    frame.render_widget(block, area);
-}
-
-/// Render PTY content inside the frame
+/// Render PTY content
 pub fn render_pty_content(
     frame: &mut Frame,
     area: Rect,
@@ -157,7 +138,6 @@ mod tests {
         FrameConfig {
             header_height,
             footer_height,
-            title: None,
         }
     }
 
@@ -171,19 +151,49 @@ mod tests {
         assert_eq!(layout.header.y, 0);
         assert_eq!(layout.header.height, 3);
 
-        // Frame: y=3, height=18 (24-3-3)
-        assert_eq!(layout.frame.y, 3);
-        assert_eq!(layout.frame.height, 18);
-
-        // Content: y=4 (frame.y + 1), height=16 (18-2)
-        assert_eq!(layout.content.y, 4);
-        assert_eq!(layout.content.height, 16);
-        assert_eq!(layout.content.x, 1);
-        assert_eq!(layout.content.width, 78);
+        // Content: straight under the header, edge to edge, 24-3-3 rows
+        assert_eq!(layout.content.y, 3);
+        assert_eq!(layout.content.height, 18);
+        assert_eq!(layout.content.x, 0);
+        assert_eq!(layout.content.width, 80);
 
         // Footer: y=21, height=3
         assert_eq!(layout.footer.y, 21);
         assert_eq!(layout.footer.height, 3);
+    }
+
+    /// The three areas tile the terminal with nothing left over
+    ///
+    /// A gap between them would be a row nobody draws, and an overlap would be
+    /// a row drawn twice. Either way the PTY and the screen would disagree
+    /// about where a cell is, which is what puts a forwarded click on the
+    /// wrong line.
+    #[test]
+    fn test_the_areas_tile_the_terminal_exactly() {
+        for (w, h) in [(80, 24), (120, 40), (40, 12)] {
+            let terminal = Rect::new(0, 0, w, h);
+            let layout = FrameLayout::calculate(terminal, &FrameConfig::for_terminal(terminal));
+
+            assert_eq!(layout.header.y, terminal.y, "{w}x{h}");
+            assert_eq!(
+                layout.header.y + layout.header.height,
+                layout.content.y,
+                "gap or overlap above the content at {w}x{h}"
+            );
+            assert_eq!(
+                layout.content.y + layout.content.height,
+                layout.footer.y,
+                "gap or overlap below the content at {w}x{h}"
+            );
+            assert_eq!(
+                layout.footer.y + layout.footer.height,
+                terminal.y + terminal.height,
+                "{w}x{h}"
+            );
+            // Edge to edge: no border to inset from
+            assert_eq!(layout.content.x, terminal.x, "{w}x{h}");
+            assert_eq!(layout.content.width, terminal.width, "{w}x{h}");
+        }
     }
 
     /// The regression behind this constructor: mouse translation used
@@ -208,9 +218,9 @@ mod tests {
         let layout = FrameLayout::calculate(terminal_size, &config);
         let (rows, cols) = layout.pty_size();
 
-        // Content area dimensions
-        assert_eq!(rows, 16);
-        assert_eq!(cols, 78);
+        // The PTY gets the whole content area, borders being gone
+        assert_eq!(rows, 18);
+        assert_eq!(cols, 80);
     }
 
     /// What a page scroll, a new PTY and a mouse click all have to agree on
@@ -223,8 +233,8 @@ mod tests {
         let terminal = Rect::new(0, 0, 120, 40);
         let rendered = FrameLayout::calculate(terminal, &FrameConfig::for_terminal(terminal));
 
-        // 4-row wordmark header, 3-row footer, and the frame's two border rows
-        assert_eq!(rendered.content.height, 40 - 4 - 3 - 2);
+        // 4-row wordmark header and 3-row footer; everything else is the agent's
+        assert_eq!(rendered.content.height, 40 - 4 - 3);
 
         // The height the old guess produced, kept here to name the gap rather
         // than leave it to arithmetic in a reader's head

@@ -2973,10 +2973,10 @@ mod tests {
         let (rows, cols) =
             FrameLayout::calculate(terminal, &FrameConfig::for_terminal(terminal)).pty_size();
 
-        // Wordmark header (4 rows on a terminal this size), footer and the
-        // frame border, and nothing pane-shaped
-        assert_eq!(cols, terminal.width - 2);
-        assert_eq!(rows, terminal.height - 4 - 3 - 2);
+        // Wordmark header (4 rows on a terminal this size) and footer, and
+        // nothing pane-shaped. No border: the agent gets the full width.
+        assert_eq!(cols, terminal.width);
+        assert_eq!(rows, terminal.height - 4 - 3);
 
         // The widest pane at this terminal is far narrower than the PTY
         let widths = crate::tui::panes::pane_widths(terminal.width, 0);

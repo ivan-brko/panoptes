@@ -18,8 +18,9 @@ Scenarios (argv[1], default `shell`):
     osc52   the fallback path: no working clipboard helper on PATH, so the
             copy has to leave as an OSC 52 sequence
 
-`codex` needs a real, authenticated `~/.codex`; it is symlinked into the fake
-HOME the way `drive_emulation.py` does it.
+`codex` needs a real, authenticated `~/.codex`. Only its credentials are
+copied into the fake HOME - never symlinked, which would let a run rewrite the
+developer's own config. It also spends one Codex turn.
 
 Run it through the integration test, which builds the binary first and passes
 its path in `PANOPTES_BIN`:
@@ -49,6 +50,11 @@ REPO = os.path.join(SCRATCH, "repo")
 LOG = os.path.join(SCRATCH, f"{SCENARIO}.log")
 
 ROWS, COLS = 40, 120
+
+# How far back from live output the session view says the reader is. It used
+# to be the title of the box drawn around the content; the box is gone and it
+# lives in the header suffix now, beside the session name.
+SCROLL_INDICATOR = r"\[↑(\d+)\]"
 
 os.makedirs(HOME)
 os.makedirs(REPO)
@@ -237,6 +243,24 @@ def wheel_up(row, col, wait=0.4):
     send(f"\x1b[<64;{col};{row}M".encode(), wait)
 
 
+def wheel_down(row, col, wait=0.4):
+    send(f"\x1b[<65;{col};{row}M".encode(), wait)
+
+
+def to_live_view(row=1, col=1):
+    """Scroll back down to live output the way a user now has to.
+
+    There are no keyboard scroll keys in a session any more - every key but
+    Esc belongs to the agent - so `End` and `PageDown` no longer come back
+    here, they type into the agent. The wheel is the way.
+    """
+    for _ in range(60):
+        if re.search(SCROLL_INDICATOR, screen_text()) is None:
+            return True
+        wheel_down(row, col, 0.1)
+    return re.search(SCROLL_INDICATOR, screen_text()) is None
+
+
 def drag(row, from_col, to_col):
     press(row, from_col)
     step = 1 if to_col >= from_col else -1
@@ -330,9 +354,8 @@ def scenario_shell():
     wheel_up(row, col)
     snapshot("wheel after selection")
     check("the wheel still drives local scrollback",
-          re.search(r"Output \[↑\d+\]", screen_text()) is not None)
-    send(b"\x1b[6~", 0.5)
-    send(b"\x1b[F", 0.5)
+          re.search(SCROLL_INDICATOR, screen_text()) is not None)
+    check("the wheel comes back to live output", to_live_view())
 
     # A drag across rows copies every line it covers
     send("printf 'ALPHA\\nBETA\\nGAMMA\\n'\r", 2.0)
@@ -359,7 +382,7 @@ def scenario_shell():
     motion(1, 3)
     drain(1.0)
     snapshot("edge auto-scroll")
-    scrolled = re.search(r"Output \[↑(\d+)\]", screen_text())
+    scrolled = re.search(SCROLL_INDICATOR, screen_text())
     release(1, 3)
     drain(0.5)
     lines = pbpaste().splitlines()
@@ -367,7 +390,7 @@ def scenario_shell():
           f"(indicator {scrolled and scrolled.group(1)})",
           scrolled is not None and int(scrolled.group(1)) > 5)
     check(f"the selection grew past one screenful ({len(lines)} lines)", len(lines) > ROWS)
-    send(b"\x1b[F", 0.5)
+    check("back to live output", to_live_view())
 
     # A drag that began as a double click keeps taking whole words, including
     # while the edge is scrolling the view under a pointer that is not moving
@@ -389,7 +412,7 @@ def scenario_shell():
         check(f"an auto-scrolled word drag stops on word boundaries "
               f"({len(tokens)} tokens, first {tokens[:1]})",
               tokens and not broken)
-    send(b"\x1b[F", 0.5)
+    check("back to live output", to_live_view())
 
     # A child that takes the mouse keeps its own drags - what claude, vim and
     # htop do, without needing one of them here.
@@ -397,8 +420,10 @@ def scenario_shell():
     # Last in this scenario on purpose: the forwarded reports arrive at zsh as
     # literal escape bytes, which leaves its line editor in a state where
     # later commands do not reliably run.
-    send("echo MOUSEOWNER\r", 1.2)
-    send("printf '\\033[?1000h\\033[?1006h'\r", 1.5)
+    # One command, because the forwarded reports that follow leave zsh's line
+    # editor unable to run another. `cat -v` renders the reports the child
+    # receives as visible text, which is what lets the coordinates be checked.
+    send("echo MOUSEOWNER; printf '\\033[?1000h\\033[?1006h'; cat -v\r", 2.0)
     check("footer defers to the child that took the mouse",
           "⌥drag: copy" in screen_text())
     pbcopy("CLIPBOARD-UNTOUCHED")
@@ -406,6 +431,43 @@ def scenario_shell():
     drag(mrow, mcol, mcol + 5)
     check("a drag over a mouse-owning child does not copy",
           pbpaste() == "CLIPBOARD-UNTOUCHED")
+
+    # ...and it lands on the cell under the pointer.
+    #
+    # The regression this guards (b0064d1, and again when the content area
+    # stopped being inset for a border): Panoptes translates screen
+    # coordinates into the child's, and if its idea of where the content
+    # starts drifts from where it is drawn, every forwarded click lands off by
+    # exactly that much - invisibly, because the click still goes somewhere.
+    #
+    # SGR columns are 1-based, so column 1 is the leftmost cell of the screen.
+    # It is also the leftmost cell of the child, because the content runs to
+    # the edge - there is no border in between to account for.
+    def child_reports():
+        return re.findall(r"\^\[\[<\d+;(\d+);(\d+)[Mm]", screen_text())
+
+    before = len(child_reports())
+    press(mrow, 1)
+    release(mrow, 1)
+    drain(0.8)
+    snapshot("forwarded click at the left edge")
+    seen = child_reports()
+    if check(f"the child received a mouse report ({seen[-2:]})", len(seen) > before):
+        left_col, left_row = (int(v) for v in seen[-1])
+        check(f"a click on the screen's left edge reaches the child as its "
+              f"own left edge (got column {left_col})", left_col == 1)
+
+        # Nine columns right and one row up must arrive as exactly that.
+        # Upwards on purpose: the rows below here are the footer, and a click
+        # outside the content area is rightly not forwarded at all.
+        press(mrow - 1, 10)
+        release(mrow - 1, 10)
+        drain(0.8)
+        col_moved, row_moved = (int(v) for v in child_reports()[-1])
+        check(f"the mapping stays linear (got column {col_moved}, row {row_moved} "
+              f"from column {left_col}, row {left_row})",
+              col_moved == left_col + 9 and row_moved == left_row - 1)
+    send(b"\x04", 0.5)   # Ctrl+D out of cat
 
 
 # =========================================================================
@@ -421,7 +483,7 @@ def scenario_codex():
         send("\r", 2.0)
     # The banner Codex prints on startup, across versions
     banner = "OpenAI Codex"
-    if not check("codex UI rendered inside the frame",
+    if not check("codex UI rendered",
                  wait_for(re.escape(banner), 40.0, "codex ui")):
         return
 
@@ -446,7 +508,7 @@ def scenario_codex():
     wheel_up(row, col)
     snapshot("codex wheel")
     check("the wheel still drives local scrollback for codex",
-          re.search(r"Output \[↑\d+\]", screen_text()) is not None)
+          re.search(SCROLL_INDICATOR, screen_text()) is not None)
 
     # Paging up past the oldest line must stop there (PAN-20).
     #
@@ -470,20 +532,22 @@ def scenario_codex():
         return
     drain(3.0)
 
-    send(b"\x1b[F", 0.5)   # End: back to the live view first
+    check("back to live output before scrolling up", to_live_view())
+    # The wheel, because there are no scroll keys in a session any more - a
+    # PgUp here types into Codex.
     offsets = []
-    for _ in range(40):
-        send(b"\x1b[5~", 0.12)   # PgUp
-        seen = re.search(r"Output \[↑(\d+)\]", screen_text())
+    for _ in range(120):
+        wheel_up(row, col, 0.06)
+        seen = re.search(SCROLL_INDICATOR, screen_text())
         offsets.append(int(seen.group(1)) if seen else 0)
-    snapshot("codex paged to the top")
+    snapshot("codex scrolled to the top")
     dropped = [(a, b) for a, b in zip(offsets, offsets[1:]) if b < a]
-    check(f"paging up never moves the view down (peak {max(offsets)}, "
+    check(f"scrolling up never moves the view down (peak {max(offsets)}, "
           f"ended {offsets[-1]}, drops {dropped[:3]})",
           not dropped)
-    check(f"paging up climbed real history, not one row (peak {max(offsets)})",
+    check(f"scrolling up climbed real history, not one row (peak {max(offsets)})",
           max(offsets) > ROWS)
-    check(f"paging up reached a top and stayed on it (last five {offsets[-5:]})",
+    check(f"scrolling up reached a top and stayed on it (last five {offsets[-5:]})",
           offsets[-1] == max(offsets))
 
 

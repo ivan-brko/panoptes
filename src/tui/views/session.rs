@@ -1,15 +1,17 @@
 //! Session view
 //!
-//! Fullscreen view for interacting with a single Claude Code session.
-//! Uses FrameLayout for pre-calculated areas and separate border/content rendering.
+//! Fullscreen view for interacting with a single agent session: the header,
+//! the agent's screen edge to edge, and the footer. Nothing is drawn around
+//! the middle - the header and footer each draw their own rule, and the rows
+//! and columns a box would have cost belong to the agent.
 
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::app::{selection, AppState, InputMode, SessionSelection};
+use crate::app::{selection, AppState, SessionSelection};
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionInfo, SessionManager, SessionState, SessionType};
-use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
+use crate::tui::frame::{render_pty_content, FrameConfig, FrameLayout};
 use crate::tui::header::{Header, LogoKind};
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
@@ -29,10 +31,23 @@ pub fn render_session_view(
     let session = state.active_session.and_then(|id| sessions.get(id));
     let attention_count = sessions.total_attention_count();
 
+    // How far back the reader is from live output. Codex keeps its own answer
+    // because a scrolled Codex session may be reading the plain-text fallback
+    // buffer, which the vterm knows nothing about.
+    let scroll_offset = session
+        .map(|s| {
+            if s.info.session_type == SessionType::OpenAICodex {
+                state.session_scroll_offset
+            } else {
+                s.vterm.scrollback_offset()
+            }
+        })
+        .unwrap_or(0);
+
     // === HEADER ===
     // Built before the layout, because how many rows it needs depends on how
     // much of the wordmark this terminal can afford
-    let (breadcrumb, suffix) = build_header_breadcrumb(session, project_store);
+    let (breadcrumb, suffix) = build_header_breadcrumb(session, project_store, scroll_offset);
 
     // Session header has custom coloring based on session state
     let header_color = session.map(|s| s.info.state.color()).unwrap_or(t.text_dim);
@@ -50,38 +65,9 @@ pub fn render_session_view(
     // Pre-calculate layout using FrameLayout. The header height must come
     // from the same answer `FrameConfig::for_terminal` gives the off-screen
     // layout math (PTY sizing, mouse translation), or clicks land a row off.
-    let frame_config = FrameConfig {
-        title: Some("Output".to_string()),
-        ..FrameConfig::for_terminal(area)
-    };
-    let layout = FrameLayout::calculate(area, &frame_config);
+    let layout = FrameLayout::calculate(area, &FrameConfig::for_terminal(area));
 
     header.render(frame, layout.header);
-
-    // === FRAME BORDER ===
-    let frame_color = if state.input_mode == InputMode::Session {
-        t.active
-    } else {
-        t.text_dim
-    };
-
-    // Build title with scroll indicator
-    let title = if let Some(session) = session {
-        let scroll_offset = if session.info.session_type == SessionType::OpenAICodex {
-            state.session_scroll_offset
-        } else {
-            session.vterm.scrollback_offset()
-        };
-        if scroll_offset > 0 {
-            format!("Output [{}{}]", '\u{2191}', scroll_offset)
-        } else {
-            "Output".to_string()
-        }
-    } else {
-        "Output".to_string()
-    };
-
-    render_frame_border(frame, layout.frame, frame_color, Some(&title));
 
     // === CONTENT ===
     if let Some(session) = session {
@@ -128,15 +114,7 @@ pub fn render_session_view(
     }
 
     // === FOOTER ===
-    let is_scrolled = session
-        .map(|s| {
-            if s.info.session_type == SessionType::OpenAICodex {
-                state.session_scroll_offset > 0
-            } else {
-                s.vterm.scrollback_offset() > 0
-            }
-        })
-        .unwrap_or(false);
+    let is_scrolled = scroll_offset > 0;
     let suspended = session.is_some_and(|s| s.info.state == SessionState::Suspended);
     // Who owns the mouse decides which drag copies: when the child asked for
     // mouse reporting its own selection is what a drag drives, exactly as in
@@ -190,7 +168,13 @@ fn paint_selection(buf: &mut Buffer, area: Rect, session: &Session, selection: &
 /// Everything the terminal below cannot say for itself, and nothing it can.
 /// No mode tag: there is one mode, and a tag that never changes is not
 /// information.
-fn header_suffix(info: &SessionInfo) -> String {
+///
+/// `scroll_offset` is how far back from live output the reader is. It used to
+/// be the title of the box drawn around the content; with the box gone this
+/// is where it lives, and it goes first because it is the one thing here that
+/// changes what the rows below *mean* - they are history, not what the agent
+/// is doing now.
+fn header_suffix(info: &SessionInfo, scroll_offset: usize) -> String {
     // The terminal below is the status. A session that is Thinking or Executing
     // is visibly doing so, and naming it again here only takes room from what
     // the screen cannot say. The two states the scrollback cannot report are
@@ -230,9 +214,15 @@ fn header_suffix(info: &SessionInfo) -> String {
         n => format!(" \u{00b7} {} subagents", n),
     };
 
+    let scroll_display = if scroll_offset > 0 {
+        format!("[\u{2191}{}] ", scroll_offset)
+    } else {
+        String::new()
+    };
+
     format!(
-        "{}{}{}{}",
-        agent_display, state_display, subagent_display, usage_display
+        "{}{}{}{}{}",
+        scroll_display, agent_display, state_display, subagent_display, usage_display
     )
 }
 
@@ -240,6 +230,7 @@ fn header_suffix(info: &SessionInfo) -> String {
 fn build_header_breadcrumb(
     session: Option<&Session>,
     project_store: &ProjectStore,
+    scroll_offset: usize,
 ) -> (Breadcrumb, String) {
     let Some(session) = session else {
         return (
@@ -261,7 +252,7 @@ fn build_header_breadcrumb(
         .push(branch_name)
         .push(&session.info.name);
 
-    (breadcrumb, header_suffix(&session.info))
+    (breadcrumb, header_suffix(&session.info, scroll_offset))
 }
 
 /// The session footer names only what Panoptes still answers
@@ -370,7 +361,7 @@ mod tests {
             let mut info = info(SessionType::ClaudeCode);
             info.state = state;
 
-            let suffix = header_suffix(&info);
+            let suffix = header_suffix(&info, 0);
             assert_eq!(suffix, "[CC]", "{state:?} leaked into {suffix:?}");
         }
     }
@@ -383,15 +374,18 @@ mod tests {
         let mut exited = info(SessionType::ClaudeCode);
         exited.state = SessionState::Exited;
         exited.exit_reason = Some("killed by signal 9".to_string());
-        assert_eq!(header_suffix(&exited), "[CC] - Exited (killed by signal 9)");
+        assert_eq!(
+            header_suffix(&exited, 0),
+            "[CC] - Exited (killed by signal 9)"
+        );
 
         // A crash Panoptes could not explain still reports the crash
         exited.exit_reason = None;
-        assert_eq!(header_suffix(&exited), "[CC] - Exited");
+        assert_eq!(header_suffix(&exited, 0), "[CC] - Exited");
 
         let mut suspended = info(SessionType::ClaudeCode);
         suspended.state = SessionState::Suspended;
-        assert_eq!(header_suffix(&suspended), "[CC] - Suspended");
+        assert_eq!(header_suffix(&suspended, 0), "[CC] - Suspended");
     }
 
     /// "Claude Code, signed in as dot-lambda" is one fact, so it gets one
@@ -400,15 +394,15 @@ mod tests {
     fn test_the_agent_and_its_account_share_a_bracket() {
         let mut claude = info(SessionType::ClaudeCode);
         claude.claude_config_name = Some("dot-lambda".to_string());
-        assert_eq!(header_suffix(&claude), "[CC \u{00b7} dot-lambda]");
+        assert_eq!(header_suffix(&claude, 0), "[CC \u{00b7} dot-lambda]");
 
         // Codex keeps its account in its own field, and used to show nothing
         let mut codex = info(SessionType::OpenAICodex);
         codex.codex_config_name = Some("work".to_string());
-        assert_eq!(header_suffix(&codex), "[CX \u{00b7} work]");
+        assert_eq!(header_suffix(&codex, 0), "[CX \u{00b7} work]");
 
         // A session with no account named keeps the bare tag
-        assert_eq!(header_suffix(&info(SessionType::Shell)), "[SH]");
+        assert_eq!(header_suffix(&info(SessionType::Shell), 0), "[SH]");
     }
 
     /// Everything the terminal cannot report stays, and keeps its order
@@ -420,7 +414,7 @@ mod tests {
         info.subagents = 2;
 
         assert_eq!(
-            header_suffix(&info),
+            header_suffix(&info, 0),
             "[CC \u{00b7} dot-lambda] - Suspended \u{00b7} 2 subagents"
         );
     }
