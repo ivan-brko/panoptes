@@ -5,7 +5,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{App, AppState, Focus, InputMode, ProjectsNav};
+use crate::app::{clamp_row, App, AppState, Focus, InputMode, ProjectsNav};
 use crate::claude_config::ClaudeConfigStore;
 use crate::claude_json::ClaudeJsonStore;
 use crate::config::{is_reserved_key, CustomShortcut};
@@ -74,8 +74,10 @@ pub(crate) fn confirming_session_delete_key(
                 // from - the two lists are on screen at once now, so only the
                 // one that was acted on may move
                 if let ProjectsNav::Branch(_, branch_id) = state.projects_nav {
-                    clamp(
-                        &mut state.branch_session_index,
+                    // Pane 1's list is offset by its back row, so it clamps
+                    // onto that rather than onto index 0 of the sessions
+                    state.branch_session_index = clamp_row(
+                        state.branch_session_index,
                         sessions.entries_for_branch(branch_id).len(),
                     );
                 }
@@ -269,14 +271,11 @@ pub(crate) fn finish_branch_delete(
 
     tracing::info!("Deleted branch: {}", branch.id);
 
-    // Adjust selected index if needed
+    // Adjust selected row if needed; a project with no branches left is all
+    // back row
     if let Some(project_id) = state.projects_nav.project_id() {
         let new_count = project_store.branches_for_project(project_id).len();
-        if state.selected_branch_index >= new_count && new_count > 0 {
-            state.selected_branch_index = new_count - 1;
-        } else if new_count == 0 {
-            state.selected_branch_index = 0;
-        }
+        state.selected_branch_index = clamp_row(state.selected_branch_index, new_count);
     }
 
     state.delete_worktree_on_disk = false;

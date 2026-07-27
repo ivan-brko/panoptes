@@ -55,6 +55,12 @@ Navigate forward with `Enter`, back with `Esc`. `Esc` backs out: one level in
 the focused pane, and once there is nothing left to pop it returns you to the
 Projects pane — home. It never quits; `q` quits.
 
+Every level of pane 1 below the tree opens with a back row — `‹ Projects`,
+`‹ <project name>` — the file-manager `..`, sitting above the list. It is muted
+like the section headings, the arrows reach it, and `Enter` on it does exactly
+what `Esc` does. The row names where `‹` goes; the pane's title says where you
+are.
+
 Opening a session is the only thing that fills the terminal; `Esc` puts you back
 in the pane you opened it from.
 

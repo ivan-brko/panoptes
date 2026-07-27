@@ -9,7 +9,7 @@ use chrono::Utc;
 use ratatui::prelude::*;
 use ratatui::widgets::{List, ListItem, Paragraph};
 
-use crate::app::{AppState, InputMode, ProjectsNav};
+use crate::app::{item_row, AppState, InputMode, ProjectsNav, BACK_ROW};
 use crate::project::{
     branch_count_label, folder_path_key, project_count_label, Branch, Project, ProjectId,
     ProjectStore, TreeRow,
@@ -18,7 +18,9 @@ use crate::session::SessionManager;
 use crate::tui::panes::SideMode;
 use crate::tui::theme::theme;
 use crate::tui::views::{status_parts, truncate_string, window_rows};
-use crate::tui::widgets::selection::{activity_style, selection_prefix, selection_style};
+use crate::tui::widgets::selection::{
+    activity_style, selection_prefix, selection_style, selection_style_with_accent,
+};
 
 /// The per-project settings rows, in list order
 pub const PROJECT_SETTINGS_ROWS: [&str; 4] = [
@@ -141,12 +143,79 @@ pub fn render_projects_pane(
             sessions,
             mode,
         ),
-        ProjectsNav::Branch(_, branch_id) => {
-            render_branch_sessions(frame, area, state, branch_id, sessions, mode)
-        }
+        ProjectsNav::Branch(project_id, branch_id) => render_branch_sessions(
+            frame,
+            area,
+            state,
+            branch_id,
+            &project_name(project_store, project_id),
+            sessions,
+            mode,
+        ),
         ProjectsNav::ProjectSettings(project_id) => {
             render_project_settings(frame, area, state, project_id, project_store, mode)
         }
+    }
+}
+
+/// A project's name, or `?` when the store no longer has it
+fn project_name(project_store: &ProjectStore, project_id: ProjectId) -> String {
+    project_store
+        .get_project(project_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Row 0 of every nested level: the way out, named by where it goes
+///
+/// The file-manager `..`, adapted. Muted like the section headings so it reads
+/// as chrome rather than as another branch, but selectable like the rows under
+/// it - `Enter` here is the same action as `Esc`. The label names the
+/// *destination*, because the pane's title breadcrumb already says where you
+/// are; a compact pane cannot afford a name, so it falls back to the bare `..`.
+fn back_row(destination: &str, selected: bool, mode: SideMode, width: usize) -> ListItem<'static> {
+    let t = theme();
+    let label = if mode == SideMode::Full {
+        format!("‹ {}", destination)
+    } else {
+        "‹ ..".to_string()
+    };
+    let content = truncate_string(&format!("{}{}", selection_prefix(selected), label), width);
+    let style = if selected {
+        selection_style_with_accent(true, t)
+    } else {
+        t.muted_style()
+    };
+    ListItem::new(content).style(style)
+}
+
+/// A nested level with nothing in it: the back row, then the hint
+///
+/// The hint used to fill the pane on its own, but an empty level is exactly
+/// where the way out matters most, so the row stays.
+fn render_empty_level(
+    frame: &mut Frame,
+    area: Rect,
+    destination: &str,
+    selected: bool,
+    mode: SideMode,
+    hint: &str,
+) {
+    let width = area.width as usize;
+    frame.render_widget(
+        List::new(vec![back_row(destination, selected, mode, width)]),
+        Rect { height: 1, ..area },
+    );
+    if area.height > 1 {
+        let rest = Rect {
+            y: area.y + 1,
+            height: area.height - 1,
+            ..area
+        };
+        frame.render_widget(
+            Paragraph::new(hint.to_string()).style(theme().muted_style()),
+            rest,
+        );
     }
 }
 
@@ -383,19 +452,22 @@ fn render_branches(
         );
         return;
     };
-    let branches = project_store.branches_for_project_sorted(project_id);
-    if branches.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No branches tracked yet.\n\nPress 'n' to create a worktree.")
-                .style(t.muted_style()),
-            area,
-        );
-        return;
-    }
-
     let width = area.width as usize;
     let focused = state.is_focused(crate::app::Tab::Projects);
     let selected_index = state.selected_branch_index;
+
+    let branches = project_store.branches_for_project_sorted(project_id);
+    if branches.is_empty() {
+        render_empty_level(
+            frame,
+            area,
+            "Projects",
+            focused,
+            mode,
+            "No branches tracked yet.\n\nPress 'n' to create a worktree.",
+        );
+        return;
+    }
 
     let local_checkout: Option<&Branch> = branches.iter().find(|b| b.is_default).copied();
     let worktrees: Vec<&Branch> = branches.iter().filter(|b| b.is_worktree).copied().collect();
@@ -404,7 +476,13 @@ fn render_branches(
     // rather than trusted from the store
     let current_branch_display = current_branch_name(project);
 
-    let mut items: Vec<ListItem> = Vec::new();
+    // The way back out sits above everything, at selection row 0
+    let mut items: Vec<ListItem> = vec![back_row(
+        "Projects",
+        selected_index == BACK_ROW && focused,
+        mode,
+        width,
+    )];
     let mut item_index = 0;
     // Section headings are rows too, so the branch index is not the row index
     let mut selected_row = 0;
@@ -422,12 +500,12 @@ fn render_branches(
             String::new()
         };
 
-        if item_index == selected_index {
+        if item_row(item_index) == selected_index {
             selected_row = items.len();
         }
         items.push(branch_item(BranchItem {
             display_name: current_branch_display.as_deref().unwrap_or(&branch.name),
-            selected: item_index == selected_index && focused,
+            selected: item_row(item_index) == selected_index && focused,
             active_count,
             attention_count,
             status,
@@ -469,12 +547,12 @@ fn render_branches(
                 String::new()
             };
 
-            if item_index == selected_index {
+            if item_row(item_index) == selected_index {
                 selected_row = items.len();
             }
             items.push(branch_item(BranchItem {
                 display_name: &branch.name,
-                selected: item_index == selected_index && focused,
+                selected: item_row(item_index) == selected_index && focused,
                 active_count,
                 attention_count,
                 status,
@@ -511,70 +589,75 @@ fn render_branch_sessions(
     area: Rect,
     state: &AppState,
     branch_id: crate::project::BranchId,
+    project_name: &str,
     sessions: &SessionManager,
     mode: SideMode,
 ) {
     let t = theme();
+    let width = area.width as usize;
+    let focused = state.is_focused(crate::app::Tab::Projects);
+    let selected_index = state.branch_session_index;
+
     let entries = sessions.entries_for_branch(branch_id);
     if entries.is_empty() {
-        frame.render_widget(
-            Paragraph::new(
-                "No sessions on this branch yet.\n\n\
-                 n: new AI session\ns: shell session",
-            )
-            .style(t.muted_style()),
+        render_empty_level(
+            frame,
             area,
+            project_name,
+            focused,
+            mode,
+            "No sessions on this branch yet.\n\n\
+             n: new AI session\ns: shell session",
         );
         return;
     }
 
     let now = Utc::now();
-    let width = area.width as usize;
-    let focused = state.is_focused(crate::app::Tab::Projects);
-    let selected_index = state.branch_session_index;
 
-    let items: Vec<ListItem> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let info = entry.info;
-            let selected = i == selected_index && focused;
-            let (badge, badge_color) = super::attention_badge(info, info.needs_attention());
-            let state_display = super::session_state_display(info, now);
+    let mut items: Vec<ListItem> = vec![back_row(
+        project_name,
+        selected_index == BACK_ROW && focused,
+        mode,
+        width,
+    )];
+    items.extend(entries.iter().enumerate().map(|(i, entry)| {
+        let info = entry.info;
+        let selected = item_row(i) == selected_index && focused;
+        let (badge, badge_color) = super::attention_badge(info, info.needs_attention());
+        let state_display = super::session_state_display(info, now);
 
-            let mut spans = vec![
-                Span::raw(selection_prefix(selected)),
-                Span::styled(badge, Style::default().fg(badge_color)),
-                Span::styled(
-                    format!("{} ", info.session_type.short_tag()),
-                    t.muted_style(),
-                ),
-            ];
+        let mut spans = vec![
+            Span::raw(selection_prefix(selected)),
+            Span::styled(badge, Style::default().fg(badge_color)),
+            Span::styled(
+                format!("{} ", info.session_type.short_tag()),
+                t.muted_style(),
+            ),
+        ];
 
-            if mode == SideMode::Full {
-                // What the session wants, or failing that what it last said.
-                // The reason is the more useful of the two, so it wins.
-                let trailer = info
-                    .attention
-                    .as_ref()
-                    .map(|reason| reason.summary())
-                    .or_else(|| info.last_message.clone());
-                spans.push(Span::raw(format!("{} [{}]", info.name, state_display)));
-                if let Some(trailer) = trailer {
-                    spans.push(Span::styled(format!(" — {}", trailer), t.muted_style()));
-                }
-            } else {
-                spans.push(Span::raw(format!(
-                    "{} [{}]",
-                    info.name,
-                    compact_state(&state_display)
-                )));
+        if mode == SideMode::Full {
+            // What the session wants, or failing that what it last said.
+            // The reason is the more useful of the two, so it wins.
+            let trailer = info
+                .attention
+                .as_ref()
+                .map(|reason| reason.summary())
+                .or_else(|| info.last_message.clone());
+            spans.push(Span::raw(format!("{} [{}]", info.name, state_display)));
+            if let Some(trailer) = trailer {
+                spans.push(Span::styled(format!(" — {}", trailer), t.muted_style()));
             }
+        } else {
+            spans.push(Span::raw(format!(
+                "{} [{}]",
+                info.name,
+                compact_state(&state_display)
+            )));
+        }
 
-            ListItem::new(clamp_line(Line::from(spans), width))
-                .style(selection_style(selected, info.state.color()))
-        })
-        .collect();
+        ListItem::new(clamp_line(Line::from(spans), width))
+            .style(selection_style(selected, info.state.color()))
+    }));
 
     let items = window_rows(items, selected_index, area.height);
     frame.render_widget(List::new(items), area);
@@ -611,23 +694,25 @@ fn render_project_settings(
             .unwrap_or_else(|| "?".to_string()),
     ];
 
-    let items: Vec<ListItem> = PROJECT_SETTINGS_ROWS
-        .iter()
-        .enumerate()
-        .map(|(i, label)| {
-            let selected = i == state.project_settings_index && focused;
-            let content = if mode == SideMode::Full {
-                format!("{}{}: {}", selection_prefix(selected), label, values[i])
-            } else {
-                format!("{}{}", selection_prefix(selected), label)
-            };
-            ListItem::new(truncate_string(&content, width)).style(
-                crate::tui::widgets::selection::selection_style_with_accent(selected, t),
-            )
-        })
-        .collect();
+    let selected_index = state.project_settings_index;
+    let mut items: Vec<ListItem> = vec![back_row(
+        &project_name(project_store, project_id),
+        selected_index == BACK_ROW && focused,
+        mode,
+        width,
+    )];
+    items.extend(PROJECT_SETTINGS_ROWS.iter().enumerate().map(|(i, label)| {
+        let selected = item_row(i) == selected_index && focused;
+        let content = if mode == SideMode::Full {
+            format!("{}{}: {}", selection_prefix(selected), label, values[i])
+        } else {
+            format!("{}{}", selection_prefix(selected), label)
+        };
+        ListItem::new(truncate_string(&content, width))
+            .style(selection_style_with_accent(selected, t))
+    }));
 
-    let items = window_rows(items, state.project_settings_index, area.height);
+    let items = window_rows(items, selected_index, area.height);
     frame.render_widget(List::new(items), area);
 }
 
@@ -701,14 +786,51 @@ mod tests {
         store
     }
 
+    /// A project called `panoptes` with a `main` checkout and the named
+    /// worktrees beside it
+    fn store_with_branches(
+        worktrees: &[&str],
+    ) -> (ProjectStore, ProjectId, crate::project::Branch) {
+        let mut store = store_with(&[("panoptes", &[][..])]);
+        let project_id = store.projects().next().unwrap().id;
+        let main = crate::project::Branch::default_for_project(
+            project_id,
+            "main".to_string(),
+            PathBuf::from("/tmp/panoptes"),
+        );
+        let main_clone = main.clone();
+        store.add_branch(main);
+        for name in worktrees {
+            store.add_branch(crate::project::Branch::new(
+                project_id,
+                name.to_string(),
+                PathBuf::from(format!("/tmp/{name}")),
+                false,
+                true,
+            ));
+        }
+        (store, project_id, main_clone)
+    }
+
+    fn empty_sessions() -> SessionManager {
+        SessionManager::with_store(Config::default(), SessionStore::new())
+    }
+
     fn render_buffer(width: u16, state: &AppState, store: &ProjectStore) -> Buffer {
-        let config = Config::default();
-        let sessions = SessionManager::with_store(config, SessionStore::new());
+        render_buffer_with(width, state, store, &empty_sessions())
+    }
+
+    fn render_buffer_with(
+        width: u16,
+        state: &AppState,
+        store: &ProjectStore,
+        sessions: &SessionManager,
+    ) -> Buffer {
         // Mirror the caller: density comes from the *outer* pane width, which
         // is two columns wider than the content rect a body is handed
         let mode = crate::tui::panes::side_mode(width + 2);
         crate::tui::views::test_util::render_to_buffer(width, 12, |frame| {
-            render_projects_pane(frame, frame.size(), state, store, &sessions, mode)
+            render_projects_pane(frame, frame.size(), state, store, sessions, mode)
         })
     }
 
@@ -893,10 +1015,8 @@ mod tests {
     fn test_project_settings_lists_the_four_relocated_flows() {
         let store = store_with(&[("panoptes", &[][..])]);
         let project_id = store.projects().next().unwrap().id;
-        let state = AppState {
-            projects_nav: ProjectsNav::ProjectSettings(project_id),
-            ..Default::default()
-        };
+        let mut state = AppState::default();
+        state.navigate_to_project_settings(project_id);
 
         let lines = render(60, &state, &store);
 
@@ -905,6 +1025,167 @@ mod tests {
         }
         assert!(
             contains_line(&lines, "▶ Default Claude config"),
+            "{lines:?}"
+        );
+    }
+
+    /// Every level below the root carries the way out, named by where `‹`
+    /// goes rather than by the action - the title breadcrumb already says
+    /// where you are
+    #[test]
+    fn test_every_nested_level_names_its_way_back_out() {
+        let (store, project_id, main) = store_with_branches(&["fix-header"]);
+        let mut state = AppState::default();
+
+        // The Overview is the root: nothing above it to go back to
+        let lines = render(60, &state, &store);
+        assert!(!lines.iter().any(|l| l.contains('‹')), "{lines:?}");
+
+        state.navigate_to_project(project_id);
+        let lines = render(60, &state, &store);
+        assert!(contains_line(&lines, "‹ Projects"), "{lines:?}");
+
+        state.navigate_to_branch(project_id, main.id);
+        let lines = render(60, &state, &store);
+        assert!(contains_line(&lines, "‹ panoptes"), "{lines:?}");
+
+        state.navigate_to_project_settings(project_id);
+        let lines = render(60, &state, &store);
+        assert!(contains_line(&lines, "‹ panoptes"), "{lines:?}");
+    }
+
+    /// The row sits above the list, not inside it
+    #[test]
+    fn test_the_back_row_is_the_first_row_of_the_branch_list() {
+        let (store, project_id, _) = store_with_branches(&["fix-header"]);
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        let lines = render(60, &state, &store);
+        assert!(lines[0].contains("‹ Projects"), "{lines:?}");
+    }
+
+    /// Muted like the section headings so it reads as chrome, but it takes the
+    /// selection like any other row
+    #[test]
+    fn test_the_back_row_is_muted_chrome_until_it_is_selected() {
+        let (store, project_id, _) = store_with_branches(&["fix-header"]);
+        let t = theme();
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        // Drilling in selected the first branch, so the back row is quiet
+        let buffer = render_buffer(60, &state, &store);
+        assert_eq!(
+            style_of_row_with(&buffer, "‹ Projects").fg,
+            Some(t.text_dim)
+        );
+        let lines = crate::tui::views::test_util::buffer_lines(&buffer);
+        assert!(contains_line(&lines, "▶ main"), "{lines:?}");
+
+        // Up from the first branch reaches it
+        state.selected_branch_index = crate::app::BACK_ROW;
+        let buffer = render_buffer(60, &state, &store);
+        assert_eq!(style_of_row_with(&buffer, "‹ Projects").fg, Some(t.accent));
+        let lines = crate::tui::views::test_util::buffer_lines(&buffer);
+        assert!(contains_line(&lines, "▶ ‹ Projects"), "{lines:?}");
+        assert!(!contains_line(&lines, "▶ main"), "{lines:?}");
+    }
+
+    /// A compact pane cannot afford the destination's name, so the row falls
+    /// back to the bare file-manager marker
+    #[test]
+    fn test_a_compact_pane_degrades_the_back_row_to_the_bare_marker() {
+        let (store, project_id, _) = store_with_branches(&["fix-header"]);
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        let lines = render(24, &state, &store);
+        assert!(contains_line(&lines, "‹ .."), "{lines:?}");
+        assert!(!contains_line(&lines, "‹ Projects"), "{lines:?}");
+    }
+
+    /// Ten columns is a counter and nothing else, back row included
+    #[test]
+    fn test_the_strip_density_has_no_back_row() {
+        let (store, project_id, _) = store_with_branches(&["fix-header"]);
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        let lines = render(10, &state, &store);
+        assert!(contains_line(&lines, "B 2"), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains('‹')), "{lines:?}");
+    }
+
+    /// An empty level used to hand the whole pane to a hint - which is exactly
+    /// where the way out matters most
+    #[test]
+    fn test_an_empty_level_keeps_its_back_row() {
+        let store = store_with(&[("panoptes", &[][..])]);
+        let project_id = store.projects().next().unwrap().id;
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        let lines = render(60, &state, &store);
+        assert!(lines[0].contains("‹ Projects"), "{lines:?}");
+        assert!(
+            contains_line(&lines, "No branches tracked yet."),
+            "{lines:?}"
+        );
+
+        // ...and the same one level down, with no sessions on the branch
+        let (store, project_id, main) = store_with_branches(&[]);
+        state.navigate_to_branch(project_id, main.id);
+        let lines = render(60, &state, &store);
+        assert!(lines[0].contains("‹ panoptes"), "{lines:?}");
+        assert!(
+            contains_line(&lines, "No sessions on this branch yet."),
+            "{lines:?}"
+        );
+    }
+
+    /// The row shifts every session down by one, so the selection must follow
+    #[test]
+    fn test_the_session_list_selection_is_offset_by_its_back_row() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let (store, project_id, main) = store_with_branches(&[]);
+        let mut sessions = SessionManager::with_store(
+            Config {
+                worktrees_dir: temp.path().join("worktrees"),
+                hooks_dir: temp.path().join("hooks"),
+                ..Config::default()
+            },
+            SessionStore::with_path(temp.path().join("sessions.json")),
+        );
+        sessions
+            .insert_test_session("first", project_id, main.id)
+            .unwrap();
+        sessions
+            .insert_test_session("second", project_id, main.id)
+            .unwrap();
+
+        let mut state = AppState::default();
+        state.navigate_to_branch(project_id, main.id);
+
+        // Drilling in lands on the first session, not on the back row
+        let lines = crate::tui::views::test_util::buffer_lines(&render_buffer_with(
+            60, &state, &store, &sessions,
+        ));
+        assert!(lines[0].contains("‹ panoptes"), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("▶") && l.contains("first")),
+            "{lines:?}"
+        );
+
+        // Row 2 is the second session, not the first
+        state.branch_session_index = 2;
+        let lines = crate::tui::views::test_util::buffer_lines(&render_buffer_with(
+            60, &state, &store, &sessions,
+        ));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("▶") && l.contains("second")),
             "{lines:?}"
         );
     }
@@ -1010,10 +1291,8 @@ mod tests {
             true,
         ));
 
-        let state = AppState {
-            projects_nav: ProjectsNav::Project(project_id),
-            ..Default::default()
-        };
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
         let lines = render(60, &state, &store);
 
         assert!(contains_line(&lines, "▶ main"), "{lines:?}");

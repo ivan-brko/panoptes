@@ -3,12 +3,18 @@
 //! One handler per level, dispatched on [`ProjectsNav`]. `Esc` pops one level
 //! and does nothing at the root: this pane is home, the place `Esc` backs out
 //! to from everywhere else, and it never quits.
+//!
+//! Every nested level puts a back row above its list ([`crate::app::BACK_ROW`]),
+//! so the three selection indices here count *rows*, not items:
+//! [`crate::app::row_item`] is what turns one into the other, and `Enter` on
+//! row 0 is the same action as `Esc`.
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{
-    cycle_next, cycle_prev, App, FolderMoveTarget, InputMode, ProjectsNav, SessionDraft,
+    clamp_row, cycle_next, cycle_prev, row_item, rows_with_back, App, FolderMoveTarget, InputMode,
+    ProjectsNav, SessionDraft,
 };
 use crate::claude_json::ClaudeJsonStore;
 use crate::input::agent_configs::{open_config_selector, AgentKind};
@@ -142,6 +148,11 @@ fn set_folder_collapsed(app: &mut App, path: &[String], collapsed: bool) {
 
 fn handle_project_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Result<()> {
     let branch_count = app.project_store.branches_for_project(project_id).len();
+    // A branch deleted from under the selection, or an empty project, leaves
+    // the back row as the nearest row that still exists
+    app.state.selected_branch_index = clamp_row(app.state.selected_branch_index, branch_count);
+    let row_count = rows_with_back(branch_count);
+    let selected_branch = row_item(app.state.selected_branch_index);
 
     match key.code {
         KeyCode::Esc => {
@@ -149,19 +160,23 @@ fn handle_project_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Re
         }
         KeyCode::Down => {
             app.state.selected_branch_index =
-                cycle_next(app.state.selected_branch_index, branch_count);
+                cycle_next(app.state.selected_branch_index, row_count);
         }
         KeyCode::Up => {
             app.state.selected_branch_index =
-                cycle_prev(app.state.selected_branch_index, branch_count);
+                cycle_prev(app.state.selected_branch_index, row_count);
         }
-        KeyCode::Enter => {
-            let branches = app.project_store.branches_for_project_sorted(project_id);
-            if let Some(branch) = branches.get(app.state.selected_branch_index) {
-                let branch_id = branch.id;
-                app.state.navigate_to_branch(project_id, branch_id);
+        KeyCode::Enter => match selected_branch {
+            // The back row is the visible twin of `Esc`
+            None => app.escape_back(),
+            Some(index) => {
+                let branches = app.project_store.branches_for_project_sorted(project_id);
+                if let Some(branch) = branches.get(index) {
+                    let branch_id = branch.id;
+                    app.state.navigate_to_branch(project_id, branch_id);
+                }
             }
-        }
+        },
         KeyCode::Char(',') => {
             app.state.navigate_to_project_settings(project_id);
         }
@@ -173,7 +188,7 @@ fn handle_project_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Re
         }
         KeyCode::Char('d') => {
             let branches = app.project_store.branches_for_project_sorted(project_id);
-            let Some(branch) = branches.get(app.state.selected_branch_index) else {
+            let Some(branch) = selected_branch.and_then(|index| branches.get(index)) else {
                 return Ok(());
             };
             let (branch_id, is_worktree, working_dir) =
@@ -285,40 +300,47 @@ fn handle_branch_key(
         .map(|entry| (entry.info.id, entry.live))
         .collect();
     let session_count = branch_sessions.len();
+    // A session deleted from under the selection, or a branch with none, leaves
+    // the back row as the nearest row that still exists
+    app.state.branch_session_index = clamp_row(app.state.branch_session_index, session_count);
+    let row_count = rows_with_back(session_count);
+    let selected_session = row_item(app.state.branch_session_index)
+        .and_then(|index| branch_sessions.get(index).copied());
 
     match key.code {
         KeyCode::Esc => {
             app.escape_back();
         }
         KeyCode::Down => {
-            app.state.branch_session_index =
-                cycle_next(app.state.branch_session_index, session_count);
+            app.state.branch_session_index = cycle_next(app.state.branch_session_index, row_count);
         }
         KeyCode::Up => {
-            app.state.branch_session_index =
-                cycle_prev(app.state.branch_session_index, session_count);
+            app.state.branch_session_index = cycle_prev(app.state.branch_session_index, row_count);
         }
         KeyCode::Enter => {
-            if let Some(&(session_id, live)) = branch_sessions.get(app.state.branch_session_index) {
-                // A recovered session has no process yet: bring it back before
-                // opening a view onto it
-                if !live {
-                    match app.resume_recovered_session(session_id) {
-                        Ok(true) => {}
-                        Ok(false) => return Ok(()),
-                        Err(e) => {
-                            tracing::error!(
-                                session_id = %session_id,
-                                error = %e,
-                                "Failed to resume session"
-                            );
-                            app.state.error_message = Some(format!("Could not resume: {}", e));
-                            return Ok(());
-                        }
+            // The back row is the visible twin of `Esc`
+            let Some((session_id, live)) = selected_session else {
+                app.escape_back();
+                return Ok(());
+            };
+            // A recovered session has no process yet: bring it back before
+            // opening a view onto it
+            if !live {
+                match app.resume_recovered_session(session_id) {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(()),
+                    Err(e) => {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to resume session"
+                        );
+                        app.state.error_message = Some(format!("Could not resume: {}", e));
+                        return Ok(());
                     }
                 }
-                app.activate_session(session_id)?;
             }
+            app.activate_session(session_id)?;
         }
         KeyCode::Char('n') => {
             if let Some(branch) = app.project_store.get_branch(branch_id) {
@@ -336,7 +358,7 @@ fn handle_branch_key(
             }
         }
         KeyCode::Char('d') => {
-            if let Some(&(session_id, _)) = branch_sessions.get(app.state.branch_session_index) {
+            if let Some((session_id, _)) = selected_session {
                 app.state.pending_delete_session = Some(session_id);
                 app.state.input_mode = InputMode::ConfirmingSessionDelete;
             }
@@ -368,7 +390,7 @@ fn handle_branch_key(
 // ========================================================================
 
 fn handle_project_settings_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Result<()> {
-    let row_count = PROJECT_SETTINGS_ROWS.len();
+    let row_count = rows_with_back(PROJECT_SETTINGS_ROWS.len());
 
     match key.code {
         KeyCode::Esc => {
@@ -382,18 +404,20 @@ fn handle_project_settings_key(app: &mut App, key: KeyEvent, project_id: Project
             app.state.project_settings_index =
                 cycle_prev(app.state.project_settings_index, row_count);
         }
-        KeyCode::Enter => match app.state.project_settings_index {
-            0 => open_project_default_config(app, project_id, AgentKind::Claude),
-            1 => open_project_default_config(app, project_id, AgentKind::Codex),
-            2 => app.start_default_base_selection(project_id),
-            3 => {
+        KeyCode::Enter => match row_item(app.state.project_settings_index) {
+            // The back row is the visible twin of `Esc`
+            None => app.escape_back(),
+            Some(0) => open_project_default_config(app, project_id, AgentKind::Claude),
+            Some(1) => open_project_default_config(app, project_id, AgentKind::Codex),
+            Some(2) => app.start_default_base_selection(project_id),
+            Some(3) => {
                 if let Some(project) = app.project_store.get_project(project_id) {
                     app.state.new_project_name = project.name.clone();
                     app.state.renaming_project = Some(project_id);
                     app.state.input_mode = InputMode::RenamingProject;
                 }
             }
-            _ => {}
+            Some(_) => {}
         },
         _ => {}
     }

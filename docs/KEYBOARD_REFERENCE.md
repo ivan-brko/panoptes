@@ -62,10 +62,14 @@ existing folders, and leave the input empty to move back to the root level.
 
 ### Project (its branches)
 
+Row 0 is the back row, `‹ Projects` — the way out, made visible. It takes the
+selection like any other row, and `Enter` on it is the same action as `Esc`.
+Every level below applies the same rule, naming its own destination.
+
 | Key | Action |
 |-----|--------|
-| `Up` / `Down` | Select a branch |
-| `Enter` | Open selected branch |
+| `Up` / `Down` | Select a branch (`Up` from the first reaches the back row) |
+| `Enter` | Open selected branch; on the back row, go back to the tree |
 | `n` | Create new worktree (opens the wizard) |
 | `d` | Delete selected worktree (never deletes the git branch) |
 | `R` | Refresh branches (check for stale worktrees) |
@@ -85,16 +89,16 @@ Per-project defaults. Replaces the old `c`, `x`, `b` and `r` keys.
 
 | Key | Action |
 |-----|--------|
-| `Up` / `Down` | Move selection |
-| `Enter` | Open the selected setting |
+| `Up` / `Down` | Move selection (row 0 is `‹ <project name>`) |
+| `Enter` | Open the selected setting; on the back row, back to the branch list |
 | `Esc` | Back to the branch list |
 
 ### Branch (its sessions)
 
 | Key | Action |
 |-----|--------|
-| `Up` / `Down` | Select a session |
-| `Enter` | Open selected session (resumes it if `[Resumable]`) |
+| `Up` / `Down` | Select a session (row 0 is `‹ <project name>`) |
+| `Enter` | Open selected session (resumes it if `[Resumable]`); on the back row, back to the branch list |
 | `n` | Create new AI session (Claude Code or Codex) |
 | `s` | Create new shell session |
 | `d` | Delete selected session (prompts for confirmation) |

@@ -280,19 +280,23 @@ pub struct AppState {
     /// Selected index in the project tree, counted over *visible tree rows*
     /// (folder headings included), not over projects
     pub selected_project_index: usize,
-    /// Selected index in pane 1's branch list
+    /// Selected *row* in pane 1's branch list
+    ///
+    /// Row 0 is the back row ([`crate::app::BACK_ROW`]), so branch `i` sits at
+    /// row `i + 1`; [`crate::app::row_item`] converts back.
     pub selected_branch_index: usize,
-    /// Selected index in pane 1's per-branch session list
+    /// Selected *row* in pane 1's per-branch session list
     ///
     /// Separate from [`Self::sessions_pane_index`]: pane 1's branch drill-down
     /// and pane 2's flat list are on screen at the same time, so one index
-    /// cannot serve both.
+    /// cannot serve both. Pane 2 has no back row, so only this one is offset.
     pub branch_session_index: usize,
     /// Selected index in pane 2's flat session list
     pub sessions_pane_index: usize,
     /// Selected row in pane 3's sections list
     pub settings_section_index: usize,
-    /// Selected row in the per-project settings list (pane 1, opened with `,`)
+    /// Selected row in the per-project settings list (pane 1, opened with `,`),
+    /// row 0 being the back row
     pub project_settings_index: usize,
     /// Selected row in pane 3's notifications list
     pub notifications_index: usize,
@@ -516,21 +520,26 @@ impl AppState {
     }
 
     /// Drill pane 1 into a project's branch list
+    ///
+    /// Lands on the first branch, not the back row that sits above it: drilling
+    /// in and pressing `Enter` must go deeper, not bounce straight back out.
+    /// An empty list has no first branch; [`crate::app::clamp_row`] in the
+    /// handler moves the selection onto the back row there.
     pub fn navigate_to_project(&mut self, project_id: ProjectId) {
         self.projects_nav = ProjectsNav::Project(project_id);
-        self.selected_branch_index = 0;
+        self.selected_branch_index = crate::app::FIRST_ITEM_ROW;
     }
 
     /// Drill pane 1 into a branch's session list
     pub fn navigate_to_branch(&mut self, project_id: ProjectId, branch_id: BranchId) {
         self.projects_nav = ProjectsNav::Branch(project_id, branch_id);
-        self.branch_session_index = 0;
+        self.branch_session_index = crate::app::FIRST_ITEM_ROW;
     }
 
     /// Open the per-project settings level of pane 1
     pub fn navigate_to_project_settings(&mut self, project_id: ProjectId) {
         self.projects_nav = ProjectsNav::ProjectSettings(project_id);
-        self.project_settings_index = 0;
+        self.project_settings_index = crate::app::FIRST_ITEM_ROW;
     }
 
     /// Open a session full-screen (auto-activates session mode)
@@ -791,19 +800,22 @@ mod tests {
         assert!(!state.should_quit);
     }
 
+    /// Drilling in lands on the first branch, not on the back row above it -
+    /// otherwise `Enter, Enter` would open a project and shut it again
     #[test]
-    fn test_navigate_to_project() {
+    fn test_navigate_to_project_lands_on_the_first_branch_not_the_back_row() {
         let mut state = AppState::default();
         let project_id = uuid::Uuid::new_v4();
 
         state.selected_branch_index = 4;
         state.navigate_to_project(project_id);
         assert_eq!(state.projects_nav, ProjectsNav::Project(project_id));
-        assert_eq!(state.selected_branch_index, 0);
+        assert_eq!(state.selected_branch_index, crate::app::FIRST_ITEM_ROW);
+        assert_ne!(state.selected_branch_index, crate::app::BACK_ROW);
     }
 
     #[test]
-    fn test_navigate_to_branch() {
+    fn test_navigate_to_branch_lands_on_the_first_session_not_the_back_row() {
         let mut state = AppState::default();
         let project_id = uuid::Uuid::new_v4();
         let branch_id = uuid::Uuid::new_v4();
@@ -814,7 +826,18 @@ mod tests {
             state.projects_nav,
             ProjectsNav::Branch(project_id, branch_id)
         );
-        assert_eq!(state.branch_session_index, 0);
+        assert_eq!(state.branch_session_index, crate::app::FIRST_ITEM_ROW);
+    }
+
+    #[test]
+    fn test_navigate_to_project_settings_lands_on_the_first_setting() {
+        let mut state = AppState::default();
+        let project_id = uuid::Uuid::new_v4();
+
+        state.project_settings_index = 2;
+        state.navigate_to_project_settings(project_id);
+        assert_eq!(state.projects_nav, ProjectsNav::ProjectSettings(project_id));
+        assert_eq!(state.project_settings_index, crate::app::FIRST_ITEM_ROW);
     }
 
     /// Pane 1's own drill-down must not disturb the other two panes
