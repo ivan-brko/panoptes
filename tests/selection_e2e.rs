@@ -59,7 +59,11 @@ fn selection_over_a_shell_session() {
 /// Codex routes wheel events before the PTY forward, unlike a shell, so its
 /// ordering through `handle_mouse_event` is its own path
 ///
-/// Needs a real, authenticated `~/.codex`.
+/// Also covers paging up past the oldest line, which used to snap the reader
+/// back to the live view and into the shallower fallback buffer.
+///
+/// Needs a real, authenticated `~/.codex`, and **spends one Codex turn**: the
+/// scroll check needs more history than the startup banner leaves behind.
 #[test]
 #[ignore = "needs an authenticated ~/.codex; run with --ignored"]
 fn selection_over_a_codex_session() {

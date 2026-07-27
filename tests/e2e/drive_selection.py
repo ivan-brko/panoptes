@@ -448,6 +448,44 @@ def scenario_codex():
     check("the wheel still drives local scrollback for codex",
           re.search(r"Output \[↑\d+\]", screen_text()) is not None)
 
+    # Paging up past the oldest line must stop there (PAN-20).
+    #
+    # A Codex session has two histories - the vterm's scrollback and the
+    # plain-text fallback buffer - and the bug was choosing between them by
+    # asking "did the vterm advance?". That is false at the top of real
+    # scrollback just as it is when there is none, so reaching the top used to
+    # dump the reader into the shallower fallback from the live view: the
+    # indicator climbed, then collapsed. Scrolling up moved the view down.
+    #
+    # Startup alone leaves about one row of scrollback, which would let this
+    # pass without testing anything, so spend one Codex turn on real history.
+    # Asking it to *print* rather than run a command keeps the turn inside the
+    # reply, with no sandbox approval to answer.
+    # Enter goes separately: sent in the same burst as the text, Codex's input
+    # widget keeps it as part of the line and the prompt is never submitted.
+    send("print the numbers 1 to 200, one per line, and nothing else", 1.5)
+    send("\r", 1.0)
+    if not check("codex produced a screenful of history",
+                 wait_for(r"\b19[0-9]\b", 180.0, "codex line output")):
+        return
+    drain(3.0)
+
+    send(b"\x1b[F", 0.5)   # End: back to the live view first
+    offsets = []
+    for _ in range(40):
+        send(b"\x1b[5~", 0.12)   # PgUp
+        seen = re.search(r"Output \[↑(\d+)\]", screen_text())
+        offsets.append(int(seen.group(1)) if seen else 0)
+    snapshot("codex paged to the top")
+    dropped = [(a, b) for a, b in zip(offsets, offsets[1:]) if b < a]
+    check(f"paging up never moves the view down (peak {max(offsets)}, "
+          f"ended {offsets[-1]}, drops {dropped[:3]})",
+          not dropped)
+    check(f"paging up climbed real history, not one row (peak {max(offsets)})",
+          max(offsets) > ROWS)
+    check(f"paging up reached a top and stayed on it (last five {offsets[-5:]})",
+          offsets[-1] == max(offsets))
+
 
 # =========================================================================
 # osc52: no clipboard helper works, so the copy leaves as an escape sequence
