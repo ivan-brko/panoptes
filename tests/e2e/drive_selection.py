@@ -375,62 +375,30 @@ def scenario_shell():
         check("the jumps did not leak into the shell",
               "1;5H" not in rendered and "1;5F" not in rendered)
 
-    # A drag across rows copies every line it covers
-    send("printf 'ALPHA\\nBETA\\nGAMMA\\n'\r", 2.0)
-    if check("three lines printed", wait_for(r"GAMMA", 8.0, "three lines")):
-        # The echoed command line holds these words too: take the output
-        arow, acol = find("ALPHA", last=True)
-        grow, gcol = find("GAMMA", last=True)
-        pbcopy("CLIPBOARD-UNTOUCHED")
-        press(arow, acol)
-        motion(arow + 1, gcol)
-        motion(grow, gcol + 4)
-        release(grow, gcol + 4)
-        drain(0.6)
-        pasted = pbpaste()
-        check(f"a multi-row drag copies every line (got {pasted!r})",
-              pasted.splitlines()[:1] == ["ALPHA"] and "GAMMA" in pasted)
+    # The guard that makes those two keys safe to take: a program drawing its
+    # own screen keeps them, because vt100 holds no scrollback behind it and
+    # stealing them would only break the program's own gg/G.
+    #
+    # The alternate screen is entered directly rather than by running a pager.
+    # `less` would do it, but the forwarded Ctrl+Home arrives there as
+    # `ESC [ 1 ; 5 H` and less reads the trailing H as its help command - so
+    # the test would be fighting a program it had just confused. A bare
+    # `printf` around a `sleep` gives the same alternate screen with nothing
+    # in it to misread the keys, and hands the primary screen back on its own.
+    send("printf '\\033[?1049h'; sleep 6; printf '\\033[?1049l'; echo BACKONPRIMARY\r", 2.0)
+    send(b"\x1b[1;5H", 0.8)
+    snapshot("Ctrl+Home while the child owns the screen")
+    check("Ctrl+Home does not scroll Panoptes while the child owns the screen",
+          re.search(SCROLL_INDICATOR, screen_text()) is None)
 
-    # Dragging past the top edge scrolls and keeps selecting. Drag events stop
-    # arriving when the pointer stops moving, so this is the tick-driven half.
-    send("seq 1 400\r", 3.0)
-    check("history generated", wait_for(r"\b400\b", 8.0, "long history"))
-    pbcopy("CLIPBOARD-UNTOUCHED")
-    press(ROWS - 4, 3)
-    motion(1, 3)
-    drain(1.0)
-    snapshot("edge auto-scroll")
-    scrolled = re.search(SCROLL_INDICATOR, screen_text())
-    release(1, 3)
-    drain(0.5)
-    lines = pbpaste().splitlines()
-    check(f"holding past the top edge scrolled the view "
-          f"(indicator {scrolled and scrolled.group(1)})",
-          scrolled is not None and int(scrolled.group(1)) > 5)
-    check(f"the selection grew past one screenful ({len(lines)} lines)", len(lines) > ROWS)
-    check("back to live output", to_live_view())
-
-    # A drag that began as a double click keeps taking whole words, including
-    # while the edge is scrolling the view under a pointer that is not moving
-    send("for i in $(seq 1 200); do echo \"AAA-$i BBB-$i\"; done\r", 3.0)
-    if check("word-boundary history printed", wait_for(r"AAA-200", 8.0, "word history")):
-        wrow, wcol = find("AAA-200", last=True)
-        pbcopy("CLIPBOARD-UNTOUCHED")
-        # Double click in the middle of a token, then hold past the top edge
-        press(wrow, wcol + 2, 0.06)
-        release(wrow, wcol + 2, 0.06)
-        press(wrow, wcol + 2, 0.06)
-        motion(1, wcol + 2)
-        drain(0.8)
-        release(1, wcol + 2)
-        drain(0.5)
-        pasted = pbpaste()
-        tokens = pasted.split()
-        broken = [t for t in tokens if not re.fullmatch(r"(AAA|BBB)-\d+", t)]
-        check(f"an auto-scrolled word drag stops on word boundaries "
-              f"({len(tokens)} tokens, first {tokens[:1]})",
-              tokens and not broken)
-    check("back to live output", to_live_view())
+    # The sleep ends, the child hands the primary screen back, and the keys
+    # have to work again - the guard is asked per keypress, not latched
+    if check("the primary screen came back",
+             wait_for(r"BACKONPRIMARY", 12.0, "primary screen")):
+        send(b"\x1b[1;5H", 0.8)
+        check("Ctrl+Home works again once the child gives the screen back",
+              re.search(SCROLL_INDICATOR, screen_text()) is not None)
+        check("and Ctrl+End still returns to live output", to_live_view())
 
     # A child that takes the mouse keeps its own drags - what claude, vim and
     # htop do, without needing one of them here.

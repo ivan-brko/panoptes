@@ -139,7 +139,7 @@ cannot hold executable scripts.
 | Default | `10000` |
 | Type | Integer |
 
-Maximum number of scrollback lines to retain in the terminal emulator for each session. This controls how far back you can scroll in session history using PageUp/PageDown.
+Maximum number of scrollback lines to retain in the terminal emulator for each session. This controls how far back you can scroll in session history with the mouse wheel, and how far `Ctrl+Home` jumps.
 
 Each 1000 lines uses approximately 10KB of memory per session.
 

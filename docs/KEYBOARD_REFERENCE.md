@@ -161,37 +161,33 @@ Read-only: version, hook server port and health, and where `config.toml`,
 settings that are only read at startup are shown here too. Edit `config.toml`
 by hand to change them.
 
-## Session View (Normal Mode)
+## Session View
 
-Viewing a session without interacting with it.
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Enter Session mode (interact with the session) |
-| `Esc` | Back to the pane the session was opened from |
-| `q` | Quit (prompts for confirmation) |
-| `Up` / `Down` | Scroll (3 lines) |
-| `PageUp` / `PageDown` | Scroll a page |
-| `Home` / `End` | Scroll to top (oldest) / bottom (live view) |
-| `Left` / `Right` | Nothing — the session fills the terminal, so there is no pane to cycle to |
-| `1-9` | Switch to session by number (`0` = 10) |
-| any other key | Run a matching custom shortcut, if one is bound |
-
-## Session View (Session Mode)
-
-Interacting directly with the session (Claude Code, Codex, or shell). Most keys
-are forwarded to the PTY — including `q`, `Tab` and `Space`.
+The session fills the terminal and there is **one mode**: nearly every key goes
+straight to the agent — including `q`, `Tab`, `Space`, the arrow keys, the
+digits and `PageUp`/`PageDown`. Panoptes keeps three keys and no more.
 
 | Key | Action |
 |-----|--------|
-| `Esc` | Exit Session mode |
-| `Shift+Esc` | Send Escape to the session |
-| `PageUp` / `PageDown` | Scroll through history |
-| `Ctrl+Home` / `Ctrl+End` | Scroll to top / bottom |
-| All other keys | Forwarded to the session |
+| `Esc` | Leave the session, back to the pane it was opened from. One press |
+| `Shift+Esc` | Send a literal Escape to the agent |
+| `Ctrl+Home` | Jump to the oldest line Panoptes still holds |
+| `Ctrl+End` | Back to live output |
+| All other keys | Forwarded to the agent |
 
-**Note:** When scrolled up in history, typing any key (except scroll keys) will
-automatically scroll back to the live view.
+**The two jumps step aside for a program drawing its own screen** (Claude
+Code's UI, `vim`, `less`). There is no Panoptes scrollback behind such a
+program, so the keys go to it instead — which is what makes `vim`'s `gg` and
+`G` keep working.
+
+Ordinary scrolling is the mouse wheel's job. When the agent has asked for the
+mouse, the wheel goes to the agent and you scroll with its own history, exactly
+as in a plain terminal tab.
+
+Typing anything while scrolled back returns you to live output.
+
+**Switching sessions, custom shortcuts and `q` to quit live in the panes.**
+Press `Esc` first.
 
 ## Worktree Creation Wizard
 

@@ -160,7 +160,7 @@ The worktree directory was deleted outside of Panoptes.
    - Resize your terminal window
    - Panoptes automatically syncs PTY size
 
-2. Try scrolling to refresh: `PageUp` then `PageDown`
+2. Try scrolling to refresh: `Ctrl+Home` then `Ctrl+End`
 
 ---
 

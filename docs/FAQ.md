@@ -305,7 +305,8 @@ The prompts are optional—you can decline each time. There's no global setting 
 | `Down` | Move down |
 | `Up` | Move up |
 | `1-9` | Select by number (not in the project tree) |
-| `PageUp/Down` | Scroll history |
+| Mouse wheel | Scroll session history |
+| `Ctrl+Home` / `Ctrl+End` | Oldest line / live output |
 | `?` | Show the keys for wherever you are |
 
 Navigation is by arrow key everywhere; there are no `j`/`k` bindings.
