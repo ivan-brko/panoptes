@@ -301,7 +301,9 @@ fn prompt_footer(mode: InputMode) -> Option<&'static str> {
 ///
 /// The overview's keys are context-sensitive: a folder heading offers folder
 /// actions, so the expand/collapse binding is advertised exactly when it
-/// applies and "ungroup" signals that nothing gets deleted.
+/// applies and "ungroup" signals that nothing gets deleted. Only the keys that
+/// read the selection vary - `n` and `R` act on the whole tree, so both
+/// variants advertise them.
 fn projects_footer(state: &AppState, project_store: &ProjectStore, config: &Config) -> String {
     match state.projects_nav {
         ProjectsNav::Overview => {
@@ -310,13 +312,15 @@ fn projects_footer(state: &AppState, project_store: &ProjectStore, config: &Conf
                 Some(crate::project::RowRef::Folder { .. })
             );
             if on_folder {
-                "Enter: expand/collapse | m: move | r: rename | d: ungroup".to_string()
+                "Enter: expand/collapse | n: new | m: move | r: rename | d: ungroup | R: refresh"
+                    .to_string()
             } else {
                 "↑↓/Enter: open | n: new | d: delete | m: move | R: refresh".to_string()
             }
         }
         ProjectsNav::Project(_) => {
-            "↑↓/1-9/Enter | n: new worktree | d: delete | R: refresh | ,: settings".to_string()
+            "↑↓/1-9/Enter | n: new worktree | d: delete | R: refresh | ,: settings | Esc: back"
+                .to_string()
         }
         ProjectsNav::Branch(_, _) => {
             let shortcuts = format_custom_shortcuts_hint(&config.custom_shortcuts);
@@ -547,6 +551,42 @@ mod tests {
             contains_line(&lines, SettingsNav::ClaudeConfigs.description()),
             "{lines:?}"
         );
+    }
+
+    /// `n` and `R` do not read the selection, so the folder variant of the
+    /// overview footer must advertise them just like the project variant does
+    #[test]
+    fn test_folder_footer_keeps_the_selection_independent_keys() {
+        let mut f = fixture();
+        let project_id = f.project_store.projects().next().unwrap().id;
+        f.project_store
+            .set_project_folder(project_id, vec!["Acme".to_string()])
+            .unwrap();
+
+        // Folders sort before the projects at their level, so row 0 is "Acme"
+        assert!(matches!(
+            crate::project::row_at(&f.project_store, 0),
+            Some(crate::project::RowRef::Folder { .. })
+        ));
+
+        let lines = render(160, &AppState::default(), &f);
+        assert!(contains_line(&lines, "expand/collapse"), "{lines:?}");
+        assert!(contains_line(&lines, "n: new"), "{lines:?}");
+        assert!(contains_line(&lines, "R: refresh"), "{lines:?}");
+    }
+
+    /// Every level below the pane's root pops back on `Esc`, and says so
+    #[test]
+    fn test_project_level_advertises_escape() {
+        let f = fixture();
+        let project_id = f.project_store.projects().next().unwrap().id;
+        let state = AppState {
+            projects_nav: ProjectsNav::Project(project_id),
+            ..Default::default()
+        };
+
+        let lines = render(160, &state, &f);
+        assert!(contains_line(&lines, "Esc: back"), "{lines:?}");
     }
 
     #[test]
