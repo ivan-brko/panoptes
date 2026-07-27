@@ -4,21 +4,16 @@
 //! vterm-scrollback-with-fallback dance in one place; the `App`-level wrappers
 //! resolve the session and viewport.
 //!
-//! Every scroll now arrives from the mouse wheel or from a selection dragged
-//! past the edge of the screen. The keyboard entry points this module was
-//! written for are gone with the mode that owned them - a session forwards
-//! every key but `Esc` to the agent - so the wrappers they called
-//! (`scroll_page_up`, `scroll_lines_up`, `scroll_to_top` and friends) have no
-//! production callers left.
+//! Scrolling arrives from the mouse wheel, from a selection dragged past the
+//! edge of the screen, and from the only two keys a session keeps for itself:
+//! `Ctrl+Home` and `Ctrl+End`, the two ends of the scrollback. The page and
+//! line wrappers went with the mode that owned them.
 //!
 //! Both clamps ask the same question, whichever buffer answers: **stop at the
 //! history that exists**, never at the capacity that was configured.
 
 use crate::app::App;
 use crate::session::{Session, SessionId, SessionType};
-
-/// Number of lines to scroll per arrow key press.
-const ARROW_SCROLL_STEP: usize = 3;
 
 /// What a scroll step did, for caller-side debug logging.
 #[derive(Debug, Clone, Copy)]
@@ -202,18 +197,6 @@ pub(crate) fn scroll_down_by(
     Some(outcome)
 }
 
-/// Scroll up by one viewport page.
-pub fn scroll_page_up(app: &mut App, session_id: SessionId) {
-    let height = viewport_height(app);
-    scroll_up_by(app, session_id, height);
-}
-
-/// Scroll down by one viewport page.
-pub fn scroll_page_down(app: &mut App, session_id: SessionId) {
-    let height = viewport_height(app);
-    scroll_down_by(app, session_id, height);
-}
-
 /// Scroll to oldest available output.
 pub fn scroll_to_top(app: &mut App, session_id: SessionId) {
     let viewport_height = viewport_height(app);
@@ -231,16 +214,6 @@ pub fn scroll_to_bottom(app: &mut App, session_id: SessionId) {
         scroll_session_to_bottom(session, &mut offset);
         app.state.session_scroll_offset = offset;
     }
-}
-
-/// Scroll up by a few lines (arrow key).
-pub fn scroll_lines_up(app: &mut App, session_id: SessionId) {
-    scroll_up_by(app, session_id, ARROW_SCROLL_STEP);
-}
-
-/// Scroll down by a few lines (arrow key).
-pub fn scroll_lines_down(app: &mut App, session_id: SessionId) {
-    scroll_down_by(app, session_id, ARROW_SCROLL_STEP);
 }
 
 /// Reset app-level scroll when changing active session.

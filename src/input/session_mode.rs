@@ -1,13 +1,13 @@
 //! Session mode input handling
 //!
-//! The session view has one mode, and this is it: every key reaches the agent
-//! except `Esc`, which leaves. There is no second mode to be in and no
-//! keystroke Panoptes takes for itself along the way - no scroll keys, no
-//! session-switching digits, no custom shortcuts. Those all still exist, in
+//! The session view has one mode, and this is it: nearly every key reaches the
+//! agent. Panoptes keeps three, and no more - `Esc` to leave, and `Ctrl+Home`
+//! / `Ctrl+End` to jump to the oldest line and back to live output. No
+//! session-switching digits, no custom shortcuts, no page keys; those live in
 //! the panes, one `Esc` away.
 //!
-//! Scrolling is therefore the wheel's job. For a session whose child asked
-//! for the mouse, the wheel goes to the child and the child's own scrollback
+//! Ordinary scrolling is the wheel's job. For a session whose child asked for
+//! the mouse, the wheel goes to the child and the child's own scrollback
 //! answers - which is what a real terminal does with an agent that draws its
 //! own screen.
 
@@ -28,6 +28,20 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
     // Reset scroll to live view when typing (only on Press/Repeat, not Release)
     if key.kind == KeyEventKind::Release {
         return Ok(());
+    }
+
+    // The two ends of the scrollback, before the key is treated as typing -
+    // otherwise the scroll-to-live below would undo the jump.
+    if let Some(jump) = scroll_jump(&key) {
+        if let Some(session_id) = app.state.active_session {
+            if !alternate_screen_owns_keys(app, session_id) {
+                match jump {
+                    ScrollJump::Top => session_scroll::scroll_to_top(app, session_id),
+                    ScrollJump::Live => session_scroll::scroll_to_bottom(app, session_id),
+                }
+                return Ok(());
+            }
+        }
     }
     if app.state.session_scroll_offset > 0 {
         if let Some(session_id) = app.state.active_session {
@@ -71,6 +85,47 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// One of the two ends of the scrollback
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollJump {
+    /// The oldest line Panoptes still holds
+    Top,
+    /// Back to what the agent is doing now
+    Live,
+}
+
+/// Whether this key is one of the two jumps Panoptes keeps for itself
+///
+/// `Ctrl+Home` and `Ctrl+End`, chosen because nothing else in a session
+/// wants them. `bash`'s readline and `zsh`'s ZLE leave both unbound, and the
+/// programs that *do* bind them - `vim`'s `gg`/`G` above all - draw on the
+/// alternate screen, where [`alternate_screen_owns_keys`] hands them straight
+/// back. Plain `Home`/`End` are deliberately untouched: they move the cursor
+/// on every command line there is.
+fn scroll_jump(key: &KeyEvent) -> Option<ScrollJump> {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Home => Some(ScrollJump::Top),
+        KeyCode::End => Some(ScrollJump::Live),
+        _ => None,
+    }
+}
+
+/// Whether the child is drawing its own screen, and so owns every key
+///
+/// An alternate-screen program - Claude Code's UI, `vim`, `less` - keeps its
+/// own scrollback and vt100 keeps none behind it. There is nothing for
+/// Panoptes to scroll to, so taking these keys would steal `gg` and `G` and
+/// give nothing back. Asked at each keypress rather than assumed, because a
+/// session moves between the two screens as the user runs things.
+fn alternate_screen_owns_keys(app: &App, session_id: SessionId) -> bool {
+    app.sessions
+        .get(session_id)
+        .is_some_and(|session| session.vterm.alternate_screen_active())
 }
 
 /// Send a key to a session's PTY and acknowledge its attention flag
@@ -186,13 +241,48 @@ mod tests {
         assert_eq!(esc_intent(&key), EscIntent::LeaveSessionView);
     }
 
+    /// The two jumps Panoptes keeps, and nothing near them
+    ///
+    /// Plain `Home`/`End` must stay the agent's: they move the cursor on
+    /// every command line there is, and stealing them would break typing.
+    #[test]
+    fn test_only_ctrl_home_and_ctrl_end_are_scroll_jumps() {
+        assert_eq!(
+            scroll_jump(&press(KeyCode::Home, KeyModifiers::CONTROL)),
+            Some(ScrollJump::Top)
+        );
+        assert_eq!(
+            scroll_jump(&press(KeyCode::End, KeyModifiers::CONTROL)),
+            Some(ScrollJump::Live)
+        );
+
+        for key in [
+            press(KeyCode::Home, KeyModifiers::NONE),
+            press(KeyCode::End, KeyModifiers::NONE),
+            press(KeyCode::Home, KeyModifiers::SHIFT),
+            press(KeyCode::End, KeyModifiers::ALT),
+            press(KeyCode::PageUp, KeyModifiers::CONTROL),
+            press(KeyCode::PageDown, KeyModifiers::CONTROL),
+            press(KeyCode::Up, KeyModifiers::CONTROL),
+            press(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(
+                scroll_jump(&key),
+                None,
+                "{:?} with {:?} must reach the agent",
+                key.code,
+                key.modifiers
+            );
+        }
+    }
+
     /// Every key that is not `Esc` reaches the agent's PTY
     ///
     /// Each of these used to be taken by Panoptes somewhere in the session
-    /// view - the scroll keys in this handler, the digits and shortcut
+    /// view - the page keys in this handler, the digits and shortcut
     /// characters in the detached mode that no longer exists. Writing them
-    /// through `forward_key_to_session` is what one mode means: the handler
-    /// above has no branch that can swallow them.
+    /// through `forward_key_to_session` is what one mode means. Note plain
+    /// `Home`/`End` among them: only the `Ctrl` pair is Panoptes'.
     #[test]
     fn test_every_key_but_esc_goes_to_the_pty() {
         let temp_dir = TempDir::new().unwrap();
@@ -204,8 +294,8 @@ mod tests {
         for key in [
             press(KeyCode::PageUp, KeyModifiers::NONE),
             press(KeyCode::PageDown, KeyModifiers::NONE),
-            press(KeyCode::Home, KeyModifiers::CONTROL),
-            press(KeyCode::End, KeyModifiers::CONTROL),
+            press(KeyCode::Home, KeyModifiers::NONE),
+            press(KeyCode::End, KeyModifiers::NONE),
             press(KeyCode::Up, KeyModifiers::NONE),
             press(KeyCode::Down, KeyModifiers::NONE),
             press(KeyCode::Enter, KeyModifiers::NONE),

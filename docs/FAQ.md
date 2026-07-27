@@ -111,7 +111,7 @@ At a branch, press `s`, enter a session name, and press Enter. Shell sessions ru
 
 Press `Enter` on a session to open it. Press `Esc` to leave — one press, straight back to the pane you opened it from.
 
-Inside a session there is no second mode: **every key goes to the agent except `Esc`**. Type as if the agent had the terminal to itself.
+Inside a session there is no second mode: **every key goes to the agent except `Esc`, `Ctrl+Home` and `Ctrl+End`**. Type as if the agent had the terminal to itself.
 
 ### How do I send Escape to the agent (not leave the session)?
 
@@ -129,11 +129,16 @@ Press `Esc` first to get out of the session you are in.
 
 ### How do I scroll through session history?
 
-Use the **mouse wheel**. There are no scroll keys inside a session: `PageUp` and friends belong to the agent, the same as every other key.
+Use the **mouse wheel**, plus two keys:
 
-When the agent owns the mouse (Claude Code's TUI, `vim`, `htop`), the wheel goes to the agent and you scroll with the agent's own history — exactly as you would in a plain terminal tab.
+- **Ctrl+Home** — jump to the oldest line Panoptes still holds
+- **Ctrl+End** — back to live output
 
-Typing anything returns you to live output.
+Those are the only scroll keys. `PageUp` and friends belong to the agent, like every other key. Typing anything also returns you to live output.
+
+Both jumps hand themselves to the agent when it draws its own screen (Claude Code's TUI, `vim`, `less`) — there is no Panoptes scrollback behind such a program, and taking the keys would only break `gg` and `G`. Scroll with the agent's own history there, exactly as you would in a plain terminal tab.
+
+When the agent owns the *mouse*, the wheel goes to it for the same reason.
 
 ### How do I copy text out of a session?
 
@@ -148,7 +153,7 @@ Two cases behave differently:
 
 ### I can't scroll through the session output - what's wrong?
 
-Use the mouse wheel; there are no keyboard scroll keys inside a session.
+Use the mouse wheel, or `Ctrl+Home` / `Ctrl+End` for the two ends.
 
 If the wheel scrolls the agent rather than Panoptes, the agent has asked for the mouse and is handling it — that is deliberate, and the agent's own scrollback is what you want in that case.
 
@@ -286,6 +291,7 @@ The prompts are optional—you can decline each time. There's no global setting 
 | `Esc` | Back one level; in a session, straight out to the panes. Never quits |
 | `q` | Quit (with confirmation) |
 | `Shift+Esc` | Send a literal Escape to the active session |
+| `Ctrl+Home` / `Ctrl+End` | In a session: oldest line / live output |
 | `Space` | Jump to next session needing attention |
 | `n` | New (project/worktree/session depending on context) |
 | `s` | New shell session (at a branch) |

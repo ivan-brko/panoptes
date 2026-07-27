@@ -264,6 +264,10 @@ fn session_shortcuts() -> Vec<Line<'static>> {
         shortcut_line("All keys", "Forwarded to the agent"),
         shortcut_line("Esc", "Back to the pane it was opened from"),
         shortcut_line("\u{21E7}Esc", "Send Esc to the agent"),
+        shortcut_line("Ctrl+Home", "Jump to the oldest line kept"),
+        shortcut_line("Ctrl+End", "Back to live output"),
+        shortcut_line("", "Both go to the agent instead when it draws"),
+        shortcut_line("", "its own screen (claude, vim, less)"),
         empty_line(),
         section_header("Session - mouse"),
         shortcut_line("Scroll wheel", "Scroll back through the output; goes to"),
@@ -276,9 +280,9 @@ fn session_shortcuts() -> Vec<Line<'static>> {
         // until the session view had one mode. Someone reaching for PgUp
         // should find out here why it typed into their agent instead.
         section_header("Not in a session"),
-        shortcut_line("", "Switching sessions, custom shortcuts and"),
-        shortcut_line("", "keyboard scrolling live in the panes - every"),
-        shortcut_line("", "key here belongs to the agent. Esc, then go."),
+        shortcut_line("", "Switching sessions and custom shortcuts live"),
+        shortcut_line("", "in the panes. Every other key here belongs"),
+        shortcut_line("", "to the agent. Esc, then go."),
         empty_line(),
         footer_hint(),
     ]

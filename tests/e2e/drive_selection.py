@@ -357,6 +357,24 @@ def scenario_shell():
           re.search(SCROLL_INDICATOR, screen_text()) is not None)
     check("the wheel comes back to live output", to_live_view())
 
+    # The two keys a session keeps for itself (PAN-25). Ctrl+Home is CSI 1;5H
+    # and Ctrl+End CSI 1;5F, exactly as a terminal sends them.
+    send(b"\x1b[1;5H", 0.8)
+    at_top = re.search(SCROLL_INDICATOR, screen_text())
+    check(f"Ctrl+Home jumps to the oldest line (indicator {at_top and at_top.group(1)})",
+          at_top is not None and int(at_top.group(1)) > 0)
+    send(b"\x1b[1;5F", 0.8)
+    check("Ctrl+End comes straight back to live output",
+          re.search(SCROLL_INDICATOR, screen_text()) is None)
+
+    # ...and neither reached the shell, which would have left the escape
+    # sequence sitting on the command line
+    send("echo AFTERJUMP\r", 1.5)
+    if check("the shell still runs commands", wait_for(r"AFTERJUMP", 6.0, "clean prompt")):
+        rendered = screen_text()
+        check("the jumps did not leak into the shell",
+              "1;5H" not in rendered and "1;5F" not in rendered)
+
     # A drag across rows copies every line it covers
     send("printf 'ALPHA\\nBETA\\nGAMMA\\n'\r", 2.0)
     if check("three lines printed", wait_for(r"GAMMA", 8.0, "three lines")):
