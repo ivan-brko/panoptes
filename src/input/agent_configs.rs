@@ -78,6 +78,17 @@ impl AgentKind {
         }
     }
 
+    /// This agent's row in the wizard's first step
+    ///
+    /// The inverse of [`crate::input::text_input::agent_kind_at`], so a step
+    /// backwards lands on the row the user came forward from.
+    pub fn selector_row(self) -> usize {
+        match self {
+            AgentKind::Claude => 0,
+            AgentKind::Codex => 1,
+        }
+    }
+
     /// Input mode for the name step of this agent's new-session wizard
     pub fn creating_session_mode(self) -> InputMode {
         match self {
@@ -274,7 +285,7 @@ pub fn handle_creating_agent_session_key(
                 let preferred = app.state.session_draft.account.as_ref().map(|a| a.id);
                 open_config_selector(app, kind, project_id, preferred);
             } else {
-                back_to_agent_step(&mut app.state);
+                back_to_agent_step(&mut app.state, kind);
             }
         }
         KeyCode::Enter => {
@@ -294,9 +305,13 @@ pub fn handle_creating_agent_session_key(
 }
 
 /// Back to the wizard's first step, keeping the branch the draft came from
-pub(crate) fn back_to_agent_step(state: &mut AppState) {
+///
+/// The step reopens on the agent the user is backing out of, not on the top
+/// of the list: stepping back is a chance to change the answer, not a reset
+/// that silently answers it differently.
+pub(crate) fn back_to_agent_step(state: &mut AppState, kind: AgentKind) {
     state.session_draft.account = None;
-    state.agent_type_selector_index = 0;
+    state.agent_type_selector_index = kind.selector_row();
     state.input_mode = InputMode::SelectingAgentType;
 }
 
@@ -598,7 +613,7 @@ pub(crate) fn selecting_config_key(
                 state.input_mode = InputMode::Normal;
             } else {
                 // Step 2 of the wizard: back to step 1, draft intact
-                back_to_agent_step(state);
+                back_to_agent_step(state, kind);
             }
         }
         KeyCode::Down => {
@@ -1131,6 +1146,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(f.state.input_mode, InputMode::SelectingAgentType);
+        assert_eq!(
+            f.state.agent_type_selector_index,
+            AgentKind::Codex.selector_row(),
+            "step 1 reopens on the agent being backed out of"
+        );
         assert!(f.state.available_codex_configs.is_empty());
         assert_eq!(f.state.session_draft.project_id, Some(project_id));
         assert_eq!(f.state.session_draft.branch_id, Some(branch_id));

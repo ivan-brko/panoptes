@@ -718,4 +718,13 @@ mod tests {
         assert_eq!(agent_kind_at(0).agent_type(), AgentType::ClaudeCode);
         assert_eq!(agent_kind_at(1).agent_type(), AgentType::OpenAICodex);
     }
+
+    /// Stepping back reopens step 1 on the row that was chosen, so the two
+    /// directions must agree on which row that is
+    #[test]
+    fn test_a_row_and_its_agent_round_trip() {
+        for row in 0..WIZARD_AGENTS.len() {
+            assert_eq!(agent_kind_at(row).selector_row(), row);
+        }
+    }
 }
