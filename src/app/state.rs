@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::claude_config::ClaudeConfig;
 use crate::project::{BranchId, ProjectId};
-use crate::session::{SessionId, SessionManager};
+use crate::session::{AgentAccount, SessionId, SessionManager};
 use crate::tui::HeaderNotificationManager;
 use crate::wizards::worktree::{BranchRef, WorktreeCreationType};
 
@@ -103,9 +103,9 @@ impl ConfigDraft {
 
 /// Draft state for a session being created
 ///
-/// Filled in by the view that starts session creation (name typed by the
-/// user, project/branch/working-dir context from the selected branch), then
-/// consumed by the create flow via [`SessionDraft::take`].
+/// Filled in step by step as the new-session wizard advances - the branch it
+/// starts from, then the account picked in the config step, then the name the
+/// user types - and consumed by the create flow via [`SessionDraft::take`].
 #[derive(Debug, Clone, Default)]
 pub struct SessionDraft {
     /// Session name being typed (empty = auto-generate one)
@@ -116,6 +116,11 @@ pub struct SessionDraft {
     pub branch_id: Option<BranchId>,
     /// Directory the session starts in (None = current directory)
     pub working_dir: Option<PathBuf>,
+    /// Account chosen in the wizard's config step
+    ///
+    /// `None` for a shell session, and for an agent with no configs at all;
+    /// an agent with exactly one config gets it without a step being shown.
+    pub account: Option<AgentAccount>,
 }
 
 impl SessionDraft {
@@ -126,6 +131,7 @@ impl SessionDraft {
             project_id: Some(project_id),
             branch_id: Some(branch_id),
             working_dir: Some(working_dir),
+            account: None,
         }
     }
 

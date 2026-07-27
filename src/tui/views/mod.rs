@@ -11,7 +11,6 @@ use crate::session::{AttentionReason, SessionInfo, SessionManager, SessionState,
 use crate::tui::theme::theme;
 
 mod agent_configs;
-mod agent_select;
 mod claude_settings;
 mod confirm;
 mod custom_shortcuts;
@@ -22,6 +21,7 @@ pub(crate) mod pane_settings;
 mod panes;
 mod prompts;
 mod session;
+mod session_wizard;
 mod worktree;
 
 #[cfg(test)]
@@ -30,9 +30,8 @@ pub(crate) mod test_util;
 pub use agent_configs::{
     render_agent_config_delete_dialog, render_agent_config_list,
     render_agent_config_name_input_dialog, render_agent_config_path_input_dialog,
-    render_agent_config_selector,
+    render_agent_config_selector, ConfigSelectorFlow,
 };
-pub use agent_select::render_agent_type_selector;
 pub use claude_settings::{
     render_claude_settings_copy_dialog, render_claude_settings_migrate_dialog,
 };
@@ -48,6 +47,9 @@ pub use prompts::{
     render_folder_move_dialog, render_folder_remove_confirmation, render_project_addition_dialog,
 };
 pub use session::render_session_view;
+pub use session_wizard::{
+    render_agent_type_selector, render_session_name_input, wizard_title, WIZARD_AGENTS,
+};
 pub use worktree::{
     render_branch_delete_confirmation, render_default_base_selector,
     render_project_delete_confirmation, render_worktree_wizard,

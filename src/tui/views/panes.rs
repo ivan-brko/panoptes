@@ -250,7 +250,7 @@ fn footer_text(ctx: &PaneContext) -> String {
     let state = ctx.state;
 
     // A prompt owns the footer while it is open
-    if let Some(prompt) = prompt_footer(state.input_mode) {
+    if let Some(prompt) = prompt_footer(state) {
         return prompt.to_string();
     }
 
@@ -271,16 +271,21 @@ fn footer_text(ctx: &PaneContext) -> String {
 }
 
 /// The footer a prompt owns while it is open, if any
-fn prompt_footer(mode: InputMode) -> Option<&'static str> {
-    Some(match mode {
+///
+/// The new-session wizard's steps say "back" rather than "cancel", because
+/// `Esc` steps them back one: only its first step cancels. The config step is
+/// the one prompt whose keys depend on more than the mode - the same selector
+/// is a dialog of its own when a project's default is being set.
+fn prompt_footer(state: &AppState) -> Option<&'static str> {
+    Some(match state.input_mode {
         InputMode::AddingProject => "Tab: autocomplete | Enter: select | Esc: cancel",
         InputMode::AddingProjectName => "Enter: create project | Esc: back",
         InputMode::RenamingProject | InputMode::RenamingFolder => "Enter: save | Esc: cancel",
         InputMode::MovingToFolder => "Tab: complete | Enter: move | Esc: cancel",
-        InputMode::CreatingSession
-        | InputMode::CreatingCodexSession
-        | InputMode::CreatingShellSession => "Enter: create | Esc: cancel",
         InputMode::SelectingAgentType => "↑↓: navigate | Enter: select | Esc: cancel",
+        InputMode::CreatingSession | InputMode::CreatingCodexSession => "Enter: create | Esc: back",
+        // A shell session's flow is one step, so there is nothing behind it
+        InputMode::CreatingShellSession => "Enter: create | Esc: cancel",
         InputMode::ConfirmingBranchDelete => {
             "w: also delete the directory | y: confirm | n/Esc: cancel"
         }
@@ -297,7 +302,11 @@ fn prompt_footer(mode: InputMode) -> Option<&'static str> {
             "Type: filter | ↑↓: navigate | Enter: set default | Esc: cancel"
         }
         InputMode::SelectingClaudeConfig | InputMode::SelectingCodexConfig => {
-            "↑↓: navigate | Enter: select | Esc: cancel"
+            if state.setting_project_default_config.is_some() {
+                "↑↓: navigate | Enter: select | Esc: cancel"
+            } else {
+                "↑↓: navigate | Enter: select | Esc: back"
+            }
         }
         _ => return None,
     })
@@ -626,6 +635,52 @@ mod tests {
         assert!(contains_line(&lines, "expand/collapse"), "{lines:?}");
         assert!(contains_line(&lines, "n: new"), "{lines:?}");
         assert!(contains_line(&lines, "R: refresh"), "{lines:?}");
+    }
+
+    /// The new-session wizard advertises `Esc` as "back" from every step but
+    /// its first, which is the only one that cancels
+    #[test]
+    fn test_wizard_steps_advertise_back_and_only_the_first_cancels() {
+        let footer = |mode| {
+            let state = AppState {
+                input_mode: mode,
+                ..Default::default()
+            };
+            prompt_footer(&state).expect("every wizard step owns the footer")
+        };
+
+        assert!(footer(InputMode::SelectingAgentType).ends_with("Esc: cancel"));
+        for mode in [
+            InputMode::SelectingClaudeConfig,
+            InputMode::SelectingCodexConfig,
+            InputMode::CreatingSession,
+            InputMode::CreatingCodexSession,
+        ] {
+            assert!(footer(mode).ends_with("Esc: back"), "{mode:?}");
+        }
+
+        // A shell session's flow is one step, so its `Esc` still cancels
+        assert!(footer(InputMode::CreatingShellSession).ends_with("Esc: cancel"));
+    }
+
+    /// The config selector is dual-use, and the footer follows the flow that
+    /// opened it: from a project's settings there is no step to go back to
+    #[test]
+    fn test_the_config_selector_footer_follows_the_flow_that_opened_it() {
+        for mode in [
+            InputMode::SelectingClaudeConfig,
+            InputMode::SelectingCodexConfig,
+        ] {
+            let state = AppState {
+                input_mode: mode,
+                setting_project_default_config: Some(uuid::Uuid::new_v4()),
+                ..Default::default()
+            };
+            assert!(
+                prompt_footer(&state).unwrap().ends_with("Esc: cancel"),
+                "{mode:?}"
+            );
+        }
     }
 
     /// Every level below the pane's root pops back on `Esc`, and says so

@@ -85,7 +85,7 @@ Shell sessions show simplified states:
 
 ### Multi-Session Management
 
-Run as many Claude Code and Codex sessions as you need. Each session is independent and maintains its own conversation history. When creating a new session, an agent type selector lets you choose between Claude Code and Codex.
+Run as many Claude Code and Codex sessions as you need. Each session is independent and maintains its own conversation history. Creating one is a single dialog with three steps - the agent (Claude Code or Codex), the account it runs under, then the name - where `Esc` steps back one at a time.
 
 ### Git-Aware Organization
 
@@ -183,7 +183,7 @@ Manage multiple accounts for both Claude Code and Codex CLI:
 
 **Shared features:**
 - **Project Defaults** - Set a default configuration for each project (independent for Claude and Codex)
-- **Session Selection** - Choose which configuration to use when creating a new session
+- **Session Selection** - Choose which configuration to use when creating a new session, as the step right after the agent type (skipped when there is only one configuration)
 - **Visual Indicator** - See which configuration a session is using in the header
 
 ### Claude Code Permissions Sync

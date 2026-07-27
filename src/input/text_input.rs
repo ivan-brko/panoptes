@@ -13,7 +13,9 @@ use crate::app::{
     cycle_next, cycle_prev, App, FolderMoveTarget, InputMode, MAX_PROJECT_NAME_LEN,
     MAX_PROJECT_PATH_LEN, MAX_SESSION_NAME_LEN,
 };
-use crate::session::{AgentAccount, NewSessionSpec};
+use crate::input::agent_configs::AgentKind;
+use crate::session::NewSessionSpec;
+use crate::tui::views::WIZARD_AGENTS;
 
 /// Handle key while creating a new shell session
 pub fn handle_creating_shell_session_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -29,7 +31,7 @@ pub fn handle_creating_shell_session_key(app: &mut App, key: KeyEvent) -> Result
         }
         KeyCode::Enter => {
             // Create the shell session
-            create_session(app, AgentType::Shell, None)?;
+            create_session(app, AgentType::Shell)?;
         }
         KeyCode::Backspace => {
             app.state.session_draft.name.pop();
@@ -47,15 +49,12 @@ pub fn handle_creating_shell_session_key(app: &mut App, key: KeyEvent) -> Result
 
 /// Create a session of the given agent type from the current draft
 ///
-/// The one create path for Claude, Codex, and shell sessions started from the
-/// name-input dialogs. Consumes `app.state.session_draft`; `account` carries
-/// the Claude/Codex profile when one was selected.
-pub(crate) fn create_session(
-    app: &mut App,
-    agent: AgentType,
-    account: Option<AgentAccount>,
-) -> Result<()> {
+/// The one create path for Claude, Codex, and shell sessions, called from the
+/// wizard's last step. Consumes `app.state.session_draft`, including the
+/// account its config step put there (always `None` for a shell).
+pub(crate) fn create_session(app: &mut App, agent: AgentType) -> Result<()> {
     let draft = app.state.session_draft.take();
+    let account = draft.account;
 
     // A blank name means Panoptes made one up, which the agent's own title may
     // later replace; a name the user typed is theirs and is never overwritten.
@@ -661,7 +660,9 @@ fn apply_path_completion(app: &mut App) {
 // Agent Type Selection Handler
 // ========================================================================
 
-/// Handle key when selecting agent type (Claude Code vs Codex)
+/// Handle key on the new-session wizard's first step (Claude Code vs Codex)
+///
+/// The only step `Esc` cancels from: every later step backs up into this one.
 pub fn handle_selecting_agent_type_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if key.kind != KeyEventKind::Press {
         return Ok(());
@@ -675,23 +676,46 @@ pub fn handle_selecting_agent_type_key(app: &mut App, key: KeyEvent) -> Result<(
         }
         KeyCode::Down => {
             app.state.agent_type_selector_index =
-                cycle_next(app.state.agent_type_selector_index, 2);
+                cycle_next(app.state.agent_type_selector_index, WIZARD_AGENTS.len());
         }
         KeyCode::Up => {
             app.state.agent_type_selector_index =
-                cycle_prev(app.state.agent_type_selector_index, 2);
+                cycle_prev(app.state.agent_type_selector_index, WIZARD_AGENTS.len());
         }
         KeyCode::Enter => {
-            if app.state.agent_type_selector_index == 0 {
-                // Claude Code selected
-                app.state.input_mode = InputMode::CreatingSession;
-            } else {
-                // Codex selected
-                app.state.input_mode = InputMode::CreatingCodexSession;
-            }
+            let kind = agent_kind_at(app.state.agent_type_selector_index);
             app.state.agent_type_selector_index = 0;
+            // On to the config step, which shows itself only when the agent
+            // has more than one account to choose between
+            crate::input::agent_configs::start_session_config_step(app, kind);
         }
         _ => {}
     }
     Ok(())
+}
+
+/// The agent the selector's row `index` stands for
+///
+/// Row order is the view's ([`WIZARD_AGENTS`]), so the two cannot drift.
+pub(crate) fn agent_kind_at(index: usize) -> AgentKind {
+    if index == 0 {
+        AgentKind::Claude
+    } else {
+        AgentKind::Codex
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every row of step 1 names an agent, and the first one is Claude
+    #[test]
+    fn test_each_agent_row_maps_to_its_kind() {
+        assert_eq!(WIZARD_AGENTS.len(), 2);
+        assert_eq!(agent_kind_at(0), AgentKind::Claude);
+        assert_eq!(agent_kind_at(1), AgentKind::Codex);
+        assert_eq!(agent_kind_at(0).agent_type(), AgentType::ClaudeCode);
+        assert_eq!(agent_kind_at(1).agent_type(), AgentType::OpenAICodex);
+    }
 }
