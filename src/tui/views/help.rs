@@ -150,7 +150,7 @@ fn project_shortcuts() -> Vec<Line<'static>> {
     with_global(
         "Pane 1 - Project",
         vec![
-            shortcut_line("↑ / ↓ / 1-9", "Select a branch"),
+            shortcut_line("↑ / ↓", "Select a branch"),
             shortcut_line("Enter", "Open the branch"),
             shortcut_line("n", "Create a worktree"),
             shortcut_line("d", "Delete the selected branch"),
@@ -164,7 +164,7 @@ fn branch_shortcuts() -> Vec<Line<'static>> {
     with_global(
         "Pane 1 - Branch",
         vec![
-            shortcut_line("↑ / ↓ / 1-9", "Select a session (0 = 10)"),
+            shortcut_line("↑ / ↓", "Select a session"),
             shortcut_line("Enter", "Open session (resumes if [Resumable])"),
             shortcut_line("n", "New AI session (Claude/Codex)"),
             shortcut_line("s", "New shell session"),

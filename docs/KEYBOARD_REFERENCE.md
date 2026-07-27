@@ -64,7 +64,7 @@ existing folders, and leave the input empty to move back to the root level.
 
 | Key | Action |
 |-----|--------|
-| `Up` / `Down` / `1-9` | Select a branch |
+| `Up` / `Down` | Select a branch |
 | `Enter` | Open selected branch |
 | `n` | Create new worktree (opens the wizard) |
 | `d` | Delete selected worktree (never deletes the git branch) |
@@ -93,7 +93,7 @@ Per-project defaults. Replaces the old `c`, `x`, `b` and `r` keys.
 
 | Key | Action |
 |-----|--------|
-| `Up` / `Down` / `1-9` | Select a session (`0` = 10) |
+| `Up` / `Down` | Select a session |
 | `Enter` | Open selected session (resumes it if `[Resumable]`) |
 | `n` | Create new AI session (Claude Code or Codex) |
 | `s` | Create new shell session |

@@ -215,14 +215,6 @@ fn handle_project_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Re
                     .push("Refreshed: all worktrees OK");
             }
         }
-        KeyCode::Char(c) if c.is_ascii_digit() => {
-            if let Some(num) = c.to_digit(10) {
-                let num = num as usize;
-                if num > 0 && num <= branch_count {
-                    app.state.selected_branch_index = num - 1;
-                }
-            }
-        }
         _ => {}
     }
     Ok(())
@@ -305,17 +297,6 @@ fn handle_branch_key(
         KeyCode::Up => {
             app.state.branch_session_index =
                 cycle_prev(app.state.branch_session_index, session_count);
-        }
-        KeyCode::Char(c) if c.is_ascii_digit() => {
-            // Sessions are numbered in the list; jump to one by its number
-            // (1-indexed, 0 means session 10). Digits are reserved, so this
-            // never collides with a custom shortcut.
-            if let Some(num) = c.to_digit(10) {
-                let target = if num == 0 { 9 } else { (num as usize) - 1 };
-                if target < session_count {
-                    app.state.branch_session_index = target;
-                }
-            }
         }
         KeyCode::Enter => {
             if let Some(&(session_id, live)) = branch_sessions.get(app.state.branch_session_index) {

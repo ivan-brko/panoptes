@@ -327,7 +327,6 @@ fn render_tree(
 /// One row of the branch list
 struct BranchItem<'a> {
     display_name: &'a str,
-    number: usize,
     selected: bool,
     active_count: usize,
     attention_count: usize,
@@ -342,9 +341,8 @@ fn branch_item(item: BranchItem) -> ListItem<'static> {
     let t = theme();
     let content = truncate_string(
         &format!(
-            "{}{}: {}{}",
+            "{}{}{}",
             selection_prefix(item.selected),
-            item.number,
             item.display_name,
             item.status
         ),
@@ -429,7 +427,6 @@ fn render_branches(
         }
         items.push(branch_item(BranchItem {
             display_name: current_branch_display.as_deref().unwrap_or(&branch.name),
-            number: item_index + 1,
             selected: item_index == selected_index && focused,
             active_count,
             attention_count,
@@ -477,7 +474,6 @@ fn render_branches(
             }
             items.push(branch_item(BranchItem {
                 display_name: &branch.name,
-                number: item_index + 1,
                 selected: item_index == selected_index && focused,
                 active_count,
                 attention_count,
@@ -563,12 +559,7 @@ fn render_branch_sessions(
                     .as_ref()
                     .map(|reason| reason.summary())
                     .or_else(|| info.last_message.clone());
-                spans.push(Span::raw(format!(
-                    "{}: {} [{}]",
-                    i + 1,
-                    info.name,
-                    state_display
-                )));
+                spans.push(Span::raw(format!("{} [{}]", info.name, state_display)));
                 if let Some(trailer) = trailer {
                     spans.push(Span::styled(format!(" — {}", trailer), t.muted_style()));
                 }
@@ -723,6 +714,18 @@ mod tests {
 
     fn render(width: u16, state: &AppState, store: &ProjectStore) -> Vec<String> {
         crate::tui::views::test_util::buffer_lines(&render_buffer(width, state, store))
+    }
+
+    fn render_with_sessions(
+        width: u16,
+        state: &AppState,
+        store: &ProjectStore,
+        sessions: &SessionManager,
+    ) -> Vec<String> {
+        let mode = crate::tui::panes::side_mode(width + 2);
+        crate::tui::views::test_util::render_to_lines(width, 12, |frame| {
+            render_projects_pane(frame, frame.size(), state, store, sessions, mode)
+        })
     }
 
     #[test]
@@ -985,6 +988,86 @@ mod tests {
         assert_eq!(projects_breadcrumb(&state, &store, 30), "pan-6-accordion");
         // Too narrow even for that: truncate, but never past the width
         assert_eq!(projects_breadcrumb(&state, &store, 10).chars().count(), 10);
+    }
+
+    /// Nothing in this pane is numbered at any depth: `↑`/`↓` and `Enter`
+    /// are the whole story, so a `1: ` prefix would advertise a jump key
+    /// that no longer exists
+    #[test]
+    fn test_branch_rows_are_not_numbered() {
+        let mut store = store_with(&[("solo", &[][..])]);
+        let project_id = store.projects().next().unwrap().id;
+        store.add_branch(crate::project::Branch::default_for_project(
+            project_id,
+            "main".to_string(),
+            PathBuf::from("/tmp/solo"),
+        ));
+        store.add_branch(crate::project::Branch::new(
+            project_id,
+            "feature-x".to_string(),
+            PathBuf::from("/tmp/solo-feature-x"),
+            false,
+            true,
+        ));
+
+        let state = AppState {
+            projects_nav: ProjectsNav::Project(project_id),
+            ..Default::default()
+        };
+        let lines = render(60, &state, &store);
+
+        assert!(contains_line(&lines, "▶ main"), "{lines:?}");
+        assert!(contains_line(&lines, "  feature-x"), "{lines:?}");
+        for numbered in ["1: ", "2: "] {
+            assert!(
+                !lines.iter().any(|l| l.contains(numbered)),
+                "{numbered:?} still prefixes a branch row: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_branch_session_rows_are_not_numbered() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut store = store_with(&[("solo", &[][..])]);
+        let project_id = store.projects().next().unwrap().id;
+        let branch = crate::project::Branch::default_for_project(
+            project_id,
+            "main".to_string(),
+            PathBuf::from("/tmp/solo"),
+        );
+        let branch_id = branch.id;
+        store.add_branch(branch);
+
+        let config = Config {
+            worktrees_dir: temp.path().join("worktrees"),
+            hooks_dir: temp.path().join("hooks"),
+            ..Config::default()
+        };
+        let mut sessions = SessionManager::with_store(
+            config,
+            SessionStore::with_path(temp.path().join("sessions.json")),
+        );
+        for name in ["alpha", "beta"] {
+            sessions
+                .insert_test_session(name, project_id, branch_id)
+                .unwrap();
+        }
+
+        let state = AppState {
+            projects_nav: ProjectsNav::Branch(project_id, branch_id),
+            ..Default::default()
+        };
+        let lines = render_with_sessions(70, &state, &store, &sessions);
+
+        assert!(lines.iter().any(|l| l.contains("alpha")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("beta")), "{lines:?}");
+        for numbered in ["1: ", "2: "] {
+            assert!(
+                !lines.iter().any(|l| l.contains(numbered)),
+                "{numbered:?} still prefixes a session row: {lines:?}"
+            );
+        }
     }
 
     #[test]

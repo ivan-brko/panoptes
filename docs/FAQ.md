@@ -121,7 +121,7 @@ Press `Shift+Esc`. It is the only way to send a literal Escape — which is what
 
 From the panes, not from inside a session — in a session those keys are the agent's.
 
-- **1-9**: Jump directly to session by number
+- **1-9**: Jump directly to a session by its number in the Sessions pane
 - **Tab**: Cycle panes
 - **Space**: Jump to next session needing attention
 
@@ -307,7 +307,7 @@ The prompts are optional—you can decline each time. There's no global setting 
 |-----|--------|
 | `Down` | Move down |
 | `Up` | Move up |
-| `1-9` | Select by number (not in the project tree) |
+| `1-9` | Select a session by number (Sessions pane only) |
 | Mouse wheel | Scroll session history |
 | `Ctrl+Home` / `Ctrl+End` | Oldest line / live output |
 | `?` | Show the keys for wherever you are |
