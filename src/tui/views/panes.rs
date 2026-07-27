@@ -37,6 +37,8 @@ pub struct PaneContext<'a> {
     pub widths: [u16; 3],
     pub hook_port: u16,
     pub hook_healthy: bool,
+    /// Columns pane 3's highlighted description is scrolled by
+    pub settings_marquee_offset: usize,
 }
 
 /// Render the whole three-pane screen
@@ -209,6 +211,7 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
                 log_file_info: ctx.log_file_info,
                 hook_port: ctx.hook_port,
                 hook_healthy: ctx.hook_healthy,
+                marquee_offset: ctx.settings_marquee_offset,
             },
         ),
     }
@@ -256,7 +259,7 @@ fn footer_text(ctx: &PaneContext) -> String {
         Some(Tab::Sessions) => {
             "↑↓/1-9: select | Enter: open | d: delete | Esc: projects".to_string()
         }
-        Some(Tab::Settings) => settings_footer(state, ctx.config),
+        Some(Tab::Settings) => settings_footer(state).to_string(),
         None => String::new(),
     };
 
@@ -336,9 +339,13 @@ fn projects_footer(state: &AppState, project_store: &ProjectStore, config: &Conf
     }
 }
 
-/// Pane 3's keys, plus the description of whatever row is highlighted
-fn settings_footer(state: &AppState, config: &Config) -> String {
-    let keys = match state.settings_nav {
+/// Pane 3's keys, and only its keys
+///
+/// The highlighted row's description used to be appended here, where it read
+/// as a gloss on the last key listed. It belongs to the row, so the row
+/// carries it now (`pane_settings::description_row`).
+fn settings_footer(state: &AppState) -> &'static str {
+    match state.settings_nav {
         SettingsNav::Sections => "↑↓/Enter | Esc: projects",
         SettingsNav::ClaudeConfigs | SettingsNav::CodexConfigs => {
             "↑↓ | n: add | d: delete | s: set default | Esc: back"
@@ -346,12 +353,6 @@ fn settings_footer(state: &AppState, config: &Config) -> String {
         SettingsNav::Shortcuts => "↑↓ | n: add | d: delete | Esc: back",
         SettingsNav::Notifications => "↑↓ | Space/Enter: change | Esc: back",
         SettingsNav::About => "Esc: back",
-    };
-    let description = super::pane_settings::settings_description(state, config);
-    if description.is_empty() {
-        keys.to_string()
-    } else {
-        format!("{} — {}", keys, description)
     }
 }
 
@@ -413,6 +414,7 @@ mod tests {
                     widths,
                     hook_port: 9999,
                     hook_healthy: true,
+                    settings_marquee_offset: 0,
                 },
             )
         })
@@ -436,6 +438,7 @@ mod tests {
                     widths,
                     hook_port: 9999,
                     hook_healthy: true,
+                    settings_marquee_offset: 0,
                 },
             )
         })
@@ -512,6 +515,7 @@ mod tests {
                     widths,
                     hook_port: 9999,
                     hook_healthy: true,
+                    settings_marquee_offset: 0,
                 },
             )
         });
@@ -554,9 +558,49 @@ mod tests {
         };
         let lines = render(160, &state, &f);
         assert!(
-            contains_line(&lines, SettingsNav::ClaudeConfigs.description()),
+            contains_line(&lines, "↑↓/Enter | Esc: projects"),
             "{lines:?}"
         );
+    }
+
+    /// The highlighted row's description used to be spliced into pane 3's
+    /// footer, where it read as a gloss on `Esc`. The row carries it now, and
+    /// the footer is keys-only like every other pane's.
+    #[test]
+    fn test_the_settings_footer_is_keys_only() {
+        let f = fixture();
+        let state = AppState {
+            focus: Focus::Panes(Tab::Settings),
+            ..Default::default()
+        };
+        let lines = render(160, &state, &f);
+        let description = SettingsNav::ClaudeConfigs.description();
+
+        // The footer is the one row carrying the global keys
+        let footer = lines
+            .iter()
+            .find(|line| line.contains("q: quit"))
+            .unwrap_or_else(|| panic!("no footer row in {lines:?}"));
+        assert!(footer.contains("↑↓/Enter | Esc: projects"), "{footer:?}");
+        assert!(!footer.contains('—'), "{footer:?}");
+        assert!(!footer.contains(description), "{footer:?}");
+
+        // ...and it did not simply vanish: pane 3's own row shows it
+        assert!(contains_line(&lines, description), "{lines:?}");
+
+        // Nothing static trails the rows inside a section either
+        for nav in [SettingsNav::ClaudeConfigs, SettingsNav::About] {
+            let state = AppState {
+                focus: Focus::Panes(Tab::Settings),
+                settings_nav: nav,
+                ..Default::default()
+            };
+            let lines = render(160, &state, &f);
+            assert!(
+                !contains_line(&lines, nav.description()),
+                "{nav:?}: {lines:?}"
+            );
+        }
     }
 
     /// `n` and `R` do not read the selection, so the folder variant of the
@@ -709,6 +753,7 @@ mod tests {
                                 widths,
                                 hook_port: 9999,
                                 hook_healthy: true,
+                                settings_marquee_offset: 0,
                             },
                         )
                     });
