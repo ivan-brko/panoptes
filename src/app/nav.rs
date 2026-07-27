@@ -208,7 +208,8 @@ impl SettingsNav {
         }
     }
 
-    /// One-line description of the section, shown in the global footer
+    /// One-line description of the section, shown beside its row when
+    /// highlighted
     pub fn description(self) -> &'static str {
         match self {
             SettingsNav::Sections => "Enter: open section",

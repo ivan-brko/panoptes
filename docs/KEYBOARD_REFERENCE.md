@@ -118,7 +118,9 @@ Every session, flat and sorted, with a pinned "Needs Attention" section on top.
 
 ## Pane 3 — Settings
 
-Five sections. The highlighted row's description shows in the footer.
+Five sections. The highlighted row carries its own description, muted, just
+after the label; if the pane is too narrow for both, the description scrolls
+past on its own while the label stays put.
 
 | Key | Action |
 |-----|--------|

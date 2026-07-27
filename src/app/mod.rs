@@ -44,7 +44,9 @@ use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionId, SessionManager, SessionType};
 use crate::transcript::{TranscriptKind, TranscriptWatcher, WatchTarget};
 use crate::tui::frame::{FrameConfig, FrameLayout};
-use crate::tui::panes::PaneLayout;
+use crate::tui::marquee::Marquee;
+use crate::tui::panes::{side_mode, PaneLayout, SideMode};
+use crate::tui::views::pane_settings::{description_row, DescriptionRow};
 use crate::tui::views::{
     render_agent_config_delete_dialog, render_agent_config_name_input_dialog,
     render_agent_config_path_input_dialog, render_agent_config_selector,
@@ -113,6 +115,10 @@ pub struct App {
     pub(crate) log_file_info: LogFileInfo,
     /// Animated split between the three panes
     pub(crate) panes: PaneLayout,
+    /// Scroll of the description trailing pane 3's highlighted row
+    settings_marquee: Marquee,
+    /// The row that scroll belongs to; a different one starts it over
+    settings_marquee_row: Option<DescriptionRow>,
     /// Whether the hook server is still accepting agent callbacks
     pub(crate) hook_server_healthy: bool,
     /// Whether verbose mouse diagnostics are enabled
@@ -271,6 +277,8 @@ impl App {
             tui,
             log_file_info,
             panes,
+            settings_marquee: Marquee::default(),
+            settings_marquee_row: None,
             hook_server_healthy: true,
             mouse_debug_enabled,
             last_codex_id_scan: None,
@@ -406,6 +414,7 @@ impl App {
             let mut dirty = false;
             dirty |= self.tick_child_focus();
             dirty |= self.tick_pane_transition();
+            dirty |= self.tick_settings_marquee();
             dirty |= self.tick_background_job();
             dirty |= self.tick_resize_debounce()?;
             dirty |= self.process_hook_events();
@@ -453,6 +462,38 @@ impl App {
     /// before the accordion existed.
     fn tick_pane_transition(&mut self) -> bool {
         self.panes.tick(Instant::now())
+    }
+
+    /// Pan the description trailing pane 3's highlighted row
+    ///
+    /// The row itself is the key: a different selection, a different section,
+    /// or a toggled value is a different row, and starts the scroll over.
+    /// Returns whether a frame is owed, which - like the accordion - is false
+    /// while the text is held at either end of its travel, or not moving at
+    /// all because it fits, or because pane 3 has no selection to describe.
+    fn tick_settings_marquee(&mut self) -> bool {
+        let now = Instant::now();
+        let row = description_row(&self.state, &self.config);
+
+        let mut dirty = false;
+        if row != self.settings_marquee_row {
+            self.settings_marquee_row = row;
+            dirty = self.settings_marquee.reset(now);
+        }
+
+        // Measured against the width pane 3 has *right now*, mid-transition
+        // included, and against its inner area: the row is drawn inside the
+        // border, not across it
+        let outer = self.panes.widths_at(now)[Tab::Settings.index()];
+        let overflow = match side_mode(outer) {
+            // A strip is a glyph; there is no row to scroll
+            SideMode::Strip | SideMode::Hidden => 0,
+            _ => self
+                .settings_marquee_row
+                .as_ref()
+                .map_or(0, |row| row.overflow(outer.saturating_sub(2) as usize)),
+        };
+        dirty | self.settings_marquee.tick(overflow, now)
     }
 
     /// Point the accordion at the focused pane, animating from where it is
@@ -2567,6 +2608,7 @@ impl App {
         let config = &self.config;
         let log_file_info = &self.log_file_info;
         let panes = &self.panes;
+        let marquee_offset = self.settings_marquee.offset();
         let hook_port = self.hook_server.addr().port();
         let hook_healthy = self.hook_server_healthy;
         let now = Instant::now();
@@ -2601,6 +2643,7 @@ impl App {
                         widths: panes.widths_at(now),
                         hook_port,
                         hook_healthy,
+                        settings_marquee_offset: marquee_offset,
                     },
                 );
             }

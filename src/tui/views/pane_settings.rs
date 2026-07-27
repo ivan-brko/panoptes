@@ -18,7 +18,8 @@ use crate::codex_config::CodexConfigStore;
 use crate::config::{Config, NotificationMethod};
 use crate::logging::LogFileInfo;
 use crate::tui::panes::SideMode;
-use crate::tui::theme::theme;
+use crate::tui::theme::{theme, Theme};
+use crate::tui::views::pane_projects::clamp_line;
 use crate::tui::views::{truncate_string, window_rows};
 use crate::tui::widgets::selection::{selection_prefix, selection_style_with_accent};
 
@@ -46,26 +47,102 @@ pub fn settings_title(state: &AppState, mode: SideMode) -> String {
     }
 }
 
-/// The one-line description of the highlighted row, for the global footer
-pub fn settings_description(state: &AppState, config: &Config) -> String {
-    match state.settings_nav {
-        SettingsNav::Sections => SettingsNav::at(state.settings_section_index)
-            .map(|section| section.description().to_string())
-            .unwrap_or_default(),
-        SettingsNav::Notifications => notification_description(state, config),
-        section => section.description().to_string(),
+/// Blank columns between a row's label and its description
+const DESCRIPTION_GAP: &str = "   ";
+
+/// The highlighted row, split at the point where it starts scrolling
+///
+/// The head - selection arrow, value, label - is what identifies the row, so
+/// it holds still; only the description pans when the pane cannot hold both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescriptionRow {
+    /// Everything left of the description, drawn in the row's own style
+    pub head: String,
+    /// The muted text trailing the label
+    pub description: String,
+}
+
+impl DescriptionRow {
+    /// Columns of the description that do not fit a `width`-wide row
+    ///
+    /// Zero when the row is too narrow to show any of it: there is nothing on
+    /// screen to scroll, so nothing to animate either.
+    pub fn overflow(&self, width: usize) -> usize {
+        let room = self.room(width);
+        if room == 0 {
+            0
+        } else {
+            self.description.chars().count().saturating_sub(room)
+        }
+    }
+
+    /// Columns left for the description after the head and its gap
+    fn room(&self, width: usize) -> usize {
+        width.saturating_sub(self.head.chars().count() + DESCRIPTION_GAP.chars().count())
+    }
+
+    /// The row as a styled line, panned `offset` columns into the description
+    fn line(&self, width: usize, offset: usize, t: &Theme) -> Line<'static> {
+        let mut spans = vec![Span::raw(self.head.clone())];
+        let room = self.room(width);
+        if room > 0 {
+            let offset = offset.min(self.overflow(width));
+            let visible: String = self.description.chars().skip(offset).take(room).collect();
+            spans.push(Span::styled(
+                format!("{}{}", DESCRIPTION_GAP, visible),
+                t.muted_style(),
+            ));
+        }
+        Line::from(spans)
     }
 }
 
-/// What the highlighted notification row currently means
-fn notification_description(state: &AppState, config: &Config) -> String {
-    match state.notifications_index {
-        0 => format!(
-            "Space/Enter to change · currently {}",
-            method_label(config.notification_method)
-        ),
-        1..=5 => "Space/Enter to toggle · takes effect on the next event".to_string(),
-        _ => String::new(),
+/// The highlighted row's description, where the level has one
+///
+/// Only the two lists whose rows are a *choice* carry one - descriptions are
+/// for choosing among rows. Inside a section the pane title already names it,
+/// and its rows speak for themselves.
+///
+/// `None` while pane 3 is unfocused: an unfocused pane draws no selection, so
+/// there is no row for a description to belong to.
+pub fn description_row(state: &AppState, config: &Config) -> Option<DescriptionRow> {
+    if !state.is_focused(Tab::Settings) {
+        return None;
+    }
+    match state.settings_nav {
+        SettingsNav::Sections => {
+            let section = SettingsNav::at(state.settings_section_index)?;
+            Some(DescriptionRow {
+                head: format!("{}{}", selection_prefix(true), section.title()),
+                description: section.description().to_string(),
+            })
+        }
+        SettingsNav::Notifications => {
+            let index = state.notifications_index;
+            let label = NOTIFICATION_ROWS.get(index)?;
+            Some(DescriptionRow {
+                head: format!(
+                    "{}{} {}",
+                    selection_prefix(true),
+                    notification_values(config)[index],
+                    label
+                ),
+                description: notification_description(index).to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// What the highlighted notification row offers
+///
+/// Deliberately silent about the current value: the row itself already shows
+/// it, two columns to the left.
+fn notification_description(index: usize) -> &'static str {
+    match index {
+        0 => "Space/Enter to change",
+        1..=5 => "Space/Enter to toggle · takes effect on the next event",
+        _ => "",
     }
 }
 
@@ -86,6 +163,8 @@ pub struct SettingsPaneContext<'a> {
     pub log_file_info: &'a LogFileInfo,
     pub hook_port: u16,
     pub hook_healthy: bool,
+    /// Columns the highlighted row's description is scrolled by
+    pub marquee_offset: usize,
 }
 
 /// Render pane 3's content into `area` (already inside the pane border)
@@ -111,7 +190,7 @@ pub fn render_settings_pane(
     // focus
     let focused = ctx.state.is_focused(Tab::Settings);
     match ctx.state.settings_nav {
-        SettingsNav::Sections => render_sections(frame, area, ctx.state),
+        SettingsNav::Sections => render_sections(frame, area, ctx),
         SettingsNav::ClaudeConfigs => super::render_agent_config_list(
             frame,
             area,
@@ -133,25 +212,32 @@ pub fn render_settings_pane(
             ctx.state.custom_shortcuts_selected,
             focused,
         ),
-        SettingsNav::Notifications => render_notifications(frame, area, ctx.state, ctx.config),
+        SettingsNav::Notifications => render_notifications(frame, area, ctx),
         SettingsNav::About => render_about(frame, area, ctx),
     }
 }
 
 /// The five sections
-fn render_sections(frame: &mut Frame, area: Rect, state: &AppState) {
+fn render_sections(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext) {
     let t = theme();
+    let state = ctx.state;
     let focused = state.is_focused(Tab::Settings);
     let width = area.width as usize;
+    let highlighted = description_row(state, ctx.config);
 
     let items: Vec<ListItem> = SettingsNav::SECTIONS
         .iter()
         .enumerate()
         .map(|(i, section)| {
             let selected = i == state.settings_section_index && focused;
-            let content = format!("{}{}", selection_prefix(selected), section.title());
-            ListItem::new(truncate_string(&content, width))
-                .style(selection_style_with_accent(selected, t))
+            let line = row_line(
+                if selected { highlighted.as_ref() } else { None },
+                || format!("{}{}", selection_prefix(selected), section.title()),
+                width,
+                ctx.marquee_offset,
+                t,
+            );
+            ListItem::new(line).style(selection_style_with_accent(selected, t))
         })
         .collect();
 
@@ -160,33 +246,58 @@ fn render_sections(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 /// The six live notification toggles
-fn render_notifications(frame: &mut Frame, area: Rect, state: &AppState, config: &Config) {
+fn render_notifications(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext) {
     let t = theme();
+    let state = ctx.state;
     let focused = state.is_focused(Tab::Settings);
     let width = area.width as usize;
-
-    let values = [
-        format!("< {} >", method_label(config.notification_method)),
-        checkbox(config.notify_on.approval),
-        checkbox(config.notify_on.turn_complete),
-        checkbox(config.notify_on.stalled),
-        checkbox(config.notify_on.crashed),
-        checkbox(config.attention_on_idle),
-    ];
+    let values = notification_values(ctx.config);
+    let highlighted = description_row(state, ctx.config);
 
     let items: Vec<ListItem> = NOTIFICATION_ROWS
         .iter()
         .enumerate()
         .map(|(i, label)| {
             let selected = i == state.notifications_index && focused;
-            let content = format!("{}{} {}", selection_prefix(selected), values[i], label);
-            ListItem::new(truncate_string(&content, width))
-                .style(selection_style_with_accent(selected, t))
+            let line = row_line(
+                if selected { highlighted.as_ref() } else { None },
+                || format!("{}{} {}", selection_prefix(selected), values[i], label),
+                width,
+                ctx.marquee_offset,
+                t,
+            );
+            ListItem::new(line).style(selection_style_with_accent(selected, t))
         })
         .collect();
 
     let items = window_rows(items, state.notifications_index, area.height);
     frame.render_widget(List::new(items), area);
+}
+
+/// One list row: the highlighted one carries its description, the rest are bare
+fn row_line(
+    highlighted: Option<&DescriptionRow>,
+    plain: impl FnOnce() -> String,
+    width: usize,
+    offset: usize,
+    t: &Theme,
+) -> Line<'static> {
+    match highlighted {
+        Some(row) => clamp_line(row.line(width, offset, t), width),
+        None => Line::from(Span::raw(truncate_string(&plain(), width))),
+    }
+}
+
+/// The value each notification row shows, in list order
+fn notification_values(config: &Config) -> [String; 6] {
+    [
+        format!("< {} >", method_label(config.notification_method)),
+        checkbox(config.notify_on.approval),
+        checkbox(config.notify_on.turn_complete),
+        checkbox(config.notify_on.stalled),
+        checkbox(config.notify_on.crashed),
+        checkbox(config.attention_on_idle),
+    ]
 }
 
 fn checkbox(on: bool) -> String {
@@ -293,16 +404,28 @@ mod tests {
             log_file_info: log,
             hook_port: 9999,
             hook_healthy: true,
+            marquee_offset: 0,
         }
     }
 
     fn render(width: u16, state: &AppState, config: &Config) -> Vec<String> {
+        render_scrolled(width, state, config, 0)
+    }
+
+    /// Render with the description panned `offset` columns
+    fn render_scrolled(
+        width: u16,
+        state: &AppState,
+        config: &Config,
+        offset: usize,
+    ) -> Vec<String> {
         let claude = ClaudeConfigStore::new();
         let codex = CodexConfigStore::new();
         let log = LogFileInfo {
             path: PathBuf::from("/tmp/panoptes/logs/panoptes-now.log"),
         };
-        let ctx = context(state, config, &claude, &codex, &log);
+        let mut ctx = context(state, config, &claude, &codex, &log);
+        ctx.marquee_offset = offset;
         let mode = crate::tui::panes::side_mode(width + 2);
         render_to_lines(width, 16, |frame| {
             render_settings_pane(frame, frame.size(), mode, &ctx)
@@ -401,27 +524,173 @@ mod tests {
         }
     }
 
+    /// The description belongs to the row the user is on, and moves with it
     #[test]
-    fn test_footer_description_follows_the_highlighted_row() {
+    fn test_the_description_follows_the_highlighted_row() {
         let mut state = focused(SettingsNav::Sections);
         let config = Config::default();
 
         state.settings_section_index = 3;
-        assert_eq!(
-            settings_description(&state, &config),
-            SettingsNav::Notifications.description()
-        );
+        let row = description_row(&state, &config).unwrap();
+        assert_eq!(row.head, "▶ Notifications");
+        assert_eq!(row.description, SettingsNav::Notifications.description());
 
         state.settings_nav = SettingsNav::Notifications;
         state.notifications_index = 0;
-        let method_row = settings_description(&state, &config);
-        assert!(method_row.contains("Bell"), "{method_row}");
+        let row = description_row(&state, &config).unwrap();
         // The description names the key that actually works here: the arrows
         // cycle panes now, so advertising them would send the user away
-        assert!(method_row.contains("Space/Enter to change"), "{method_row}");
+        assert_eq!(row.description, "Space/Enter to change");
+        // ...and not the current method, which the row already shows
+        assert!(row.head.contains("< Bell >"), "{}", row.head);
+        assert!(!row.description.contains("Bell"), "{}", row.description);
 
         state.notifications_index = 2;
-        assert!(settings_description(&state, &config).contains("Space/Enter to toggle"));
+        let row = description_row(&state, &config).unwrap();
+        assert!(row.description.contains("Space/Enter to toggle"));
+    }
+
+    /// Descriptions are for choosing *among* rows. Inside a section the title
+    /// already names it, so nothing static trails the rows there.
+    #[test]
+    fn test_only_the_two_choosing_lists_carry_a_description() {
+        let config = Config::default();
+        for nav in [
+            SettingsNav::ClaudeConfigs,
+            SettingsNav::CodexConfigs,
+            SettingsNav::Shortcuts,
+            SettingsNav::About,
+        ] {
+            assert!(
+                description_row(&focused(nav), &config).is_none(),
+                "{nav:?} should carry no row description"
+            );
+        }
+    }
+
+    /// An unfocused pane draws no selection, so it has no row to describe
+    #[test]
+    fn test_an_unfocused_pane_describes_nothing() {
+        let state = AppState {
+            focus: crate::app::Focus::Panes(Tab::Projects),
+            settings_nav: SettingsNav::Sections,
+            ..Default::default()
+        };
+        assert!(description_row(&state, &Config::default()).is_none());
+
+        let lines = render(60, &state, &Config::default());
+        assert!(contains_line(&lines, "Claude configs"), "{lines:?}");
+        assert!(
+            !contains_line(&lines, SettingsNav::ClaudeConfigs.description()),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn test_the_highlighted_row_shows_its_description_inline() {
+        let config = Config::default();
+
+        let lines = render(60, &focused(SettingsNav::Sections), &config);
+        assert!(
+            contains_line(
+                &lines,
+                &format!(
+                    "▶ Claude configs   {}",
+                    SettingsNav::ClaudeConfigs.description()
+                )
+            ),
+            "{lines:?}"
+        );
+        // Only the highlighted row: the others stay clean
+        assert!(
+            !contains_line(&lines, SettingsNav::CodexConfigs.description()),
+            "{lines:?}"
+        );
+
+        let lines = render(60, &focused(SettingsNav::Notifications), &config);
+        assert!(
+            contains_line(&lines, "▶ < Bell > Notify me by   Space/Enter to change"),
+            "{lines:?}"
+        );
+        assert!(
+            !contains_line(&lines, "takes effect on the next event"),
+            "{lines:?}"
+        );
+    }
+
+    /// The description is a second voice on the row, so it is muted while the
+    /// label keeps the selection's accent
+    #[test]
+    fn test_the_description_is_muted() {
+        let claude = ClaudeConfigStore::new();
+        let codex = CodexConfigStore::new();
+        let config = Config::default();
+        let log = LogFileInfo {
+            path: PathBuf::from("/tmp/x.log"),
+        };
+        let state = focused(SettingsNav::Sections);
+        let ctx = context(&state, &config, &claude, &codex, &log);
+        let buffer = crate::tui::views::test_util::render_to_buffer(60, 16, |frame| {
+            render_settings_pane(frame, frame.size(), SideMode::Full, &ctx)
+        });
+
+        let t = theme();
+        let description = crate::tui::views::test_util::style_of_row_with(
+            &buffer,
+            SettingsNav::ClaudeConfigs.description(),
+        );
+        assert_eq!(description.fg, Some(t.muted_style().fg.unwrap()));
+        assert_eq!(
+            crate::tui::views::test_util::style_of_row_with(&buffer, "Claude configs").fg,
+            Some(t.accent)
+        );
+    }
+
+    /// Only the description pans: the arrow and the label are how the user
+    /// knows which row they are on, so they never move
+    #[test]
+    fn test_scrolling_pans_the_description_and_nothing_else() {
+        let config = Config::default();
+        let state = focused(SettingsNav::Sections);
+
+        // 34 columns holds "▶ Claude configs" plus a stub of its description
+        let head = "▶ Claude configs   ";
+        let full = render_scrolled(34, &state, &config, 0);
+        let panned = render_scrolled(34, &state, &config, 4);
+
+        let row = |lines: &[String]| {
+            lines
+                .iter()
+                .find(|l| l.contains("Claude configs"))
+                .unwrap()
+                .clone()
+        };
+        let (before, after) = (row(&full), row(&panned));
+        let description = SettingsNav::ClaudeConfigs.description();
+
+        // The label holds still...
+        let before = before.strip_prefix(head).expect("{before:?}");
+        let after = after.strip_prefix(head).expect("{after:?}");
+        // ...while the description slides four columns to the left under it
+        let room = before.chars().count();
+        assert_eq!(before, &description[..room]);
+        assert_eq!(after, &description[4..4 + room]);
+    }
+
+    /// A row too narrow for any description at all has nothing to scroll -
+    /// which is also what keeps the tick loop quiet at a strip's width
+    #[test]
+    fn test_a_row_with_no_room_for_a_description_never_scrolls() {
+        let row = DescriptionRow {
+            head: "▶ Notifications".to_string(),
+            description: "What interrupts you, and how".to_string(),
+        };
+        assert_eq!(row.overflow(10), 0);
+        assert_eq!(row.overflow(18), 0, "the gap alone leaves no room");
+        assert_eq!(row.overflow(1_000), 0, "it all fits");
+
+        // 15 head + 3 gap + 8 columns of a 28-column description
+        assert_eq!(row.overflow(26), 28 - 8);
     }
 
     #[test]
