@@ -173,6 +173,14 @@ pub struct Config {
     #[serde(default)]
     pub theme: ThemeMode,
 
+    /// Which colour preset the UI wears
+    ///
+    /// Orthogonal to [`Self::theme`]: that picks how many colours the terminal
+    /// can show, this picks which ones. `peacock` (the default) is the look
+    /// Panoptes has always had.
+    #[serde(default)]
+    pub palette: Palette,
+
     // Everything below serialises as a TOML table or array-of-tables. TOML has
     // no way to express a bare key after a table header, so any scalar field
     // added later must go ABOVE this line or it will be silently swallowed into
@@ -267,6 +275,88 @@ impl<'de> Deserialize<'de> for ThemeMode {
                     "Unknown theme in config; defaulting to auto"
                 );
                 Self::Auto
+            }
+        })
+    }
+}
+
+/// Which colour preset the UI wears
+///
+/// Named for the myth: Panoptes is Argus Panoptes, the all-seeing. A preset
+/// restyles the chrome - the accent, the focused border, the selection
+/// surface, the input prompt, the default markers - and never the semantics:
+/// green still means waiting and red still means crashed in every one of
+/// them, so a session list reads the same whichever you pick.
+///
+/// Serialises as the lowercase strings `peacock`, `io`, `hera`, `argus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Palette {
+    /// Cyan and blue - the look Panoptes has always had
+    #[default]
+    Peacock,
+    /// Warm amber and gold
+    Io,
+    /// Royal violet
+    Hera,
+    /// The watcher's own green
+    Argus,
+}
+
+impl Palette {
+    /// The presets in the order the picker offers them
+    pub const ALL: [Palette; 4] = [Palette::Peacock, Palette::Io, Palette::Hera, Palette::Argus];
+
+    /// Row label in the picker
+    pub fn label(self) -> &'static str {
+        match self {
+            Palette::Peacock => "Peacock",
+            Palette::Io => "Io",
+            Palette::Hera => "Hera",
+            Palette::Argus => "Argus",
+        }
+    }
+
+    /// One-line description, shown in the global footer
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Palette::Peacock => "Cyan and blue - the hundred eyes on the tail",
+            Palette::Io => "Warm amber and gold - the heifer he guarded",
+            Palette::Hera => "Royal violet - the goddess he served",
+            Palette::Argus => "Green - the watcher himself",
+        }
+    }
+
+    /// Position in [`Palette::ALL`], for seeding the picker's highlight
+    pub fn index(self) -> usize {
+        Palette::ALL.iter().position(|p| *p == self).unwrap_or(0)
+    }
+
+    /// The preset at `index` in the picker
+    pub fn at(index: usize) -> Option<Palette> {
+        Palette::ALL.get(index).copied()
+    }
+}
+
+/// Unknown values fall back to `Peacock` rather than failing the whole load:
+/// a typo in a hand-edited config should cost the typo, not the file.
+impl<'de> Deserialize<'de> for Palette {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "peacock" => Self::Peacock,
+            "io" => Self::Io,
+            "hera" => Self::Hera,
+            "argus" => Self::Argus,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    "Unknown palette in config; defaulting to peacock"
+                );
+                Self::Peacock
             }
         })
     }
@@ -377,6 +467,7 @@ impl Default for Config {
             log_agent_events: false,
             attention_on_idle: false,
             theme: ThemeMode::default(),
+            palette: Palette::default(),
             notify_on: NotifyOn::default(),
             custom_shortcuts: Vec::new(),
         }
@@ -884,6 +975,58 @@ notification_method = "title"
         assert!(removed.is_some());
         assert_eq!(removed.unwrap().key, 'v');
         assert!(config.custom_shortcuts.is_empty());
+    }
+
+    /// `palette` is a scalar, so it has to serialise *above* the first table
+    /// header or TOML swallows it into that table. A round-trip through a
+    /// config that also has tables is what proves it did.
+    #[test]
+    fn test_palette_survives_a_round_trip_past_the_table_header() {
+        let mut config = Config {
+            palette: Palette::Hera,
+            ..Config::default()
+        };
+        config
+            .add_shortcut(CustomShortcut::new(
+                'v',
+                String::new(),
+                "code .".to_string(),
+                false,
+            ))
+            .unwrap();
+
+        let toml_str = toml::to_string(&config).unwrap();
+        let palette_line = toml_str.find("palette").expect("palette not serialised");
+        let first_table = toml_str.find('[').unwrap_or(toml_str.len());
+        assert!(
+            palette_line < first_table,
+            "palette must sit above the first table header:\n{toml_str}"
+        );
+
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.palette, Palette::Hera);
+    }
+
+    #[test]
+    fn test_unknown_palette_falls_back_to_peacock() {
+        let parsed: Config = toml::from_str("palette = \"chartreuse\"").unwrap();
+        assert_eq!(parsed.palette, Palette::Peacock);
+        // And an absent key is the same as the default
+        let parsed: Config = toml::from_str("").unwrap();
+        assert_eq!(parsed.palette, Palette::Peacock);
+    }
+
+    #[test]
+    fn test_every_palette_round_trips_through_its_config_string() {
+        for palette in Palette::ALL {
+            let text = toml::to_string(&Config {
+                palette,
+                ..Config::default()
+            })
+            .unwrap();
+            let parsed: Config = toml::from_str(&text).unwrap();
+            assert_eq!(parsed.palette, palette, "{palette:?}");
+        }
     }
 
     #[test]

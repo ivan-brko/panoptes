@@ -233,7 +233,7 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
 /// The check is by colour value, which is why the richer tiers give the
 /// suspended state its own grey off the ramp. The 16-colour baseline cannot:
 /// there, suspended shares `text_dim`'s value and recesses with it.
-fn dim_pane_body(buf: &mut Buffer, area: Rect, t: &crate::tui::theme::Theme) {
+fn dim_pane_body(buf: &mut Buffer, area: Rect, t: crate::tui::theme::Theme) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = buf.get_mut(x, y);
@@ -352,6 +352,9 @@ fn settings_footer(state: &AppState) -> &'static str {
         }
         SettingsNav::Shortcuts => "↑↓ | n: add | d: delete | Esc: back",
         SettingsNav::Notifications => "↑↓ | Space/Enter: change | Esc: back",
+        // No "back" on Esc here: leaving without committing undoes the
+        // preview, and the footer has to say so before the user finds out
+        SettingsNav::Theme => "↑↓: preview | Enter: keep | Esc: revert",
         SettingsNav::About => "Esc: back",
     }
 }
@@ -818,7 +821,7 @@ mod tests {
 
             let mut buf = Buffer::empty(area);
             buf.set_string(0, 0, "susp", Style::default().fg(t.state_suspended));
-            dim_pane_body(&mut buf, area, &t);
+            dim_pane_body(&mut buf, area, t);
             assert!(
                 !buf.get(0, 0).style().add_modifier.contains(Modifier::DIM),
                 "a suspended row must not dim on {:?}",
@@ -828,7 +831,7 @@ mod tests {
             // ...while the text ramp around it does recess
             let mut buf = Buffer::empty(area);
             buf.set_string(0, 0, "text", Style::default().fg(t.text_dim));
-            dim_pane_body(&mut buf, area, &t);
+            dim_pane_body(&mut buf, area, t);
             assert!(buf.get(0, 0).style().add_modifier.contains(Modifier::DIM));
         }
     }

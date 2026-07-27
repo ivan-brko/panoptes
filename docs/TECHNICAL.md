@@ -137,9 +137,21 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
   awaiting approval, suspended), plus `attention_color` for badge reasons
 - Three capability tiers - `truecolor()`, `ansi256()`, `ansi16()` - detected
   from `COLORTERM`/`TERM` at startup and forceable with the `theme` config
-  key. The tiers agree on every chromatic token (the user's terminal palette
-  keeps deciding what "green" means) and differ only in the structural greys,
-  so the 16-colour baseline is exactly the classic appearance
+  key. Within a palette the tiers agree on every chromatic token (the user's
+  terminal palette keeps deciding what "green" means) and differ only in the
+  structural greys and surfaces, so the 16-colour baseline is exactly the
+  classic appearance
+- Four palettes - `Peacock` (default), `Io`, `Hera`, `Argus` - chosen with the
+  `palette` config key or live from **Settings → Theme**. A theme is one
+  palette at one tier: `Theme::new(palette, support)`. A palette owns only the
+  `Chrome` tokens (accent, focused border, the two surfaces, input prompt,
+  default marker); states, outcomes, banners and the text ramp are identical
+  in all four, so a session list reads the same whichever is on. Peacock is
+  byte-for-byte the pre-palette theme, pinned by
+  `test_peacock_is_byte_for_byte_the_old_palette`
+- The global is a swappable `RwLock`, not a `OnceLock`: the picker previews
+  live, so a palette change has to reach the next render. `theme()` returns a
+  `Copy` snapshot rather than a borrow, so no render holds the lock
 
 Focus is signalled by four channels at once, so it survives a colourblind
 user, a low-contrast theme, and a screenshot: border brightness
@@ -414,6 +426,7 @@ See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for the full reference.
 | `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
 | `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
 | `theme` | `auto` | Colour-capability tier: `auto` / `truecolor` / `ansi256` / `ansi16` |
+| `palette` | `peacock` | Colour preset: `peacock` / `io` / `hera` / `argus` |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
 
 Several config keys from earlier versions — an output-line cap, an Escape-hold

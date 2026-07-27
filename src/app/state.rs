@@ -300,6 +300,12 @@ pub struct AppState {
     pub project_settings_index: usize,
     /// Selected row in pane 3's notifications list
     pub notifications_index: usize,
+    /// Selected row in pane 3's theme-preset list
+    ///
+    /// This is the *previewed* preset, not the saved one: moving through the
+    /// list repaints the UI immediately, and only `Enter` writes it to
+    /// `config.palette`.
+    pub palette_index: usize,
     /// Session being viewed (in session view)
     pub active_session: Option<SessionId>,
     /// Pane the session view was opened from, restored when it is left

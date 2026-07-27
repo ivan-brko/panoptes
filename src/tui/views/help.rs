@@ -64,6 +64,7 @@ fn shortcuts_for(state: &AppState) -> (&'static str, Vec<Line<'static>>) {
                 "Keyboard Shortcuts - Notifications",
                 settings_notifications_shortcuts(),
             ),
+            SettingsNav::Theme => ("Keyboard Shortcuts - Theme", settings_theme_shortcuts()),
             SettingsNav::About => ("Keyboard Shortcuts - About", settings_about_shortcuts()),
         },
     }
@@ -244,6 +245,18 @@ fn settings_notifications_shortcuts() -> Vec<Line<'static>> {
                 "Toggle the row, or change how you are notified",
             ),
             shortcut_line("Esc", "Back to the sections list"),
+        ],
+    )
+}
+
+fn settings_theme_shortcuts() -> Vec<Line<'static>> {
+    with_global(
+        "Settings - Theme",
+        vec![
+            shortcut_line("↑ / ↓", "Try a preset - the whole UI is the preview"),
+            shortcut_line("Enter", "Keep the highlighted preset"),
+            shortcut_line("Esc", "Back to the sections list, undoing the preview"),
+            shortcut_line("★", "Marks the preset that is saved"),
         ],
     )
 }

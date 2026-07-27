@@ -65,6 +65,10 @@ attention_on_idle = false
 # Options: "auto" (detect from COLORTERM/TERM), "truecolor", "ansi256", "ansi16"
 theme = "auto"
 
+# Which colour preset the UI wears (pick it live from Settings > Theme)
+# Options: "peacock" (default), "io", "hera", "argus"
+palette = "peacock"
+
 # Which attention reasons produce a notification
 [notify_on]
 approval = true       # a permission dialog is blocking a turn
@@ -333,6 +337,41 @@ a terminal that supports truecolor but does not advertise it.
 
 ---
 
+### palette
+
+| Property | Value |
+|----------|-------|
+| Default | `"peacock"` |
+| Type | String: `"peacock"`, `"io"`, `"hera"`, `"argus"` |
+
+Which colour preset the UI wears. Orthogonal to [`theme`](#theme): that picks
+how *many* colours the terminal can show, this picks *which* ones.
+
+| Preset | Look |
+|--------|------|
+| `peacock` | Cyan and blue - the hundred eyes on the tail, and the look Panoptes has always had |
+| `io` | Warm amber and gold - the heifer he guarded |
+| `hera` | Royal violet - the goddess he served |
+| `argus` | Green - the watcher himself |
+
+A preset restyles the **chrome** and never the **semantics**: the accent, the
+focused pane border, the selected-row surface, the input prompt and the
+`★` default markers all change, while green still means waiting, yellow still
+means thinking and red still means crashed. A session list reads identically
+in all four, which is the point - the preset is a skin, not a second language.
+
+Each preset lands hardest on truecolor, where its selected-row and text
+selection surfaces are tinted toward its hue. On `ansi16` a preset can only
+reassign named colours, so the four are distinguishable but modest there.
+
+**Changing it:** open **Settings > Theme** in pane 3. Moving through the list
+with `Up`/`Down` applies the preset to the whole dashboard immediately - the
+UI is the preview - `Enter` keeps it and writes it here, and `Esc` puts back
+whatever was saved. Editing this key by hand works too and takes effect on the
+next start.
+
+---
+
 ### custom_shortcuts
 
 | Property | Value |
@@ -466,6 +505,11 @@ Notifications**. They take effect on the next event, with no restart:
 | …on tool stalled | `notify_on.stalled` |
 | …on session crashed | `notify_on.crashed` |
 | Idle nudge counts as attention | `attention_on_idle` |
+
+The colour preset is live too, from **Settings → Theme**: `Up`/`Down` repaints
+the whole UI on the spot, `Enter` writes `palette`, `Esc` puts the saved one
+back. The colour *tier* (`theme`) is not - it is a property of the terminal,
+settled once at startup.
 
 Everything else is read at startup or when a session is spawned, and needs a
 restart. Those settings are shown read-only under **Settings → About / paths**,

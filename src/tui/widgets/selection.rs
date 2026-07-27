@@ -68,10 +68,10 @@ pub fn selection_style(is_selected: bool, base_color: Color) -> Style {
 /// # use panoptes::tui::widgets::selection::selection_style_with_accent;
 /// # use panoptes::tui::theme::theme;
 /// let t = theme();
-/// let style = selection_style_with_accent(true, &t);
+/// let style = selection_style_with_accent(true, t);
 /// // Creates a bold cyan (accent) style for selected item
 /// ```
-pub fn selection_style_with_accent(is_selected: bool, theme: &Theme) -> Style {
+pub fn selection_style_with_accent(is_selected: bool, theme: Theme) -> Style {
     if is_selected {
         Style::default()
             .fg(theme.accent)
@@ -94,7 +94,7 @@ pub fn selection_style_with_accent(is_selected: bool, theme: &Theme) -> Style {
 /// # use ratatui::text::Span;
 /// # use ratatui::style::Stylize;
 /// let t = theme();
-/// let style = selection_name_style(true, &t);
+/// let style = selection_name_style(true, t);
 /// let span = Span::styled("My Item", style);
 /// // Creates a bold cyan "My Item" span
 /// ```
@@ -110,7 +110,7 @@ pub fn activity_style(
     attention_count: usize,
     active_count: usize,
     fallback: Style,
-    theme: &Theme,
+    theme: Theme,
 ) -> Style {
     if is_selected {
         if attention_count > 0 {
@@ -129,7 +129,7 @@ pub fn activity_style(
     }
 }
 
-pub fn selection_name_style(is_selected: bool, theme: &Theme) -> Style {
+pub fn selection_name_style(is_selected: bool, theme: Theme) -> Style {
     Style::default()
         .fg(if is_selected {
             theme.accent
@@ -194,18 +194,18 @@ mod tests {
     #[test]
     fn test_selection_background_scales_with_the_tier() {
         let rich = Theme::truecolor();
-        let selected = selection_style_with_accent(true, &rich);
+        let selected = selection_style_with_accent(true, rich);
         assert_eq!(selected.bg, Some(rich.bg_surface));
         assert!(matches!(rich.bg_surface, ratatui::style::Color::Rgb(..)));
 
         // Unselected rows never carry a background
-        assert_eq!(selection_style_with_accent(false, &rich).bg, None);
+        assert_eq!(selection_style_with_accent(false, rich).bg, None);
 
         // The baseline's surface is the terminal's own background
         let base = Theme::ansi16();
         assert_eq!(base.bg_surface, ratatui::style::Color::Reset);
         assert_eq!(
-            selection_style_with_accent(true, &base).bg,
+            selection_style_with_accent(true, base).bg,
             Some(ratatui::style::Color::Reset)
         );
     }

@@ -4,12 +4,16 @@
 //! keystroke. That is safe precisely because these six fields are the ones the
 //! runtime re-reads on every event: nothing caches them, so a toggle takes
 //! effect on the next event with no reload path to build.
+//!
+//! The Theme picker inverts that: it repaints on every keystroke and writes
+//! only on `Enter`, because the preview *is* the whole dashboard and a preset
+//! you were only looking at should not outlive the visit.
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{cycle_next, cycle_prev, App, InputMode, SettingsNav};
-use crate::config::NotificationMethod;
+use crate::config::{NotificationMethod, Palette};
 use crate::input::agent_configs::AgentKind;
 use crate::tui::views::pane_settings::NOTIFICATION_ROWS;
 
@@ -29,6 +33,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         SettingsNav::Shortcuts => handle_shortcuts_key(app, key),
         SettingsNav::Notifications => handle_notifications_key(app, key),
+        SettingsNav::Theme => handle_theme_key(app, key),
         SettingsNav::About => handle_about_key(app, key),
     }
 }
@@ -56,6 +61,11 @@ fn handle_sections_key(app: &mut App, key: KeyEvent) -> Result<()> {
                     SettingsNav::CodexConfigs => app.state.codex_configs_selected_index = 0,
                     SettingsNav::Shortcuts => app.state.custom_shortcuts_selected = 0,
                     SettingsNav::Notifications => app.state.notifications_index = 0,
+                    // The one section that does not start at the top: the
+                    // list is a picker, so it opens on what is already worn
+                    SettingsNav::Theme => {
+                        app.state.palette_index = app.config.palette.index();
+                    }
                     _ => {}
                 }
             }
@@ -127,6 +137,43 @@ fn handle_notifications_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
     persist(app);
     Ok(())
+}
+
+/// The preset picker: highlight previews, `Enter` keeps, `Esc` reverts
+fn handle_theme_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let count = Palette::ALL.len();
+    match key.code {
+        KeyCode::Esc => {
+            // Whatever was being previewed goes back to what was saved
+            crate::tui::theme::set_palette(app.config.palette);
+            app.state.palette_index = app.config.palette.index();
+            app.escape_back();
+        }
+        KeyCode::Down => {
+            app.state.palette_index = cycle_next(app.state.palette_index, count);
+            preview(app);
+        }
+        KeyCode::Up => {
+            app.state.palette_index = cycle_prev(app.state.palette_index, count);
+            preview(app);
+        }
+        KeyCode::Enter => {
+            if let Some(palette) = Palette::at(app.state.palette_index) {
+                app.config.palette = palette;
+                // Already on screen from the preview; this only makes it stick
+                persist(app);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Wear the highlighted preset without committing it
+fn preview(app: &App) {
+    if let Some(palette) = Palette::at(app.state.palette_index) {
+        crate::tui::theme::set_palette(palette);
+    }
 }
 
 /// Flip the boolean the highlighted row controls; returns whether one moved
