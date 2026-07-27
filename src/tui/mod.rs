@@ -7,6 +7,7 @@ pub mod header;
 pub mod header_notifications;
 pub mod layout;
 pub mod logo;
+pub mod marquee;
 pub mod panes;
 pub mod theme;
 pub mod views;
