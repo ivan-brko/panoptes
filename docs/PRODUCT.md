@@ -126,9 +126,10 @@ two applies.
 
 ### Keyboard-Driven Interface
 
-Everything is accessible via keyboard shortcuts. Number keys (1-9) for quick
-selection, `→`/`←` (or `Tab`/`Shift+Tab`) to cycle panes, `↑`/`↓` to move within
-one, and `Enter` as the single key that acts on whatever is selected.
+Everything is accessible via keyboard shortcuts. `→`/`←` (or `Tab`/`Shift+Tab`)
+to cycle panes, `↑`/`↓` to move within one, and `Enter` as the single key that
+acts on whatever is selected. The Sessions pane numbers its rows, so number keys
+(1-9) jump straight to one there.
 
 ### Session Naming
 

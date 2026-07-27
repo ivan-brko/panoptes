@@ -319,13 +319,13 @@ fn projects_footer(state: &AppState, project_store: &ProjectStore, config: &Conf
             }
         }
         ProjectsNav::Project(_) => {
-            "↑↓/1-9/Enter | n: new worktree | d: delete | R: refresh | ,: settings | Esc: back"
+            "↑↓/Enter | n: new worktree | d: delete | R: refresh | ,: settings | Esc: back"
                 .to_string()
         }
         ProjectsNav::Branch(_, _) => {
             let shortcuts = format_custom_shortcuts_hint(&config.custom_shortcuts);
             format!(
-                "↑↓/1-9/Enter | n: new AI | s: shell | d: delete | {}Esc: back",
+                "↑↓/Enter | n: new AI | s: shell | d: delete | {}Esc: back",
                 shortcuts
             )
         }
@@ -587,6 +587,41 @@ mod tests {
 
         let lines = render(160, &state, &f);
         assert!(contains_line(&lines, "Esc: back"), "{lines:?}");
+    }
+
+    /// Pane 1 has no numbered rows, so it must not offer `1-9`. Pane 2 still
+    /// numbers its sessions, so it still does.
+    #[test]
+    fn test_only_the_sessions_pane_footer_offers_the_digit_jump() {
+        let f = fixture();
+        let project_id = f.project_store.projects().next().unwrap().id;
+        let branch = crate::project::Branch::default_for_project(
+            project_id,
+            "main".to_string(),
+            PathBuf::from("/tmp/panoptes"),
+        );
+        let branch_id = branch.id;
+
+        for nav in [
+            ProjectsNav::Overview,
+            ProjectsNav::Project(project_id),
+            ProjectsNav::Branch(project_id, branch_id),
+            ProjectsNav::ProjectSettings(project_id),
+        ] {
+            let state = AppState {
+                projects_nav: nav,
+                ..Default::default()
+            };
+            let footer = projects_footer(&state, &f.project_store, &f.config);
+            assert!(!footer.contains("1-9"), "{footer:?}");
+        }
+
+        let state = AppState {
+            focus: Focus::Panes(Tab::Sessions),
+            ..Default::default()
+        };
+        let lines = render(160, &state, &f);
+        assert!(contains_line(&lines, "↑↓/1-9: select"), "{lines:?}");
     }
 
     #[test]
