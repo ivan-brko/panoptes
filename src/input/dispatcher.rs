@@ -279,8 +279,12 @@ fn validate_mode_focus_consistency(state: &mut AppState) {
             on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::ProjectSettings(_))
         }
 
-        // Session deletion is valid wherever a session list lives: the session
-        // view, pane 1's branch drill-down, and pane 2
+        // Session deletion is opened from a session list: pane 2, or pane 1's
+        // branch drill-down. `Focus::Session` is allowed rather than reachable
+        // - the session view has no delete key, because every key there is
+        // the agent's - and stays allowed so that a session destroyed while
+        // it is on screen can still put its pane back (`was_full_screen` in
+        // `dialogs::confirming_session_delete_key`).
         InputMode::ConfirmingSessionDelete => {
             state.focus == Focus::Session
                 || on(Tab::Sessions)
@@ -362,11 +366,11 @@ fn validate_mode_focus_consistency(state: &mut AppState) {
     // The session view has exactly one mode, so the rule runs both ways: a
     // session filling the screen is always in session mode.
     //
-    // Normal mode is the resting state every dialog returns to, and a dialog
-    // can be opened from the session view - answering "no" to a session
-    // delete lands here. Without this the user would be left looking at a
-    // session that no key reaches, because normal mode has no handler for a
-    // screen that is not a pane.
+    // Normal mode is where every dialog comes to rest, and the repair above
+    // resets to it too. Neither knows whether a session is on screen. Without
+    // this the user would be left looking at a session that no key reaches,
+    // because normal mode's handler has nothing to route a full-screen
+    // session to - that was the detached mode this replaced.
     if state.focus == Focus::Session && state.input_mode == InputMode::Normal {
         state.input_mode = InputMode::Session;
     }
@@ -721,8 +725,21 @@ mod tests {
                 assert_eq!(state.input_mode, mode, "{mode:?} at {focus:?}");
             }
         }
-        // Quit is still answerable from the session view; normal mode is not
-        // something the session view can be in, and is repaired below.
+    }
+
+    /// `q` no longer quits from the session view - it types a `q`
+    ///
+    /// Quitting was a global key, and globals are normal mode's. The session
+    /// view was in normal mode when detached, so `q` reached the quit dialog
+    /// from there; with one mode the keystroke belongs to the agent, and the
+    /// way out is `Esc` first. The validator still permits the combination
+    /// rather than pretending to know every future entry point.
+    #[test]
+    fn test_quitting_is_no_longer_reachable_from_the_session_view() {
+        assert!(globals_apply(InputMode::Normal));
+        assert!(!globals_apply(InputMode::Session));
+
+        // Permitted if something ever does set it, but nothing does
         let mut state = state_at(Focus::Session, InputMode::ConfirmingQuit);
         validate_mode_focus_consistency(&mut state);
         assert_eq!(state.input_mode, InputMode::ConfirmingQuit);

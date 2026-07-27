@@ -1,8 +1,12 @@
 //! Normal mode input handlers
 //!
-//! One handler per pane, plus the full-screen session view. Each pane handler
-//! routes on its own drill-down level; the Claude and Codex config sections
-//! share one handler in [`crate::input::agent_configs`].
+//! One handler per pane. Each routes on its own drill-down level; the Claude
+//! and Codex config sections share one handler in
+//! [`crate::input::agent_configs`].
+//!
+//! Normal mode is a pane's mode. A full-screen session is always in session
+//! mode ([`crate::input::session_mode`]), where every key but `Esc` belongs
+//! to the agent, so there is no session handler here.
 
 pub mod projects_pane;
 pub mod sessions_pane;
@@ -17,15 +21,15 @@ use crate::session::{NewSessionSpec, SessionId};
 
 /// Launch a shell session running a custom shortcut's command
 ///
-/// The shared body of the custom-shortcut key in the branch-detail and
-/// session views: sizes the PTY like the session view renders it, creates a
-/// shell session with the shortcut's command as initial input, and applies
-/// the shortcut's auto-close setting at creation time (so the flag can never
-/// miss a command that finishes instantly).
+/// The body of the custom-shortcut key at pane 1's branch level: sizes the
+/// PTY like the session view renders it, creates a shell session with the
+/// shortcut's command as initial input, and applies the shortcut's auto-close
+/// setting at creation time (so the flag can never miss a command that
+/// finishes instantly).
 ///
 /// Returns the new session's ID; on failure the error has been surfaced to
 /// the user already and `None` is returned. Navigation into the session is
-/// left to the caller, since the two views enter it differently.
+/// left to the caller.
 pub(crate) fn launch_shortcut_session(
     app: &mut App,
     shortcut: &CustomShortcut,
