@@ -733,7 +733,7 @@ impl App {
     /// Check for sessions stuck in Executing state too long
     fn tick_state_timeouts(&mut self) -> bool {
         self.sessions
-            .check_state_timeouts(self.config.state_timeout_secs)
+            .check_state_timeouts(self.config.state_timeout_secs, self.state.active_session)
     }
 
     /// Check shell session states via foreground detection

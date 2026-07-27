@@ -348,6 +348,15 @@ at it and clear the flag, because the dialog is still open.
 4. The bell rings only when the reason is new, not on every repeat
 5. When the user opens or types into the session, attention is acknowledged
 
+`Stalled` is the one reason with a liveness test in front of it
+(`SessionManager::check_state_timeouts`). Passing `state_timeout_secs` decides
+only that an in-flight tool report is too old to believe, so the tool is evicted
+and the state repaired regardless. The flag is raised only if the session has
+also written nothing to its PTY for `STALL_SILENCE_SECS` (30s) and is not the
+session on screen: both agents redraw a spinner while a tool runs, so continuing
+output means a long tool, not a hung one. Without that test every long `Bash`
+call in a row re-raised the badge moments after the user cleared the last one.
+
 ## File Locations
 
 | Path | Purpose |
@@ -408,7 +417,7 @@ See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for the full reference.
 | `worktrees_dir` | `~/.panoptes/worktrees` | Where branch worktrees are created |
 | `hooks_dir` | `~/.panoptes/hooks` | Where generated hook scripts are written |
 | `scrollback_lines` | 10,000 | Lines of history retained per session |
-| `state_timeout_secs` | 300 | Seconds before an in-flight tool is treated as stalled |
+| `state_timeout_secs` | 300 | Seconds before an in-flight tool report stops being believed |
 | `suspend_after_secs` | 7200 (2h) | Seconds a session may sit inactive before its agent process is suspended; 0 disables |
 | `log_agent_events` | false | Log raw agent transcript lines for debugging |
 | `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
