@@ -1204,6 +1204,28 @@ mod tests {
         assert!(contains_line(&lines, "▶ ⚙ Project settings"), "{lines:?}");
     }
 
+    /// The trailing row is the one furthest from the top, so a branch list
+    /// longer than the pane has to scroll to it like any other selection
+    #[test]
+    fn test_selecting_the_settings_row_scrolls_a_long_branch_list_to_it() {
+        let names: Vec<String> = (0..30).map(|i| format!("worktree-{i:02}")).collect();
+        let worktrees: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (store, project_id, _) = store_with_branches(&worktrees);
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        // Top of the list: the settings row is far off the bottom
+        let lines = render(60, &state, &store);
+        assert!(!lines.iter().any(|l| l.contains('⚙')), "{lines:?}");
+
+        state.selected_branch_index = project_settings_row(worktrees.len() + 1);
+        let lines = render(60, &state, &store);
+        assert!(
+            contains_line(&lines, "▶ ⚙ Project settings"),
+            "the settings row stayed off-screen: {lines:?}"
+        );
+    }
+
     /// A compact pane shortens the label; ten columns is a counter and has no
     /// rows at all
     #[test]
