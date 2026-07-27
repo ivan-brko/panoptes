@@ -105,7 +105,6 @@ other two shrink but stay in view.
 | `m` | Move a project or folder into a folder (in the tree) |
 | `r` | Rename folder (in the tree) |
 | `R` | Refresh git state / branches |
-| `,` | Per-project settings: default configs, base branch, rename |
 
 ### Settings
 
@@ -119,13 +118,13 @@ See [Keyboard Reference](docs/KEYBOARD_REFERENCE.md) for the complete list.
 Need to manage multiple accounts — say, one for work and one for personal projects? Panoptes has you covered.
 
 ### Claude Code Accounts
-Open Settings (`Tab` twice) → Claude configs to manage them, then assign a per-project default with `,` at the project.
+Open Settings (`Tab` twice) → Claude configs to manage them, then assign a per-project default from `⚙ Project settings`, the last row of the project's branch list.
 
 - **New account**: Select any folder as your config directory. Claude will prompt you to log in the first time you use it.
 - **Existing account**: Select the Claude config directory you already have (e.g., `~/.claude-work`).
 
 ### Codex Accounts
-Open Settings (`Tab` twice) → Codex configs to manage them, then assign a per-project default with `,` at the project.
+Open Settings (`Tab` twice) → Codex configs to manage them, then assign a per-project default from `⚙ Project settings`, the last row of the project's branch list.
 
 - **New account**: Select any folder as the `CODEX_HOME` directory. Codex will use it for config, auth, and sessions.
 - **Existing account**: Select your existing Codex home directory (default `~/.codex`).

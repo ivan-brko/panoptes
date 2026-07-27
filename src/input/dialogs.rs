@@ -5,7 +5,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app::{clamp_row, App, AppState, Focus, InputMode, ProjectsNav};
+use crate::app::{clamp_project_row, clamp_row, App, AppState, Focus, InputMode, ProjectsNav};
 use crate::claude_config::ClaudeConfigStore;
 use crate::claude_json::ClaudeJsonStore;
 use crate::config::{is_reserved_key, CustomShortcut};
@@ -271,11 +271,11 @@ pub(crate) fn finish_branch_delete(
 
     tracing::info!("Deleted branch: {}", branch.id);
 
-    // Adjust selected row if needed; a project with no branches left is all
-    // back row
+    // Adjust selected row if needed; a project with no branches left is the
+    // back row and the settings row
     if let Some(project_id) = state.projects_nav.project_id() {
         let new_count = project_store.branches_for_project(project_id).len();
-        state.selected_branch_index = clamp_row(state.selected_branch_index, new_count);
+        state.selected_branch_index = clamp_project_row(state.selected_branch_index, new_count);
     }
 
     state.delete_worktree_on_disk = false;

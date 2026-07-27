@@ -46,7 +46,7 @@ Pane 1 drills down; the other two stay put while it does:
 ```
 Projects (tree)
     └── Folder (optional, up to 3 levels deep)
-            └── Project (branches)  ── , ──> Project settings
+            └── Project (branches)  ── ⚙ row ──> Project settings
                     └── Branch (sessions)
                             └── Session (fullscreen)
 ```
@@ -60,6 +60,12 @@ Every level of pane 1 below the tree opens with a back row — `‹ Projects`,
 like the section headings, the arrows reach it, and `Enter` on it does exactly
 what `Esc` does. The row names where `‹` goes; the pane's title says where you
 are.
+
+A project's branch list closes with a row of its own the same way: `⚙ Project
+settings`, last in the list under a divider, muted so it does not read as
+another branch. It is there whether the project has branches or not, so the
+project's default configs, its default base branch, and its name are always one
+`Enter` away rather than behind a shortcut you have to know about.
 
 Opening a session is the only thing that fills the terminal; `Esc` puts you back
 in the pane you opened it from.

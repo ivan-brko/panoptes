@@ -289,7 +289,8 @@ pub struct AppState {
     /// Selected *row* in pane 1's branch list
     ///
     /// Row 0 is the back row ([`crate::app::BACK_ROW`]), so branch `i` sits at
-    /// row `i + 1`; [`crate::app::row_item`] converts back.
+    /// row `i + 1`, and the row past the last branch is the project's settings;
+    /// [`crate::app::project_row`] resolves which is which.
     pub selected_branch_index: usize,
     /// Selected *row* in pane 1's per-branch session list
     ///
@@ -301,8 +302,8 @@ pub struct AppState {
     pub sessions_pane_index: usize,
     /// Selected row in pane 3's sections list
     pub settings_section_index: usize,
-    /// Selected row in the per-project settings list (pane 1, opened with `,`),
-    /// row 0 being the back row
+    /// Selected row in the per-project settings list (pane 1, reached from the
+    /// branch list's last row), row 0 being the back row
     pub project_settings_index: usize,
     /// Selected row in pane 3's notifications list
     pub notifications_index: usize,
@@ -535,8 +536,9 @@ impl AppState {
     ///
     /// Lands on the first branch, not the back row that sits above it: drilling
     /// in and pressing `Enter` must go deeper, not bounce straight back out.
-    /// An empty list has no first branch; [`crate::app::clamp_row`] in the
-    /// handler moves the selection onto the back row there.
+    /// An empty list has no first branch, so
+    /// [`crate::app::clamp_project_row`] in the handler leaves the selection on
+    /// the settings row that closes the list - still a way in, not a way out.
     pub fn navigate_to_project(&mut self, project_id: ProjectId) {
         self.projects_nav = ProjectsNav::Project(project_id);
         self.selected_branch_index = crate::app::FIRST_ITEM_ROW;
