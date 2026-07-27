@@ -112,7 +112,8 @@ fn global_section() -> Vec<Line<'static>> {
     vec![
         empty_line(),
         section_header("Global"),
-        shortcut_line("→ ← Tab ⇧Tab", "Switch pane (wraps)"),
+        shortcut_line("→ / Tab", "Next pane (wraps)"),
+        shortcut_line("← / ⇧Tab", "Previous pane (wraps)"),
         shortcut_line("Esc", "Back one level, then out to Projects"),
         shortcut_line("q", "Quit (asks to confirm)"),
         shortcut_line("Space", "Jump to next session needing attention"),
@@ -385,7 +386,8 @@ mod tests {
                 ..Default::default()
             };
             let lines = render(&state);
-            assert!(contains_line(&lines, "Switch pane"), "{tab:?}: {lines:?}");
+            assert!(contains_line(&lines, "Next pane"), "{tab:?}: {lines:?}");
+            assert!(contains_line(&lines, "Previous pane"), "{tab:?}: {lines:?}");
             assert!(contains_line(&lines, "q"), "{tab:?}: {lines:?}");
         }
     }

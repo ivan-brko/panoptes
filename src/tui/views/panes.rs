@@ -260,7 +260,10 @@ fn footer_text(ctx: &PaneContext) -> String {
         None => String::new(),
     };
 
-    let global = "←→/Tab: pane | q: quit | ?: help";
+    // One hint per direction, each arrow beside the Tab that means the same
+    // thing - the combined "←→/Tab" said which keys switch panes but not which
+    // way any of them goes
+    let global = "←/⇧Tab: prev pane | →/Tab: next pane | q: quit | ?: help";
     footer_with_attention(format!("{} | {}", base, global), ctx.sessions)
 }
 
@@ -468,7 +471,10 @@ mod tests {
             "{lines:?}"
         );
         assert!(
-            contains_line(&lines, "←→/Tab: pane | q: quit | ?: help"),
+            contains_line(
+                &lines,
+                "←/⇧Tab: prev pane | →/Tab: next pane | q: quit | ?: help"
+            ),
             "{lines:?}"
         );
     }

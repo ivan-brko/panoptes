@@ -86,8 +86,8 @@ other two shrink but stay in view.
 
 | Key | Action |
 |-----|--------|
-| `→` / `←` | Switch pane (wraps around) |
-| `Tab` / `Shift+Tab` | Same thing — switch to the next / previous pane |
+| `→` / `Tab` | Next pane (wraps around) |
+| `←` / `Shift+Tab` | Previous pane (wraps around) |
 | `Enter` | Open selected item / Enter session mode |
 | `Esc` | Back one level; at a pane's root, back out to the Projects pane — never quits |
 | `q` | Quit (with confirmation) |

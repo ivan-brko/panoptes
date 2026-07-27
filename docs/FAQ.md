@@ -288,8 +288,8 @@ The prompts are optional—you can decline each time. There's no global setting 
 
 | Key | Action |
 |-----|--------|
-| `→` / `←` | Switch pane (Projects → Sessions → Settings, wrapping) |
-| `Tab` / `Shift+Tab` | Same thing — switch to the next / previous pane |
+| `→` / `Tab` | Next pane (Projects → Sessions → Settings, wrapping) |
+| `←` / `Shift+Tab` | Previous pane (wrapping the same way) |
 | `Enter` | Open the selected item / session |
 | `Esc` | Back one level; in a session, straight out to the panes. Never quits |
 | `q` | Quit (with confirmation) |
