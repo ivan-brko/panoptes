@@ -358,6 +358,18 @@ fn validate_mode_focus_consistency(state: &mut AppState) {
         );
         state.input_mode = InputMode::Normal;
     }
+
+    // The session view has exactly one mode, so the rule runs both ways: a
+    // session filling the screen is always in session mode.
+    //
+    // Normal mode is the resting state every dialog returns to, and a dialog
+    // can be opened from the session view - answering "no" to a session
+    // delete lands here. Without this the user would be left looking at a
+    // session that no key reaches, because normal mode has no handler for a
+    // screen that is not a pane.
+    if state.focus == Focus::Session && state.input_mode == InputMode::Normal {
+        state.input_mode = InputMode::Session;
+    }
 }
 
 #[cfg(test)]
@@ -697,9 +709,8 @@ mod tests {
     }
 
     #[test]
-    fn test_normal_and_quit_are_valid_anywhere() {
+    fn test_normal_and_quit_are_valid_in_every_pane() {
         for focus in [
-            Focus::Session,
             Focus::Panes(Tab::Projects),
             Focus::Panes(Tab::Sessions),
             Focus::Panes(Tab::Settings),
@@ -710,6 +721,25 @@ mod tests {
                 assert_eq!(state.input_mode, mode, "{mode:?} at {focus:?}");
             }
         }
+        // Quit is still answerable from the session view; normal mode is not
+        // something the session view can be in, and is repaired below.
+        let mut state = state_at(Focus::Session, InputMode::ConfirmingQuit);
+        validate_mode_focus_consistency(&mut state);
+        assert_eq!(state.input_mode, InputMode::ConfirmingQuit);
+    }
+
+    /// A session on screen is always in session mode
+    ///
+    /// Normal mode is the resting state every dialog returns to, and a
+    /// session-delete dialog can be opened from the session view. Answering
+    /// "no" used to land in the detached mode that no longer exists; without
+    /// the repair it would land on a screen no key reaches.
+    #[test]
+    fn test_the_session_view_is_never_left_in_normal_mode() {
+        let mut state = state_at(Focus::Session, InputMode::Normal);
+        validate_mode_focus_consistency(&mut state);
+        assert_eq!(state.input_mode, InputMode::Session);
+        assert_eq!(state.focus, Focus::Session);
     }
 
     /// Every mode has a decision recorded above; this catches a new variant

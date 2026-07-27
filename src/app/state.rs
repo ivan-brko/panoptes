@@ -489,7 +489,8 @@ impl AppState {
                 None => false,
             },
             // Pane 2 is a flat list with nothing to pop, and the session view
-            // has its own two-step Esc in `handle_session_view_normal_key`
+            // owns its own `Esc` in `input::session_mode` - one press, all
+            // the way out
             Focus::Panes(Tab::Sessions) | Focus::Session => false,
         }
     }
@@ -584,17 +585,6 @@ impl AppState {
     pub fn clear_selection(&mut self) {
         self.selection = None;
         self.session_click.reset();
-    }
-
-    /// Detach from the session, leaving it on screen
-    ///
-    /// The caller drops mouse capture to hand selection back to the terminal,
-    /// which also means the release of a button held right now will never
-    /// arrive, so the selection has to end here. That is what keeps a drag
-    /// interrupted by `Esc` from freezing its session for good.
-    pub fn leave_session_mode(&mut self) {
-        self.input_mode = InputMode::Normal;
-        self.clear_selection();
     }
 
     /// Drop the selection if the screen it was made against has moved on
@@ -1029,25 +1019,34 @@ mod tests {
         assert!(state.selection.is_none());
     }
 
-    /// Esc drops mouse capture, so the release of a button held right now
-    /// never arrives - and a drag left dragging would freeze its session for
-    /// good
+    /// A drag interrupted by `Esc` must not freeze its session for good
+    ///
+    /// The output hold is re-derived from the live selection every tick, so a
+    /// selection left `dragging` after the screen is gone holds a session's
+    /// output forever - and the release that would have ended it never
+    /// arrives, because the user is no longer on that screen. `Esc` now
+    /// leaves the view outright, so this is the path that has to end the drag.
     #[test]
-    fn test_leaving_session_mode_ends_an_in_progress_drag() {
+    fn test_leaving_the_session_view_ends_an_in_progress_drag() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sessions = SessionManager::with_store(
+            crate::config::Config::default(),
+            crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
         let session_id = uuid::Uuid::new_v4();
         let mut state = AppState::default();
         state.navigate_to_session(session_id);
         state.selection = Some(selection_for(session_id));
         assert_eq!(state.dragging_session(), Some(session_id));
 
-        state.leave_session_mode();
+        state.return_from_session(&sessions);
 
-        assert_eq!(state.input_mode, InputMode::Normal);
         assert_eq!(state.dragging_session(), None);
         assert!(state.selection.is_none());
-        // The session itself is still on screen; only the mode changed
-        assert_eq!(state.active_session, Some(session_id));
-        assert_eq!(state.focus, Focus::Session);
+        // One press, all the way out: no session on screen, back in a pane
+        assert_eq!(state.active_session, None);
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert!(matches!(state.focus, Focus::Panes(_)));
     }
 
     #[test]

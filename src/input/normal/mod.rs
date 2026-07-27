@@ -5,7 +5,6 @@
 //! share one handler in [`crate::input::agent_configs`].
 
 pub mod projects_pane;
-pub mod session_view;
 pub mod sessions_pane;
 pub mod settings_pane;
 

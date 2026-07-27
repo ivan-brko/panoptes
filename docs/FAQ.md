@@ -36,8 +36,8 @@ At minimum, [Claude Code CLI](https://claude.ai/code) installed and configured. 
 2. Navigate into the project with Enter
 3. Create a worktree for your branch with `n`
 4. Create a session with `n` from the branch view
-5. Work with Claude Code in session mode
-6. Press `Esc` to exit session mode, then `Esc` again to navigate back (`Shift+Esc` sends an Escape keypress to the agent instead)
+5. Work with Claude Code — every key you press goes to it
+6. Press `Esc` to leave the session and go back (`Shift+Esc` sends an Escape keypress to the agent instead)
 
 ---
 
@@ -107,43 +107,50 @@ At a branch, press `n`, select Claude Code or Codex from the agent type selector
 
 At a branch, press `s`, enter a session name, and press Enter. Shell sessions run your default shell (bash/zsh) instead of Claude Code.
 
-### How do I enter/exit session mode?
+### How do I open and leave a session?
 
-- **Enter**: Press Enter on a session, or when viewing a session in Normal mode
-- **Exit**: Press `Esc` (`Shift+Esc` does not exit — it sends an Escape keypress to the session)
+Press `Enter` on a session to open it. Press `Esc` to leave — one press, straight back to the pane you opened it from.
 
-### How do I send Escape to the session (not exit session mode)?
+Inside a session there is no second mode: **every key goes to the agent except `Esc`**. Type as if the agent had the terminal to itself.
 
-Press `Shift+Esc`. Regular `Esc` exits session mode; `Shift+Esc` sends the Escape key to the active session (Claude Code, Codex, or shell).
+### How do I send Escape to the agent (not leave the session)?
+
+Press `Shift+Esc`. It is the only way to send a literal Escape — which is what `vim` needs to leave insert mode and what interrupts a Claude Code turn.
 
 ### How do I switch between sessions quickly?
 
-- **Tab**: Switch to next session (cycles through all sessions in the branch)
+From the panes, not from inside a session — in a session those keys are the agent's.
+
 - **1-9**: Jump directly to session by number
-- **Space**: Jump to next session needing attention (works from any view)
+- **Tab**: Cycle panes
+- **Space**: Jump to next session needing attention
 
-### How do I scroll through session history while in session mode?
+Press `Esc` first to get out of the session you are in.
 
-- **PageUp/PageDown**: Scroll through history
-- **Ctrl+Home/Ctrl+End**: Jump to top/bottom
-- Typing any key (except scroll keys) automatically scrolls back to live view
+### How do I scroll through session history?
+
+Use the **mouse wheel**. There are no scroll keys inside a session: `PageUp` and friends belong to the agent, the same as every other key.
+
+When the agent owns the mouse (Claude Code's TUI, `vim`, `htop`), the wheel goes to the agent and you scroll with the agent's own history — exactly as you would in a plain terminal tab.
+
+Typing anything returns you to live output.
 
 ### How do I copy text out of a session?
 
-Drag over it with the mouse. Panoptes highlights the selection and copies it to the clipboard when you release the button, the way tmux does — no need to leave session mode. Double-click selects a word, triple-click the whole line, and dragging past the top or bottom edge scrolls the view and keeps extending the selection.
+Drag over it with the mouse. Panoptes highlights the selection and copies it to the clipboard when you release the button, the way tmux does — no need to leave the session. Double-click selects a word, triple-click the whole line, and dragging past the top or bottom edge scrolls the view and keeps extending the selection.
 
 The highlight is deliberately short-lived: the copy has already happened when you release, so the highlight disappears on the session's next output, your next click, or a scroll.
 
 Two cases behave differently:
 
 - **The agent owns the mouse** (Claude Code's TUI, `vim` with `mouse=a`, `htop`). Your drag is forwarded to it, exactly as it would be in a normal terminal tab, so the agent does its own selection. Hold **⌥ (Option)** while dragging to bypass mouse reporting and use iTerm2's native selection instead. The footer says which one applies: `drag: copy` when the selection is Panoptes's, `⌥drag: copy` when it is the terminal's.
-- **Codex's fallback history** (very old sessions scrolled past what the terminal emulator kept) has no terminal cells behind it and cannot be selected. Exit session mode with `Esc` and use the terminal's own selection.
-
-Exiting session mode with `Esc` always works too: it releases mouse capture, giving you your terminal's native selection back.
+- **Codex's fallback history** (very old sessions scrolled past what the terminal emulator kept) has no terminal cells behind it and cannot be selected. Use ⌥drag for your terminal's own selection.
 
 ### I can't scroll through the session output - what's wrong?
 
-If you're in Normal mode (viewing but not interacting), press `Enter` to enter session mode first. Scrolling with PageUp/PageDown works in session mode. Alternatively, in Normal mode you can use PageUp/PageDown but only after entering the session view.
+Use the mouse wheel; there are no keyboard scroll keys inside a session.
+
+If the wheel scrolls the agent rather than Panoptes, the agent has asked for the mouse and is handling it — that is deliberate, and the agent's own scrollback is what you want in that case.
 
 ### What do the session states mean?
 
@@ -275,10 +282,10 @@ The prompts are optional—you can decline each time. There's no global setting 
 |-----|--------|
 | `→` / `←` | Switch pane (Projects → Sessions → Settings, wrapping) |
 | `Tab` / `Shift+Tab` | Same thing — switch to the next / previous pane |
-| `Enter` | Open / Enter session mode |
-| `Esc` | Back one level; at a pane's root, back out to the Projects pane. Never quits |
+| `Enter` | Open the selected item / session |
+| `Esc` | Back one level; in a session, straight out to the panes. Never quits |
 | `q` | Quit (with confirmation) |
-| `Shift+Esc` | Send Escape to active session |
+| `Shift+Esc` | Send a literal Escape to the active session |
 | `Space` | Jump to next session needing attention |
 | `n` | New (project/worktree/session depending on context) |
 | `s` | New shell session (at a branch) |

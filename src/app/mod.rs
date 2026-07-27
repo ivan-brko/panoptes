@@ -470,10 +470,9 @@ impl App {
         }
     }
 
-    /// Safety net: Codex session mode requires mouse capture for wheel events.
+    /// Safety net: a Codex session needs mouse capture for wheel events.
     fn tick_mouse_capture_safety_net(&mut self) {
         if self.state.focus == Focus::Session
-            && self.state.input_mode == InputMode::Session
             && self
                 .state
                 .active_session
@@ -1038,8 +1037,9 @@ impl App {
     ) -> Result<bool> {
         use crossterm::event::MouseButton;
 
-        // Outside session mode the mouse is the terminal's own again (capture
-        // is dropped on Esc), so there is nothing here to do
+        // Belt and braces: the session view has one mode, and it is this one.
+        // Nothing should reach here otherwise, and a stray event that did
+        // would be selecting against a screen the user has already left.
         if self.state.input_mode != InputMode::Session {
             return Ok(false);
         }
@@ -1425,11 +1425,7 @@ impl App {
         let mouse_enabled = self.sessions.get(session_id).is_some_and(|session| {
             session.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None
         });
-        if !should_forward_mouse_to_pty(
-            self.state.input_mode,
-            mouse_enabled,
-            self.sessions.is_suspended(session_id),
-        ) {
+        if !should_forward_mouse_to_pty(mouse_enabled, self.sessions.is_suspended(session_id)) {
             return Ok(false);
         }
 
@@ -1515,15 +1511,17 @@ impl App {
     /// Handle key in normal mode
     ///
     /// Routes to the focused pane, which then routes on its own drill-down
-    /// level. A session filling the screen is the only thing that bypasses the
-    /// panes entirely.
+    /// level. Normal mode is a pane's mode: a session filling the screen is
+    /// always in session mode, which `validate_mode_focus_consistency`
+    /// guarantees before any key is dispatched, so `Focus::Session` cannot
+    /// arrive here.
     pub(crate) fn handle_normal_mode_key(&mut self, key: KeyEvent) -> Result<()> {
         use crate::input::normal;
         match self.state.focus {
             Focus::Panes(Tab::Projects) => normal::projects_pane::handle_key(self, key),
             Focus::Panes(Tab::Sessions) => normal::sessions_pane::handle_key(self, key),
             Focus::Panes(Tab::Settings) => normal::settings_pane::handle_key(self, key),
-            Focus::Session => normal::session_view::handle_session_view_normal_key(self, key),
+            Focus::Session => Ok(()),
         }
     }
 
@@ -2531,7 +2529,6 @@ impl App {
                     state,
                     sessions,
                     project_store,
-                    config,
                     &state.header_notifications,
                 );
             } else {
@@ -2775,18 +2772,19 @@ fn paste_into(field: &mut String, text: &str, max: usize) -> bool {
 
 /// Whether a mouse event belongs to the child rather than to Panoptes
 ///
-/// Three conditions, and the third is what makes a suspended session
+/// Two conditions, and the second is what makes a suspended session
 /// selectable: it has no PTY to forward to, and forwarding must not wake it
 /// either - reading back through a suspended session is the point, and a
 /// stray click should not relaunch an agent. Since nothing is forwarded, its
 /// drags fall through to Panoptes' own selection, which only ever reads the
 /// terminal emulator.
-fn should_forward_mouse_to_pty(
-    input_mode: InputMode,
-    mouse_enabled: bool,
-    suspended: bool,
-) -> bool {
-    !suspended && input_mode == InputMode::Session && mouse_enabled
+///
+/// It used to ask a third question - whether the user was in session mode -
+/// back when leaving that mode handed the mouse to the terminal. There is one
+/// mode now, so the only question left is whether the child asked for the
+/// mouse.
+fn should_forward_mouse_to_pty(mouse_enabled: bool, suspended: bool) -> bool {
+    !suspended && mouse_enabled
 }
 
 /// The one session, if any, whose PTY is not read at all this tick
@@ -2991,13 +2989,10 @@ mod tests {
 
     #[test]
     fn test_should_forward_mouse_to_pty() {
-        assert!(should_forward_mouse_to_pty(InputMode::Session, true, false));
-        assert!(!should_forward_mouse_to_pty(
-            InputMode::Session,
-            false,
-            false
-        ));
-        assert!(!should_forward_mouse_to_pty(InputMode::Normal, true, false));
+        // The child asked for the mouse, so the drag is the child's
+        assert!(should_forward_mouse_to_pty(true, false));
+        // It did not, so the drag is Panoptes' own selection
+        assert!(!should_forward_mouse_to_pty(false, false));
     }
 
     /// What makes a suspended session selectable: nothing is forwarded to it,
@@ -3006,13 +3001,8 @@ mod tests {
     #[test]
     fn test_a_suspended_session_never_receives_forwarded_mouse_events() {
         // Even a child that had asked for the mouse before it was suspended
-        assert!(!should_forward_mouse_to_pty(InputMode::Session, true, true));
-        assert!(!should_forward_mouse_to_pty(InputMode::Normal, true, true));
-        assert!(!should_forward_mouse_to_pty(
-            InputMode::Session,
-            false,
-            true
-        ));
+        assert!(!should_forward_mouse_to_pty(true, true));
+        assert!(!should_forward_mouse_to_pty(false, true));
     }
 
     /// A session manager backed by a temp store, so tests never touch the

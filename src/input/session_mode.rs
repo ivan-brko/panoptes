@@ -1,6 +1,15 @@
 //! Session mode input handling
 //!
-//! Handles keyboard input when in session mode (PTY forwarding).
+//! The session view has one mode, and this is it: every key reaches the agent
+//! except `Esc`, which leaves. There is no second mode to be in and no
+//! keystroke Panoptes takes for itself along the way - no scroll keys, no
+//! session-switching digits, no custom shortcuts. Those all still exist, in
+//! the panes, one `Esc` away.
+//!
+//! Scrolling is therefore the wheel's job. For a session whose child asked
+//! for the mouse, the wheel goes to the child and the child's own scrollback
+//! answers - which is what a real terminal does with an agent that draws its
+//! own screen.
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -14,56 +23,6 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
     // Handle Esc key
     if key.code == KeyCode::Esc {
         return handle_session_mode_esc(app, key);
-    }
-
-    // An alternate-screen app (Claude Code's UI, vim, less) owns its own
-    // scrolling: there is no terminal scrollback behind it, so PgUp/PgDn
-    // belong to the app — exactly what a real terminal does. Local
-    // scrollback interception only applies to primary-screen sessions.
-    let alt_screen_owns_scrolling = app
-        .state
-        .active_session
-        .and_then(|id| app.sessions.get(id))
-        .is_some_and(|s| s.vterm.alternate_screen_active());
-
-    // Intercept scroll keys - don't forward to PTY
-    // Only handle Press events for scroll keys (not repeat) to prevent rapid scrolling
-    match key.code {
-        KeyCode::PageUp if !alt_screen_owns_scrolling && key.kind == KeyEventKind::Press => {
-            if let Some(session_id) = app.state.active_session {
-                session_scroll::scroll_page_up(app, session_id);
-            }
-            return Ok(());
-        }
-        KeyCode::PageDown if !alt_screen_owns_scrolling && key.kind == KeyEventKind::Press => {
-            if let Some(session_id) = app.state.active_session {
-                session_scroll::scroll_page_down(app, session_id);
-            }
-            return Ok(());
-        }
-        KeyCode::Home
-            if !alt_screen_owns_scrolling
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.kind == KeyEventKind::Press =>
-        {
-            // Ctrl+Home: scroll to top
-            if let Some(session_id) = app.state.active_session {
-                session_scroll::scroll_to_top(app, session_id);
-            }
-            return Ok(());
-        }
-        KeyCode::End
-            if !alt_screen_owns_scrolling
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.kind == KeyEventKind::Press =>
-        {
-            // Ctrl+End: scroll to bottom (live view)
-            if let Some(session_id) = app.state.active_session {
-                session_scroll::scroll_to_bottom(app, session_id);
-            }
-            return Ok(());
-        }
-        _ => {}
     }
 
     // Reset scroll to live view when typing (only on Press/Repeat, not Release)
@@ -121,8 +80,8 @@ enum EscIntent {
     Ignore,
     /// Shift+Esc: forward Esc to the agent in the PTY
     ForwardToPty,
-    /// Plain Esc: switch to Normal mode, staying in the session view
-    LeaveSessionMode,
+    /// Plain Esc: leave the session view for the pane it was opened from
+    LeaveSessionView,
 }
 
 /// Classify an Esc key event in session mode
@@ -132,19 +91,25 @@ fn esc_intent(key: &KeyEvent) -> EscIntent {
     } else if key.modifiers.contains(KeyModifiers::SHIFT) {
         EscIntent::ForwardToPty
     } else {
-        EscIntent::LeaveSessionMode
+        EscIntent::LeaveSessionView
     }
 }
 
 /// Handle Esc key in session mode
+///
+/// One press, all the way out. `Shift+Esc` is what an agent that wants a
+/// literal `Esc` - `vim` leaving insert mode, Claude Code interrupting a turn
+/// - gets instead, and is now the only way to send one.
 fn handle_session_mode_esc(app: &mut App, key: KeyEvent) -> Result<()> {
     match esc_intent(&key) {
         EscIntent::Ignore => {}
         EscIntent::ForwardToPty => forward_esc_to_pty(app)?,
-        EscIntent::LeaveSessionMode => {
-            app.state.leave_session_mode();
-            // Disable mouse capture so user can select and copy text
-            app.tui.disable_mouse_capture();
+        EscIntent::LeaveSessionView => {
+            // Clears the selection on the way out, which is also what releases
+            // a drag's output hold: the hold is re-derived from the live
+            // selection every tick, so `Esc` mid-drag cannot strand a session
+            // with its output held and no release coming.
+            app.state.return_from_session(&app.sessions);
         }
     }
     Ok(())
@@ -193,9 +158,41 @@ mod tests {
     }
 
     #[test]
-    fn test_esc_intent_plain_press_leaves_session_mode() {
+    fn test_esc_intent_plain_press_leaves_the_session_view() {
         let key = press(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(esc_intent(&key), EscIntent::LeaveSessionMode);
+        assert_eq!(esc_intent(&key), EscIntent::LeaveSessionView);
+    }
+
+    /// Every key that is not `Esc` reaches the agent's PTY
+    ///
+    /// Each of these used to be taken by Panoptes somewhere in the session
+    /// view - the scroll keys in this handler, the digits and shortcut
+    /// characters in the detached mode that no longer exists. Writing them
+    /// through `forward_key_to_session` is what one mode means: the handler
+    /// above has no branch that can swallow them.
+    #[test]
+    fn test_every_key_but_esc_goes_to_the_pty() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut sessions = test_manager(&temp_dir);
+        let session_id = sessions
+            .insert_test_session("forward", Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+
+        for key in [
+            press(KeyCode::PageUp, KeyModifiers::NONE),
+            press(KeyCode::PageDown, KeyModifiers::NONE),
+            press(KeyCode::Home, KeyModifiers::CONTROL),
+            press(KeyCode::End, KeyModifiers::CONTROL),
+            press(KeyCode::Up, KeyModifiers::NONE),
+            press(KeyCode::Down, KeyModifiers::NONE),
+            press(KeyCode::Enter, KeyModifiers::NONE),
+            press(KeyCode::Char('3'), KeyModifiers::NONE),
+            press(KeyCode::Char('q'), KeyModifiers::NONE),
+        ] {
+            assert_ne!(key.code, KeyCode::Esc);
+            forward_key_to_session(&mut sessions, session_id, key)
+                .unwrap_or_else(|e| panic!("{:?} should reach the PTY: {e}", key.code));
+        }
     }
 
     #[test]

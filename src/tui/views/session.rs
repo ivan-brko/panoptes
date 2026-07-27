@@ -7,7 +7,6 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::app::{selection, AppState, InputMode, SessionSelection};
-use crate::config::Config;
 use crate::project::ProjectStore;
 use crate::session::{Session, SessionInfo, SessionManager, SessionState, SessionType};
 use crate::tui::frame::{render_frame_border, render_pty_content, FrameConfig, FrameLayout};
@@ -15,7 +14,7 @@ use crate::tui::header::{Header, LogoKind};
 use crate::tui::header_notifications::HeaderNotificationManager;
 use crate::tui::theme::theme;
 use crate::tui::views::Breadcrumb;
-use crate::tui::views::{footer_with_attention, format_custom_shortcuts_hint, render_footer};
+use crate::tui::views::{footer_with_attention, render_footer};
 
 /// Render the session view
 pub fn render_session_view(
@@ -24,7 +23,6 @@ pub fn render_session_view(
     state: &AppState,
     sessions: &SessionManager,
     project_store: &ProjectStore,
-    config: &Config,
     header_notifications: &HeaderNotificationManager,
 ) {
     let t = theme();
@@ -34,7 +32,7 @@ pub fn render_session_view(
     // === HEADER ===
     // Built before the layout, because how many rows it needs depends on how
     // much of the wordmark this terminal can afford
-    let (breadcrumb, suffix) = build_header_breadcrumb(session, state, project_store);
+    let (breadcrumb, suffix) = build_header_breadcrumb(session, project_store);
 
     // Session header has custom coloring based on session state
     let header_color = session.map(|s| s.info.state.color()).unwrap_or(t.text_dim);
@@ -102,11 +100,12 @@ pub fn render_session_view(
         } else {
             let styled_lines = session.visible_styled_lines(layout.content.height as usize);
 
-            // Get cursor info
+            // Get cursor info. Scrolled back there is no cursor to show: the
+            // rows on screen are history, and the agent's cursor is somewhere
+            // below them.
             let cursor_pos = session.vterm.cursor_position();
-            let cursor_visible = state.input_mode == InputMode::Session
-                && session.vterm.cursor_visible()
-                && session.vterm.scrollback_offset() == 0;
+            let cursor_visible =
+                session.vterm.cursor_visible() && session.vterm.scrollback_offset() == 0;
 
             render_pty_content(
                 frame,
@@ -144,14 +143,7 @@ pub fn render_session_view(
     // a real terminal tab, and \u{2325}drag is the way past it
     let child_owns_mouse =
         session.is_some_and(|s| s.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None);
-    let help_text = build_footer_text(
-        state,
-        is_scrolled,
-        suspended,
-        child_owns_mouse,
-        sessions,
-        config,
-    );
+    let help_text = build_footer_text(is_scrolled, suspended, child_owns_mouse, sessions);
     render_footer(frame, layout.footer, &help_text);
 }
 
@@ -196,11 +188,9 @@ fn paint_selection(buf: &mut Buffer, area: Rect, session: &Session, selection: &
 /// What the session header says after the breadcrumb
 ///
 /// Everything the terminal below cannot say for itself, and nothing it can.
-fn header_suffix(info: &SessionInfo, mode: InputMode) -> String {
-    let mode_indicator = match mode {
-        InputMode::Session => "[SESSION]",
-        _ => "[NORMAL]",
-    };
+/// No mode tag: there is one mode, and a tag that never changes is not
+/// information.
+fn header_suffix(info: &SessionInfo) -> String {
     // The terminal below is the status. A session that is Thinking or Executing
     // is visibly doing so, and naming it again here only takes room from what
     // the screen cannot say. The two states the scrollback cannot report are
@@ -241,15 +231,14 @@ fn header_suffix(info: &SessionInfo, mode: InputMode) -> String {
     };
 
     format!(
-        "{}{}{}{} {}",
-        agent_display, state_display, subagent_display, usage_display, mode_indicator
+        "{}{}{}{}",
+        agent_display, state_display, subagent_display, usage_display
     )
 }
 
 /// Build breadcrumb and suffix for the session header
 fn build_header_breadcrumb(
     session: Option<&Session>,
-    state: &AppState,
     project_store: &ProjectStore,
 ) -> (Breadcrumb, String) {
     let Some(session) = session else {
@@ -272,64 +261,63 @@ fn build_header_breadcrumb(
         .push(branch_name)
         .push(&session.info.name);
 
-    (breadcrumb, header_suffix(&session.info, state.input_mode))
+    (breadcrumb, header_suffix(&session.info))
 }
 
+/// The session footer names only what Panoptes still answers
+///
+/// Which is very little, and deliberately: every key but `Esc` belongs to the
+/// agent, so a footer listing scroll keys and session-switching digits would
+/// be listing keys that now type into Claude Code. What is left is the way
+/// out, the way to send a literal `Esc`, and how the mouse behaves.
+///
+/// The attention badge stays. It is the one thing here that is not about the
+/// session on screen, and being buried in one session is exactly when another
+/// one wanting you is worth knowing.
 fn build_footer_text(
-    state: &AppState,
     is_scrolled: bool,
     suspended: bool,
     child_owns_mouse: bool,
     sessions: &SessionManager,
-    config: &Config,
 ) -> String {
+    // Panoptes selects for itself while the mouse is ours; when the child
+    // asked for mouse reporting the drag belongs to it, and \u{2325}drag -
+    // which the terminal handles natively, without ever reaching us - is what
+    // copies
+    let drag = if child_owns_mouse {
+        "\u{2325}drag: copy"
+    } else {
+        "drag: copy"
+    };
+
     // Say what a suspended session is before saying what to do with it: the
     // scrollback still reads as a live session, so without this the missing
     // process looks like a hang rather than a deliberate saving.
     if suspended {
-        return match state.input_mode {
-            InputMode::Session => {
-                "Suspended to save memory | Type to wake | PgUp: scroll history".to_string()
-            }
-            _ => "Suspended to save memory | Enter: session mode, then type to wake | \u{2191}\u{2193}/PgUp/Dn: scroll"
-                .to_string(),
-        };
+        return footer_with_attention(
+            format!("Esc: back | Suspended to save memory | Type to wake | {drag}"),
+            sessions,
+        );
     }
 
-    match state.input_mode {
-        InputMode::Session => {
-            // Panoptes selects for itself while the mouse is ours; when the
-            // child asked for mouse reporting the drag belongs to it, and
-            // \u{2325}drag - which the terminal handles natively, without
-            // ever reaching us - is what copies
-            let drag = if child_owns_mouse {
-                "\u{2325}drag: copy"
-            } else {
-                "drag: copy"
-            };
-            if is_scrolled {
-                format!("Esc: exit session mode | PgUp/PgDn: scroll | Ctrl+End: live view | {drag}")
-            } else {
-                format!("Esc: exit session mode | \u{21E7}Esc: send Esc | PgUp: scroll | {drag}")
-            }
-        }
-        _ => {
-            let scroll_hint = if is_scrolled { "End: live view | " } else { "" };
-            // Build custom shortcuts hint
-            let shortcuts_hint = format_custom_shortcuts_hint(&config.custom_shortcuts);
-
-            let base = format!(
-                "{}{}Enter: session mode | 1-9: switch | \u{2191}\u{2193}/PgUp/Dn: scroll | q: quit | ?: help | Esc: back",
-                scroll_hint, shortcuts_hint
-            );
-            footer_with_attention(base, sessions)
-        }
-    }
+    // Scrolled back, there is no key that returns to live output - typing does
+    // it, because a keystroke belongs to the agent and reaching the agent
+    // means being where the agent is.
+    let live = if is_scrolled {
+        "type: live view | "
+    } else {
+        ""
+    };
+    footer_with_attention(
+        format!("Esc: back | \u{21E7}Esc: send Esc | {live}{drag}"),
+        sessions,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::session::store::SessionStore;
     use crate::tui::views::test_util::{contains_line, render_to_buffer, render_to_lines};
 
@@ -348,14 +336,13 @@ mod tests {
                 &state,
                 &sessions,
                 &store,
-                &config,
                 &header_notifications,
             )
         });
 
         assert!(contains_line(&lines, "Session not found"), "{:?}", lines);
         assert!(contains_line(&lines, "? > ? > ?"), "{:?}", lines);
-        assert!(contains_line(&lines, "Enter: session mode"), "{:?}", lines);
+        assert!(contains_line(&lines, "Esc: back"), "{:?}", lines);
     }
 
     fn info(session_type: SessionType) -> SessionInfo {
@@ -383,8 +370,8 @@ mod tests {
             let mut info = info(SessionType::ClaudeCode);
             info.state = state;
 
-            let suffix = header_suffix(&info, InputMode::Session);
-            assert_eq!(suffix, "[CC] [SESSION]", "{state:?} leaked into {suffix:?}");
+            let suffix = header_suffix(&info);
+            assert_eq!(suffix, "[CC]", "{state:?} leaked into {suffix:?}");
         }
     }
 
@@ -396,24 +383,15 @@ mod tests {
         let mut exited = info(SessionType::ClaudeCode);
         exited.state = SessionState::Exited;
         exited.exit_reason = Some("killed by signal 9".to_string());
-        assert_eq!(
-            header_suffix(&exited, InputMode::Session),
-            "[CC] - Exited (killed by signal 9) [SESSION]"
-        );
+        assert_eq!(header_suffix(&exited), "[CC] - Exited (killed by signal 9)");
 
         // A crash Panoptes could not explain still reports the crash
         exited.exit_reason = None;
-        assert_eq!(
-            header_suffix(&exited, InputMode::Session),
-            "[CC] - Exited [SESSION]"
-        );
+        assert_eq!(header_suffix(&exited), "[CC] - Exited");
 
         let mut suspended = info(SessionType::ClaudeCode);
         suspended.state = SessionState::Suspended;
-        assert_eq!(
-            header_suffix(&suspended, InputMode::Session),
-            "[CC] - Suspended [SESSION]"
-        );
+        assert_eq!(header_suffix(&suspended), "[CC] - Suspended");
     }
 
     /// "Claude Code, signed in as dot-lambda" is one fact, so it gets one
@@ -422,24 +400,15 @@ mod tests {
     fn test_the_agent_and_its_account_share_a_bracket() {
         let mut claude = info(SessionType::ClaudeCode);
         claude.claude_config_name = Some("dot-lambda".to_string());
-        assert_eq!(
-            header_suffix(&claude, InputMode::Session),
-            "[CC \u{00b7} dot-lambda] [SESSION]"
-        );
+        assert_eq!(header_suffix(&claude), "[CC \u{00b7} dot-lambda]");
 
         // Codex keeps its account in its own field, and used to show nothing
         let mut codex = info(SessionType::OpenAICodex);
         codex.codex_config_name = Some("work".to_string());
-        assert_eq!(
-            header_suffix(&codex, InputMode::Session),
-            "[CX \u{00b7} work] [SESSION]"
-        );
+        assert_eq!(header_suffix(&codex), "[CX \u{00b7} work]");
 
         // A session with no account named keeps the bare tag
-        assert_eq!(
-            header_suffix(&info(SessionType::Shell), InputMode::Session),
-            "[SH] [SESSION]"
-        );
+        assert_eq!(header_suffix(&info(SessionType::Shell)), "[SH]");
     }
 
     /// Everything the terminal cannot report stays, and keeps its order
@@ -451,8 +420,8 @@ mod tests {
         info.subagents = 2;
 
         assert_eq!(
-            header_suffix(&info, InputMode::Normal),
-            "[CC \u{00b7} dot-lambda] - Suspended \u{00b7} 2 subagents [NORMAL]"
+            header_suffix(&info),
+            "[CC \u{00b7} dot-lambda] - Suspended \u{00b7} 2 subagents"
         );
     }
 
@@ -473,7 +442,6 @@ mod tests {
                 &state,
                 &sessions,
                 &store,
-                &config,
                 &header_notifications,
             )
         });
@@ -539,7 +507,6 @@ mod tests {
     }
 
     fn render_session(state: &AppState, sessions: &SessionManager) -> ratatui::buffer::Buffer {
-        let config = Config::default();
         let store = ProjectStore::new();
         let header_notifications = HeaderNotificationManager::default();
         render_to_buffer(80, 24, |frame| {
@@ -549,7 +516,6 @@ mod tests {
                 state,
                 sessions,
                 &store,
-                &config,
                 &header_notifications,
             )
         })
@@ -615,10 +581,6 @@ mod tests {
     /// ours, and \u{2325}drag is the way past a child that took it
     #[test]
     fn test_the_footer_names_the_drag_that_copies() {
-        let state = AppState {
-            input_mode: InputMode::Session,
-            ..Default::default()
-        };
         let dir = tempfile::TempDir::new().unwrap();
         let config = Config::default();
         let sessions = SessionManager::with_store(
@@ -626,18 +588,56 @@ mod tests {
             SessionStore::with_path(dir.path().join("sessions.json")),
         );
 
-        let ours = build_footer_text(&state, false, false, false, &sessions, &config);
+        let ours = build_footer_text(false, false, false, &sessions);
         assert!(ours.contains("drag: copy"), "{ours}");
         assert!(!ours.contains('\u{2325}'), "{ours}");
 
-        let theirs = build_footer_text(&state, false, false, true, &sessions, &config);
+        let theirs = build_footer_text(false, false, true, &sessions);
         assert!(theirs.contains("\u{2325}drag: copy"), "{theirs}");
 
-        // Scrolled up says the same thing, alongside the scroll keys
-        let scrolled = build_footer_text(&state, true, false, false, &sessions, &config);
-        assert!(
-            scrolled.contains("Ctrl+End: live view | drag: copy"),
-            "{scrolled}"
+        // Scrolled up, typing is what returns to live output
+        let scrolled = build_footer_text(true, false, false, &sessions);
+        assert!(scrolled.contains("type: live view"), "{scrolled}");
+    }
+
+    /// The footer must not offer a key the agent now takes
+    ///
+    /// Every one of these was a real binding in the session view before the
+    /// modes collapsed. Naming any of them now would be telling the user to
+    /// press something that types into Claude Code instead.
+    #[test]
+    fn test_the_footer_offers_no_key_that_belongs_to_the_agent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config::default();
+        let sessions = SessionManager::with_store(
+            config.clone(),
+            SessionStore::with_path(dir.path().join("sessions.json")),
         );
+
+        for suspended in [false, true] {
+            for is_scrolled in [false, true] {
+                let footer = build_footer_text(is_scrolled, suspended, false, &sessions);
+                for gone in [
+                    "PgUp",
+                    "PgDn",
+                    "Ctrl+End",
+                    "Ctrl+Home",
+                    "1-9",
+                    "Enter:",
+                    "session mode",
+                ] {
+                    assert!(
+                        !footer.contains(gone),
+                        "{gone:?} still offered in {footer:?}"
+                    );
+                }
+                // What is left is the way out and the literal Esc
+                assert!(footer.contains("Esc: back"), "{footer}");
+                assert!(
+                    footer.contains("\u{21E7}Esc: send Esc") || suspended,
+                    "{footer}"
+                );
+            }
+        }
     }
 }

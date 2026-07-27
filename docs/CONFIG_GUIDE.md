@@ -384,7 +384,7 @@ command = "npm run dev"
 
 **Managing shortcuts:**
 - Settings pane → Shortcuts: `n` adds one, `d` deletes the selected one
-- At a branch, or in session view (normal mode), press the shortcut key to spawn
+- At a branch, press the shortcut key to spawn
   a shell session with that command
 
 **When to use:** Define shortcuts for commands you frequently run when working with Claude Code sessions, such as opening editors, starting dev servers, or running build tools.
