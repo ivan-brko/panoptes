@@ -328,6 +328,27 @@ impl VirtualTerminal {
         )
     }
 
+    /// The text of a rectangle of cells, `end_col` inclusive
+    ///
+    /// The block counterpart of [`Self::contents_between`]: the same column
+    /// range from every row, so one column of a table comes out without the
+    /// rest of each line. Rows are never joined - a rectangle's rows line up
+    /// with the rows on screen, wrapped or not.
+    pub fn contents_in_columns(
+        &self,
+        start_row: usize,
+        end_row: usize,
+        start_col: u16,
+        end_col: u16,
+    ) -> String {
+        self.parser.screen().contents_in_columns_absolute(
+            start_row,
+            end_row,
+            start_col,
+            end_col.saturating_add(1),
+        )
+    }
+
     /// Whether an absolute row soft-wraps into the next one
     ///
     /// `true` means this row *continues* into the row below, which is how a
@@ -346,6 +367,96 @@ impl VirtualTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rectangle takes the same columns from every row
+    ///
+    /// The thing a stream selection cannot do: one column of a table, without
+    /// the rest of each line coming with it.
+    #[test]
+    fn test_block_selection_takes_one_column_of_a_table() {
+        let mut vt = VirtualTerminal::new(6, 40);
+        vt.process(b"NAME      STATUS    PORT\r\n");
+        vt.process(b"alpha     running   8080\r\n");
+        vt.process(b"beta      exited    9090\r\n");
+
+        // Columns 10..=17 are the STATUS column
+        let block = vt.contents_in_columns(0, 2, 10, 17);
+        assert_eq!(block, "STATUS  \nrunning \nexited  ");
+
+        // The same rows as a stream selection drag in whole lines instead
+        let stream = vt.contents_between(0, 10, 2, 17);
+        assert_eq!(
+            stream,
+            "STATUS    PORT\nalpha     running   8080\nbeta      exited  "
+        );
+    }
+
+    /// Every row of a rectangle contributes a line, including a blank one, so
+    /// the result lines up with the rows on screen
+    #[test]
+    fn test_block_selection_keeps_blank_rows() {
+        let mut vt = VirtualTerminal::new(6, 20);
+        vt.process(b"aaa\r\n\r\nccc\r\n");
+
+        assert_eq!(vt.contents_in_columns(0, 2, 0, 2), "aaa\n\nccc");
+    }
+
+    /// A rectangle ignores soft wrapping
+    ///
+    /// A stream selection joins a wrapped row to the next, because they are
+    /// one logical line. A rectangle must not: joining would slide every later
+    /// cell out of the column the user drew.
+    #[test]
+    fn test_block_selection_does_not_join_wrapped_rows() {
+        let mut vt = VirtualTerminal::new(6, 10);
+        // 14 characters into a 10-column terminal: wraps after "0123456789"
+        vt.process(b"0123456789abcd");
+
+        assert_eq!(vt.contents_in_columns(0, 1, 0, 1), "01\nab");
+        // The stream selection over the same cells treats it as one line
+        assert_eq!(vt.contents_between(0, 0, 1, 1), "0123456789ab");
+    }
+
+    /// A wide character straddling the edge of the rectangle
+    ///
+    /// vt100 keeps a wide character in its *first* cell and leaves the second
+    /// empty, which gives one rule that holds at both edges: the character
+    /// belongs to the rectangle exactly when its first cell does. A right edge
+    /// landing on that first cell keeps the whole character; a left edge
+    /// landing on the second half yields a blank in its place, never half a
+    /// character - and the blank is what keeps every row the width the user
+    /// drew, so a pasted rectangle still lines up.
+    #[test]
+    fn test_block_selection_handles_wide_characters_at_both_edges() {
+        let mut vt = VirtualTerminal::new(4, 20);
+        // Each CJK character occupies two columns: 0-1, 2-3, 4-5
+        vt.process("一二三".as_bytes());
+
+        // Both halves inside: kept, obviously
+        assert_eq!(vt.contents_in_columns(0, 0, 0, 1), "一");
+
+        // Right edge on the second character's *first* cell: kept whole, so
+        // the text is never cut mid-character
+        assert_eq!(vt.contents_in_columns(0, 0, 0, 2), "一二");
+
+        // Left edge on the second character's *second* cell: that orphaned
+        // half comes out as a blank rather than as half a character, which is
+        // what keeps the rectangle rectangular - every row is the width the
+        // user drew, so the columns still line up when pasted.
+        assert_eq!(vt.contents_in_columns(0, 0, 3, 5), " 三");
+    }
+
+    /// An empty or inverted rectangle is empty, never a panic
+    #[test]
+    fn test_block_selection_rejects_an_empty_rectangle() {
+        let mut vt = VirtualTerminal::new(4, 20);
+        vt.process(b"hello");
+
+        // Columns beyond the terminal clamp rather than panic
+        assert_eq!(vt.contents_in_columns(0, 0, 100, 200), "");
+        // A row range running backwards selects nothing
+        assert_eq!(vt.contents_in_columns(2, 0, 0, 4), "");
+    }
 
     #[test]
     fn test_vterm_creation() {

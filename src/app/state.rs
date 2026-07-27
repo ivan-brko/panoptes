@@ -974,6 +974,7 @@ mod tests {
             ((3, 5), (3, 5)),
             crate::app::selection::Granularity::Cell,
             (0, 5),
+            crate::app::selection::Shape::Stream,
         )
     }
 

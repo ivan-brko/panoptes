@@ -242,6 +242,49 @@ impl Screen {
         }
     }
 
+    /// PANOPTES PATCH: a rectangle of cells, addressed absolutely
+    ///
+    /// The same column range taken from every row, which is what pulls one
+    /// column out of `docker ps` or `ls -l` - something
+    /// [`Self::contents_between_absolute`] cannot do, because a stream
+    /// selection runs to the end of each line.
+    ///
+    /// Two deliberate differences from the stream version. Soft wrapping is
+    /// ignored: a wrapped row is a row of the rectangle like any other, and
+    /// joining it to its neighbour would slide every later cell out of the
+    /// column the user drew. And every row contributes a line, including an
+    /// empty one, so the rows of the result line up with the rows on screen.
+    ///
+    /// `end_col` is exclusive, as everywhere else here.
+    #[must_use]
+    pub fn contents_in_columns_absolute(
+        &self,
+        start_row: usize,
+        end_row: usize,
+        start_col: u16,
+        end_col: u16,
+    ) -> String {
+        if end_row < start_row || end_col <= start_col {
+            return String::new();
+        }
+        let (_, cols) = self.size();
+        let start_col = start_col.min(cols);
+        let end_col = end_col.min(cols);
+        if end_col <= start_col {
+            return String::new();
+        }
+
+        let mut contents = String::new();
+        let row_count = end_row - start_row + 1;
+        for (i, row) in self.grid().all_rows().skip(start_row).take(row_count).enumerate() {
+            if i > 0 {
+                contents.push('\n');
+            }
+            row.write_contents(&mut contents, start_col, end_col - start_col, false);
+        }
+        contents
+    }
+
     /// PANOPTES PATCH: how many rows of scrollback the grid currently holds
     ///
     /// The origin the absolute row addressing of

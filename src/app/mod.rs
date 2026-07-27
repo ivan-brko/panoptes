@@ -1011,7 +1011,20 @@ impl App {
             return Ok(true);
         }
 
-        if self.forward_mouse_event_to_pty_if_enabled(session_id, mouse, is_codex_session)? {
+        // Shift says the event is the terminal's, not the child's - the
+        // convention every terminal already uses to reach past an application
+        // that has taken the mouse. Without it, the majority of sessions
+        // (Claude Code's TUI, `vim` with `mouse=a`, `htop`) can only be copied
+        // from with the terminal's own native selection.
+        //
+        // Measured before it was built: iTerm2 does not claim shift-drag the
+        // way it claims option-drag, so the +4 shift bit arrives intact - on
+        // the press, every drag, and the release. Where a terminal *does* claim
+        // it the bit never arrives, and this reads false, which is exactly
+        // today's behaviour.
+        if !shift_claims_event(&mouse)
+            && self.forward_mouse_event_to_pty_if_enabled(session_id, mouse, is_codex_session)?
+        {
             return Ok(true);
         }
 
@@ -1094,7 +1107,18 @@ impl App {
             (view_row, view_col),
             Duration::from_millis(self.config.multi_click_ms),
         );
-        let granularity = selection::Granularity::for_click_count(clicks);
+        // Fixed for the whole drag, from the modifier held as the button went
+        // down: a shape that changed halfway would redraw the highlight around
+        // text the user never dragged over
+        let shape = block_shape_requested(&mouse);
+        // A rectangle is drawn in cells, never snapped to words or lines. The
+        // point of it is the exact column range the user drew - a rectangle
+        // that grew to a word boundary would take the neighbouring column with
+        // it, which is the thing a block selection exists to avoid.
+        let granularity = match shape {
+            selection::Shape::Block => selection::Granularity::Cell,
+            selection::Shape::Stream => selection::Granularity::for_click_count(clicks),
+        };
 
         let Some(span) = self.span_at(session_id, view_row, view_col, granularity) else {
             return Ok(false);
@@ -1104,6 +1128,7 @@ impl App {
             span,
             granularity,
             (view_row, view_col),
+            shape,
         ));
         Ok(true)
     }
@@ -1224,14 +1249,19 @@ impl App {
         let Some(selection) = self.state.selection_for(session_id) else {
             return;
         };
+        let shape = selection.shape;
         let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
+        let ((top, bottom), (left, right)) = selection.block_bounds();
         let Some(session) = self.sessions.get(session_id) else {
             return;
         };
 
-        let text = session
-            .vterm
-            .contents_between(start_row, start_col, end_row, end_col);
+        let text = match shape {
+            selection::Shape::Stream => session
+                .vterm
+                .contents_between(start_row, start_col, end_row, end_col),
+            selection::Shape::Block => session.vterm.contents_in_columns(top, bottom, left, right),
+        };
         if text.is_empty() {
             return;
         }
@@ -2789,6 +2819,44 @@ fn paste_into(field: &mut String, text: &str, max: usize) -> bool {
     was_truncated
 }
 
+/// What shape the modifiers held at button-down ask for
+///
+/// `Ctrl` draws a rectangle. The other two candidates were spoken for: option
+/// belongs to the terminal, which handles it natively and never passes it on,
+/// and shift already means "this event is Panoptes', not the child's".
+///
+/// Unverified against a real terminal, unlike the shift bit: on macOS
+/// `Ctrl`+click is traditionally a right-click, so a terminal may translate
+/// the press rather than report it with the +16 control bit. Where that
+/// happens the modifier never arrives, this reads `Stream`, and a drag is the
+/// ordinary selection it has always been.
+fn block_shape_requested(mouse: &MouseEvent) -> selection::Shape {
+    if mouse
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::CONTROL)
+    {
+        selection::Shape::Block
+    } else {
+        selection::Shape::Stream
+    }
+}
+
+/// Whether Shift is being held, which claims the event for Panoptes
+///
+/// One rule, applied before anything is forwarded: a shift-held mouse event is
+/// the terminal's business, not the child's. That is what real terminals do
+/// with an application that has enabled mouse reporting, and it is the only
+/// way to select out of one - a drag over Claude Code's TUI otherwise belongs
+/// to Claude Code.
+///
+/// It costs the child nothing, because a child that wanted shift-drag could
+/// not have had it anyway: the terminal is the first thing to see the report.
+fn shift_claims_event(mouse: &MouseEvent) -> bool {
+    mouse
+        .modifiers
+        .contains(crossterm::event::KeyModifiers::SHIFT)
+}
+
 /// Whether a mouse event belongs to the child rather than to Panoptes
 ///
 /// Two conditions, and the second is what makes a suspended session
@@ -3006,6 +3074,71 @@ mod tests {
         );
     }
 
+    /// Shift claims a mouse event for Panoptes, and nothing else does
+    ///
+    /// The load-bearing rule of shift-drag: over a child that owns the mouse,
+    /// a plain drag is still the child's and a shift drag is ours. Pinned in
+    /// both directions, because getting either wrong is silent - the drag
+    /// simply goes somewhere the user did not expect.
+    #[test]
+    fn test_shift_claims_the_event_and_nothing_else_does() {
+        use crossterm::event::{KeyModifiers, MouseButton};
+
+        let at = |kind, modifiers| MouseEvent {
+            kind,
+            column: 4,
+            row: 4,
+            modifiers,
+        };
+
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::ScrollUp,
+        ] {
+            assert!(
+                shift_claims_event(&at(kind, KeyModifiers::SHIFT)),
+                "{kind:?} with shift is Panoptes'"
+            );
+            assert!(
+                !shift_claims_event(&at(kind, KeyModifiers::NONE)),
+                "{kind:?} without shift belongs to the child"
+            );
+            // Other modifiers are not a claim: control changes the shape of a
+            // selection, and option never reaches us at all
+            assert!(!shift_claims_event(&at(kind, KeyModifiers::CONTROL)));
+            assert!(!shift_claims_event(&at(kind, KeyModifiers::ALT)));
+        }
+    }
+
+    /// Control asks for a rectangle; nothing else does
+    #[test]
+    fn test_control_asks_for_a_block_selection() {
+        use crossterm::event::{KeyModifiers, MouseButton};
+
+        let at = |modifiers| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 4,
+            modifiers,
+        };
+
+        assert_eq!(
+            block_shape_requested(&at(KeyModifiers::CONTROL)),
+            selection::Shape::Block
+        );
+        // Shift claims the event for Panoptes but does not change its shape,
+        // so shift+control drag over a mouse-owning child is a rectangle
+        assert_eq!(
+            block_shape_requested(&at(KeyModifiers::CONTROL | KeyModifiers::SHIFT)),
+            selection::Shape::Block
+        );
+        for m in [KeyModifiers::NONE, KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            assert_eq!(block_shape_requested(&at(m)), selection::Shape::Stream);
+        }
+    }
+
     #[test]
     fn test_should_forward_mouse_to_pty() {
         // The child asked for the mouse, so the drag is the child's
@@ -3041,6 +3174,7 @@ mod tests {
             (anchor, anchor),
             selection::Granularity::Cell,
             (0, 0),
+            selection::Shape::Stream,
         )
     }
 

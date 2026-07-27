@@ -117,8 +117,8 @@ pub fn render_session_view(
     let is_scrolled = scroll_offset > 0;
     let suspended = session.is_some_and(|s| s.info.state == SessionState::Suspended);
     // Who owns the mouse decides which drag copies: when the child asked for
-    // mouse reporting its own selection is what a drag drives, exactly as in
-    // a real terminal tab, and \u{2325}drag is the way past it
+    // mouse reporting a plain drag drives its own selection, exactly as in a
+    // real terminal tab, and \u{21E7}drag is the way past it
     let child_owns_mouse =
         session.is_some_and(|s| s.vterm.mouse_protocol_mode() != vt100::MouseProtocolMode::None);
     let help_text = build_footer_text(is_scrolled, suspended, child_owns_mouse, sessions);
@@ -127,11 +127,13 @@ pub fn render_session_view(
 
 /// Paint the mouse selection over the rendered terminal content
 ///
-/// Stream shape, like every terminal's selection and nothing like a
-/// rectangle: the first row runs from the anchor column to the end of the
-/// line, whole rows follow, and the last row stops at the head column. Rows
-/// that the view has scrolled past are simply not drawn - the selection is
-/// anchored in absolute rows, so it can be larger than the screen.
+/// Two shapes. A stream selection is what every terminal draws: the first row
+/// runs from the anchor column to the end of the line, whole rows follow, and
+/// the last row stops at the head column. A block selection is the same column
+/// range on every row.
+///
+/// Rows the view has scrolled past are simply not drawn - the selection is
+/// anchored in absolute rows, so it can be taller than the screen.
 fn paint_selection(buf: &mut Buffer, area: Rect, session: &Session, selection: &SessionSelection) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -139,12 +141,22 @@ fn paint_selection(buf: &mut Buffer, area: Rect, session: &Session, selection: &
     let style = theme().text_selection_style();
     let last_col = area.width - 1;
     let ((start_row, start_col), (end_row, end_col)) = selection.ordered();
+    let ((top, bottom), (left, right)) = selection.block_bounds();
+    let block = selection.shape == selection::Shape::Block;
+
+    // Which rows the shape covers at all. A rectangle is bounded by its own
+    // top and bottom, which are ordered independently of the drag's direction.
+    let (from_row, to_row) = if block {
+        (top, bottom)
+    } else {
+        (start_row, end_row)
+    };
 
     // Only the rows on screen are worth walking: a selection dragged through
     // a long scrollback can be thousands of rows tall
     let viewport_top = session.vterm.viewport_top_row();
-    let first_row = start_row.max(viewport_top);
-    let last_row = end_row.min(viewport_top + usize::from(area.height) - 1);
+    let first_row = from_row.max(viewport_top);
+    let last_row = to_row.min(viewport_top + usize::from(area.height) - 1);
     if last_row < first_row {
         return;
     }
@@ -153,8 +165,17 @@ fn paint_selection(buf: &mut Buffer, area: Rect, session: &Session, selection: &
         let Some(view_row) = selection::view_row(viewport_top, row, area.height) else {
             continue;
         };
-        let first = if row == start_row { start_col } else { 0 };
-        let last = if row == end_row { end_col } else { last_col };
+        let (first, last) = if block {
+            (left, right)
+        } else {
+            (
+                if row == start_row { start_col } else { 0 },
+                if row == end_row { end_col } else { last_col },
+            )
+        };
+        if first > last_col {
+            continue;
+        }
 
         let y = area.y + view_row;
         for x in first..=last.min(last_col) {
@@ -271,12 +292,12 @@ fn build_footer_text(
     child_owns_mouse: bool,
     sessions: &SessionManager,
 ) -> String {
-    // Panoptes selects for itself while the mouse is ours; when the child
-    // asked for mouse reporting the drag belongs to it, and \u{2325}drag -
-    // which the terminal handles natively, without ever reaching us - is what
-    // copies
+    // Panoptes selects for itself while the mouse is ours. When the child
+    // asked for mouse reporting a plain drag belongs to it - so the footer
+    // names the one that still copies here, which is \u{21E7}drag: shift
+    // claims the event for the terminal before anything is forwarded.
     let drag = if child_owns_mouse {
-        "\u{2325}drag: copy"
+        "\u{21E7}drag: copy"
     } else {
         "drag: copy"
     };
@@ -494,8 +515,13 @@ mod tests {
         span: (selection::Cell, selection::Cell),
         pointer: (u16, u16),
     ) -> SessionSelection {
-        let mut sel =
-            SessionSelection::started(session_id, span, selection::Granularity::Cell, pointer);
+        let mut sel = SessionSelection::started(
+            session_id,
+            span,
+            selection::Granularity::Cell,
+            pointer,
+            selection::Shape::Stream,
+        );
         sel.dragging = false;
         sel
     }
@@ -571,8 +597,8 @@ mod tests {
         assert!(!painted);
     }
 
-    /// The footer says whose drag it is: Panoptes selects while the mouse is
-    /// ours, and \u{2325}drag is the way past a child that took it
+    /// The footer says whose drag it is: a plain drag copies while the mouse
+    /// is ours, and \u{21E7}drag is the way past a child that took it
     #[test]
     fn test_the_footer_names_the_drag_that_copies() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -585,9 +611,17 @@ mod tests {
         let ours = build_footer_text(false, false, false, &sessions);
         assert!(ours.contains("drag: copy"), "{ours}");
         assert!(!ours.contains('\u{2325}'), "{ours}");
+        // `\u{21E7}Esc` is always there, so the check has to name the drag
+        assert!(
+            !ours.contains("\u{21E7}drag"),
+            "no modifier needed when the mouse is ours: {ours}"
+        );
 
         let theirs = build_footer_text(false, false, true, &sessions);
-        assert!(theirs.contains("\u{2325}drag: copy"), "{theirs}");
+        assert!(theirs.contains("\u{21E7}drag: copy"), "{theirs}");
+        // Option-drag was the old answer, and is the terminal's own selection
+        // rather than Panoptes' - it must not be offered as if it were ours
+        assert!(!theirs.contains('\u{2325}'), "{theirs}");
 
         // Scrolled up, typing is what returns to live output
         let scrolled = build_footer_text(true, false, false, &sessions);

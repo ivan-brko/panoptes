@@ -261,6 +261,19 @@ def to_live_view(row=1, col=1):
     return re.search(SCROLL_INDICATOR, screen_text()) is None
 
 
+# SGR modifier bits, added to the button code: +4 shift, +8 alt, +16 control
+SHIFT, CTRL = 4, 16
+
+
+def modified_drag(row, from_col, to_col, bits, rows=1):
+    """A drag carrying modifier bits, optionally spanning several rows."""
+    send(f"\x1b[<{bits};{from_col};{row}M".encode(), 0.4)
+    for i in range(1, rows):
+        send(f"\x1b[<{32 + bits};{to_col};{row + i}M".encode(), 0.15)
+    send(f"\x1b[<{32 + bits};{to_col};{row + rows - 1}M".encode(), 0.2)
+    send(f"\x1b[<{bits};{to_col};{row + rows - 1}m".encode(), 0.6)
+
+
 def drag(row, from_col, to_col):
     press(row, from_col)
     step = 1 if to_col >= from_col else -1
@@ -375,6 +388,25 @@ def scenario_shell():
         check("the jumps did not leak into the shell",
               "1;5H" not in rendered and "1;5F" not in rendered)
 
+    # A Ctrl drag takes a rectangle, which is the thing a stream selection
+    # cannot do: one column of a table without the rest of each line.
+    send("printf 'aa bb cc\\ndd ee ff\\ngg hh ii\\n'\r", 2.0)
+    if check("a table printed", wait_for(r"gg hh ii", 8.0, "table")):
+        trow, tcol = find("aa bb cc", last=True)
+        pbcopy("CLIPBOARD-UNTOUCHED")
+        # Columns 3..4 of three consecutive rows: the middle column only
+        modified_drag(trow, tcol + 3, tcol + 4, CTRL, rows=3)
+        pasted = pbpaste()
+        check(f"a ctrl drag takes a rectangle, not whole lines (got {pasted!r})",
+              pasted == "bb\nee\nhh")
+
+        # The same drag without Ctrl is a stream, and drags whole lines with it
+        pbcopy("CLIPBOARD-UNTOUCHED")
+        modified_drag(trow, tcol + 3, tcol + 4, 0, rows=3)
+        streamed = pbpaste()
+        check(f"the same drag without ctrl is a stream (got {streamed!r})",
+              streamed.startswith("bb cc") and "hh" in streamed)
+
     # The guard that makes those two keys safe to take: a program drawing its
     # own screen keeps them, because vt100 holds no scrollback behind it and
     # stealing them would only break the program's own gg/G.
@@ -410,13 +442,23 @@ def scenario_shell():
     # editor unable to run another. `cat -v` renders the reports the child
     # receives as visible text, which is what lets the coordinates be checked.
     send("echo MOUSEOWNER; printf '\\033[?1000h\\033[?1006h'; cat -v\r", 2.0)
-    check("footer defers to the child that took the mouse",
-          "⌥drag: copy" in screen_text())
+    check("footer names the drag that still copies here",
+          "⇧drag: copy" in screen_text())
     pbcopy("CLIPBOARD-UNTOUCHED")
     mrow, mcol = find("MOUSEOWNER", last=True)
     drag(mrow, mcol, mcol + 5)
     check("a drag over a mouse-owning child does not copy",
           pbpaste() == "CLIPBOARD-UNTOUCHED")
+
+    # ⇧drag reaches past a child that owns the mouse (PAN-18 phase 1).
+    #
+    # Measured first, then built: iTerm2 does not claim shift-drag the way it
+    # claims option-drag, so the +4 bit arrives and this is Panoptes' drag.
+    pbcopy("CLIPBOARD-UNTOUCHED")
+    modified_drag(mrow, mcol, mcol + len("MOUSEOWNER") - 1, SHIFT)
+    pasted = pbpaste()
+    check(f"\u21e7drag over a mouse-owning child copies (got {pasted!r})",
+          pasted == "MOUSEOWNER")
 
     # ...and it lands on the cell under the pointer.
     #
@@ -482,7 +524,7 @@ def scenario_codex():
 
     # PAN-15 routes Codex to Panoptes' own selection because Codex does not
     # ask for mouse reporting. If that ever changes, this is where it shows.
-    check("codex leaves the mouse to us", "⌥drag: copy" not in screen_text())
+    check("codex leaves the mouse to us", "⇧drag: copy" not in screen_text())
 
     row, col = find(banner)
     pbcopy("CLIPBOARD-UNTOUCHED")

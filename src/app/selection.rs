@@ -38,6 +38,20 @@ const MULTI_CLICK_TOLERANCE: u16 = 1;
 /// the extra distance buys nothing.
 const MAX_SCROLL_STEP: usize = 12;
 
+/// What shape a drag draws
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shape {
+    /// The terminal's usual selection: the first row from the anchor to the
+    /// end of the line, whole rows after it, the last row up to the head
+    #[default]
+    Stream,
+    /// A rectangle: the same column range from every row
+    ///
+    /// What a stream selection cannot do - take one column out of `docker ps`
+    /// or `ls -l` without dragging the rest of every line with it.
+    Block,
+}
+
 /// How much of the text one click takes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Granularity {
@@ -121,6 +135,12 @@ pub struct SessionSelection {
     /// cell: dragging left from the middle of a word must keep all of that
     /// word, not just the half the pointer started on.
     pub anchor_span: (Cell, Cell),
+    /// Stream or rectangle
+    ///
+    /// Decided by the modifier held when the button went down and fixed for
+    /// the drag: changing shape halfway would redraw the highlight around
+    /// text the user never dragged over.
+    pub shape: Shape,
 }
 
 impl SessionSelection {
@@ -130,6 +150,7 @@ impl SessionSelection {
         span: (Cell, Cell),
         granularity: Granularity,
         pointer: (u16, u16),
+        shape: Shape,
     ) -> Self {
         Self {
             session_id,
@@ -140,6 +161,7 @@ impl SessionSelection {
             edge: None,
             granularity,
             anchor_span: span,
+            shape,
         }
     }
 
@@ -166,6 +188,27 @@ impl SessionSelection {
         } else {
             (self.head, self.anchor)
         }
+    }
+
+    /// The rectangle a block selection covers: `(top, bottom)` rows and
+    /// `(left, right)` columns, all inclusive
+    ///
+    /// Rows and columns are ordered independently, which is the whole
+    /// difference from [`Self::ordered`]: dragging up and to the left draws
+    /// the same rectangle as dragging down and to the right, whereas a stream
+    /// selection started at the later cell would run the other way.
+    pub fn block_bounds(&self) -> ((usize, usize), (u16, u16)) {
+        let (top, bottom) = if self.anchor.0 <= self.head.0 {
+            (self.anchor.0, self.head.0)
+        } else {
+            (self.head.0, self.anchor.0)
+        };
+        let (left, right) = if self.anchor.1 <= self.head.1 {
+            (self.anchor.1, self.head.1)
+        } else {
+            (self.head.1, self.anchor.1)
+        };
+        ((top, bottom), (left, right))
     }
 
     /// Whether this is a plain click that never went anywhere
@@ -450,6 +493,7 @@ mod tests {
             dragging: true,
             pointer: (0, 0),
             edge: None,
+            shape: Shape::Stream,
             granularity: Granularity::Cell,
             anchor_span: (anchor, anchor),
         }
@@ -690,6 +734,7 @@ mod tests {
             ((0, 6), (0, 10)),
             Granularity::Word,
             (0, 8),
+            Shape::Stream,
         );
         assert_eq!(sel.ordered(), ((0, 6), (0, 10)));
 
@@ -714,6 +759,7 @@ mod tests {
             ((2, 4), (2, 4)),
             Granularity::Cell,
             (0, 0),
+            Shape::Stream,
         );
         assert!(click.is_bare_click());
 
@@ -724,6 +770,7 @@ mod tests {
             ((2, 4), (2, 4)),
             Granularity::Word,
             (0, 0),
+            Shape::Stream,
         );
         assert!(!letter.is_bare_click());
 

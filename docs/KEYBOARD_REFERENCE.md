@@ -184,6 +184,15 @@ Ordinary scrolling is the mouse wheel's job. When the agent has asked for the
 mouse, the wheel goes to the agent and you scroll with its own history, exactly
 as in a plain terminal tab.
 
+### Mouse
+
+| Gesture | Action |
+|-----|--------|
+| Drag | Select and copy on release |
+| `⇧`+Drag | The same, over an agent that owns the mouse |
+| `Ctrl`+Drag | Select a rectangle rather than a stream of text |
+| Double / triple click | Select a word / a whole logical line |
+
 Typing anything while scrolled back returns you to live output.
 
 **Switching sessions, custom shortcuts and `q` to quit live in the panes.**

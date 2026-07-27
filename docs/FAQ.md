@@ -144,11 +144,15 @@ When the agent owns the *mouse*, the wheel goes to it for the same reason.
 
 Drag over it with the mouse. Panoptes highlights the selection and copies it to the clipboard when you release the button, the way tmux does — no need to leave the session. Double-click selects a word, triple-click the whole line, and dragging past the top or bottom edge scrolls the view and keeps extending the selection.
 
+**Hold Ctrl while dragging to select a rectangle** instead of a stream of text — one column of `docker ps` or `ls -l` without the rest of every line coming with it. Every row of the result is the width you drew, so the columns still line up when you paste.
+
 The highlight is deliberately short-lived: the copy has already happened when you release, so the highlight disappears on the session's next output, your next click, or a scroll.
 
 Two cases behave differently:
 
-- **The agent owns the mouse** (Claude Code's TUI, `vim` with `mouse=a`, `htop`). Your drag is forwarded to it, exactly as it would be in a normal terminal tab, so the agent does its own selection. Hold **⌥ (Option)** while dragging to bypass mouse reporting and use iTerm2's native selection instead. The footer says which one applies: `drag: copy` when the selection is Panoptes's, `⌥drag: copy` when it is the terminal's.
+- **The agent owns the mouse** (Claude Code's TUI, `vim` with `mouse=a`, `htop`). A plain drag is forwarded to it, exactly as in a normal terminal tab, so the agent does its own selection. Hold **⇧ (Shift)** while dragging and the drag is Panoptes's instead — shift reaches past an application that has taken the mouse, which is what shift does in every terminal. You get the same highlight, the same clipboard copy, the same double-click-for-a-word. The footer says which applies: `drag: copy` when the mouse is ours, `⇧drag: copy` when the agent has it.
+
+  (**⌥ (Option)** still works too, and is different: it is iTerm2's own native selection, which never reaches Panoptes at all.)
 - **Codex's fallback history** (very old sessions scrolled past what the terminal emulator kept) has no terminal cells behind it and cannot be selected. Use ⌥drag for your terminal's own selection.
 
 ### I can't scroll through the session output - what's wrong?
