@@ -1,9 +1,18 @@
 //! Shared session scrolling helpers
 //!
-//! Centralizes scroll behavior so Session mode, Session view (normal mode),
-//! and mouse-wheel handling stay consistent. The session-level engine
-//! functions implement the Codex vterm-scrollback-with-fallback dance in one
-//! place; the `App`-level wrappers resolve the session and viewport.
+//! The session-level engine functions implement the Codex
+//! vterm-scrollback-with-fallback dance in one place; the `App`-level wrappers
+//! resolve the session and viewport.
+//!
+//! Every scroll now arrives from the mouse wheel or from a selection dragged
+//! past the edge of the screen. The keyboard entry points this module was
+//! written for are gone with the mode that owned them - a session forwards
+//! every key but `Esc` to the agent - so the wrappers they called
+//! (`scroll_page_up`, `scroll_lines_up`, `scroll_to_top` and friends) have no
+//! production callers left.
+//!
+//! Both clamps ask the same question, whichever buffer answers: **stop at the
+//! history that exists**, never at the capacity that was configured.
 
 use crate::app::App;
 use crate::session::{Session, SessionId, SessionType};
@@ -82,7 +91,12 @@ fn scroll_session_up(
             fallback_offset: session.fallback_scroll_offset(),
         }
     } else {
-        let max_scroll = session.vterm.scrollback_capacity();
+        // Clamped against the history that exists, not the capacity that was
+        // configured. The vterm clamps internally either way, so a capacity
+        // clamp let this counter climb to 10000 while the screen stopped at
+        // the oldest row - and every notch back down then moved the counter
+        // without moving the view.
+        let max_scroll = session.vterm.history_rows();
         *scroll_offset = scroll_offset.saturating_add(amount).min(max_scroll);
         session.vterm.set_scrollback(*scroll_offset);
         ScrollOutcome {
@@ -141,8 +155,7 @@ fn scroll_session_to_top(session: &mut Session, scroll_offset: &mut usize, viewp
             *scroll_offset = session.fallback_scroll_offset();
         }
     } else {
-        let max_scroll = session.vterm.scrollback_capacity();
-        *scroll_offset = max_scroll;
+        *scroll_offset = session.vterm.history_rows();
         session.vterm.set_scrollback(*scroll_offset);
     }
 }
@@ -446,25 +459,58 @@ mod tests {
         assert_eq!(session.fallback_scroll_offset(), 0);
     }
 
+    /// Wheeling up past the oldest line must not run a counter off into
+    /// space, or wheeling back down does nothing until it unwinds
+    ///
+    /// The app-level offset used to clamp against `scrollback_capacity()` -
+    /// the *configured* 10000 rows, not the history that exists - while the
+    /// vterm clamped internally to the real thing. Twenty lines of output and
+    /// a determined wheel left the offset at 10000 and the view at 20, and
+    /// every notch down then moved the counter without moving the screen.
     #[test]
-    fn non_codex_scroll_clamps_at_capacity_and_bottom() {
+    fn non_codex_scroll_up_stops_at_the_history_that_exists() {
         let mut session = spawn_session(false, false, 50);
         let mut offset = 0usize;
-        let capacity = session.vterm.scrollback_capacity();
+
+        // Wheel up far past the top
+        for _ in 0..60 {
+            scroll_session_up(&mut session, &mut offset, VIEWPORT, 3);
+        }
+        let history = session.vterm.history_rows();
+        assert!(history > 0, "the session should have had history to scroll");
+        assert_eq!(offset, history, "the offset outran the history that exists");
+
+        // One notch down has to move the screen, not just the counter
+        let before = session.vterm.scrollback_offset();
+        scroll_session_down(&mut session, &mut offset, 3);
+        assert!(
+            session.vterm.scrollback_offset() < before,
+            "scrolling down moved the counter but not the view ({before} -> {})",
+            session.vterm.scrollback_offset()
+        );
+    }
+
+    #[test]
+    fn non_codex_scroll_clamps_at_the_history_and_the_bottom() {
+        let mut session = spawn_session(false, false, 50);
+        let mut offset = 0usize;
+        let history = session.vterm.history_rows();
+        assert!(history > 0 && history < session.vterm.scrollback_capacity());
 
         // Ordinary step moves by the requested amount.
         scroll_session_up(&mut session, &mut offset, VIEWPORT, 3);
         assert_eq!(offset, 3);
 
-        // A huge step clamps to scrollback capacity (matching pre-refactor
-        // behavior: the offset tracks the request clamped to capacity, while
-        // the vterm clamps internally to the history it actually has).
+        // A huge step stops on the oldest row that exists. It used to stop at
+        // the configured capacity instead, which the vterm never reached.
         scroll_session_up(&mut session, &mut offset, VIEWPORT, usize::MAX);
-        assert_eq!(offset, capacity);
+        assert_eq!(offset, history);
+        assert_eq!(session.vterm.scrollback_offset(), history);
 
-        // scroll_to_top pins the offset at capacity too.
+        // scroll_to_top lands on the same row, by the same measure.
+        scroll_session_to_bottom(&mut session, &mut offset);
         scroll_session_to_top(&mut session, &mut offset, VIEWPORT);
-        assert_eq!(offset, capacity);
+        assert_eq!(offset, history);
 
         // Scrolling down past the bottom clamps at 0.
         scroll_session_down(&mut session, &mut offset, usize::MAX);
