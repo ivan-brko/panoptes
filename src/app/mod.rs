@@ -12,7 +12,10 @@ mod state;
 
 // Re-exports from submodules
 pub use input_mode::InputMode;
-pub use nav::{Focus, ProjectsNav, SettingsNav, Tab};
+pub use nav::{
+    clamp_row, item_row, row_item, rows_with_back, Focus, ProjectsNav, SettingsNav, Tab, BACK_ROW,
+    FIRST_ITEM_ROW,
+};
 pub use selection::SessionSelection;
 pub use state::{
     cycle_next, cycle_prev, AppState, ClaudeSettingsCopyState, ClaudeSettingsMigrateState,

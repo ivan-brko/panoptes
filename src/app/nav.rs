@@ -130,6 +130,44 @@ impl ProjectsNav {
     }
 }
 
+/// Row 0 of every nested level of pane 1: the way back out
+///
+/// The file-manager `..` convention - a selectable row whose `Enter` is the
+/// same action as `Esc`. It shifts every list selection in the pane by one, so
+/// a selection index there is a *row*, and [`item_row`]/[`row_item`] convert
+/// between a row and the list item under it.
+pub const BACK_ROW: usize = 0;
+
+/// The row a nested level lands on when it is drilled into
+///
+/// Not [`BACK_ROW`]: drilling in and immediately pressing `Enter` must not
+/// bounce straight back out. [`clamp_row`] moves it onto the back row when the
+/// level turns out to have no items at all.
+pub const FIRST_ITEM_ROW: usize = 1;
+
+/// The row that shows list item `item`
+pub fn item_row(item: usize) -> usize {
+    item + 1
+}
+
+/// The list item `row` points at, or `None` on the back row
+pub fn row_item(row: usize) -> Option<usize> {
+    row.checked_sub(1)
+}
+
+/// Fit a row selection to a list of `item_count` items
+///
+/// An empty level has only the back row, and deleting the last item leaves the
+/// selection past the end; both land on the nearest row that still exists.
+pub fn clamp_row(row: usize, item_count: usize) -> usize {
+    row.min(item_count)
+}
+
+/// Number of selectable rows at a nested level holding `item_count` items
+pub fn rows_with_back(item_count: usize) -> usize {
+    item_count + 1
+}
+
 /// Drill-down level of pane 3
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsNav {
@@ -262,6 +300,32 @@ mod tests {
             Some(branch)
         );
         assert_eq!(ProjectsNav::Project(project).branch_id(), None);
+    }
+
+    /// The back row occupies row 0, so a row and the item under it are one
+    /// apart in every direction
+    #[test]
+    fn test_rows_and_items_round_trip_across_the_back_row() {
+        assert_eq!(row_item(BACK_ROW), None);
+        assert_eq!(row_item(FIRST_ITEM_ROW), Some(0));
+        assert_eq!(item_row(0), FIRST_ITEM_ROW);
+        for item in 0..5 {
+            assert_eq!(row_item(item_row(item)), Some(item));
+        }
+        // A three-item level has four rows: the back row and the three items
+        assert_eq!(rows_with_back(3), 4);
+        assert_eq!(rows_with_back(0), 1);
+    }
+
+    /// Drilling into an empty level lands on the only row it has
+    #[test]
+    fn test_clamp_row_falls_back_to_the_back_row_when_there_is_nothing_else() {
+        assert_eq!(clamp_row(FIRST_ITEM_ROW, 0), BACK_ROW);
+        // The last item survives a list that shrank under the selection
+        assert_eq!(clamp_row(9, 3), 3);
+        // A row already in range is left alone
+        assert_eq!(clamp_row(2, 3), 2);
+        assert_eq!(clamp_row(BACK_ROW, 3), BACK_ROW);
     }
 
     #[test]
