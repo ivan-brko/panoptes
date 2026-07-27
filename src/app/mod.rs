@@ -665,19 +665,22 @@ impl App {
     }
 
     /// Check for dead sessions and notify about crashes
+    ///
+    /// Returns whether the screen has to be redrawn, which is *any* session
+    /// having been reaped and not just a crash. A shell the user typed `exit`
+    /// into crashes nothing, and reporting "nothing happened" for it left the
+    /// header claiming a dead session was live until some unrelated event
+    /// forced a frame.
     fn tick_crash_detection(&mut self) -> bool {
-        let crashed_sessions = self.sessions.check_alive();
-        if crashed_sessions.is_empty() {
-            return false;
-        }
+        let scan = self.sessions.check_alive();
         // Notify about each crashed session
-        for (_session_id, session_name, exit_reason) in &crashed_sessions {
+        for (_session_id, session_name, exit_reason) in &scan.crashed {
             self.state.header_notifications.push(format!(
                 "Session '{}' crashed: {}",
                 session_name, exit_reason
             ));
         }
-        true
+        scan.reaped
     }
 
     /// Check for sessions stuck in Executing state too long

@@ -43,8 +43,31 @@ pub fn handle_session_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
         if app.sessions.is_suspended(session_id) && !app.wake_session(session_id)? {
             return Ok(());
         }
-        if forward_key_to_session(&mut app.sessions, session_id, key)? {
-            app.clear_title_notification();
+        // Neither has an exited one, and there is nothing to wake: the agent
+        // is gone and its scrollback is all that is left. Typing at it is a
+        // reasonable thing for a user to try - the screen still looks like a
+        // session - so it has to be a no-op rather than an error.
+        if !app
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.info.state.has_process())
+        {
+            return Ok(());
+        }
+        match forward_key_to_session(&mut app.sessions, session_id, key) {
+            Ok(true) => app.clear_title_notification(),
+            Ok(false) => {}
+            // A failed write means the process died between the check above
+            // and here. Never fatal: this error used to propagate out of the
+            // event loop and take Panoptes down with the session.
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "Keystroke could not be delivered; the session's process is gone"
+                );
+                app.state.error_message = Some("This session's process has exited".to_string());
+            }
         }
     }
     Ok(())

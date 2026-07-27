@@ -107,6 +107,23 @@ pub struct SessionEntry<'a> {
     pub live: bool,
 }
 
+/// What a pass of [`SessionManager::check_alive`] found
+///
+/// Two answers, and conflating them is what left a dead session looking
+/// alive: `crashed` drives the notification, but `reaped` is whether the
+/// screen has to be redrawn. A session that exits *cleanly* - a shell the
+/// user typed `exit` into - crashes nothing, so a caller reading only the
+/// crash list concludes nothing happened and never repaints. The header
+/// is the one place that can say the process is gone, and it would go on
+/// claiming the session was live until something else forced a frame.
+#[derive(Debug, Default)]
+pub struct ExitScan {
+    /// `(id, name, reason)` for each session that died abnormally
+    pub crashed: Vec<(SessionId, String, String)>,
+    /// Whether any session moved to `Exited`, however it died
+    pub reaped: bool,
+}
+
 impl SessionManager {
     /// Create a new session manager
     ///
@@ -784,9 +801,8 @@ impl SessionManager {
 
     /// Check all sessions for exited processes
     /// Updates state to Exited for any dead sessions
-    /// Returns a list of (session_id, session_name, exit_reason) for sessions that crashed
-    pub fn check_alive(&mut self) -> Vec<(SessionId, String, String)> {
-        let mut crashed_sessions = Vec::new();
+    pub fn check_alive(&mut self) -> ExitScan {
+        let mut scan = ExitScan::default();
         for session in self.sessions.values_mut() {
             // We killed suspended sessions on purpose. Reaping one here would
             // report the signal as a crash and move it to Exited, from where
@@ -816,13 +832,18 @@ impl SessionManager {
                             reason: reason.clone(),
                         });
                         // Collect crashed sessions for notification
-                        crashed_sessions.push((session.info.id, session.info.name.clone(), reason));
+                        scan.crashed
+                            .push((session.info.id, session.info.name.clone(), reason));
                     }
                     session.set_state(SessionState::Exited);
+                    // Recorded for both kinds of death, which is the point:
+                    // the header has to be redrawn whether or not anyone
+                    // wants a notification about it.
+                    scan.reaped = true;
                 }
             }
         }
-        crashed_sessions
+        scan
     }
 
     /// Evict tools that have been in flight far longer than expected
@@ -1702,9 +1723,14 @@ mod tests {
 
         // We killed it on purpose. Reaping it here would notify the user of a
         // crash and move it to Exited, from where cleanup deletes its record.
+        let scan = manager.check_alive();
         assert!(
-            manager.check_alive().is_empty(),
+            scan.crashed.is_empty(),
             "a deliberate kill must not surface as a crash"
+        );
+        assert!(
+            !scan.reaped,
+            "a suspended session must not be reaped into Exited"
         );
         assert_eq!(
             manager.get(session_id).unwrap().info.state,
@@ -2134,9 +2160,10 @@ mod tests {
         // poll until it is rather than sleeping a fixed amount
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let crashed = loop {
-            let crashed = manager.check_alive();
-            if !crashed.is_empty() {
-                break crashed;
+            let scan = manager.check_alive();
+            if !scan.crashed.is_empty() {
+                assert!(scan.reaped, "a crash is also a reap");
+                break scan.crashed;
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -2943,5 +2970,87 @@ mod tests {
         assert_eq!(manager.unrecoverable_count(), 2);
 
         manager.shutdown_all();
+    }
+
+    /// A shell the user exits must be reported as exited
+    ///
+    /// Both halves matter and only one was ever tested. The state has to
+    /// reach `Exited` - and `reaped` has to say so, because a clean exit
+    /// crashes nothing, and a caller that reads only the crash list decides
+    /// nothing happened and never repaints. The header was left claiming a
+    /// dead session was live until some unrelated event forced a frame.
+    #[test]
+    fn test_a_shell_that_exits_is_reaped_and_reported() {
+        use crate::session::pty::PtyHandle;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        let mut info = SessionInfo::new(
+            "sh".to_string(),
+            PathBuf::from("/tmp"),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        info.session_type = SessionType::Shell;
+        let session_id = info.id;
+        let pty = PtyHandle::spawn(
+            "sh",
+            &["-i"],
+            &PathBuf::from("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+        manager.register(Session::new(info, pty, 24, 80));
+
+        // Let it come up, then exit it the way a user does
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        manager
+            .get_mut(session_id)
+            .unwrap()
+            .write(b"exit\n")
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let reaped = loop {
+            // The PTY has to be drained for the child to be reapable, which is
+            // what the app's tick does in this order too
+            manager.get_mut(session_id).unwrap().poll_output();
+            let scan = manager.check_alive();
+            if scan.reaped {
+                assert!(
+                    scan.crashed.is_empty(),
+                    "exiting on purpose is not a crash: {:?}",
+                    scan.crashed
+                );
+                break true;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "still {:?} ten seconds after the shell exited",
+                manager.get(session_id).unwrap().info.state
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+
+        assert!(reaped);
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Exited);
+        // A clean exit has nothing to explain, and no attention to raise
+        assert_eq!(info.exit_reason, None);
+        assert!(info.attention.is_none(), "{:?}", info.attention);
+
+        // Reaped once, and only once. `reaped` drives the repaint and this
+        // runs every ~16ms tick, so a session that stayed reapable would
+        // redraw the screen forever.
+        for _ in 0..3 {
+            assert!(
+                !manager.check_alive().reaped,
+                "an already-exited session must not be reaped again"
+            );
+        }
     }
 }

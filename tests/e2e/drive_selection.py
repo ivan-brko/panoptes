@@ -577,8 +577,28 @@ def scenario_osc52():
               payload == "OSC52-MARKER")
 
 
+# =========================================================================
+# exited: a shell whose process is gone must say so (PAN-23)
+# =========================================================================
+def scenario_exited():
+    open_branch()
+    open_shell_session("EXIT-PROBE")
+
+    send("exit\r", 2.0)
+    # The header is the only thing that can say the process is gone: the
+    # scrollback still reads as a shell sitting at a prompt.
+    labelled = wait_for(r"- Exited", 15.0, "exited label")
+    snapshot("after the shell exited")
+    check("the header reports the shell exited", labelled)
+
+    # And the process really is gone, so nothing echoes any more
+    send("echo STILLALIVE\r", 1.5)
+    check("a dead shell echoes nothing", "STILLALIVE" not in screen_text())
+
+
 SCENARIOS = {
     "shell": scenario_shell,
+    "exited": scenario_exited,
     "codex": scenario_codex,
     "osc52": scenario_osc52,
 }
@@ -588,12 +608,19 @@ if SCENARIO not in SCENARIOS:
 try:
     SCENARIOS[SCENARIO]()
 finally:
-    # Teardown: leave the session, quit, confirm
-    send(b"\x1b", 0.5)
-    send(b"\x1b", 0.5)
-    send("q", 0.8)
-    send("y", 1.2)
-    time.sleep(0.5)
+    # Teardown: leave the session, quit, confirm.
+    #
+    # Guarded, because a panoptes that has already exited makes every write
+    # fail - and losing the screens and the log is exactly backwards when the
+    # thing under test just died.
+    try:
+        send(b"\x1b", 0.5)
+        send(b"\x1b", 0.5)
+        send("q", 0.8)
+        send("y", 1.2)
+        time.sleep(0.5)
+    except OSError as e:
+        print(f"(panoptes was already gone at teardown: {e})")
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:

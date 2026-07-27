@@ -49,11 +49,24 @@ fn run_scenario(scenario: &str) {
 }
 
 /// Drag, click, double- and triple-click, backwards and multi-row drags, edge
-/// auto-scroll, a child that takes the mouse, and a session whose process died
+/// auto-scroll, and a child that takes the mouse
 #[test]
 #[ignore = "spawns a PTY and uses the system clipboard; run with --ignored"]
 fn selection_over_a_shell_session() {
     run_scenario("shell");
+}
+
+/// A shell the user types `exit` into has to say it exited
+///
+/// The scrollback still reads as a shell sitting at a prompt, so the header is
+/// the only thing that can tell the user the process is gone. It stayed silent,
+/// because a clean exit crashes nothing and the tick that noticed reported that
+/// nothing had happened — so no frame was ever drawn. Typing at the dead
+/// session then took Panoptes down with it.
+#[test]
+#[ignore = "spawns a PTY; run with --ignored"]
+fn a_shell_that_exits_says_so() {
+    run_scenario("exited");
 }
 
 /// Codex routes wheel events before the PTY forward, unlike a shell, so its
