@@ -15,7 +15,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use crate::app::{cycle_next, cycle_prev, App, InputMode, SettingsNav};
 use crate::config::{NotificationMethod, Palette};
 use crate::input::agent_configs::AgentKind;
-use crate::tui::views::pane_settings::NOTIFICATION_ROWS;
+use crate::tui::views::pane_settings::{ABOUT_ROWS, NOTIFICATION_ROWS};
 
 /// Handle a normal-mode key while pane 3 has focus
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -61,6 +61,7 @@ fn handle_sections_key(app: &mut App, key: KeyEvent) -> Result<()> {
                     SettingsNav::CodexConfigs => app.state.codex_configs_selected_index = 0,
                     SettingsNav::Shortcuts => app.state.custom_shortcuts_selected = 0,
                     SettingsNav::Notifications => app.state.notifications_index = 0,
+                    SettingsNav::About => app.state.about_index = 0,
                     // The one section that does not start at the top: the
                     // list is a picker, so it opens on what is already worn
                     SettingsNav::Theme => {
@@ -214,9 +215,15 @@ fn persist(app: &mut App) {
     }
 }
 
+/// The one read-only section: `↑↓` move a cursor so the list can scroll, and
+/// `Enter` has nothing to open
 fn handle_about_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    if key.code == KeyCode::Esc {
-        app.escape_back();
+    let count = ABOUT_ROWS.len();
+    match key.code {
+        KeyCode::Esc => app.escape_back(),
+        KeyCode::Down => app.state.about_index = cycle_next(app.state.about_index, count),
+        KeyCode::Up => app.state.about_index = cycle_prev(app.state.about_index, count),
+        _ => {}
     }
     Ok(())
 }

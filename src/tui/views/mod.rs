@@ -41,7 +41,7 @@ pub use confirm::{
     ConfirmDialogConfig,
 };
 pub use custom_shortcuts::{render_custom_shortcut_dialogs, render_shortcuts_list};
-pub use help::render_help_overlay;
+pub use help::{help_scroll_limits, render_help_overlay};
 pub use panes::{render_panes, PaneContext};
 pub use prompts::{
     render_folder_move_dialog, render_folder_remove_confirmation, render_project_addition_dialog,

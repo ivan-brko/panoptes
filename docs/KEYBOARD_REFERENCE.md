@@ -16,7 +16,7 @@ a confirmation dialog, an autocomplete) owns these keys itself.
 | `Right` / `Left` | Switch to the next / previous pane (wraps around) |
 | `Tab` / `Shift+Tab` | Same thing — switch to the next / previous pane |
 | `q` | Quit (prompts for confirmation) |
-| `?` | Show the shortcuts for wherever you are (`?` or `Esc` closes it) |
+| `?` | Show the shortcuts for wherever you are (`?` or `Esc` closes it; `Up` / `Down` / `PageUp` / `PageDown` scroll it) |
 | `Space` | Jump to the next session needing attention |
 | `Esc` | Go back one level in the focused pane; with nothing left to pop, back out to the Projects pane. Never quits |
 
@@ -184,6 +184,13 @@ Read-only: version, hook server port and health, and where `config.toml`,
 `logs/`, `projects.json`, `sessions.json`, `worktrees/` and `hooks/` live. The
 settings that are only read at startup are shown here too. Edit `config.toml`
 by hand to change them.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Move through the rows, scrolling the list when the pane is too short for all of them |
+
+There is no `Enter`: nothing here is editable, and the cursor exists only so a
+short pane can reach the rows below its bottom edge.
 
 ## Session View
 

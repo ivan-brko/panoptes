@@ -307,6 +307,11 @@ pub struct AppState {
     pub project_settings_index: usize,
     /// Selected row in pane 3's notifications list
     pub notifications_index: usize,
+    /// Selected row in pane 3's About list
+    ///
+    /// Nothing there is editable; the cursor exists so the list can scroll to
+    /// rows a short pane cannot hold.
+    pub about_index: usize,
     /// Selected row in pane 3's theme-preset list
     ///
     /// This is the *previewed* preset, not the saved one: moving through the
@@ -444,6 +449,13 @@ pub struct AppState {
     // --- Help overlay ---
     /// Whether to show the help overlay with keyboard shortcuts
     pub show_help_overlay: bool,
+    /// Rows the help overlay is scrolled down by
+    ///
+    /// Reset every time the overlay opens: the content is per pane and per
+    /// level, so an offset carried over from a longer list would open the next
+    /// one somewhere in its middle. Clamped against the terminal on every
+    /// keypress; see [`crate::tui::views::help_scroll_limits`].
+    pub help_scroll: u16,
 
     // --- Custom shortcuts dialog state ---
     /// Selected index in the custom shortcuts list

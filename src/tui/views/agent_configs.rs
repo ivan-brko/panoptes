@@ -298,7 +298,14 @@ pub enum ConfigSelectorFlow {
     ProjectDefault,
 }
 
+/// Rows of config the selector overlay will show at once
+const SELECTOR_MAX_ROWS: usize = 8;
+
 /// Render the config selector overlay
+///
+/// The overlay is capped at [`SELECTOR_MAX_ROWS`] rows, so anyone with more
+/// configs than that gets a window around the selection rather than a list
+/// whose tail is drawn past the dialog's bottom border.
 pub fn render_agent_config_selector<C: AgentProfile>(
     frame: &mut Frame,
     area: Rect,
@@ -310,7 +317,9 @@ pub fn render_agent_config_selector<C: AgentProfile>(
 ) {
     let t = theme();
 
-    let list_height = configs.len().min(8) as u16;
+    let (start, end) =
+        crate::tui::views::visible_window(configs.len(), selected_index, SELECTOR_MAX_ROWS);
+    let list_height = (end - start) as u16;
 
     let mut lines = vec![
         Line::from(""),
@@ -321,7 +330,7 @@ pub fn render_agent_config_selector<C: AgentProfile>(
         Line::from(""),
     ];
 
-    for (i, config) in configs.iter().enumerate() {
+    for (i, config) in configs.iter().enumerate().take(end).skip(start) {
         let is_selected = i == selected_index;
         let is_default = default_id == Some(config.id());
         let default_marker = if is_default { " (default)" } else { "" };
@@ -565,5 +574,37 @@ mod tests {
         let project = render_selector(ConfigSelectorFlow::ProjectDefault);
         assert!(contains_line(&project, "Select Config"), "{project:?}");
         assert!(contains_line(&project, "[Esc] Cancel"), "{project:?}");
+    }
+
+    /// The overlay only ever shows [`SELECTOR_MAX_ROWS`] configs, so with more
+    /// than that the selection has to bring its own window with it rather than
+    /// walking off past the dialog's bottom border
+    #[test]
+    fn test_selector_windows_around_the_selection() {
+        let configs: Vec<ClaudeConfig> = (0..20)
+            .map(|i| ClaudeConfig::new(format!("config-{i:02}"), None))
+            .collect();
+        let render = |selected| {
+            render_to_lines(80, 24, |frame| {
+                render_agent_config_selector(
+                    frame,
+                    frame.size(),
+                    AgentKind::Claude,
+                    &configs,
+                    selected,
+                    None,
+                    ConfigSelectorFlow::SessionWizard,
+                )
+            })
+        };
+
+        let lines = render(19);
+        assert!(contains_line(&lines, "▶ config-19"), "{:?}", lines);
+        assert!(!contains_line(&lines, "config-00"), "{:?}", lines);
+
+        // At the top of the list, the window is pinned there
+        let lines = render(0);
+        assert!(contains_line(&lines, "▶ config-00"), "{:?}", lines);
+        assert!(!contains_line(&lines, "config-19"), "{:?}", lines);
     }
 }
