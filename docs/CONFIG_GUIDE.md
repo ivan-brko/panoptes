@@ -394,12 +394,13 @@ Defines custom keyboard shortcuts that spawn shell sessions with predefined comm
 **Reserved keys** (cannot be used for custom shortcuts):
 - `q` - Quit, handled globally in normal mode
 - `n`, `s`, `d` - New / shell / delete, bound in panes 1 and 2
-- `,` - Per-project settings, bound at pane 1's project level
 - `0-9` - Used for session number jumping
 
 `c`, `g`, `G`, `k` and `x` used to be reserved and are now free: the configs,
 shortcuts and log viewer they belonged to have moved into the Settings pane,
-which is reached with `Tab` rather than a letter.
+which is reached with `Tab` rather than a letter. `,` is free for the same kind
+of reason: per-project settings are the last row of a project's branch list, so
+no key opens them.
 
 A shortcut bound to a key that has since become reserved is **dropped** when
 Panoptes starts, and a startup notice says which ones went — it is never left in

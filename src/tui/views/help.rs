@@ -154,10 +154,10 @@ fn project_shortcuts() -> Vec<Line<'static>> {
         vec![
             shortcut_line("↑ / ↓", "Select a branch"),
             shortcut_line("Enter", "Open the branch"),
+            shortcut_line("⚙ row", "Last row of the list: per-project settings"),
             shortcut_line("n", "Create a worktree"),
             shortcut_line("d", "Delete the selected branch"),
             shortcut_line("R", "Refresh branches"),
-            shortcut_line(",", "Project settings"),
         ],
     )
 }

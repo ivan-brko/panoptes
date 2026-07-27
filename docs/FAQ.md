@@ -49,7 +49,7 @@ Press `n` in the Projects pane, enter the path, and press Enter.
 
 ### How do I set the default base branch for new worktrees?
 
-Open the project, press `,` for its settings, choose "Default base branch", and select the branch (e.g. `main` or `develop`).
+Open the project, select `⚙ Project settings` at the bottom of its branch list, choose "Default base branch", and select the branch (e.g. `main` or `develop`).
 
 ### How do I create a worktree for an existing branch vs. a new branch?
 
@@ -211,7 +211,7 @@ Press `Space` from any view. This is the fastest way to context-switch between w
 
 ### How do I set a default account for a project?
 
-Open the project, press `,` for its settings, and choose "Default Claude config" or "Default Codex config".
+Open the project, select `⚙ Project settings` at the bottom of its branch list, and choose "Default Claude config" or "Default Codex config".
 
 ### How do I switch accounts for a single session?
 
@@ -299,7 +299,6 @@ The prompts are optional—you can decline each time. There's no global setting 
 | `n` | New (project/worktree/session depending on context) |
 | `s` | New shell session (at a branch) |
 | `d` | Delete selected item |
-| `,` | Per-project settings (at a project) |
 
 ### Navigation Keys
 

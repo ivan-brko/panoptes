@@ -334,8 +334,9 @@ fn projects_footer(state: &AppState, project_store: &ProjectStore, config: &Conf
             }
         }
         ProjectsNav::Project(_) => {
-            "↑↓/Enter | n: new worktree | d: delete | R: refresh | ,: settings | Esc: back"
-                .to_string()
+            // No `settings` hint: the level's last row is the way in, and it
+            // says so on screen
+            "↑↓/Enter | n: new worktree | d: delete | R: refresh | Esc: back".to_string()
         }
         ProjectsNav::Branch(_, _) => {
             let shortcuts = format_custom_shortcuts_hint(&config.custom_shortcuts);

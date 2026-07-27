@@ -13,7 +13,8 @@ mod state;
 // Re-exports from submodules
 pub use input_mode::InputMode;
 pub use nav::{
-    clamp_row, item_row, row_item, rows_with_back, Focus, ProjectsNav, SettingsNav, Tab, BACK_ROW,
+    clamp_project_row, clamp_row, item_row, project_row, project_rows, project_settings_row,
+    row_item, rows_with_back, Focus, ProjectRow, ProjectsNav, SettingsNav, Tab, BACK_ROW,
     FIRST_ITEM_ROW,
 };
 pub use selection::SessionSelection;

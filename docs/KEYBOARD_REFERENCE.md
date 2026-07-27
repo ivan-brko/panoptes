@@ -66,19 +66,23 @@ Row 0 is the back row, `‹ Projects` — the way out, made visible. It takes th
 selection like any other row, and `Enter` on it is the same action as `Esc`.
 Every level below applies the same rule, naming its own destination.
 
+The list also *ends* with a row that is not a branch: `⚙ Project settings`,
+below a divider, muted the same way. It is there even when the project has no
+branches at all, and `d` on it does nothing.
+
 | Key | Action |
 |-----|--------|
-| `Up` / `Down` | Select a branch (`Up` from the first reaches the back row) |
-| `Enter` | Open selected branch; on the back row, go back to the tree |
+| `Up` / `Down` | Select a branch (`Up` from the first reaches the back row, `Down` from the last reaches `⚙ Project settings`) |
+| `Enter` | Open selected branch; on the back row, go back to the tree; on `⚙ Project settings`, open them |
 | `n` | Create new worktree (opens the wizard) |
 | `d` | Delete selected worktree (never deletes the git branch) |
 | `R` | Refresh branches (check for stale worktrees) |
-| `,` | Project settings |
 | `Esc` | Back to the tree |
 
-### Project settings (`,`)
+### Project settings (the `⚙` row)
 
-Per-project defaults. Replaces the old `c`, `x`, `b` and `r` keys.
+Per-project defaults. Replaces the old `c`, `x`, `b` and `r` keys, and the `,`
+shortcut that opened this list before it became a row of the branch list.
 
 | Row | What it opens |
 |-----|---------------|
@@ -271,10 +275,13 @@ When prompted to confirm an action:
 
 ## Reserved Keys
 
-Custom shortcuts cannot be bound to `q`, `n`, `s`, `d`, `,` or the digits `0-9`:
+Custom shortcuts cannot be bound to `q`, `n`, `s`, `d` or the digits `0-9`:
 those are built-in where custom shortcuts fire, so a shortcut on one could never
 run. `Space`, `Esc`, `Enter`, `Tab` and the arrow keys are not characters and
 cannot be bound at all.
+
+`,` was reserved while it opened per-project settings and is bindable again now
+that a row of the branch list does.
 
 A shortcut bound to a key that has since become reserved is dropped when
 Panoptes starts, and a startup notice says which ones went.

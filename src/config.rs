@@ -63,18 +63,19 @@ impl CustomShortcut {
 /// on one screen and something else on the next:
 /// - q: quit, handled globally in normal mode (and in session-view normal mode)
 /// - n, s, d: new worktree/AI, shell, delete - bound in pane 1 and pane 2
-/// - ',': per-project settings, bound at pane 1's project level
 /// - 0-9: jump to session by number
 ///
 /// `c`, `g`, `G`, `k` and `x` used to be here and are now free: configs,
 /// shortcuts and the log viewer they belonged to have all moved into pane 3,
-/// which is reached with `Tab` rather than a letter.
+/// which is reached with `Tab` rather than a letter. `,` is free for the same
+/// kind of reason: per-project settings are a row of the branch list now, so no
+/// key opens them.
 ///
 /// `m` and `r` stay unreserved: they are bound only in the projects overview,
 /// where custom shortcuts do not fire.
 ///
 /// `Space`, `Esc`, `Enter`, and `Tab` are not chars and cannot be bound at all.
-const RESERVED_KEYS: &[char] = &['q', 'n', 's', 'd', ','];
+const RESERVED_KEYS: &[char] = &['q', 'n', 's', 'd'];
 const RESERVED_DIGITS: bool = true;
 
 /// Check if a key is reserved and cannot be used for custom shortcuts
@@ -517,11 +518,15 @@ impl Config {
 
     /// Drop custom shortcuts bound to keys that have since become reserved
     ///
-    /// `q` and `,` were legal shortcut keys before the three-pane layout gave
-    /// them meanings of their own. A shortcut on one of them could never fire
+    /// `q` was a legal shortcut key before the three-pane layout gave it a
+    /// meaning of its own. A shortcut on a key like that could never fire
     /// again - the built-in arm matches first - so it is dropped rather than
-    /// silently shadowed. Returns a message naming what went, for the startup
-    /// notice, or `None` when nothing had to be dropped.
+    /// silently shadowed. The reserved set only ever shrinks after that: `,`
+    /// was reserved for per-project settings and is bindable again now that a
+    /// row opens them, and a config binding it survives untouched.
+    ///
+    /// Returns a message naming what went, for the startup notice, or `None`
+    /// when nothing had to be dropped.
     pub fn drop_reserved_shortcuts(&mut self) -> Option<String> {
         let dropped: Vec<String> = self
             .custom_shortcuts
@@ -833,7 +838,7 @@ notification_method = "title"
         assert_eq!(shortcut.short_display_name(), "VSCode");
     }
 
-    /// The reserved set after the three-pane layout: `q n s d ,` and digits
+    /// The reserved set after the three-pane layout: `q n s d` and digits
     #[test]
     fn test_is_reserved_key() {
         // Quit, from every pane and from session-view normal mode
@@ -844,9 +849,9 @@ notification_method = "title"
         assert!(is_reserved_key('s'));
         assert!(is_reserved_key('d'));
 
-        // Per-project settings; deliberately not a letter, so it cannot
-        // compete with anything a user would reach for
-        assert!(is_reserved_key(','));
+        // Freed again: per-project settings are the last row of the branch
+        // list, so no key opens them
+        assert!(!is_reserved_key(','), "',' should be bindable again");
 
         // Jump to session by number
         assert!(is_reserved_key('0'));
@@ -882,17 +887,11 @@ notification_method = "title"
     #[test]
     fn test_drop_reserved_shortcuts_removes_and_reports_them() {
         let mut config = Config::default();
-        // Written by an older version, when q and ',' were still bindable
+        // Written by an older version, when q was still bindable
         config.custom_shortcuts.push(CustomShortcut::new(
             'q',
             "Quit".into(),
             "exit".into(),
-            false,
-        ));
-        config.custom_shortcuts.push(CustomShortcut::new(
-            ',',
-            String::new(),
-            "settings".into(),
             false,
         ));
         config.custom_shortcuts.push(CustomShortcut::new(
@@ -907,10 +906,34 @@ notification_method = "title"
             .expect("dropping must be reported, never silent");
 
         assert!(warning.contains("'q' (Quit)"), "{warning}");
-        assert!(warning.contains("','"), "{warning}");
         assert!(!warning.contains("VSCode"), "{warning}");
         assert_eq!(config.custom_shortcuts.len(), 1);
         assert_eq!(config.custom_shortcuts[0].key, 'v');
+    }
+
+    /// `,` was reserved while it opened per-project settings and is bindable
+    /// again now a row does. The reverse of the migration that dropped it: a
+    /// config that binds it is legal and must survive load untouched.
+    #[test]
+    fn test_a_shortcut_bound_to_the_freed_comma_key_survives() {
+        let mut config = Config::default();
+        let comma = CustomShortcut::new(',', "Notes".into(), "vim notes.md".into(), false);
+        config.custom_shortcuts.push(comma);
+
+        assert!(config.drop_reserved_shortcuts().is_none());
+        assert_eq!(config.custom_shortcuts.len(), 1);
+        assert_eq!(config.custom_shortcuts[0].key, ',');
+
+        // ...and it can be added in the first place
+        let mut fresh = Config::default();
+        assert!(fresh
+            .add_shortcut(CustomShortcut::new(
+                ',',
+                "Notes".into(),
+                "vim notes.md".into(),
+                false
+            ))
+            .is_ok());
     }
 
     #[test]

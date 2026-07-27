@@ -9,7 +9,7 @@ use chrono::Utc;
 use ratatui::prelude::*;
 use ratatui::widgets::{List, ListItem, Paragraph};
 
-use crate::app::{item_row, AppState, InputMode, ProjectsNav, BACK_ROW};
+use crate::app::{item_row, project_settings_row, AppState, InputMode, ProjectsNav, BACK_ROW};
 use crate::project::{
     branch_count_label, folder_path_key, project_count_label, Branch, Project, ProjectId,
     ProjectStore, TreeRow,
@@ -179,27 +179,46 @@ fn back_row(destination: &str, selected: bool, mode: SideMode, width: usize) -> 
     ListItem::new(content).style(style)
 }
 
-/// A nested level with nothing in it: the back row, then the hint
+/// Last row of the branch list: the way into the project's own settings
+///
+/// A sibling of the branch list rather than a branch, so it is styled like the
+/// back row - muted chrome with a glyph of its own, selectable like anything
+/// else. A compact pane cannot afford the full label and drops to the bare
+/// noun; the strip density has no rows at all.
+fn settings_row(selected: bool, mode: SideMode, width: usize) -> ListItem<'static> {
+    let t = theme();
+    let label = if mode == SideMode::Full {
+        "⚙ Project settings"
+    } else {
+        "⚙ settings"
+    };
+    let content = truncate_string(&format!("{}{}", selection_prefix(selected), label), width);
+    let style = if selected {
+        selection_style_with_accent(true, t)
+    } else {
+        t.muted_style()
+    };
+    ListItem::new(content).style(style)
+}
+
+/// A nested level with nothing in it: its pseudo-rows, then the hint
 ///
 /// The hint used to fill the pane on its own, but an empty level is exactly
-/// where the way out matters most, so the row stays.
-fn render_empty_level(
-    frame: &mut Frame,
-    area: Rect,
-    destination: &str,
-    selected: bool,
-    mode: SideMode,
-    hint: &str,
-) {
-    let width = area.width as usize;
+/// where the way out - and, at the project level, the way into its settings -
+/// matters most, so the rows stay.
+fn render_empty_level(frame: &mut Frame, area: Rect, rows: Vec<ListItem<'static>>, hint: &str) {
+    let row_count = rows.len() as u16;
     frame.render_widget(
-        List::new(vec![back_row(destination, selected, mode, width)]),
-        Rect { height: 1, ..area },
+        List::new(rows),
+        Rect {
+            height: row_count.min(area.height),
+            ..area
+        },
     );
-    if area.height > 1 {
+    if area.height > row_count {
         let rest = Rect {
-            y: area.y + 1,
-            height: area.height - 1,
+            y: area.y + row_count,
+            height: area.height - row_count,
             ..area
         };
         frame.render_widget(
@@ -451,9 +470,19 @@ fn render_branches(
         render_empty_level(
             frame,
             area,
-            "Projects",
-            focused,
-            mode,
+            vec![
+                back_row(
+                    "Projects",
+                    selected_index == BACK_ROW && focused,
+                    mode,
+                    width,
+                ),
+                settings_row(
+                    selected_index == project_settings_row(0) && focused,
+                    mode,
+                    width,
+                ),
+            ],
             "No branches tracked yet.\n\nPress 'n' to create a worktree.",
         );
         return;
@@ -554,6 +583,17 @@ fn render_branches(
         }
     }
 
+    // The project's own settings close the list, below a divider so the row
+    // reads as a sibling of the branch list rather than the last branch in it
+    if mode == SideMode::Full {
+        items.push(ListItem::new("─".repeat(width.min(40))).style(t.muted_style()));
+    }
+    let settings_selected = selected_index == project_settings_row(branches.len());
+    if settings_selected {
+        selected_row = items.len();
+    }
+    items.push(settings_row(settings_selected && focused, mode, width));
+
     let items = window_rows(items, selected_row, area.height);
     frame.render_widget(List::new(items), area);
 }
@@ -593,9 +633,12 @@ fn render_branch_sessions(
         render_empty_level(
             frame,
             area,
-            project_name,
-            focused,
-            mode,
+            vec![back_row(
+                project_name,
+                selected_index == BACK_ROW && focused,
+                mode,
+                width,
+            )],
             "No sessions on this branch yet.\n\n\
              n: new AI session\ns: shell session",
         );
@@ -653,7 +696,7 @@ fn render_branch_sessions(
     frame.render_widget(List::new(items), area);
 }
 
-/// The per-project settings list, opened with `,`
+/// The per-project settings list, opened from the branch list's last row
 fn render_project_settings(
     frame: &mut Frame,
     area: Rect,
@@ -1107,8 +1150,78 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains('‹')), "{lines:?}");
     }
 
+    /// Per-project settings are a row of the branch list, not a shortcut you
+    /// have to know about: last in the list, muted chrome, and named
+    #[test]
+    fn test_the_branch_list_ends_with_a_project_settings_row() {
+        let (store, project_id, _) = store_with_branches(&["fix-header"]);
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        let lines = render(60, &state, &store);
+        let row = lines
+            .iter()
+            .position(|l| l.contains("⚙ Project settings"))
+            .unwrap_or_else(|| panic!("no settings row: {lines:?}"));
+
+        // Last row with anything on it, and below every branch
+        assert!(
+            lines[row + 1..].iter().all(|l| l.trim().is_empty()),
+            "something renders below the settings row: {lines:?}"
+        );
+        for branch in ["main", "fix-header"] {
+            let branch_row = lines.iter().position(|l| l.contains(branch)).unwrap();
+            assert!(
+                branch_row < row,
+                "{branch} renders below settings: {lines:?}"
+            );
+        }
+    }
+
+    /// Chrome until selected, like the back row it mirrors - and reached by
+    /// `↑`/`↓` like any other row
+    #[test]
+    fn test_the_settings_row_is_muted_chrome_until_it_is_selected() {
+        let (store, project_id, _) = store_with_branches(&["fix-header"]);
+        let t = theme();
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        let buffer = render_buffer(60, &state, &store);
+        assert_eq!(
+            style_of_row_with(&buffer, "⚙ Project settings").fg,
+            Some(t.text_dim)
+        );
+
+        // Down past the last branch reaches it
+        state.selected_branch_index = project_settings_row(2);
+        let buffer = render_buffer(60, &state, &store);
+        assert_eq!(
+            style_of_row_with(&buffer, "⚙ Project settings").fg,
+            Some(t.accent)
+        );
+        let lines = crate::tui::views::test_util::buffer_lines(&buffer);
+        assert!(contains_line(&lines, "▶ ⚙ Project settings"), "{lines:?}");
+    }
+
+    /// A compact pane shortens the label; ten columns is a counter and has no
+    /// rows at all
+    #[test]
+    fn test_the_settings_row_shortens_then_disappears_as_the_pane_narrows() {
+        let (store, project_id, _) = store_with_branches(&["fix-header"]);
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        let lines = render(24, &state, &store);
+        assert!(contains_line(&lines, "⚙ settings"), "{lines:?}");
+        assert!(!contains_line(&lines, "⚙ Project settings"), "{lines:?}");
+
+        let lines = render(10, &state, &store);
+        assert!(!lines.iter().any(|l| l.contains('⚙')), "{lines:?}");
+    }
+
     /// An empty level used to hand the whole pane to a hint - which is exactly
-    /// where the way out matters most
+    /// where the way out, and the way into the project's settings, matter most
     #[test]
     fn test_an_empty_level_keeps_its_back_row() {
         let store = store_with(&[("panoptes", &[][..])]);
@@ -1118,16 +1231,20 @@ mod tests {
 
         let lines = render(60, &state, &store);
         assert!(lines[0].contains("‹ Projects"), "{lines:?}");
+        // Settings must stay reachable in a project with no branches
+        assert!(lines[1].contains("⚙ Project settings"), "{lines:?}");
         assert!(
             contains_line(&lines, "No branches tracked yet."),
             "{lines:?}"
         );
 
-        // ...and the same one level down, with no sessions on the branch
+        // ...and the same one level down, with no sessions on the branch -
+        // only the branch level carries the trailing settings row
         let (store, project_id, main) = store_with_branches(&[]);
         state.navigate_to_branch(project_id, main.id);
         let lines = render(60, &state, &store);
         assert!(lines[0].contains("‹ panoptes"), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains('⚙')), "{lines:?}");
         assert!(
             contains_line(&lines, "No sessions on this branch yet."),
             "{lines:?}"

@@ -7,14 +7,16 @@
 //! Every nested level puts a back row above its list ([`crate::app::BACK_ROW`]),
 //! so the three selection indices here count *rows*, not items:
 //! [`crate::app::row_item`] is what turns one into the other, and `Enter` on
-//! row 0 is the same action as `Esc`.
+//! row 0 is the same action as `Esc`. The branch level adds a second pseudo-row
+//! at the bottom for the project's own settings, so its rows go through
+//! [`crate::app::project_row`] instead.
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::{
-    clamp_row, cycle_next, cycle_prev, row_item, rows_with_back, App, FolderMoveTarget, InputMode,
-    ProjectsNav, SessionDraft,
+    clamp_project_row, clamp_row, cycle_next, cycle_prev, project_row, project_rows, row_item,
+    rows_with_back, App, FolderMoveTarget, InputMode, ProjectRow, ProjectsNav, SessionDraft,
 };
 use crate::claude_json::ClaudeJsonStore;
 use crate::input::agent_configs::{open_config_selector, AgentKind};
@@ -149,10 +151,15 @@ fn set_folder_collapsed(app: &mut App, path: &[String], collapsed: bool) {
 fn handle_project_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Result<()> {
     let branch_count = app.project_store.branches_for_project(project_id).len();
     // A branch deleted from under the selection, or an empty project, leaves
-    // the back row as the nearest row that still exists
-    app.state.selected_branch_index = clamp_row(app.state.selected_branch_index, branch_count);
-    let row_count = rows_with_back(branch_count);
-    let selected_branch = row_item(app.state.selected_branch_index);
+    // the settings row as the nearest row that still exists
+    app.state.selected_branch_index =
+        clamp_project_row(app.state.selected_branch_index, branch_count);
+    let row_count = project_rows(branch_count);
+    let selected_row = project_row(app.state.selected_branch_index, branch_count);
+    let selected_branch = match selected_row {
+        ProjectRow::Branch(index) => Some(index),
+        ProjectRow::Back | ProjectRow::Settings => None,
+    };
 
     match key.code {
         KeyCode::Esc => {
@@ -166,20 +173,15 @@ fn handle_project_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Re
             app.state.selected_branch_index =
                 cycle_prev(app.state.selected_branch_index, row_count);
         }
-        KeyCode::Enter => match selected_branch {
-            // The back row is the visible twin of `Esc`
-            None => app.escape_back(),
-            Some(index) => {
+        KeyCode::Enter => match selected_row {
+            // The back row is the visible twin of `Esc`, and the only arm that
+            // moves focus rather than the pane's own level
+            ProjectRow::Back => app.escape_back(),
+            row => {
                 let branches = app.project_store.branches_for_project_sorted(project_id);
-                if let Some(branch) = branches.get(index) {
-                    let branch_id = branch.id;
-                    app.state.navigate_to_branch(project_id, branch_id);
-                }
+                open_project_row(&mut app.state, row, &branches, project_id);
             }
         },
-        KeyCode::Char(',') => {
-            app.state.navigate_to_project_settings(project_id);
-        }
         KeyCode::Char('n') => {
             if let Err(e) = app.start_worktree_wizard(project_id) {
                 tracing::error!("Failed to start worktree wizard: {:#}", e);
@@ -233,6 +235,30 @@ fn handle_project_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Re
         _ => {}
     }
     Ok(())
+}
+
+/// Drill into whatever the project level's selected row points at
+///
+/// Split from the handler so both halves of the dispatch can be tested against
+/// a bare [`crate::app::AppState`]: a branch row opens the branch, and the
+/// trailing settings row opens the project's settings, and neither is anything
+/// more than a navigation. [`ProjectRow::Back`] stays with the caller, which
+/// owns the focus sync backing out needs.
+fn open_project_row(
+    state: &mut crate::app::AppState,
+    row: ProjectRow,
+    branches: &[&project::Branch],
+    project_id: ProjectId,
+) {
+    match row {
+        ProjectRow::Back => {}
+        ProjectRow::Branch(index) => {
+            if let Some(branch) = branches.get(index) {
+                state.navigate_to_branch(project_id, branch.id);
+            }
+        }
+        ProjectRow::Settings => state.navigate_to_project_settings(project_id),
+    }
 }
 
 /// Check if Claude settings should be migrated before worktree deletion
@@ -386,7 +412,7 @@ fn handle_branch_key(
 }
 
 // ========================================================================
-// Project settings: the four flows `,` replaced c/x/b/r with
+// Project settings: the four flows that replaced c/x/b/r
 // ========================================================================
 
 fn handle_project_settings_key(app: &mut App, key: KeyEvent, project_id: ProjectId) -> Result<()> {
@@ -437,5 +463,148 @@ fn open_project_default_config(app: &mut App, project_id: ProjectId, kind: Agent
         open_config_selector(app, kind, Some(project_id), None);
     } else {
         app.state.header_notifications.push(kind.no_configs_hint());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{cycle_next, cycle_prev, project_settings_row, AppState, BACK_ROW};
+    use crate::project::{Branch, Project, ProjectStore};
+    use std::path::PathBuf;
+
+    /// A `panoptes` project with a `main` checkout and one worktree beside it
+    fn store() -> (ProjectStore, ProjectId) {
+        let mut store = ProjectStore::new();
+        let project = Project::new(
+            "panoptes".to_string(),
+            PathBuf::from("/tmp/panoptes"),
+            "main".to_string(),
+        );
+        let project_id = project.id;
+        store.add_project(project);
+        store.add_branch(Branch::default_for_project(
+            project_id,
+            "main".to_string(),
+            PathBuf::from("/tmp/panoptes"),
+        ));
+        store.add_branch(Branch::new(
+            project_id,
+            "fix-header".to_string(),
+            PathBuf::from("/tmp/fix-header"),
+            false,
+            true,
+        ));
+        (store, project_id)
+    }
+
+    /// The last row of the branch list is what `,` used to be
+    #[test]
+    fn test_enter_on_the_settings_row_opens_the_project_settings_level() {
+        let (store, project_id) = store();
+        let branches = store.branches_for_project_sorted(project_id);
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+
+        state.selected_branch_index = project_settings_row(branches.len());
+        let row = project_row(state.selected_branch_index, branches.len());
+        assert_eq!(row, ProjectRow::Settings);
+
+        open_project_row(&mut state, row, &branches, project_id);
+        assert_eq!(
+            state.projects_nav,
+            ProjectsNav::ProjectSettings(project_id),
+            "the settings row must land on the settings level"
+        );
+    }
+
+    /// The trailing row must not shift what the branch rows above it do
+    #[test]
+    fn test_enter_on_a_branch_row_still_opens_that_branch() {
+        let (store, project_id) = store();
+        let branches = store.branches_for_project_sorted(project_id);
+        // Sorted puts the default checkout first
+        assert_eq!(branches[0].name, "main");
+
+        for (index, branch) in branches.iter().enumerate() {
+            let mut state = AppState::default();
+            state.navigate_to_project(project_id);
+            state.selected_branch_index = crate::app::item_row(index);
+
+            let row = project_row(state.selected_branch_index, branches.len());
+            assert_eq!(row, ProjectRow::Branch(index));
+
+            open_project_row(&mut state, row, &branches, project_id);
+            assert_eq!(
+                state.projects_nav,
+                ProjectsNav::Branch(project_id, branch.id),
+                "row {} should open {}",
+                state.selected_branch_index,
+                branch.name
+            );
+        }
+    }
+
+    /// `↑`/`↓` reach the row like any other, and the wrap runs through it
+    #[test]
+    fn test_wrapping_the_branch_list_passes_through_the_settings_row() {
+        let branch_count = 2;
+        let row_count = project_rows(branch_count);
+
+        // Down from the top: back, both branches, settings, then back again
+        let mut row = BACK_ROW;
+        let mut seen = vec![project_row(row, branch_count)];
+        for _ in 1..row_count {
+            row = cycle_next(row, row_count);
+            seen.push(project_row(row, branch_count));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                ProjectRow::Back,
+                ProjectRow::Branch(0),
+                ProjectRow::Branch(1),
+                ProjectRow::Settings,
+            ]
+        );
+        assert_eq!(
+            cycle_next(row, row_count),
+            BACK_ROW,
+            "down must wrap to top"
+        );
+
+        // Up from the back row lands on the settings row, not on the last
+        // branch: the pseudo-row is inside the cycle, not appended past it
+        let wrapped = cycle_prev(BACK_ROW, row_count);
+        assert_eq!(project_row(wrapped, branch_count), ProjectRow::Settings);
+    }
+
+    /// A project with no branches is back row and settings row, and `↑`/`↓`
+    /// still toggle between them
+    #[test]
+    fn test_the_settings_row_survives_a_project_with_no_branches() {
+        let mut store = ProjectStore::new();
+        let project = Project::new(
+            "empty".to_string(),
+            PathBuf::from("/tmp/empty"),
+            "main".to_string(),
+        );
+        let project_id = project.id;
+        store.add_project(project);
+        let branches = store.branches_for_project_sorted(project_id);
+        assert!(branches.is_empty());
+
+        let mut state = AppState::default();
+        state.navigate_to_project(project_id);
+        // Drilling in lands on the settings row, the only row that is not `Esc`
+        let row = clamp_project_row(state.selected_branch_index, 0);
+        assert_eq!(project_row(row, 0), ProjectRow::Settings);
+
+        assert_eq!(project_rows(0), 2);
+        assert_eq!(cycle_next(row, project_rows(0)), BACK_ROW);
+
+        state.selected_branch_index = row;
+        open_project_row(&mut state, project_row(row, 0), &branches, project_id);
+        assert_eq!(state.projects_nav, ProjectsNav::ProjectSettings(project_id));
     }
 }

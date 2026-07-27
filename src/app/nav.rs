@@ -96,7 +96,7 @@ pub enum ProjectsNav {
     Project(ProjectId),
     /// Sessions of one branch
     Branch(ProjectId, BranchId),
-    /// Per-project settings, opened with `,`
+    /// Per-project settings, opened from the last row of the branch list
     ProjectSettings(ProjectId),
 }
 
@@ -166,6 +166,51 @@ pub fn clamp_row(row: usize, item_count: usize) -> usize {
 /// Number of selectable rows at a nested level holding `item_count` items
 pub fn rows_with_back(item_count: usize) -> usize {
     item_count + 1
+}
+
+/// What one row of pane 1's project level points at
+///
+/// The branch list is the only level with a pseudo-row at *both* ends: the way
+/// back out above it, and the way into the project's own settings below it.
+/// Neither is a branch, so a row there is one of three things rather than
+/// "back or item".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectRow {
+    /// The back row: out to the folder tree
+    Back,
+    /// Branch `index` of the project's sorted branch list
+    Branch(usize),
+    /// The trailing row: into [`ProjectsNav::ProjectSettings`]
+    Settings,
+}
+
+/// The row the settings pseudo-row occupies below `branch_count` branches
+pub fn project_settings_row(branch_count: usize) -> usize {
+    item_row(branch_count)
+}
+
+/// Number of selectable rows at the project level: back + branches + settings
+pub fn project_rows(branch_count: usize) -> usize {
+    rows_with_back(branch_count) + 1
+}
+
+/// What `row` of a project level holding `branch_count` branches points at
+pub fn project_row(row: usize, branch_count: usize) -> ProjectRow {
+    match row_item(row) {
+        None => ProjectRow::Back,
+        Some(index) if index < branch_count => ProjectRow::Branch(index),
+        // Everything past the last branch is the settings row, so a selection
+        // left past the end by a deleted branch still resolves to a real row
+        Some(_) => ProjectRow::Settings,
+    }
+}
+
+/// Fit a row selection to a project level holding `branch_count` branches
+///
+/// Unlike [`clamp_row`], this never has to fall back to the back row: the
+/// settings row is always there, even in a project with no branches at all.
+pub fn clamp_project_row(row: usize, branch_count: usize) -> usize {
+    row.min(project_settings_row(branch_count))
 }
 
 /// Drill-down level of pane 3
@@ -332,6 +377,38 @@ mod tests {
         // A row already in range is left alone
         assert_eq!(clamp_row(2, 3), 2);
         assert_eq!(clamp_row(BACK_ROW, 3), BACK_ROW);
+    }
+
+    /// The branch level has a pseudo-row at each end, so its rows resolve
+    /// three ways
+    #[test]
+    fn test_the_project_level_brackets_its_branches_with_two_pseudo_rows() {
+        // main + one worktree: back, two branches, settings
+        assert_eq!(project_rows(2), 4);
+        assert_eq!(project_settings_row(2), 3);
+        assert_eq!(project_row(BACK_ROW, 2), ProjectRow::Back);
+        assert_eq!(project_row(1, 2), ProjectRow::Branch(0));
+        assert_eq!(project_row(2, 2), ProjectRow::Branch(1));
+        assert_eq!(project_row(3, 2), ProjectRow::Settings);
+
+        // A project with no branches still has the settings row
+        assert_eq!(project_rows(0), 2);
+        assert_eq!(project_settings_row(0), FIRST_ITEM_ROW);
+        assert_eq!(project_row(BACK_ROW, 0), ProjectRow::Back);
+        assert_eq!(project_row(FIRST_ITEM_ROW, 0), ProjectRow::Settings);
+    }
+
+    /// Deleting the last branch leaves the selection past the end; the settings
+    /// row is what it lands on, because that level always has one
+    #[test]
+    fn test_clamp_project_row_falls_back_to_the_settings_row() {
+        assert_eq!(clamp_project_row(9, 2), project_settings_row(2));
+        assert_eq!(
+            clamp_project_row(FIRST_ITEM_ROW, 0),
+            project_settings_row(0)
+        );
+        assert_eq!(clamp_project_row(BACK_ROW, 0), BACK_ROW);
+        assert_eq!(clamp_project_row(2, 3), 2);
     }
 
     #[test]

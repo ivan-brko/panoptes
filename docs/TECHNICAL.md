@@ -462,7 +462,7 @@ command = "code . &"
 - Creates shell session using `SessionManager::create_shell_session_with_command()`
 
 **Key validation:**
-- Reserved keys are rejected (q, n, s, d, `,`, 0-9)
+- Reserved keys are rejected (q, n, s, d, 0-9)
 - Duplicate keys are rejected
 - Validation occurs in `config::is_reserved_key()` and `Config::add_shortcut()`
 
