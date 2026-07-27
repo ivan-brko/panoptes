@@ -133,6 +133,9 @@ pub fn description_row(state: &AppState, config: &Config) -> Option<DescriptionR
         }
         SettingsNav::Theme => {
             let palette = Palette::at(state.palette_index)?;
+            // The description says only what the preset looks like. How to
+            // keep it is the footer's job, and which one is saved is already
+            // said by the `★` two columns to the left.
             Some(DescriptionRow {
                 head: format!(
                     "{}{}{}",
@@ -140,22 +143,10 @@ pub fn description_row(state: &AppState, config: &Config) -> Option<DescriptionR
                     palette_marker(palette, config),
                     palette.label()
                 ),
-                description: palette_description(palette, config),
+                description: palette.blurb().to_string(),
             })
         }
         _ => None,
-    }
-}
-
-/// What the highlighted preset is, and how to keep it
-///
-/// The preset under the cursor is already on screen - the whole dashboard is
-/// the preview - so the description's job is to say how to make it stay.
-fn palette_description(palette: Palette, config: &Config) -> String {
-    if palette == config.palette {
-        format!("{} · saved", palette.blurb())
-    } else {
-        format!("{} · Enter: keep · Esc: revert", palette.blurb())
     }
 }
 
@@ -577,38 +568,23 @@ mod tests {
         );
     }
 
-    /// The picker's description says how to keep what is already on screen
+    /// The picker's description says what a preset looks like; the `★` says
+    /// which one is saved, and the footer says how to keep the other
     #[test]
-    fn test_theme_description_says_how_to_keep_or_revert_the_preview() {
+    fn test_theme_description_describes_the_highlighted_preset() {
         let mut state = focused(SettingsNav::Theme);
         let config = Config::default();
 
-        // Sitting on the saved preset there is nothing to keep or revert
         state.palette_index = Palette::Peacock.index();
         let row = description_row(&state, &config).unwrap();
         assert!(row.head.contains("★ Peacock"), "{}", row.head);
-        assert!(row.description.ends_with("· saved"), "{}", row.description);
+        assert_eq!(row.description, Palette::Peacock.blurb());
 
-        // Moved off it, both committing keys are named - and the star stays
-        // behind on the row that owns it
+        // The star stays behind on the row that owns it
         state.palette_index = Palette::Argus.index();
         let row = description_row(&state, &config).unwrap();
         assert!(!row.head.contains('★'), "{}", row.head);
-        assert!(
-            row.description.starts_with(Palette::Argus.blurb()),
-            "{}",
-            row.description
-        );
-        assert!(
-            row.description.contains("Enter: keep"),
-            "{}",
-            row.description
-        );
-        assert!(
-            row.description.contains("Esc: revert"),
-            "{}",
-            row.description
-        );
+        assert_eq!(row.description, Palette::Argus.blurb());
     }
 
     #[test]
