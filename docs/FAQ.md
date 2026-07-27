@@ -152,8 +152,7 @@ Two cases behave differently:
 
 - **The agent owns the mouse** (Claude Code's TUI, `vim` with `mouse=a`, `htop`). A plain drag is forwarded to it, exactly as in a normal terminal tab, so the agent does its own selection. Hold **⇧ (Shift)** while dragging and the drag is Panoptes's instead — shift reaches past an application that has taken the mouse, which is what shift does in every terminal. You get the same highlight, the same clipboard copy, the same double-click-for-a-word. The footer says which applies: `drag: copy` when the mouse is ours, `⇧drag: copy` when the agent has it.
 
-  (**⌥ (Option)** still works too, and is different: it is iTerm2's own native selection, which never reaches Panoptes at all.)
-- **Codex's fallback history** (very old sessions scrolled past what the terminal emulator kept) has no terminal cells behind it and cannot be selected. Use ⌥drag for your terminal's own selection.
+- **Codex's fallback history** (very old sessions scrolled past what the terminal emulator kept) is plain text recovered from the byte stream, with no terminal cells behind it, so Panoptes cannot select it at all. This is the one case where you need your terminal's own selection — **⌥ (Option)** drag in iTerm2, whatever your terminal uses elsewhere.
 
 ### I can't scroll through the session output - what's wrong?
 
