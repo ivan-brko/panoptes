@@ -173,6 +173,23 @@ fn default_codex_home() -> std::path::PathBuf {
         .join(".codex")
 }
 
+/// The colour preset the UI should be wearing, given where the user is
+///
+/// The picker's highlight is worn only while the picker is the focused pane's
+/// open section; everywhere else `saved` is. Deriving this on every frame,
+/// rather than repainting from the Up/Down handler, is what stops a preview
+/// leaking out of the section when the user leaves it by a route that handler
+/// never sees - cycling panes, jumping to attention, opening a session.
+fn worn_palette(state: &AppState, saved: crate::config::Palette) -> crate::config::Palette {
+    let previewing =
+        state.focus == Focus::Panes(Tab::Settings) && state.settings_nav == SettingsNav::Theme;
+    if previewing {
+        crate::config::Palette::at(state.palette_index).unwrap_or(saved)
+    } else {
+        saved
+    }
+}
+
 impl App {
     /// Create a new application instance
     pub async fn new(log_file_info: LogFileInfo) -> Result<Self> {
@@ -184,9 +201,10 @@ impl App {
         if let Some(warning) = config_warning {
             startup_warnings.push(warning);
         }
-        // Pin the palette tier before the first render; `auto` reads
-        // COLORTERM/TERM, the other modes force a tier
-        crate::tui::theme::init(config.theme);
+        // Settle the tier and the preset before the first render; `auto` reads
+        // COLORTERM/TERM, the other modes force a tier. The preset can still
+        // change later, from pane 3; the tier cannot.
+        crate::tui::theme::init(config.theme, config.palette);
         // A shortcut bound to a key that has since become reserved could never
         // fire - the built-in arm matches first - so it is dropped rather than
         // silently shadowed, and the user is told which ones went.
@@ -2600,6 +2618,8 @@ impl App {
 
     /// Render the current state
     fn render(&mut self) -> Result<()> {
+        crate::tui::theme::set_palette(worn_palette(&self.state, self.config.palette));
+
         let state = &self.state;
         let project_store = &self.project_store;
         let claude_config_store = &self.claude_config_store;
@@ -2978,6 +2998,48 @@ mod tests {
     #[test]
     fn test_input_mode_default() {
         assert_eq!(InputMode::default(), InputMode::Normal);
+    }
+
+    /// The preview is worn only inside the picker, and only while the picker
+    /// is the pane you are looking at
+    #[test]
+    fn test_worn_palette_is_the_preview_only_inside_the_picker() {
+        use crate::config::Palette;
+
+        let saved = Palette::Peacock;
+        let at = |focus, nav, index| AppState {
+            focus,
+            settings_nav: nav,
+            palette_index: index,
+            ..Default::default()
+        };
+        let previewing = Palette::Argus.index();
+        let picker = Focus::Panes(Tab::Settings);
+
+        assert_eq!(
+            worn_palette(&at(picker, SettingsNav::Theme, previewing), saved),
+            Palette::Argus
+        );
+
+        // Cycling to another pane drops the preview without anyone reverting
+        // it: this is the leak the derivation exists to close
+        for focus in [
+            Focus::Panes(Tab::Projects),
+            Focus::Panes(Tab::Sessions),
+            Focus::Session,
+        ] {
+            let state = at(focus, SettingsNav::Theme, previewing);
+            assert_eq!(worn_palette(&state, saved), saved, "{focus:?}");
+        }
+
+        // So does backing out to the sections list, even with the index left
+        // pointing at what was being previewed
+        let backed_out = at(picker, SettingsNav::Sections, previewing);
+        assert_eq!(worn_palette(&backed_out, saved), saved);
+
+        // An index that outran the list falls back rather than blanking
+        let stale = at(picker, SettingsNav::Theme, Palette::ALL.len());
+        assert_eq!(worn_palette(&stale, saved), saved);
     }
 
     #[test]

@@ -105,8 +105,12 @@ PTY Output → Session buffer → TUI render
   (index, session name, state) always stays whole
 - Every colour a view draws comes from a semantic token in `src/tui/theme.rs`;
   raw `Color::` literals in view code are invisible to a theme change and are
-  a bug. The palette has three capability tiers (truecolor / 256 / 16-ANSI)
-  that agree on every chromatic token and differ only in the structural greys
+  a bug. A theme is one palette at one capability tier: the tiers (truecolor /
+  256 / 16-ANSI) agree on every chromatic token within a palette and differ
+  only in the structural greys and surfaces, and a palette (Peacock / Io /
+  Hera / Argus) restyles only the chrome - states, outcomes and banners mean
+  the same colour in all four. The global is swappable, because the preset
+  picker in Settings previews live
 
 ## Error Handling
 

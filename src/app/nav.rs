@@ -182,17 +182,20 @@ pub enum SettingsNav {
     Shortcuts,
     /// Live notification toggles
     Notifications,
+    /// The colour preset the whole UI wears
+    Theme,
     /// Version, hook health, and where the files live
     About,
 }
 
 impl SettingsNav {
     /// The sections in list order (everything except [`SettingsNav::Sections`])
-    pub const SECTIONS: [SettingsNav; 5] = [
+    pub const SECTIONS: [SettingsNav; 6] = [
         SettingsNav::ClaudeConfigs,
         SettingsNav::CodexConfigs,
         SettingsNav::Shortcuts,
         SettingsNav::Notifications,
+        SettingsNav::Theme,
         SettingsNav::About,
     ];
 
@@ -204,6 +207,7 @@ impl SettingsNav {
             SettingsNav::CodexConfigs => "Codex configs",
             SettingsNav::Shortcuts => "Shortcuts",
             SettingsNav::Notifications => "Notifications",
+            SettingsNav::Theme => "Theme",
             SettingsNav::About => "About / paths",
         }
     }
@@ -217,6 +221,7 @@ impl SettingsNav {
             SettingsNav::CodexConfigs => "Codex accounts (CODEX_HOME)",
             SettingsNav::Shortcuts => "Custom keys that launch a shell command",
             SettingsNav::Notifications => "What interrupts you, and how",
+            SettingsNav::Theme => "The colour preset the whole UI wears",
             SettingsNav::About => "Version, hook server, and where the files live",
         }
     }
@@ -332,8 +337,11 @@ mod tests {
     #[test]
     fn test_settings_sections_list_is_ordered_and_addressable() {
         assert_eq!(SettingsNav::at(0), Some(SettingsNav::ClaudeConfigs));
-        assert_eq!(SettingsNav::at(4), Some(SettingsNav::About));
-        assert_eq!(SettingsNav::at(5), None);
+        assert_eq!(SettingsNav::at(4), Some(SettingsNav::Theme));
+        // About stays last: it is the read-only catch-all, so anything
+        // actionable is reached before it
+        assert_eq!(SettingsNav::at(5), Some(SettingsNav::About));
+        assert_eq!(SettingsNav::at(6), None);
         assert!(!SettingsNav::SECTIONS.contains(&SettingsNav::Sections));
 
         for section in SettingsNav::SECTIONS {

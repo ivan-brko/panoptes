@@ -118,7 +118,7 @@ Every session, flat and sorted, with a pinned "Needs Attention" section on top.
 
 ## Pane 3 — Settings
 
-Five sections. The highlighted row carries its own description, muted, just
+Six sections. The highlighted row carries its own description, muted, just
 after the label; if the pane is too narrow for both, the description scrolls
 past on its own while the label stays put.
 
@@ -159,6 +159,20 @@ written to `config.toml` immediately.
 |-----|--------|
 | `Up` / `Down` | Move through the rows |
 | `Space` / `Enter` | Toggle the highlighted option — on the first row, advance how you are notified (Bell → Title → Silent, wrapping) |
+
+### Theme
+
+The colour preset the whole UI wears. `★` marks the saved one.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Try a preset — it is applied to the whole dashboard immediately, so the UI is the preview |
+| `Enter` | Keep the highlighted preset and write it to `config.toml` |
+| `Esc` | Back to the sections list, putting back whatever was saved |
+
+The preview lasts exactly as long as you are in this section: leaving it any
+other way — `Tab`, `←`/`→`, opening a session — puts the saved preset back too.
+Only `Enter` makes a preset stick.
 
 ### About / paths
 

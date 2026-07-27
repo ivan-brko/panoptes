@@ -1,13 +1,14 @@
 //! Pane 3: settings
 //!
-//! Not a config editor. Five sections in a single scrollable drill-down list -
+//! Not a config editor. Six sections in a single scrollable drill-down list -
 //! the btop/weechat shape, one list plus a description of the highlighted item,
 //! rather than htop's two columns, which needs width this pane does not have.
 //!
-//! Only the six Notification rows are editable, and deliberately so: they are
-//! exactly the fields the runtime re-reads on every event, so a toggle takes
-//! effect on the next event with no restart and no "restart required" badge.
-//! Everything numeric or path-shaped is shown read-only under About / paths.
+//! Only the six Notification rows and the Theme presets are editable, and
+//! deliberately so: they are exactly the settings the runtime re-reads rather
+//! than caches, so a change takes effect immediately with no restart and no
+//! "restart required" badge. Everything numeric or path-shaped is shown
+//! read-only under About / paths.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{List, ListItem, Paragraph};
@@ -15,7 +16,7 @@ use ratatui::widgets::{List, ListItem, Paragraph};
 use crate::app::{AppState, SettingsNav, Tab};
 use crate::claude_config::ClaudeConfigStore;
 use crate::codex_config::CodexConfigStore;
-use crate::config::{Config, NotificationMethod};
+use crate::config::{Config, NotificationMethod, Palette};
 use crate::logging::LogFileInfo;
 use crate::tui::panes::SideMode;
 use crate::tui::theme::{theme, Theme};
@@ -82,7 +83,7 @@ impl DescriptionRow {
     }
 
     /// The row as a styled line, panned `offset` columns into the description
-    fn line(&self, width: usize, offset: usize, t: &Theme) -> Line<'static> {
+    fn line(&self, width: usize, offset: usize, t: Theme) -> Line<'static> {
         let mut spans = vec![Span::raw(self.head.clone())];
         let room = self.room(width);
         if room > 0 {
@@ -99,9 +100,9 @@ impl DescriptionRow {
 
 /// The highlighted row's description, where the level has one
 ///
-/// Only the two lists whose rows are a *choice* carry one - descriptions are
-/// for choosing among rows. Inside a section the pane title already names it,
-/// and its rows speak for themselves.
+/// Only the lists whose rows are a *choice* carry one - descriptions are for
+/// choosing among rows. Inside the other sections the pane title already names
+/// them, and their rows speak for themselves.
 ///
 /// `None` while pane 3 is unfocused: an unfocused pane draws no selection, so
 /// there is no row for a description to belong to.
@@ -130,7 +131,31 @@ pub fn description_row(state: &AppState, config: &Config) -> Option<DescriptionR
                 description: notification_description(index).to_string(),
             })
         }
+        SettingsNav::Theme => {
+            let palette = Palette::at(state.palette_index)?;
+            // The description says only what the preset looks like. How to
+            // keep it is the footer's job, and which one is saved is already
+            // said by the `★` two columns to the left.
+            Some(DescriptionRow {
+                head: format!(
+                    "{}{}{}",
+                    selection_prefix(true),
+                    palette_marker(palette, config),
+                    palette.label()
+                ),
+                description: palette.blurb().to_string(),
+            })
+        }
         _ => None,
+    }
+}
+
+/// `★` on the saved preset, blank columns on the rest so labels stay aligned
+fn palette_marker(palette: Palette, config: &Config) -> &'static str {
+    if palette == config.palette {
+        "★ "
+    } else {
+        "  "
     }
 }
 
@@ -213,11 +238,12 @@ pub fn render_settings_pane(
             focused,
         ),
         SettingsNav::Notifications => render_notifications(frame, area, ctx),
+        SettingsNav::Theme => render_palettes(frame, area, ctx),
         SettingsNav::About => render_about(frame, area, ctx),
     }
 }
 
-/// The five sections
+/// The six sections
 fn render_sections(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext) {
     let t = theme();
     let state = ctx.state;
@@ -274,13 +300,60 @@ fn render_notifications(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext
     frame.render_widget(List::new(items), area);
 }
 
+/// The colour presets, with the saved one marked
+///
+/// The marker names the *saved* preset, not the highlighted one, because the
+/// highlighted one is already being worn - without the marker there would be
+/// nothing on screen saying which one survives an Esc.
+fn render_palettes(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext) {
+    let t = theme();
+    let state = ctx.state;
+    let focused = state.is_focused(Tab::Settings);
+    let width = area.width as usize;
+    let highlighted = description_row(state, ctx.config);
+
+    let items: Vec<ListItem> = Palette::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, palette)| {
+            let selected = i == state.palette_index && focused;
+            let saved = *palette == ctx.config.palette;
+            let line = row_line(
+                if selected { highlighted.as_ref() } else { None },
+                || {
+                    format!(
+                        "{}{}{}",
+                        selection_prefix(selected),
+                        palette_marker(*palette, ctx.config),
+                        palette.label()
+                    )
+                },
+                width,
+                ctx.marquee_offset,
+                t,
+            );
+            // The saved-but-unhighlighted row wears the marker's own colour,
+            // so the star reads as a marker rather than as more list
+            let style = if saved && !selected {
+                Style::default().fg(t.default_marker)
+            } else {
+                selection_style_with_accent(selected, t)
+            };
+            ListItem::new(line).style(style)
+        })
+        .collect();
+
+    let items = window_rows(items, state.palette_index, area.height);
+    frame.render_widget(List::new(items), area);
+}
+
 /// One list row: the highlighted one carries its description, the rest are bare
 fn row_line(
     highlighted: Option<&DescriptionRow>,
     plain: impl FnOnce() -> String,
     width: usize,
     offset: usize,
-    t: &Theme,
+    t: Theme,
 ) -> Line<'static> {
     match highlighted {
         Some(row) => clamp_line(row.line(width, offset, t), width),
@@ -441,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sections_list_offers_all_five() {
+    fn test_sections_list_offers_every_section() {
         let lines = render(40, &focused(SettingsNav::Sections), &Config::default());
         for section in SettingsNav::SECTIONS {
             assert!(
@@ -468,6 +541,50 @@ mod tests {
             contains_line(&lines, "[ ] Idle nudge counts as attention"),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn test_theme_lists_every_preset_and_marks_the_saved_one() {
+        let config = Config {
+            palette: Palette::Hera,
+            ..Config::default()
+        };
+        let lines = render(60, &focused(SettingsNav::Theme), &config);
+
+        for palette in Palette::ALL {
+            assert!(
+                contains_line(&lines, palette.label()),
+                "{} missing from {lines:?}",
+                palette.label()
+            );
+        }
+        assert!(contains_line(&lines, "★ Hera"), "{lines:?}");
+        // Exactly one star: the marker names the saved preset, and there is
+        // only ever one of those
+        assert_eq!(
+            lines.iter().filter(|l| l.contains('★')).count(),
+            1,
+            "{lines:?}"
+        );
+    }
+
+    /// The picker's description says what a preset looks like; the `★` says
+    /// which one is saved, and the footer says how to keep the other
+    #[test]
+    fn test_theme_description_describes_the_highlighted_preset() {
+        let mut state = focused(SettingsNav::Theme);
+        let config = Config::default();
+
+        state.palette_index = Palette::Peacock.index();
+        let row = description_row(&state, &config).unwrap();
+        assert!(row.head.contains("★ Peacock"), "{}", row.head);
+        assert_eq!(row.description, Palette::Peacock.blurb());
+
+        // The star stays behind on the row that owns it
+        state.palette_index = Palette::Argus.index();
+        let row = description_row(&state, &config).unwrap();
+        assert!(!row.head.contains('★'), "{}", row.head);
+        assert_eq!(row.description, Palette::Argus.blurb());
     }
 
     #[test]
@@ -553,7 +670,7 @@ mod tests {
     /// Descriptions are for choosing *among* rows. Inside a section the title
     /// already names it, so nothing static trails the rows there.
     #[test]
-    fn test_only_the_two_choosing_lists_carry_a_description() {
+    fn test_only_the_choosing_lists_carry_a_description() {
         let config = Config::default();
         for nav in [
             SettingsNav::ClaudeConfigs,
