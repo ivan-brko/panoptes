@@ -172,15 +172,20 @@ terminal-wide switch, so the terminal's own drag-selection is off while it is.
 order:
 
 1. Wheel notches over a Codex session become local scrollback
-2. If the child enabled a mouse protocol (Claude Code's TUI, `vim` with
+2. **Shift claims the event for Panoptes.** Held shift skips step 3 entirely,
+   which is what shift means in every terminal: this one is the terminal's
+   business, not the application's. It is the only way to select out of an
+   agent that took the mouse, and it costs the child nothing — the terminal
+   sees the report first, so a child could never have had shift-drag anyway
+3. If the child enabled a mouse protocol (Claude Code's TUI, `vim` with
    `mouse=a`, `htop`), the event is encoded and forwarded to the PTY, and the
-   child does its own selection — the same as in a real terminal tab, where
-   ⌥drag is the way past it
-3. Alternate-screen apps that did *not* enable a mouse protocol get wheel
+   child does its own selection — the same as in a real terminal tab
+4. Alternate-screen apps that did *not* enable a mouse protocol get wheel
    notches translated to arrow keys, as iTerm2 does
-4. Wheel notches over anything else become local scrollback
-5. What is left — left-button press, drag and release over a plain shell or
-   Codex — becomes a Panoptes selection
+5. Wheel notches over anything else become local scrollback
+6. What is left — left-button press, drag and release — becomes a Panoptes
+   selection, a rectangle if control was held at button-down and the usual
+   stream if not
 
 Selection (`app/selection.rs`, painted by `tui/views/session.rs`) is modelled
 on tmux:
