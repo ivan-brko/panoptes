@@ -505,6 +505,13 @@ def scenario_codex():
                  wait_for(re.escape(banner), 40.0, "codex ui")):
         return
 
+    # The banner appears before Codex is ready: the model line reads
+    # "loading" until it is, and a prompt typed before then is dropped on the
+    # floor. Wait for a real model name.
+    if not check("codex finished starting up",
+                 wait_for(r"model:\s+(?!loading)\S+", 60.0, "codex ready")):
+        return
+
     # PAN-15 routes Codex to Panoptes' own selection because Codex does not
     # ask for mouse reporting. If that ever changes, this is where it shows.
     check("codex leaves the mouse to us", "⌥drag: copy" not in screen_text())
@@ -514,19 +521,6 @@ def scenario_codex():
     drag(row, col, col + len(banner) - 1)
     pasted = pbpaste()
     check(f"a drag over a codex session copies (got {pasted!r})", pasted == banner)
-
-    # Wheel notches over a Codex session are handled before the PTY forward,
-    # which is the ordering that makes its path different from a shell's. It
-    # has to keep driving local scrollback rather than being swallowed by the
-    # selection that just happened.
-    #
-    # That a session which has only just started already has history to scroll
-    # into is itself the vendored vt100 patch working: Codex pins a footer with
-    # a scroll region, and those lines now reach real scrollback.
-    wheel_up(row, col)
-    snapshot("codex wheel")
-    check("the wheel still drives local scrollback for codex",
-          re.search(SCROLL_INDICATOR, screen_text()) is not None)
 
     # Paging up past the oldest line must stop there (PAN-20).
     #
@@ -550,9 +544,24 @@ def scenario_codex():
         return
     drain(3.0)
 
+    # Wheel notches over a Codex session are handled before the PTY forward,
+    # which is the ordering that makes its path different from a shell's. It
+    # has to keep driving local scrollback rather than being swallowed by the
+    # selection that happened earlier.
+    #
+    # Checked here rather than straight after startup: how much Codex prints
+    # before its first turn varies with tips and usage notices, and a run that
+    # printed less than a screenful left nothing to scroll and failed for a
+    # reason that had nothing to do with the wheel.
+    wheel_up(row, col)
+    snapshot("codex wheel")
+    check("the wheel still drives local scrollback for codex",
+          re.search(SCROLL_INDICATOR, screen_text()) is not None)
+
     check("back to live output before scrolling up", to_live_view())
-    # The wheel, because there are no scroll keys in a session any more - a
-    # PgUp here types into Codex.
+    # The wheel, because there are only two scroll keys in a session now, and
+    # a Codex session on the primary screen answers them - but the wheel is
+    # what this is measuring.
     offsets = []
     for _ in range(120):
         wheel_up(row, col, 0.06)
