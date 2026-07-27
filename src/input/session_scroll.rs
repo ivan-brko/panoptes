@@ -34,12 +34,26 @@ fn viewport_height(app: &App) -> usize {
         .unwrap_or_default()
 }
 
+/// Whether the terminal emulator holds this session's history
+///
+/// The one question that decides which buffer a Codex scroll reads, and it is
+/// asked the same way everywhere. `true` when vt100 has scrollback rows: the
+/// session is drawing on the primary screen and the vterm *is* the history.
+/// `false` for an agent on the alternate screen, where vt100 keeps none and
+/// the plain-text fallback buffer is the only history there is.
+///
+/// Deliberately not "did the vterm advance this step". That conflates "there
+/// is no vterm history" with "you have reached the top of the vterm history",
+/// and the second is a clamp, not a reason to change buffers.
+fn vterm_holds_history(session: &Session) -> bool {
+    session.vterm.history_rows() > 0
+}
+
 /// Scroll a session up (toward older content) by `amount` lines.
 ///
-/// For Codex sessions this prefers vterm scrollback and switches to the
-/// plain-text fallback buffer when the vterm cannot advance (Codex runs in
-/// the alternate screen, where vt100 keeps no scrollback). `scroll_offset`
-/// is the app-level offset shown in the UI (0 = live view).
+/// For Codex sessions this reads vterm scrollback when the vterm has any, and
+/// the plain-text fallback buffer when it does not. `scroll_offset` is the
+/// app-level offset shown in the UI (0 = live view).
 fn scroll_session_up(
     session: &mut Session,
     scroll_offset: &mut usize,
@@ -47,18 +61,18 @@ fn scroll_session_up(
     amount: usize,
 ) -> ScrollOutcome {
     if session.info.session_type == SessionType::OpenAICodex {
-        let current_vterm = session.vterm.scrollback_offset();
-        let requested = current_vterm.saturating_add(amount);
-        session.vterm.set_scrollback(requested);
-        let vterm_offset = session.vterm.scrollback_offset();
-        let vterm_advanced = vterm_offset > current_vterm;
-        if vterm_offset > 0 && vterm_advanced {
+        let requested = session.vterm.scrollback_offset().saturating_add(amount);
+        if vterm_holds_history(session) {
+            // `set_scrollback` clamps to the rows that exist, so paging past
+            // the oldest line leaves the view on the oldest line - the same
+            // stop a non-Codex session makes. It must not fall through to the
+            // fallback buffer here: that discards the reader's position and
+            // drops them into a different, shallower history, so scrolling up
+            // moves the view down.
+            session.vterm.set_scrollback(requested);
             session.fallback_scroll_to_bottom();
-            *scroll_offset = vterm_offset;
+            *scroll_offset = session.vterm.scrollback_offset();
         } else {
-            // vterm scrollback can stop advancing at a shallow offset.
-            // Switch to fallback mode for continued upward scrolling.
-            session.vterm.scroll_to_bottom();
             session.fallback_scroll_up_with_viewport(amount, viewport_height);
             *scroll_offset = session.fallback_scroll_offset();
         }
@@ -88,7 +102,7 @@ fn scroll_session_down(
     if session.info.session_type == SessionType::OpenAICodex {
         let current_vterm = session.vterm.scrollback_offset();
         let requested = current_vterm.saturating_sub(amount);
-        if current_vterm > 0 {
+        if vterm_holds_history(session) {
             session.vterm.set_scrollback(requested);
             let vterm_offset = session.vterm.scrollback_offset();
             if vterm_offset == 0 {
@@ -118,11 +132,10 @@ fn scroll_session_down(
 /// Scroll a session to the oldest available output.
 fn scroll_session_to_top(session: &mut Session, scroll_offset: &mut usize, viewport_height: usize) {
     if session.info.session_type == SessionType::OpenAICodex {
-        session.vterm.set_scrollback(usize::MAX);
-        let vterm_offset = session.vterm.scrollback_offset();
-        if vterm_offset > 0 {
+        if vterm_holds_history(session) {
+            session.vterm.set_scrollback(usize::MAX);
             session.fallback_scroll_to_bottom();
-            *scroll_offset = vterm_offset;
+            *scroll_offset = session.vterm.scrollback_offset();
         } else {
             session.fallback_scroll_to_top_with_viewport(viewport_height);
             *scroll_offset = session.fallback_scroll_offset();
@@ -321,6 +334,60 @@ mod tests {
         assert_eq!(outcome.vterm_offset, 3);
         assert_eq!(outcome.fallback_offset, 0);
         assert_eq!(offset, 3);
+    }
+
+    /// Paging past the oldest line of a Codex session must stop there.
+    ///
+    /// The regression: reaching the top of real vterm scrollback made the
+    /// vterm fail to advance, which used to be read as "this session has no
+    /// vterm history" and handed the reader to the fallback buffer - from the
+    /// live view. Scrolling up moved the view down.
+    #[test]
+    fn codex_scroll_up_clamps_at_the_top_of_vterm_history() {
+        // Primary screen, so the vterm holds the history.
+        let mut session = spawn_session(true, false, 100);
+        let mut offset = 0usize;
+
+        // Walk up a page at a time until the offset stops climbing.
+        let mut top = 0usize;
+        for _ in 0..200 {
+            scroll_session_up(&mut session, &mut offset, VIEWPORT, VIEWPORT);
+            if offset == top {
+                break;
+            }
+            assert!(
+                offset > top,
+                "scrolling up moved the view down: {top} -> {offset}"
+            );
+            top = offset;
+        }
+        assert!(top > 0, "the session should have had scrollback to walk");
+
+        // At the top, further page-ups stay put rather than resetting.
+        for _ in 0..5 {
+            scroll_session_up(&mut session, &mut offset, VIEWPORT, VIEWPORT);
+            assert_eq!(offset, top, "scrolling past the top left the top");
+        }
+
+        // And the history is still the vterm's, not the fallback's.
+        assert_eq!(session.vterm.scrollback_offset(), top);
+        assert_eq!(session.fallback_scroll_offset(), 0);
+    }
+
+    /// `Home` on a primary-screen Codex session lands on the oldest row and
+    /// stays there, rather than taking the fallback.
+    #[test]
+    fn codex_scroll_to_top_uses_vterm_history_when_it_exists() {
+        let mut session = spawn_session(true, false, 100);
+        let mut offset = 0usize;
+
+        scroll_session_to_top(&mut session, &mut offset, VIEWPORT);
+
+        assert_eq!(offset, session.vterm.history_rows());
+        assert_eq!(session.fallback_scroll_offset(), 0);
+
+        scroll_session_up(&mut session, &mut offset, VIEWPORT, 1000);
+        assert_eq!(offset, session.vterm.history_rows());
     }
 
     #[test]
