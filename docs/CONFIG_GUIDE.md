@@ -182,11 +182,13 @@ How long after a click a second one still counts as a double-click, and a third 
 | Default | `300` (5 minutes) |
 | Type | Integer (seconds) |
 
-A tool that has been in flight this long without its completion event arriving is treated as stalled: it is dropped from the session's in-flight set and the session is flagged with a `Stalled` attention reason. If nothing else is running the session falls back to "Thinking".
+A tool that has been in flight this long without its completion event arriving stops being believed: it is dropped from the session's in-flight set, and if nothing else is running the session falls back to "Thinking".
 
 This exists because a `PostToolUse` hook can go missing - dropped on channel overflow, or belonging to a subagent that died - and without it the session would sit in "Executing" forever.
 
-**When to change:** Increase if you have long-running tool executions that should remain in "Executing" state longer.
+Being overdue is not by itself a reason to interrupt you. No threshold can tell a ten-minute build from a hang, so the `Stalled` badge is raised only when the session has *also* stopped producing output for half a minute - and never for the session you are currently looking at. A session still drawing its spinner is long-running, not stalled, and is retired quietly.
+
+**When to change:** Increase if you want tools to stay visible in the in-flight set (and the session in "Executing") for longer before Panoptes stops believing the report.
 
 ---
 

@@ -109,7 +109,10 @@ pub struct Config {
     #[serde(default = "default_hooks_dir")]
     pub hooks_dir: PathBuf,
 
-    /// State timeout in seconds - Executing states auto-transition to Idle after this (default: 300 = 5 min)
+    /// State timeout in seconds - a tool in flight this long stops being
+    /// believed and is dropped from the session's in-flight set (default: 300 =
+    /// 5 min). Whether that also flags the session is decided by liveness, not
+    /// by this threshold; see `SessionManager::check_state_timeouts`.
     #[serde(default = "default_state_timeout")]
     pub state_timeout_secs: u64,
 

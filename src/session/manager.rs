@@ -23,6 +23,15 @@ use super::{
     SessionStore, SessionType,
 };
 
+/// How long a session's PTY has to have been silent before an overdue tool is
+/// treated as *stalled* rather than merely *long*
+///
+/// Both agents redraw while a tool runs - a spinner, an elapsed-second counter -
+/// so anything alive keeps producing output roughly every second, whatever the
+/// tool is doing. Half a minute of complete silence is the signal that nothing
+/// is; the figure only has to outlast the slowest redraw, not the work.
+const STALL_SILENCE_SECS: i64 = 30;
+
 /// Everything needed to create a brand-new session
 ///
 /// One spec serves every agent type; the [`AgentType`] passed alongside it to
@@ -851,15 +860,23 @@ impl SessionManager {
     /// A tool whose `PostToolUse` never arrives - because the hook was dropped,
     /// the subagent died, or the tool genuinely hung - would otherwise pin the
     /// session in `Executing` forever. Evicting it lets the session fall back to
-    /// `Thinking` (or `Waiting`, once the turn ends) on its own, and raises
-    /// `Stalled` so the list can say why.
+    /// `Thinking` (or `Waiting`, once the turn ends) on its own.
     ///
     /// This is what the old `Idle` state was doing. `Idle` claimed the session
     /// had gone quiet when what had actually happened was that one tool stopped
     /// reporting, which is a different thing and deserved a different name.
     ///
+    /// The eviction and the attention flag are two separate decisions. No
+    /// threshold can tell a ten-minute build from a hang, so the threshold alone
+    /// decides only the *eviction*: whether to keep believing a report that is
+    /// this old. Whether the user is told is decided by liveness - a session
+    /// still writing to its PTY is demonstrably working, and a `Stalled` badge
+    /// on it is a false alarm that comes back after every clear, since each long
+    /// tool crosses the threshold separately. `active` names the session on
+    /// screen, which is likewise never worth flagging: the user is looking at it.
+    ///
     /// Returns true if any session changed.
-    pub fn check_state_timeouts(&mut self, timeout_secs: u64) -> bool {
+    pub fn check_state_timeouts(&mut self, timeout_secs: u64, active: Option<SessionId>) -> bool {
         let now = Utc::now();
         let mut changed = false;
 
@@ -882,20 +899,41 @@ impl SessionManager {
                 })
                 .collect();
 
+            // `last_activity` moves on raw PTY output, which is exactly the
+            // question here: is anything still coming out of this session?
+            let quiet_secs = now
+                .signed_duration_since(session.info.last_activity)
+                .num_seconds();
+            let is_active = active == Some(session.info.id);
+            let worth_flagging = !is_active && quiet_secs >= STALL_SILENCE_SECS;
+
             for (key, name, elapsed) in stale {
-                tracing::warn!(
-                    session_id = %session.info.id,
-                    session_name = %session.info.name,
-                    tool = %name,
-                    elapsed_secs = elapsed,
-                    "Tool stalled, evicting from in-flight set"
-                );
                 session.info.in_flight.remove(&key);
-                session.info.attention = Some(AttentionReason::Stalled {
-                    tool: name,
-                    secs: elapsed,
-                });
                 changed = true;
+                if worth_flagging {
+                    tracing::warn!(
+                        session_id = %session.info.id,
+                        session_name = %session.info.name,
+                        tool = %name,
+                        elapsed_secs = elapsed,
+                        quiet_secs,
+                        "Tool stalled, evicting from in-flight set"
+                    );
+                    session.info.attention = Some(AttentionReason::Stalled {
+                        tool: name,
+                        secs: elapsed,
+                    });
+                } else {
+                    tracing::debug!(
+                        session_id = %session.info.id,
+                        session_name = %session.info.name,
+                        tool = %name,
+                        elapsed_secs = elapsed,
+                        quiet_secs,
+                        viewed = is_active,
+                        "Overdue tool retired quietly; the session is not stalled"
+                    );
+                }
             }
 
             // Nothing left running means the session was never really executing
@@ -1988,12 +2026,14 @@ mod tests {
             serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"}),
         ));
 
-        // Backdate the tool past the timeout
+        // Backdate the tool past the timeout, and the session's output clock
+        // past the silence window: nothing has come out of the PTY either
         let info = &mut manager.get_mut(session_id).unwrap().info;
         info.in_flight.get_mut("t1").unwrap().started_at =
             Utc::now() - chrono::Duration::seconds(600);
+        info.last_activity = Utc::now() - chrono::Duration::seconds(600);
 
-        assert!(manager.check_state_timeouts(300));
+        assert!(manager.check_state_timeouts(300, None));
 
         let info = &manager.get(session_id).unwrap().info;
         assert!(info.in_flight.is_empty(), "stalled tool should be evicted");
@@ -2031,16 +2071,12 @@ mod tests {
                 name: "shell".to_string(),
             },
         );
-        manager
-            .get_mut(session_id)
-            .unwrap()
-            .info
-            .in_flight
-            .get_mut("c1")
-            .unwrap()
-            .started_at = Utc::now() - chrono::Duration::seconds(600);
+        let info = &mut manager.get_mut(session_id).unwrap().info;
+        info.in_flight.get_mut("c1").unwrap().started_at =
+            Utc::now() - chrono::Duration::seconds(600);
+        info.last_activity = Utc::now() - chrono::Duration::seconds(600);
 
-        assert!(manager.check_state_timeouts(300));
+        assert!(manager.check_state_timeouts(300, None));
 
         let info = &manager.get(session_id).unwrap().info;
         assert!(info.in_flight.is_empty());
@@ -2066,11 +2102,107 @@ mod tests {
             session.set_state(SessionState::Executing);
         }
 
-        assert!(!manager.check_state_timeouts(300));
+        assert!(!manager.check_state_timeouts(300, None));
         assert_eq!(
             manager.get(session_id).unwrap().info.state,
             SessionState::Executing
         );
+    }
+
+    /// Start a Bash tool and backdate it past any sane timeout, leaving the
+    /// session's output clock alone - as a session still drawing its spinner
+    /// would.
+    fn start_an_overdue_tool(manager: &mut SessionManager, session_id: SessionId) {
+        manager.handle_hook_event(&hook(
+            session_id,
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"}),
+        ));
+        let info = &mut manager.get_mut(session_id).unwrap().info;
+        info.in_flight.get_mut("t1").unwrap().started_at =
+            Utc::now() - chrono::Duration::seconds(600);
+    }
+
+    /// A ten-minute build is not a hang. The tool report is stale either way -
+    /// so it is still evicted, and the state still repaired - but a session
+    /// whose PTY is talking must not be flagged, or every long Bash call in a
+    /// row raises the badge again the moment the user clears the last one.
+    #[test]
+    fn test_a_long_tool_on_a_talking_session_is_retired_without_a_flag() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        start_an_overdue_tool(&mut manager, session_id);
+        // Output arrived a moment ago: the agent is demonstrably alive
+        manager.get_mut(session_id).unwrap().info.last_activity = Utc::now();
+
+        assert!(
+            manager.check_state_timeouts(300, None),
+            "the stale report is still evicted; only the flag is withheld"
+        );
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.in_flight.is_empty(), "overdue tool should be evicted");
+        assert_eq!(info.state, SessionState::Thinking);
+        assert!(
+            info.attention.is_none(),
+            "a session still producing output is long-running, not stalled"
+        );
+        assert_eq!(manager.total_attention_count(), 0);
+    }
+
+    /// The session filling the screen never needs pointing at, exactly as
+    /// `check_shell_states` already decides for shells.
+    #[test]
+    fn test_the_session_on_screen_is_not_flagged_as_stalled() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_test_session(&mut manager);
+
+        start_an_overdue_tool(&mut manager, session_id);
+        // Silent as well as overdue: only being the viewed session spares it
+        manager.get_mut(session_id).unwrap().info.last_activity =
+            Utc::now() - chrono::Duration::seconds(600);
+
+        assert!(manager.check_state_timeouts(300, Some(session_id)));
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.in_flight.is_empty());
+        assert_eq!(info.state, SessionState::Thinking);
+        assert!(
+            info.attention.is_none(),
+            "the user is looking at it; a badge tells them nothing"
+        );
+    }
+
+    /// Silence is measured against the session's own output, not against
+    /// whichever session happens to be busy.
+    #[test]
+    fn test_a_quiet_session_is_still_flagged_while_another_talks() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let talking = insert_test_session(&mut manager);
+        let quiet = insert_test_session(&mut manager);
+
+        for session_id in [talking, quiet] {
+            start_an_overdue_tool(&mut manager, session_id);
+        }
+        manager.get_mut(talking).unwrap().info.last_activity = Utc::now();
+        manager.get_mut(quiet).unwrap().info.last_activity =
+            Utc::now() - chrono::Duration::seconds(600);
+
+        assert!(manager.check_state_timeouts(300, None));
+
+        assert!(manager.get(talking).unwrap().info.attention.is_none());
+        assert!(matches!(
+            manager.get(quiet).unwrap().info.attention,
+            Some(AttentionReason::Stalled { .. })
+        ));
+        assert_eq!(manager.total_attention_count(), 1);
     }
 
     #[test]

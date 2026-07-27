@@ -237,6 +237,26 @@ The "Stop" or completion hook event wasn't received.
    echo 'state_timeout_secs = 60' >> ~/.panoptes/config.toml
    ```
 
+### Session Flagged as Stalled While It Is Working
+
+**Symptoms:**
+- A session running a long build or scrape keeps raising the `◐` badge, and it comes back minutes after you clear it
+
+**Explanation:**
+Every tool that outlives `state_timeout_secs` is dropped from the in-flight set,
+so a session making a series of long calls used to be flagged once per call.
+Panoptes now checks the session's output first: one that is still writing to its
+PTY is long-running, not stalled, and is retired without a flag. A session that
+crosses the threshold *and* has gone silent for 30 seconds is still flagged —
+that is the case the badge exists for.
+
+**Solutions:**
+
+1. If a genuinely long tool is still being flagged, the session had stopped
+   producing output; raise `state_timeout_secs` so the report is believed longer.
+2. To keep such sessions out of your notifications entirely, leave
+   `notify_on.stalled = false` (the default) — the badge shows, nothing rings.
+
 ---
 
 ## Performance Issues
