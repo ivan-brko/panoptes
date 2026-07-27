@@ -166,7 +166,7 @@ The colour preset the whole UI wears. `★` marks the saved one.
 
 | Key | Action |
 |-----|--------|
-| `Up` / `Down` | Try a preset - it is applied to the whole dashboard immediately, so the UI is the preview |
+| `Up` / `Down` | Try a preset — it is applied to the whole dashboard immediately, so the UI is the preview |
 | `Enter` | Keep the highlighted preset and write it to `config.toml` |
 | `Esc` | Back to the sections list, putting back whatever was saved |
 

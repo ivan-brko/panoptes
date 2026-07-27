@@ -517,6 +517,7 @@ impl Theme {
 /// [`set_palette`] can rebuild the theme without re-detecting anything.
 #[derive(Debug, Clone, Copy)]
 struct Active {
+    palette: Palette,
     support: ColorSupport,
     theme: Theme,
 }
@@ -525,12 +526,13 @@ struct Active {
 ///
 /// Swappable, not pinned: the preset picker previews live, so a palette change
 /// has to reach the next render. Renders run on the main loop and the only
-/// writer is a keystroke on that same loop, so the lock is never contended.
+/// writer is that same loop, so the lock is never contended.
 static ACTIVE: OnceLock<RwLock<Active>> = OnceLock::new();
 
 fn active() -> &'static RwLock<Active> {
     ACTIVE.get_or_init(|| {
         RwLock::new(Active {
+            palette: Palette::Peacock,
             support: ColorSupport::Ansi16,
             theme: Theme::default(),
         })
@@ -551,6 +553,7 @@ pub fn init(mode: ThemeMode, palette: Palette) {
     };
     let mut guard = active().write().unwrap_or_else(PoisonError::into_inner);
     *guard = Active {
+        palette,
         support,
         theme: Theme::new(palette, support),
     };
@@ -559,9 +562,21 @@ pub fn init(mode: ThemeMode, palette: Palette) {
 /// Repaint the UI in `palette`, keeping the tier [`init`] settled on
 ///
 /// Takes effect on the next render, which is what makes the picker's highlight
-/// a live preview of the whole dashboard rather than a swatch.
+/// a live preview of the whole dashboard rather than a swatch. Called once per
+/// frame from the render path with whatever the state says should be worn, so
+/// it has to be cheap and idempotent when nothing moved - hence the read
+/// first, and no write at all in the overwhelmingly common case.
 pub fn set_palette(palette: Palette) {
+    if active()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .palette
+        == palette
+    {
+        return;
+    }
     let mut guard = active().write().unwrap_or_else(PoisonError::into_inner);
+    guard.palette = palette;
     guard.theme = Theme::new(palette, guard.support);
 }
 

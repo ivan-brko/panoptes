@@ -256,6 +256,7 @@ fn settings_theme_shortcuts() -> Vec<Line<'static>> {
             shortcut_line("↑ / ↓", "Try a preset - the whole UI is the preview"),
             shortcut_line("Enter", "Keep the highlighted preset"),
             shortcut_line("Esc", "Back to the sections list, undoing the preview"),
+            shortcut_line("", "Leaving this section any other way undoes it too"),
             shortcut_line("★", "Marks the preset that is saved"),
         ],
     )

@@ -140,22 +140,23 @@ fn handle_notifications_key(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 /// The preset picker: highlight previews, `Enter` keeps, `Esc` reverts
+///
+/// Nothing here touches the theme global. The worn preset is derived from this
+/// state on every frame (`App::worn_palette`), so moving the highlight *is* the
+/// preview and leaving the section - by `Esc` or by any other route - is the
+/// revert, with no repaint call to forget on a path this handler never sees.
 fn handle_theme_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let count = Palette::ALL.len();
     match key.code {
         KeyCode::Esc => {
-            // Whatever was being previewed goes back to what was saved
-            crate::tui::theme::set_palette(app.config.palette);
             app.state.palette_index = app.config.palette.index();
             app.escape_back();
         }
         KeyCode::Down => {
             app.state.palette_index = cycle_next(app.state.palette_index, count);
-            preview(app);
         }
         KeyCode::Up => {
             app.state.palette_index = cycle_prev(app.state.palette_index, count);
-            preview(app);
         }
         KeyCode::Enter => {
             if let Some(palette) = Palette::at(app.state.palette_index) {
@@ -167,13 +168,6 @@ fn handle_theme_key(app: &mut App, key: KeyEvent) -> Result<()> {
         _ => {}
     }
     Ok(())
-}
-
-/// Wear the highlighted preset without committing it
-fn preview(app: &App) {
-    if let Some(palette) = Palette::at(app.state.palette_index) {
-        crate::tui::theme::set_palette(palette);
-    }
 }
 
 /// Flip the boolean the highlighted row controls; returns whether one moved

@@ -367,7 +367,8 @@ reassign named colours, so the four are distinguishable but modest there.
 **Changing it:** open **Settings > Theme** in pane 3. Moving through the list
 with `Up`/`Down` applies the preset to the whole dashboard immediately - the
 UI is the preview - `Enter` keeps it and writes it here, and `Esc` puts back
-whatever was saved. Editing this key by hand works too and takes effect on the
+whatever was saved. So does leaving the section any other way: the preview
+lasts exactly as long as you are looking at the picker. Editing this key by hand works too and takes effect on the
 next start.
 
 ---
@@ -508,7 +509,7 @@ Notifications**. They take effect on the next event, with no restart:
 
 The colour preset is live too, from **Settings → Theme**: `Up`/`Down` repaints
 the whole UI on the spot, `Enter` writes `palette`, `Esc` puts the saved one
-back. The colour *tier* (`theme`) is not - it is a property of the terminal,
+back, as does leaving the section any other way. The colour *tier* (`theme`) is not - it is a property of the terminal,
 settled once at startup.
 
 Everything else is read at startup or when a session is spawned, and needs a
