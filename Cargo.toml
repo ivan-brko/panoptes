@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "panoptes-cc"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "Terminal-based dashboard for managing multiple AI coding agent sessions (Claude Code, OpenAI Codex CLI)"
 license = "MIT"
@@ -39,7 +39,7 @@ axum = "0.7"
 portable-pty = "0.8"
 
 # Terminal emulation
-vt100 = "0.16"
+vt100 = { package = "panoptes-vt100", version = "0.16.2" }
 
 # Git integration
 git2 = "0.18"
@@ -75,6 +75,3 @@ tower = { version = "0.4", features = ["util"] }
 [profile.release]
 lto = true
 codegen-units = 1
-
-[patch.crates-io]
-vt100 = { path = "vendor/vt100" }

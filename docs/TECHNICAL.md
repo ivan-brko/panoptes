@@ -224,8 +224,9 @@ Coordinates are *absolute rows* — row 0 is the oldest line of scrollback and
 current view. That is what lets a drag held past the top or bottom edge scroll
 the view (driven from the event-loop tick, because drag events stop arriving
 when the pointer stops moving) and keep extending across more than a
-screenful. Extraction over such a range needs `contents_between_absolute` on
-the vendored vt100, added beside the existing `PANOPTES PATCH` marks.
+screenful. Extraction over such a range needs `contents_between_absolute`, one
+of the `PANOPTES PATCH` additions in the [`panoptes-vt100`](https://github.com/ivan-brko/panoptes-vt100)
+fork this crate depends on in place of upstream `vt100`.
 
 Selection works on suspended sessions too: it only ever reads the terminal
 emulator, and never writes to or wakes a PTY.
