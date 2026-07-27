@@ -12,6 +12,7 @@ use crate::project::{Project, ProjectStore};
 use crate::session::SessionManager;
 use crate::tui::theme::theme;
 use crate::tui::views::confirm::{render_confirm_dialog, ConfirmDialogConfig};
+use crate::tui::views::window_rows;
 use crate::tui::widgets::dialog::{centered_rect, render_dialog, DialogSize, DialogSpec};
 use crate::tui::widgets::selection::{
     selection_prefix, selection_style, selection_style_with_accent,
@@ -40,12 +41,19 @@ pub fn render_worktree_wizard(frame: &mut Frame, area: Rect, state: &AppState, c
 }
 
 /// A centred overlay split into a header box and a list box
+///
+/// The overlay is a fixed fraction of the terminal, so a repo with more
+/// branches than it is tall would otherwise let `↓` walk the selection off the
+/// bottom - navigating blind, with typing-to-filter the only way back.
+/// `selected_row` counts rendered rows, not items: the branch step has a
+/// separator between the branches and its create-new row.
 fn render_selector_overlay(
     frame: &mut Frame,
     area: Rect,
     header_lines: Vec<Line<'static>>,
     list_title: String,
     items: Vec<ListItem<'static>>,
+    selected_row: usize,
 ) {
     let t = theme();
     let overlay = centered_rect(area, SELECTOR_WIDTH, SELECTOR_HEIGHT);
@@ -65,6 +73,8 @@ fn render_selector_overlay(
         ),
         chunks[0],
     );
+    // The block's own borders take a row at each end of the list box
+    let items = window_rows(items, selected_row, chunks[1].height.saturating_sub(2));
     frame.render_widget(
         List::new(items).block(
             Block::default()
@@ -199,12 +209,21 @@ fn render_select_branch(frame: &mut Frame, area: Rect, state: &AppState) {
         );
     }
 
+    // Rows are 1:1 with the branches; only the create-new row sits one row
+    // further down than its index, because of the separator above it
+    let selected_row = if has_create_option && wizard.list_index >= filtered_count {
+        filtered_count + 1
+    } else {
+        wizard.list_index
+    };
+
     render_selector_overlay(
         frame,
         area,
         header,
         format!("Select Branch ({} found)", filtered_count),
         items,
+        selected_row,
     );
 }
 
@@ -252,6 +271,7 @@ fn render_select_base(frame: &mut Frame, area: Rect, state: &AppState) {
             wizard.filtered_base_branches.len()
         ),
         items,
+        wizard.base_list_index,
     );
 }
 
@@ -440,6 +460,7 @@ pub fn render_default_base_selector(frame: &mut Frame, area: Rect, state: &AppSt
             state.filtered_branch_refs.len()
         ),
         items,
+        state.base_branch_selector_index,
     );
 }
 
@@ -708,6 +729,86 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// A repo with more branches than the overlay is tall: `↓` used to walk the
+    /// selection off the bottom, leaving the user navigating blind
+    #[test]
+    fn test_select_branch_scrolls_to_keep_the_selection_visible() {
+        let mut state = AppState {
+            input_mode: InputMode::WorktreeSelectBranch,
+            ..Default::default()
+        };
+        state.worktree_wizard.filtered_branches = (0..60)
+            .map(|i| BranchRef::new(WizardRefType::Local, format!("branch-{i:02}")))
+            .collect();
+        state.worktree_wizard.list_index = 59;
+
+        let lines = render_wizard(&state);
+
+        assert!(contains_line(&lines, "▶ [L] branch-59"), "{lines:?}");
+        // The window moved rather than growing: the first branch is gone
+        assert!(!contains_line(&lines, "[L] branch-00"), "{lines:?}");
+    }
+
+    /// The create-new row is the last row and sits below a separator, so its
+    /// index is one short of its row - it must still be reachable and visible
+    #[test]
+    fn test_select_branch_keeps_the_create_row_visible_when_selected() {
+        let mut state = AppState {
+            input_mode: InputMode::WorktreeSelectBranch,
+            ..Default::default()
+        };
+        state.worktree_wizard.search_text = "branch".to_string();
+        state.worktree_wizard.filtered_branches = (0..60)
+            .map(|i| BranchRef::new(WizardRefType::Local, format!("branch-{i:02}")))
+            .collect();
+        // Where `worktree_navigate_branches` puts the create option
+        state.worktree_wizard.list_index = 60;
+
+        let lines = render_wizard(&state);
+
+        assert!(
+            contains_line(&lines, "▶ + Create new branch \"branch\""),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn test_select_base_scrolls_to_keep_the_selection_visible() {
+        let mut state = AppState {
+            input_mode: InputMode::WorktreeSelectBase,
+            ..Default::default()
+        };
+        state.worktree_wizard.branch_name = "new-branch".to_string();
+        state.worktree_wizard.filtered_base_branches = (0..60)
+            .map(|i| BranchRef::new(WizardRefType::Local, format!("base-{i:02}")))
+            .collect();
+        state.worktree_wizard.base_list_index = 59;
+
+        let lines = render_wizard(&state);
+
+        assert!(contains_line(&lines, "▶ [L] base-59"), "{lines:?}");
+        assert!(!contains_line(&lines, "[L] base-00"), "{lines:?}");
+    }
+
+    #[test]
+    fn test_default_base_selector_scrolls_to_keep_the_selection_visible() {
+        let state = AppState {
+            input_mode: InputMode::SelectingDefaultBase,
+            filtered_branch_refs: (0..60)
+                .map(|i| BranchRef::new(WizardRefType::Local, format!("base-{i:02}")))
+                .collect(),
+            base_branch_selector_index: 59,
+            ..Default::default()
+        };
+
+        let lines = render_to_lines(120, 30, |frame| {
+            render_default_base_selector(frame, frame.size(), &state)
+        });
+
+        assert!(contains_line(&lines, "▶ [L] base-59"), "{lines:?}");
+        assert!(!contains_line(&lines, "[L] base-00"), "{lines:?}");
     }
 
     #[test]

@@ -37,6 +37,24 @@ pub const NOTIFICATION_ROWS: [&str; 6] = [
     "Idle nudge counts as attention",
 ];
 
+/// The read-only About rows, in list order
+///
+/// Split from their values the way [`NOTIFICATION_ROWS`] is: the input handler
+/// needs the row count to move a cursor through them, and has no business
+/// building the paths and the hook's health to get it.
+pub const ABOUT_ROWS: [&str; 10] = [
+    "Version",
+    "Hook server",
+    "config.toml",
+    "logs/",
+    "projects.json",
+    "sessions.json",
+    "worktrees/",
+    "hooks/",
+    "scrollback_lines",
+    "log_agent_events",
+];
+
 /// Pane 3's block title at the given density
 pub fn settings_title(state: &AppState, mode: SideMode) -> String {
     match mode {
@@ -381,79 +399,81 @@ fn checkbox(on: bool) -> String {
     }
 }
 
+/// The value each About row shows, in list order
+fn about_values(ctx: &SettingsPaneContext) -> [String; 10] {
+    let config = ctx.config;
+    [
+        env!("CARGO_PKG_VERSION").to_string(),
+        if ctx.hook_healthy {
+            format!("listening on :{}", ctx.hook_port)
+        } else {
+            format!("STOPPED (was :{})", ctx.hook_port)
+        },
+        crate::config::config_file_path().display().to_string(),
+        ctx.log_file_info.path.display().to_string(),
+        crate::project::store::projects_file_path()
+            .display()
+            .to_string(),
+        crate::session::store::sessions_file_path()
+            .display()
+            .to_string(),
+        config.worktrees_dir.display().to_string(),
+        config.hooks_dir.display().to_string(),
+        format!("{} (new sessions only)", config.scrollback_lines),
+        format!("{} (startup only)", config.log_agent_events),
+    ]
+}
+
 /// Version, hook health, where the files live, and the startup-only settings
+///
+/// Read-only, but it carries a cursor anyway - not to act on a row, but so the
+/// list can scroll: ten rows is more than a short pane holds, and without a
+/// selection to follow the tail was clipped with nothing on screen saying so.
 fn render_about(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext) {
     let t = theme();
-    let config = ctx.config;
+    let state = ctx.state;
+    let focused = state.is_focused(Tab::Settings);
     let width = area.width as usize;
 
-    let hook_status = if ctx.hook_healthy {
-        format!("listening on :{}", ctx.hook_port)
-    } else {
-        format!("STOPPED (was :{})", ctx.hook_port)
-    };
-
-    let rows: Vec<(String, String)> = vec![
-        ("Version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
-        ("Hook server".to_string(), hook_status),
-        (
-            "config.toml".to_string(),
-            crate::config::config_file_path().display().to_string(),
-        ),
-        (
-            "logs/".to_string(),
-            ctx.log_file_info.path.display().to_string(),
-        ),
-        (
-            "projects.json".to_string(),
-            crate::project::store::projects_file_path()
-                .display()
-                .to_string(),
-        ),
-        (
-            "sessions.json".to_string(),
-            crate::session::store::sessions_file_path()
-                .display()
-                .to_string(),
-        ),
-        (
-            "worktrees/".to_string(),
-            config.worktrees_dir.display().to_string(),
-        ),
-        ("hooks/".to_string(), config.hooks_dir.display().to_string()),
-        (
-            "scrollback_lines".to_string(),
-            format!("{} (new sessions only)", config.scrollback_lines),
-        ),
-        (
-            "log_agent_events".to_string(),
-            format!("{} (startup only)", config.log_agent_events),
-        ),
-    ];
-
-    let label_width = rows
+    let values = about_values(ctx);
+    let label_width = ABOUT_ROWS
         .iter()
-        .map(|(l, _)| l.chars().count())
+        .map(|l| l.chars().count())
         .max()
         .unwrap_or(0);
-    let lines: Vec<Line> = rows
+
+    let items: Vec<ListItem> = ABOUT_ROWS
         .iter()
-        .map(|(label, value)| {
-            let text = format!("{:<label_width$}  {}", label, value);
-            Line::from(Span::styled(
-                truncate_string(&text, width),
-                Style::default().fg(t.text),
-            ))
+        .zip(values.iter())
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let selected = i == state.about_index && focused;
+            let text = format!(
+                "{}{:<label_width$}  {}",
+                selection_prefix(selected),
+                label,
+                value
+            );
+            ListItem::new(Line::from(Span::raw(truncate_string(&text, width))))
+                .style(selection_style_with_accent(selected, t))
         })
         .collect();
 
-    let mut all = vec![Line::from(Span::styled(
-        "Read-only. Edit config.toml for anything not offered above.",
-        t.muted_style(),
-    ))];
-    all.extend(lines);
-
-    frame.render_widget(Paragraph::new(all), area);
+    // The note keeps its own row above the list, so scrolling cannot take away
+    // the one line that says why nothing here responds to Enter
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Read-only. Edit config.toml for anything not offered above.",
+            t.muted_style(),
+        ))),
+        chunks[0],
+    );
+    let items = window_rows(items, state.about_index, chunks[1].height);
+    frame.render_widget(List::new(items), chunks[1]);
 }
 
 #[cfg(test)]
@@ -617,6 +637,42 @@ mod tests {
             render_settings_pane(frame, frame.size(), SideMode::Full, &ctx)
         });
         assert!(contains_line(&lines, "STOPPED"), "{lines:?}");
+    }
+
+    /// A short pane cannot hold all ten rows, so the cursor has to drag the
+    /// list along with it - the last row used to be clipped silently
+    #[test]
+    fn test_about_scrolls_to_the_selected_row_in_a_short_pane() {
+        let mut state = focused(SettingsNav::About);
+        state.about_index = ABOUT_ROWS.len() - 1;
+        let config = Config::default();
+        let claude = ClaudeConfigStore::new();
+        let codex = CodexConfigStore::new();
+        let log = LogFileInfo {
+            path: PathBuf::from("/tmp/x.log"),
+        };
+        let ctx = context(&state, &config, &claude, &codex, &log);
+
+        let lines = render_to_lines(70, 6, |frame| {
+            render_settings_pane(frame, frame.size(), SideMode::Full, &ctx)
+        });
+
+        assert!(contains_line(&lines, "▶ log_agent_events"), "{lines:?}");
+        // The window moved rather than growing: the first row is gone, and the
+        // note that is not part of the list held its place
+        assert!(!contains_line(&lines, "Version"), "{lines:?}");
+        assert!(contains_line(&lines, "Read-only."), "{lines:?}");
+    }
+
+    /// Selection is a focus affordance here as everywhere else
+    #[test]
+    fn test_about_draws_no_cursor_while_the_pane_is_unfocused() {
+        let state = AppState {
+            settings_nav: SettingsNav::About,
+            ..Default::default()
+        };
+        let lines = render(70, &state, &Config::default());
+        assert!(!contains_line(&lines, "▶ "), "{lines:?}");
     }
 
     #[test]

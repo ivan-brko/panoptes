@@ -365,7 +365,9 @@ fn settings_footer(state: &AppState) -> &'static str {
         // No "back" on Esc here: leaving without committing undoes the
         // preview, and the footer has to say so before the user finds out
         SettingsNav::Theme => "↑↓: preview | Enter: keep | Esc: revert",
-        SettingsNav::About => "Esc: back",
+        // `↑↓` scroll rather than choose: nothing here is editable, so there
+        // is no Enter to advertise beside them
+        SettingsNav::About => "↑↓: scroll | Esc: back",
     }
 }
 
