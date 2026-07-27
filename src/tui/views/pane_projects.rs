@@ -90,7 +90,9 @@ pub fn render_projects_pane(
     }
 
     // One-line inputs replace the pane's content; lists and paragraphs are
-    // overlays anchored to the terminal instead (see `views::prompts`).
+    // overlays anchored to the terminal instead (see `views::prompts`), and a
+    // step of a multi-step wizard keeps the wizard's frame however little it
+    // asks for (see `views::session_wizard`).
     match state.input_mode {
         InputMode::AddingProjectName => {
             render_inline_input(frame, area, "Project name", &state.new_project_name);
@@ -115,18 +117,6 @@ pub fn render_projects_pane(
             if let Some(error) = &state.folder_error {
                 render_inline_error(frame, area, error);
             }
-            return;
-        }
-        InputMode::CreatingSession => {
-            render_inline_input(frame, area, "New Claude session", &state.session_draft.name);
-            return;
-        }
-        InputMode::CreatingCodexSession => {
-            render_inline_input(frame, area, "New Codex session", &state.session_draft.name);
-            return;
-        }
-        InputMode::CreatingShellSession => {
-            render_inline_input(frame, area, "New shell session", &state.session_draft.name);
             return;
         }
         _ => {}

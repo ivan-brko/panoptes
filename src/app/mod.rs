@@ -56,8 +56,8 @@ use crate::tui::views::{
     render_folder_move_dialog, render_folder_remove_confirmation, render_help_overlay,
     render_loading_indicator, render_panes, render_project_addition_dialog,
     render_project_delete_confirmation, render_quit_confirm_dialog,
-    render_session_delete_confirmation, render_session_view, render_startup_notice_overlay,
-    render_worktree_wizard, PaneContext,
+    render_session_delete_confirmation, render_session_name_input, render_session_view,
+    render_startup_notice_overlay, render_worktree_wizard, ConfigSelectorFlow, PaneContext,
 };
 use crate::tui::Tui;
 use crate::wizards::worktree::{
@@ -2719,6 +2719,7 @@ impl App {
                         &state.available_claude_configs,
                         state.config_selector_index,
                         claude_config_store.get_default_id(),
+                        config_selector_flow(state),
                     );
                 }
                 InputMode::ConfirmingClaudeSettingsCopy => {
@@ -2781,6 +2782,7 @@ impl App {
                         &state.available_codex_configs,
                         state.config_selector_index,
                         codex_config_store.get_default_id(),
+                        config_selector_flow(state),
                     );
                 }
                 InputMode::AddingCustomShortcutKey
@@ -2829,13 +2831,35 @@ impl App {
                 InputMode::ConfirmingFolderRemove => {
                     render_folder_remove_confirmation(frame, area, state, project_store);
                 }
+                // The name step is one line you type into, but it is a step of
+                // the new-session wizard, so it keeps the wizard's frame
+                // rather than dropping into pane 1
+                InputMode::CreatingSession
+                | InputMode::CreatingCodexSession
+                | InputMode::CreatingShellSession => {
+                    let (agent, esc_backs_up) = match state.input_mode {
+                        InputMode::CreatingSession => ("Claude", true),
+                        InputMode::CreatingCodexSession => ("Codex", true),
+                        // A shell has a one-step flow: nothing behind it
+                        _ => ("shell", false),
+                    };
+                    render_session_name_input(
+                        frame,
+                        area,
+                        agent,
+                        state
+                            .session_draft
+                            .account
+                            .as_ref()
+                            .map(|a| a.name.as_str()),
+                        &state.session_draft.name,
+                        esc_backs_up,
+                    );
+                }
                 // The remaining modes are one-line inputs drawn inline in the
                 // pane that owns them, or need no overlay at all.
                 InputMode::Normal
                 | InputMode::Session
-                | InputMode::CreatingSession
-                | InputMode::CreatingShellSession
-                | InputMode::CreatingCodexSession
                 | InputMode::AddingProjectName
                 | InputMode::RenamingProject
                 | InputMode::RenamingFolder => {}
@@ -2872,6 +2896,18 @@ impl App {
     /// Get a mutable reference to the project store
     pub fn project_store_mut(&mut self) -> &mut ProjectStore {
         &mut self.project_store
+    }
+}
+
+/// Which flow the open config selector belongs to
+///
+/// The selector is dual-use: a project setting sets `setting_project_default_config`
+/// before opening it, and the new-session wizard does not.
+fn config_selector_flow(state: &AppState) -> ConfigSelectorFlow {
+    if state.setting_project_default_config.is_some() {
+        ConfigSelectorFlow::ProjectDefault
+    } else {
+        ConfigSelectorFlow::SessionWizard
     }
 }
 

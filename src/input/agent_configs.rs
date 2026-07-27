@@ -78,6 +78,25 @@ impl AgentKind {
         }
     }
 
+    /// This agent's row in the wizard's first step
+    ///
+    /// The inverse of [`crate::input::text_input::agent_kind_at`], so a step
+    /// backwards lands on the row the user came forward from.
+    pub fn selector_row(self) -> usize {
+        match self {
+            AgentKind::Claude => 0,
+            AgentKind::Codex => 1,
+        }
+    }
+
+    /// Input mode for the name step of this agent's new-session wizard
+    pub fn creating_session_mode(self) -> InputMode {
+        match self {
+            AgentKind::Claude => InputMode::CreatingSession,
+            AgentKind::Codex => InputMode::CreatingCodexSession,
+        }
+    }
+
     /// Input mode for this agent's config delete confirmation
     pub fn confirming_delete_mode(self) -> InputMode {
         match self {
@@ -187,7 +206,63 @@ fn account_of<C: AgentProfile>(config: &C) -> AgentAccount {
 // App-level wrappers (called by the dispatcher and normal-mode handlers)
 // ========================================================================
 
-/// Handle key while creating a new Claude or Codex session (typing the name)
+/// What the wizard does after the agent step, given how many configs exist
+///
+/// One config is not a choice, and no configs is not a question, so the step
+/// is only shown when there is something to decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigStep {
+    /// Show the selector: more than one account to run under
+    Ask,
+    /// Skip the step, using the only config there is
+    UseOnly,
+    /// Skip the step; the session runs on the agent's own default
+    Skip,
+}
+
+/// Which config step follows the agent step
+pub(crate) fn config_step_for(config_count: usize) -> ConfigStep {
+    match config_count {
+        0 => ConfigStep::Skip,
+        1 => ConfigStep::UseOnly,
+        _ => ConfigStep::Ask,
+    }
+}
+
+/// Step 2 of the new-session wizard: pick the account the session runs under
+///
+/// Called once the agent step is done. When the step has nothing to ask it
+/// resolves the account itself and the wizard goes straight to the name step,
+/// which is what makes `Esc` from the name step land back on the agent step
+/// rather than on a selector that was never shown.
+pub fn start_session_config_step(app: &mut App, kind: AgentKind) {
+    let config_count = match kind {
+        AgentKind::Claude => app.claude_config_store.count(),
+        AgentKind::Codex => app.codex_config_store.count(),
+    };
+
+    match config_step_for(config_count) {
+        ConfigStep::Ask => {
+            let project_id = app.state.session_draft.project_id;
+            let preferred = app.state.session_draft.account.as_ref().map(|a| a.id);
+            open_config_selector(app, kind, project_id, preferred);
+        }
+        ConfigStep::UseOnly => {
+            let account = match kind {
+                AgentKind::Claude => account_of(app.claude_config_store.configs_sorted()[0]),
+                AgentKind::Codex => account_of(app.codex_config_store.configs_sorted()[0]),
+            };
+            app.state.session_draft.account = Some(account);
+            app.state.input_mode = kind.creating_session_mode();
+        }
+        ConfigStep::Skip => {
+            app.state.session_draft.account = None;
+            app.state.input_mode = kind.creating_session_mode();
+        }
+    }
+}
+
+/// Handle key on the wizard's name step (the last step, for either agent)
 pub fn handle_creating_agent_session_key(
     app: &mut App,
     key: KeyEvent,
@@ -198,31 +273,23 @@ pub fn handle_creating_agent_session_key(
     }
     match key.code {
         KeyCode::Esc => {
-            app.state.input_mode = InputMode::Normal;
-            app.state.session_draft.reset();
-        }
-        KeyCode::Enter => {
+            // Esc backs up one step. Which step that is depends on whether the
+            // config step was shown at all - with one config or none it was
+            // resolved without asking, so back means the agent step.
             let config_count = match kind {
                 AgentKind::Claude => app.claude_config_store.count(),
                 AgentKind::Codex => app.codex_config_store.count(),
             };
-
-            if config_count > 1 {
-                // Multiple configs - show selector, pre-selecting the project
-                // default (or global default)
+            if config_step_for(config_count) == ConfigStep::Ask {
                 let project_id = app.state.session_draft.project_id;
-                open_config_selector(app, kind, project_id);
-            } else if config_count == 1 {
-                // Single config - use it directly
-                let account = match kind {
-                    AgentKind::Claude => account_of(app.claude_config_store.configs_sorted()[0]),
-                    AgentKind::Codex => account_of(app.codex_config_store.configs_sorted()[0]),
-                };
-                crate::input::text_input::create_session(app, kind.agent_type(), Some(account))?;
+                let preferred = app.state.session_draft.account.as_ref().map(|a| a.id);
+                open_config_selector(app, kind, project_id, preferred);
             } else {
-                // No configs - create without config
-                crate::input::text_input::create_session(app, kind.agent_type(), None)?;
+                back_to_agent_step(&mut app.state, kind);
             }
+        }
+        KeyCode::Enter => {
+            crate::input::text_input::create_session(app, kind.agent_type())?;
         }
         KeyCode::Backspace => {
             app.state.session_draft.name.pop();
@@ -237,13 +304,31 @@ pub fn handle_creating_agent_session_key(
     Ok(())
 }
 
+/// Back to the wizard's first step, keeping the branch the draft came from
+///
+/// The step reopens on the agent the user is backing out of, not on the top
+/// of the list: stepping back is a chance to change the answer, not a reset
+/// that silently answers it differently.
+pub(crate) fn back_to_agent_step(state: &mut AppState, kind: AgentKind) {
+    state.session_draft.account = None;
+    state.agent_type_selector_index = kind.selector_row();
+    state.input_mode = InputMode::SelectingAgentType;
+}
+
 /// Populate and open the config selector for an agent
 ///
 /// The one place that fills the "available configs" list: used both when a
 /// session needs an account picked and when a project default is being set.
-/// Pre-selects the project's default config when `project_id` names one,
-/// falling back to the store's global default.
-pub fn open_config_selector(app: &mut App, kind: AgentKind, project_id: Option<ProjectId>) {
+/// Pre-selects `preferred` when it names a config still in the list - the
+/// wizard passes the account already chosen, so stepping back and forward
+/// lands on the same row - falling back to the project's default and then to
+/// the store's global default.
+pub fn open_config_selector(
+    app: &mut App,
+    kind: AgentKind,
+    project_id: Option<ProjectId>,
+    preferred: Option<Uuid>,
+) {
     let project_default = project_id
         .and_then(|pid| app.project_store.get_project(pid))
         .and_then(|p| kind.project_default(p));
@@ -271,7 +356,7 @@ pub fn open_config_selector(app: &mut App, kind: AgentKind, project_id: Option<P
         }
     };
 
-    let preferred_id = project_default.or(global_default);
+    let preferred_id = preferred.or(project_default).or(global_default);
     app.state.config_selector_index = kind
         .available_position(&app.state, preferred_id)
         .unwrap_or(0);
@@ -304,11 +389,7 @@ pub fn handle_adding_config_path_key(app: &mut App, key: KeyEvent, kind: AgentKi
 
 /// Handle key while a config selector is open
 pub fn handle_selecting_config_key(app: &mut App, key: KeyEvent, kind: AgentKind) -> Result<()> {
-    if let Some(account) = selecting_config_key(&mut app.state, &mut app.project_store, kind, key)?
-    {
-        crate::input::text_input::create_session(app, kind.agent_type(), Some(account))?;
-    }
-    Ok(())
+    selecting_config_key(&mut app.state, &mut app.project_store, kind, key)
 }
 
 /// Handle key while confirming a config deletion
@@ -506,28 +587,34 @@ pub(crate) fn adding_config_path_key<C: AgentProfile>(
 
 /// Config selector body
 ///
-/// Returns the account to create a session under when the selection was made
-/// for session creation; setting a project default is applied here directly.
+/// Dual-use, and the two uses part company on `Enter` and on `Esc`: setting a
+/// project default is applied here and ends the dialog, while the wizard
+/// records the account on the draft and advances to its name step. `Esc`
+/// likewise cancels the project-default dialog outright, but only steps the
+/// wizard back to its agent step.
 pub(crate) fn selecting_config_key(
     state: &mut AppState,
     project_store: &mut ProjectStore,
     kind: AgentKind,
     key: KeyEvent,
-) -> Result<Option<AgentAccount>> {
+) -> Result<()> {
     if key.kind != KeyEventKind::Press {
-        return Ok(None);
+        return Ok(());
     }
 
     let config_count = kind.available_len(state);
+    let setting_project_default = state.setting_project_default_config.is_some();
 
     match key.code {
         KeyCode::Esc => {
-            // Cancel selection - abort session creation or project config setting
-            state.input_mode = InputMode::Normal;
             kind.clear_selector(state);
-            // Also clear session creation state
-            state.session_draft.reset();
-            state.setting_project_default_config = None;
+            if setting_project_default {
+                state.setting_project_default_config = None;
+                state.input_mode = InputMode::Normal;
+            } else {
+                // Step 2 of the wizard: back to step 1, draft intact
+                back_to_agent_step(state, kind);
+            }
         }
         KeyCode::Down => {
             state.config_selector_index = cycle_next(state.config_selector_index, config_count);
@@ -539,9 +626,7 @@ pub(crate) fn selecting_config_key(
             let selected_id = kind.available_id_at(state, state.config_selector_index);
             let selected_account = kind.available_account_at(state, state.config_selector_index);
 
-            let mut account_for_session = None;
             if let Some(config_id) = selected_id {
-                // Check if we're setting project default or creating a session
                 if let Some(project_id) = state.setting_project_default_config.take() {
                     if let Some(project) = project_store.get_project_mut(project_id) {
                         kind.set_project_default(project, Some(config_id));
@@ -551,17 +636,18 @@ pub(crate) fn selecting_config_key(
                     }
                     state.input_mode = InputMode::Normal;
                 } else {
-                    // Creating a session - hand the account back to the caller
-                    account_for_session = selected_account;
+                    // Creating a session - the account rides the draft to the
+                    // name step, which is where the session is finally made
+                    state.session_draft.account = selected_account;
+                    state.input_mode = kind.creating_session_mode();
                 }
             }
 
             kind.clear_selector(state);
-            return Ok(account_for_session);
         }
         _ => {}
     }
-    Ok(None)
+    Ok(())
 }
 
 /// Config delete confirmation body
@@ -930,14 +1016,17 @@ mod tests {
         assert_eq!(f.state.config_selector_index, 1);
 
         // Enter applies the selection as the project default
-        let account = selecting_config_key(
+        selecting_config_key(
             &mut f.state,
             &mut f.projects,
             AgentKind::Claude,
             press(KeyCode::Enter),
         )
         .unwrap();
-        assert!(account.is_none(), "project-default flow creates no session");
+        assert!(
+            f.state.session_draft.account.is_none(),
+            "project-default flow starts no session"
+        );
         assert_eq!(f.state.input_mode, InputMode::Normal);
         assert!(f.state.available_claude_configs.is_empty());
         assert_eq!(
@@ -972,23 +1061,33 @@ mod tests {
         );
     }
 
+    /// The wizard's config step comes *before* the name step: Enter records
+    /// the account on the draft and moves on rather than creating anything
     #[test]
-    fn test_selector_enter_for_session_returns_account() {
+    fn test_selector_enter_in_the_wizard_advances_to_the_name_step() {
         let mut f = fixture();
         let config = ClaudeConfig::new("Work".to_string(), Some("/tmp/work".into()));
         let config_id = config.id;
         f.state.available_claude_configs = vec![config];
         f.state.config_selector_index = 0;
         f.state.setting_project_default_config = None;
+        f.state.input_mode = InputMode::SelectingClaudeConfig;
 
-        let account = selecting_config_key(
+        selecting_config_key(
             &mut f.state,
             &mut f.projects,
             AgentKind::Claude,
             press(KeyCode::Enter),
         )
-        .unwrap()
-        .expect("session flow returns the selected account");
+        .unwrap();
+
+        assert_eq!(f.state.input_mode, InputMode::CreatingSession);
+        let account = f
+            .state
+            .session_draft
+            .account
+            .as_ref()
+            .expect("the chosen account rides the draft to the name step");
         assert_eq!(account.id, config_id);
         assert_eq!(account.name, "Work");
         assert_eq!(
@@ -998,11 +1097,75 @@ mod tests {
         assert!(f.state.available_claude_configs.is_empty());
     }
 
+    /// Codex takes the identical path, into its own name step
     #[test]
-    fn test_selector_esc_cancels_and_clears_state() {
+    fn test_selector_enter_in_the_wizard_advances_for_codex_too() {
+        let mut f = fixture();
+        f.state.available_codex_configs = vec![CodexConfig::new("Personal".to_string(), None)];
+        f.state.config_selector_index = 0;
+        f.state.input_mode = InputMode::SelectingCodexConfig;
+
+        selecting_config_key(
+            &mut f.state,
+            &mut f.projects,
+            AgentKind::Codex,
+            press(KeyCode::Enter),
+        )
+        .unwrap();
+
+        assert_eq!(f.state.input_mode, InputMode::CreatingCodexSession);
+        assert_eq!(
+            f.state.session_draft.account.map(|a| a.name),
+            Some("Personal".to_string())
+        );
+    }
+
+    /// Esc in the wizard's config step backs up one step, keeping the branch
+    /// the draft was started from - it does not cancel the whole flow
+    #[test]
+    fn test_selector_esc_in_the_wizard_backs_up_to_the_agent_step() {
+        let mut f = fixture();
+        let project_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+        f.state.session_draft =
+            crate::app::SessionDraft::for_branch(project_id, branch_id, "/tmp/p".into());
+        f.state.session_draft.account = Some(AgentAccount {
+            id: uuid::Uuid::new_v4(),
+            name: "stale".to_string(),
+            dir: None,
+        });
+        f.state.available_codex_configs = vec![CodexConfig::new("One".to_string(), None)];
+        f.state.input_mode = InputMode::SelectingCodexConfig;
+
+        selecting_config_key(
+            &mut f.state,
+            &mut f.projects,
+            AgentKind::Codex,
+            press(KeyCode::Esc),
+        )
+        .unwrap();
+
+        assert_eq!(f.state.input_mode, InputMode::SelectingAgentType);
+        assert_eq!(
+            f.state.agent_type_selector_index,
+            AgentKind::Codex.selector_row(),
+            "step 1 reopens on the agent being backed out of"
+        );
+        assert!(f.state.available_codex_configs.is_empty());
+        assert_eq!(f.state.session_draft.project_id, Some(project_id));
+        assert_eq!(f.state.session_draft.branch_id, Some(branch_id));
+        assert!(
+            f.state.session_draft.account.is_none(),
+            "the account is un-chosen by stepping back past it"
+        );
+    }
+
+    /// The project-default flow is the other half of the dual use: Esc there
+    /// cancels the dialog outright
+    #[test]
+    fn test_selector_esc_cancels_the_project_default_flow() {
         let mut f = fixture();
         f.state.available_codex_configs = vec![CodexConfig::new("One".to_string(), None)];
-        f.state.session_draft.name = "half-typed".to_string();
         f.state.setting_project_default_config = Some(uuid::Uuid::new_v4());
         f.state.input_mode = InputMode::SelectingCodexConfig;
 
@@ -1015,8 +1178,16 @@ mod tests {
         .unwrap();
         assert_eq!(f.state.input_mode, InputMode::Normal);
         assert!(f.state.available_codex_configs.is_empty());
-        assert!(f.state.session_draft.name.is_empty());
         assert!(f.state.setting_project_default_config.is_none());
+    }
+
+    /// The step is only shown when there is a choice to make
+    #[test]
+    fn test_config_step_is_skipped_unless_there_is_something_to_choose() {
+        assert_eq!(config_step_for(0), ConfigStep::Skip);
+        assert_eq!(config_step_for(1), ConfigStep::UseOnly);
+        assert_eq!(config_step_for(2), ConfigStep::Ask);
+        assert_eq!(config_step_for(9), ConfigStep::Ask);
     }
 
     #[test]

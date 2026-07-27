@@ -434,7 +434,7 @@ fn open_project_default_config(app: &mut App, project_id: ProjectId, kind: Agent
     };
     if config_count > 0 {
         app.state.setting_project_default_config = Some(project_id);
-        open_config_selector(app, kind, Some(project_id));
+        open_config_selector(app, kind, Some(project_id), None);
     } else {
         app.state.header_notifications.push(kind.no_configs_hint());
     }

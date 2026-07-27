@@ -284,6 +284,20 @@ pub fn render_agent_config_delete_dialog(
     render_confirm_dialog(frame, area, config);
 }
 
+/// Which flow the dual-use config selector is serving
+///
+/// The list is the same either way; the frame around it is not. As step 2 of
+/// the new-session wizard it wears the wizard's title and `Esc` steps back to
+/// the agent step, while from a project's settings it is a dialog of its own
+/// that `Esc` cancels outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSelectorFlow {
+    /// Step 2 of the new-session wizard
+    SessionWizard,
+    /// Setting a project's default config
+    ProjectDefault,
+}
+
 /// Render the config selector overlay
 pub fn render_agent_config_selector<C: AgentProfile>(
     frame: &mut Frame,
@@ -292,6 +306,7 @@ pub fn render_agent_config_selector<C: AgentProfile>(
     configs: &[C],
     selected_index: usize,
     default_id: Option<Uuid>,
+    flow: ConfigSelectorFlow,
 ) {
     let t = theme();
 
@@ -323,19 +338,29 @@ pub fn render_agent_config_selector<C: AgentProfile>(
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "[Enter] Select  [Esc] Cancel",
+        match flow {
+            ConfigSelectorFlow::SessionWizard => "[Enter] Select  [Esc] Back",
+            ConfigSelectorFlow::ProjectDefault => "[Enter] Select  [Esc] Cancel",
+        },
         Style::default().fg(t.text_dim),
     )));
 
+    let wizard_title = crate::tui::views::wizard_title(kind.label(), None);
     render_dialog(
         frame,
         area,
         DialogSpec {
-            title: " Select Config ",
+            title: match flow {
+                ConfigSelectorFlow::SessionWizard => &wizard_title,
+                ConfigSelectorFlow::ProjectDefault => " Select Config ",
+            },
             border_color: t.accent,
             alignment: Alignment::Left,
             width: DialogSize::Fixed(50),
-            height: DialogSize::Fixed(list_height + 6),
+            // Two borders, a leading blank, the prompt, a blank, the list,
+            // a blank, and the key hint - the hint is a step's own keys now,
+            // so a height that clipped it is a step that cannot be read
+            height: DialogSize::Fixed(list_height + 7),
         },
         lines,
     );
@@ -495,8 +520,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_selector_marks_default_and_selection() {
+    fn render_selector(flow: ConfigSelectorFlow) -> Vec<String> {
         let default = ClaudeConfig::new("Default".to_string(), None);
         let default_id = default.id;
         let configs = vec![
@@ -504,7 +528,7 @@ mod tests {
             ClaudeConfig::new("Work".to_string(), Some(PathBuf::from("/tmp/claude-work"))),
         ];
 
-        let lines = render_to_lines(80, 24, |frame| {
+        render_to_lines(80, 24, |frame| {
             render_agent_config_selector(
                 frame,
                 frame.size(),
@@ -512,8 +536,14 @@ mod tests {
                 &configs,
                 1,
                 Some(default_id),
+                flow,
             )
-        });
+        })
+    }
+
+    #[test]
+    fn test_selector_marks_default_and_selection() {
+        let lines = render_selector(ConfigSelectorFlow::ProjectDefault);
 
         assert!(
             contains_line(&lines, "Select a Claude config:"),
@@ -522,5 +552,18 @@ mod tests {
         );
         assert!(contains_line(&lines, "Default (default)"), "{:?}", lines);
         assert!(contains_line(&lines, "▶ Work"), "{:?}", lines);
+    }
+
+    /// As step 2 of the wizard the selector wears the wizard's title and backs
+    /// up; as a project setting it is its own dialog and cancels
+    #[test]
+    fn test_selector_frames_itself_by_the_flow_that_opened_it() {
+        let wizard = render_selector(ConfigSelectorFlow::SessionWizard);
+        assert!(contains_line(&wizard, "New Claude session"), "{wizard:?}");
+        assert!(contains_line(&wizard, "[Esc] Back"), "{wizard:?}");
+
+        let project = render_selector(ConfigSelectorFlow::ProjectDefault);
+        assert!(contains_line(&project, "Select Config"), "{project:?}");
+        assert!(contains_line(&project, "[Esc] Cancel"), "{project:?}");
     }
 }

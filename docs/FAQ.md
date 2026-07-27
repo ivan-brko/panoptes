@@ -101,7 +101,7 @@ Yes! Press `n` at a branch and select "Codex" from the agent type selector. Code
 
 ### How do I create a Claude Code or Codex session?
 
-At a branch, press `n`, select Claude Code or Codex from the agent type selector, enter a session name, and press Enter.
+At a branch, press `n`. One dialog walks you through it: pick Claude Code or Codex, pick the account it runs under (skipped when that agent has only one configuration, or none), then type a session name and press Enter. `Esc` steps back one, and cancels from the first step.
 
 ### How do I create a shell session?
 
@@ -215,7 +215,7 @@ Open the project, press `,` for its settings, and choose "Default Claude config"
 
 ### How do I switch accounts for a single session?
 
-When creating a new session, you'll be prompted to select which configuration to use if the project has a default set.
+When creating a new session, the step after the agent type asks which configuration to use, with the project's default (or the global one) already selected. It is skipped when that agent has only one configuration to offer.
 
 ### What happens if I don't set up any configurations?
 

@@ -68,6 +68,8 @@ PTY Output → Session buffer → TUI render
 - `tui/views/pane_{projects,sessions,settings}.rs` - Each pane's content, at every density
 - `tui/views/prompts.rs` / `tui/views/worktree.rs` - The centred overlays (lists and paragraphs)
 - `tui/views/agent_configs.rs` - Shared Claude/Codex config view rendering
+- `tui/views/session_wizard.rs` - The new-session wizard's own steps (agent, then name);
+  its config step is the dual-use selector in `tui/views/agent_configs.rs`
 - `tui/widgets/dialog.rs` - Shared dialog widget (Yes/No buttons, clamped centering)
 - `project/` - Project/branch management, folder tree, and persistence
 - `persistence.rs` - Shared atomic-save / load-with-backup for all state files
@@ -95,7 +97,11 @@ PTY Output → Session buffer → TUI render
 - Prompts split by content: **if it shows a list or a paragraph it is a centred
   overlay** (`tui/views/prompts.rs`, `worktree.rs`), anchored to the terminal so
   an animating pane cannot resize it mid-typing; **if it is one line you type
-  into, it is inline** in the pane that owns it
+  into, it is inline** in the pane that owns it. One carve-out: **a step of a
+  multi-step wizard keeps the wizard's frame**, however little that step asks
+  for, so the eye does not jump between an overlay and a pane mid-flow - the
+  new-session wizard's name step is one line, drawn in the same centred modal
+  as the steps before it (`tui/views/session_wizard.rs`)
 - Pane rows drop fields whole as the pane narrows rather than truncating one
   long string, and are truncated against the pane's *current* width. One
   deliberate exception: the session row's project and branch middle-elide
