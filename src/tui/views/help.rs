@@ -3,38 +3,91 @@
 //! Structured per pane and per sub-screen, mirroring the navigation model: a
 //! global section that applies everywhere, then the keys of the focused pane's
 //! current level. Dismissible with `?` or `Esc`.
+//!
+//! The session section runs past 25 lines, which is taller than the overlay
+//! gets on an 80x24 terminal, so it scrolls with `↑↓`/`PgUp`/`PgDn` and names
+//! on its bottom border how much is still below.
 
 use ratatui::prelude::*;
+use ratatui::widgets::block::{Position, Title};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{AppState, Focus, ProjectsNav, SettingsNav, Tab};
 use crate::tui::theme::theme;
-use crate::tui::widgets::dialog::{render_dialog, DialogSize, DialogSpec};
+use crate::tui::widgets::dialog::{centered_rect, DialogSize};
+
+/// Size of the help overlay
+const HELP_WIDTH: DialogSize = DialogSize::Percent {
+    pct: 70,
+    min: 40,
+    max: 72,
+};
+const HELP_HEIGHT: DialogSize = DialogSize::Percent {
+    pct: 70,
+    min: 10,
+    max: 28,
+};
+
+/// How far the help overlay can scroll, and one screenful of it
+///
+/// Both come from the terminal the overlay would be drawn into, rather than
+/// from anything a previous render recorded: the overlay is a fixed fraction of
+/// that terminal, and the content is a pure function of where the user is. That
+/// lets the input handler clamp `↓` at the real end of the list on the first
+/// press, instead of letting a held key run the offset off into nothing.
+pub fn help_scroll_limits(state: &AppState, area: Rect) -> (u16, u16) {
+    let (_, content) = shortcuts_for(state);
+    // The overlay's borders take a row at each end
+    let page = centered_rect(area, HELP_WIDTH, HELP_HEIGHT)
+        .height
+        .saturating_sub(2);
+    let max_scroll = (content.len() as u16).saturating_sub(page);
+    (max_scroll, page.max(1))
+}
 
 /// Render the help overlay for the current pane and level
 pub fn render_help_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
     let t = theme();
     let (title, content) = shortcuts_for(state);
+    let (max_scroll, _) = help_scroll_limits(state, area);
+    let scroll = state.help_scroll.min(max_scroll);
 
-    render_dialog(
-        frame,
-        area,
-        DialogSpec {
-            title: &format!(" {} ", title),
-            border_color: t.accent,
-            alignment: Alignment::Left,
-            width: DialogSize::Percent {
-                pct: 70,
-                min: 40,
-                max: 72,
-            },
-            height: DialogSize::Percent {
-                pct: 70,
-                min: 10,
-                max: 28,
-            },
-        },
-        content,
+    let overlay = centered_rect(area, HELP_WIDTH, HELP_HEIGHT);
+    frame.render_widget(Clear, overlay);
+
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent))
+        .title(format!(" {} ", title));
+    // Nothing clipped, nothing to say: the border stays quiet when the whole
+    // list fits
+    if max_scroll > 0 {
+        block = block.title(
+            Title::from(Span::styled(
+                scroll_hint(scroll, max_scroll),
+                t.muted_style(),
+            ))
+            .position(Position::Bottom)
+            .alignment(Alignment::Right),
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(content)
+            .alignment(Alignment::Left)
+            .scroll((scroll, 0))
+            .block(block),
+        overlay,
     );
+}
+
+/// What the bottom border says about the rows that are off screen
+fn scroll_hint(scroll: u16, max_scroll: u16) -> String {
+    match (scroll, max_scroll - scroll) {
+        (0, below) => format!(" {} more ↓ ", below),
+        (_, 0) => " ↑ end ".to_string(),
+        (_, below) => format!(" ↑ {} more ↓ ", below),
+    }
 }
 
 /// The title and shortcut list for wherever the user currently is
@@ -103,7 +156,7 @@ fn empty_line() -> Line<'static> {
 fn footer_hint() -> Line<'static> {
     let t = theme();
     Line::from(vec![Span::styled(
-        "Press ? or Esc to close",
+        "↑↓ / PgUp / PgDn to scroll · ? or Esc to close",
         Style::default().fg(t.text_dim),
     )])
 }
@@ -266,6 +319,7 @@ fn settings_about_shortcuts() -> Vec<Line<'static>> {
     with_global(
         "Settings - About / paths",
         vec![
+            shortcut_line("↑ / ↓", "Move through the rows, scrolling the list"),
             shortcut_line("Esc", "Back to the sections list"),
             shortcut_line("", "Everything here is read-only; edit config.toml"),
         ],
@@ -404,6 +458,94 @@ mod tests {
             assert!(contains_line(&lines, "Previous pane"), "{tab:?}: {lines:?}");
             assert!(contains_line(&lines, "q"), "{tab:?}: {lines:?}");
         }
+    }
+
+    /// The session section runs past what an 80x24 terminal gives the overlay,
+    /// so the bottom of it is only reachable by scrolling
+    #[test]
+    fn test_a_clipped_help_list_scrolls_to_its_last_line() {
+        let state = AppState {
+            focus: Focus::Session,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 80, 24);
+        let (max_scroll, page) = help_scroll_limits(&state, area);
+        assert!(max_scroll > 0, "the session help fits, so nothing to test");
+        assert!(page > 1);
+
+        let unscrolled = render_to_lines(80, 24, |frame| {
+            render_help_overlay(frame, frame.size(), &state)
+        });
+        assert!(
+            !contains_line(&unscrolled, "Esc, then go."),
+            "the tail is visible unscrolled: {unscrolled:?}"
+        );
+
+        let scrolled_state = AppState {
+            help_scroll: max_scroll,
+            ..state
+        };
+        let scrolled = render_to_lines(80, 24, |frame| {
+            render_help_overlay(frame, frame.size(), &scrolled_state)
+        });
+        assert!(contains_line(&scrolled, "Esc, then go."), "{scrolled:?}");
+        assert!(
+            contains_line(&scrolled, "? or Esc to close"),
+            "{scrolled:?}"
+        );
+    }
+
+    /// A pane whose help fits reports nothing to scroll, so `↓` there stays a
+    /// no-op rather than sliding the list under its own border
+    #[test]
+    fn test_a_help_list_that_fits_has_nothing_to_scroll() {
+        let state = AppState {
+            focus: Focus::Panes(Tab::Projects),
+            ..Default::default()
+        };
+        let (max_scroll, _) = help_scroll_limits(&state, Rect::new(0, 0, 100, 60));
+        assert_eq!(max_scroll, 0);
+    }
+
+    /// A stale offset - from a resize, or from a list that is now shorter -
+    /// must not scroll the content away entirely
+    #[test]
+    fn test_an_offset_past_the_end_still_shows_the_tail() {
+        let state = AppState {
+            focus: Focus::Panes(Tab::Projects),
+            help_scroll: 500,
+            ..Default::default()
+        };
+        let lines = render(&state);
+        assert!(contains_line(&lines, "? or Esc to close"), "{lines:?}");
+    }
+
+    /// The border says how much is below, and stays quiet when nothing is
+    #[test]
+    fn test_the_border_names_what_is_off_screen() {
+        assert_eq!(scroll_hint(0, 7), " 7 more ↓ ");
+        assert_eq!(scroll_hint(3, 7), " ↑ 4 more ↓ ");
+        assert_eq!(scroll_hint(7, 7), " ↑ end ");
+
+        let state = AppState {
+            focus: Focus::Session,
+            ..Default::default()
+        };
+        let clipped = render_to_lines(80, 24, |frame| {
+            render_help_overlay(frame, frame.size(), &state)
+        });
+        assert!(contains_line(&clipped, "more ↓"), "{clipped:?}");
+
+        // A list that fits its overlay draws no indicator at all
+        let short = AppState {
+            focus: Focus::Panes(Tab::Projects),
+            ..Default::default()
+        };
+        let roomy = render_to_lines(100, 60, |frame| {
+            render_help_overlay(frame, frame.size(), &short)
+        });
+        assert!(!contains_line(&roomy, "more ↓"), "{roomy:?}");
+        assert!(contains_line(&roomy, "Refresh git state"), "{roomy:?}");
     }
 
     /// The keys that were retired must not be advertised anywhere

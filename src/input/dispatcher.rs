@@ -14,11 +14,19 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
 
     // Handle help overlay first - it captures all keys when visible
     if app.state.show_help_overlay {
-        match key.code {
-            KeyCode::Char('?') | KeyCode::Esc if key.kind == KeyEventKind::Press => {
-                app.state.show_help_overlay = false;
+        if key.kind != KeyEventKind::Release {
+            match key.code {
+                KeyCode::Char('?') | KeyCode::Esc => {
+                    app.state.show_help_overlay = false;
+                }
+                // The session section is taller than the overlay on an 80x24
+                // terminal, so these scroll it rather than being swallowed
+                KeyCode::Down => scroll_help(app, 1, false),
+                KeyCode::Up => scroll_help(app, -1, false),
+                KeyCode::PageDown => scroll_help(app, 1, true),
+                KeyCode::PageUp => scroll_help(app, -1, true),
+                _ => {} // Ignore other keys while overlay is visible
             }
-            _ => {} // Ignore other keys while overlay is visible
         }
         return Ok(());
     }
@@ -152,6 +160,27 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
     }
 }
 
+/// Scroll the help overlay, clamped to what is actually off screen
+///
+/// The clamp is computed from the live terminal size rather than remembered
+/// from the last render: without it a held `↓` would run the offset far past
+/// the end of the list, and `↑` would take just as many presses to come back.
+fn scroll_help(app: &mut App, direction: i32, by_page: bool) {
+    let Ok(area) = app.tui.size() else { return };
+    let (max_scroll, page) = crate::tui::views::help_scroll_limits(&app.state, area);
+    let step = if by_page { page } else { 1 };
+    app.state.help_scroll = scrolled(app.state.help_scroll, direction, step, max_scroll);
+}
+
+/// Where a scroll key lands, given how far the content can actually go
+fn scrolled(current: u16, direction: i32, step: u16, max_scroll: u16) -> u16 {
+    if direction > 0 {
+        current.saturating_add(step).min(max_scroll)
+    } else {
+        current.saturating_sub(step)
+    }
+}
+
 /// Whether the global keys (`Tab`, `←`/`→`, `q`, `?`, `Space`) apply in this mode
 ///
 /// `Tab` is the load-bearing one: it switches panes *only* in normal mode,
@@ -228,6 +257,9 @@ fn handle_global_normal_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
         GlobalIntent::ShowHelp => {
             app.state.show_help_overlay = true;
+            // Each pane and level has its own list, so every one opens at
+            // its top rather than at the last one's offset
+            app.state.help_scroll = 0;
             Ok(true)
         }
         // Quit from every pane and from session-view normal mode. In session
@@ -608,6 +640,24 @@ mod tests {
         ] {
             assert!(!globals_apply(mode), "{mode:?}");
         }
+    }
+
+    /// Holding `↓` must stop at the end of the list rather than running the
+    /// offset up into nothing - otherwise `↑` takes as many presses to come
+    /// back as `↓` took to get there
+    #[test]
+    fn test_help_scrolling_stops_at_both_ends() {
+        assert_eq!(scrolled(0, 1, 1, 5), 1);
+        assert_eq!(scrolled(5, 1, 1, 5), 5);
+        assert_eq!(scrolled(4, 1, 20, 5), 5);
+        assert_eq!(scrolled(u16::MAX, 1, 20, 5), 5);
+
+        assert_eq!(scrolled(3, -1, 1, 5), 2);
+        assert_eq!(scrolled(0, -1, 1, 5), 0);
+        assert_eq!(scrolled(3, -1, 20, 5), 0);
+
+        // A list that fits has nowhere to go in either direction
+        assert_eq!(scrolled(0, 1, 14, 0), 0);
     }
 
     fn state_at(focus: Focus, mode: InputMode) -> AppState {
