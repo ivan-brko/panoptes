@@ -872,8 +872,9 @@ impl SessionManager {
     /// this old. Whether the user is told is decided by liveness - a session
     /// still writing to its PTY is demonstrably working, and a `Stalled` badge
     /// on it is a false alarm that comes back after every clear, since each long
-    /// tool crosses the threshold separately. `active` names the session on
-    /// screen, which is likewise never worth flagging: the user is looking at it.
+    /// tool crosses the threshold separately. `active` names the session the
+    /// user is watching (on screen, in a focused terminal), which is likewise
+    /// never worth flagging: the user is looking at it.
     ///
     /// Returns true if any session changed.
     pub fn check_state_timeouts(&mut self, timeout_secs: u64, active: Option<SessionId>) -> bool {
@@ -955,9 +956,12 @@ impl SessionManager {
     /// Returns a list of session IDs that transitioned from Executing to Waiting
     /// (these sessions need notifications).
     ///
-    /// The `active_session` parameter indicates which session the user is currently viewing.
-    /// Sessions that are active will not have `needs_attention` set or be included in the
-    /// notification list, since the user is already looking at them.
+    /// The `active_session` parameter names the session the user is actually
+    /// watching: the one on screen, in a terminal that has focus. It will not
+    /// have `needs_attention` set or be included in the notification list,
+    /// since the user is already looking at it. Callers pass `None` when the
+    /// terminal is unfocused - an open session nobody is looking at earns
+    /// notifications like any other.
     pub fn check_shell_states(&mut self, active_session: Option<SessionId>) -> Vec<SessionId> {
         use super::SessionType;
 

@@ -191,6 +191,39 @@ fn worn_palette(state: &AppState, saved: crate::config::Palette) -> crate::confi
     }
 }
 
+/// The session the user is actually watching, if any
+///
+/// "Watching" needs both halves: the session filling the screen, *and* the
+/// terminal window itself having focus. A session left open while the user
+/// switches to a browser is not being watched — its events deserve the same
+/// notification any background session's would get. On terminals that never
+/// report focus, `terminal_focused` stays true and this collapses to the
+/// open session, which is the best available answer there.
+fn viewed_session(terminal_focused: bool, active_session: Option<SessionId>) -> Option<SessionId> {
+    if terminal_focused {
+        active_session
+    } else {
+        None
+    }
+}
+
+/// The session whose attention flag the user's gaze has already answered
+///
+/// `None` whenever nothing on screen is being watched: a pane has the
+/// screen, or the terminal is unfocused. A flag raised then has not been
+/// seen, and must survive until it has — clearing it early is what would
+/// silently eat the badge (and the title notification) the user was owed.
+fn acknowledgeable_session(
+    terminal_focused: bool,
+    focus: Focus,
+    active_session: Option<SessionId>,
+) -> Option<SessionId> {
+    if focus != Focus::Session {
+        return None;
+    }
+    viewed_session(terminal_focused, active_session)
+}
+
 impl App {
     /// Create a new application instance
     pub async fn new(log_file_info: LogFileInfo) -> Result<Self> {
@@ -449,9 +482,9 @@ impl App {
             self.sync_transcript_watchers();
             dirty |= self.process_transcript_events();
             dirty |= self.tick_state_timeouts();
-            // Whatever the events above flagged, the session filling the screen
-            // is not one the user needs pointing at
-            self.acknowledge_visible_session();
+            // Whatever the events above flagged, the session the user is
+            // watching is not one they need pointing at
+            dirty |= self.acknowledge_visible_session();
             dirty |= self.tick_shell_state_notifications();
             dirty |= self.tick_auto_close();
             dirty |= self.tick_idle_suspension();
@@ -752,27 +785,25 @@ impl App {
     /// Check for sessions stuck in Executing state too long
     fn tick_state_timeouts(&mut self) -> bool {
         self.sessions
-            .check_state_timeouts(self.config.state_timeout_secs, self.state.active_session)
+            .check_state_timeouts(self.config.state_timeout_secs, self.viewed_session())
     }
 
     /// Check shell session states via foreground detection
     fn tick_shell_state_notifications(&mut self) -> bool {
-        let shell_notifications = self.sessions.check_shell_states(self.state.active_session);
+        let shell_notifications = self.sessions.check_shell_states(self.viewed_session());
         if shell_notifications.is_empty() {
             return false;
         }
 
         // Send notifications for shell sessions that finished commands
+        // (check_shell_states already excluded the one being watched)
         for session_id in shell_notifications {
-            let is_active = self.state.active_session == Some(session_id);
-            if !is_active {
-                let session_name = self
-                    .sessions
-                    .get(session_id)
-                    .map(|s| s.info.name.as_str())
-                    .unwrap_or("Shell");
-                SessionManager::send_notification(self.config.notification_method, session_name);
-            }
+            let session_name = self
+                .sessions
+                .get(session_id)
+                .map(|s| s.info.name.as_str())
+                .unwrap_or("Shell");
+            SessionManager::send_notification(self.config.notification_method, session_name);
         }
         true
     }
@@ -2147,27 +2178,50 @@ impl App {
         true
     }
 
-    /// Clear the attention flag on the session currently filling the screen
+    /// Clear the attention flag on the session the user is watching
     ///
     /// The flag exists to point the user at a session that wants them. The one
     /// they are already watching cannot be that, so an event arriving while it
     /// is open must not leave it badged. Only the flag is cleared, never the
     /// state: a session blocked on a permission dialog still reads as
     /// `AwaitingApproval`, which is visible on screen anyway.
-    fn acknowledge_visible_session(&mut self) {
-        if self.state.focus != Focus::Session {
-            return;
-        }
-        if let Some(session_id) = self.state.active_session {
+    ///
+    /// "Watching" requires terminal focus, not just an open session view: a
+    /// flag raised while the user was away in another window stays up until
+    /// they come back, at which point this clears it (and resets a title
+    /// notification that was pointing them home) on the first tick after
+    /// `FocusGained`.
+    ///
+    /// Returns whether a flag was actually cleared, so the badge it fed
+    /// gets repainted.
+    fn acknowledge_visible_session(&mut self) -> bool {
+        let Some(session_id) = acknowledgeable_session(
+            self.terminal_focused,
+            self.state.focus,
+            self.state.active_session,
+        ) else {
+            return false;
+        };
+        let needs_attention = self
+            .sessions
+            .get(session_id)
+            .is_some_and(|s| s.info.needs_attention());
+        if needs_attention {
             self.sessions.acknowledge_attention(session_id);
+            self.clear_title_notification();
         }
+        needs_attention
+    }
+
+    /// The session the user is actually watching right now, if any
+    fn viewed_session(&self) -> Option<SessionId> {
+        viewed_session(self.terminal_focused, self.state.active_session)
     }
 
     /// Sound the configured notification for a session, unless the user is
-    /// already looking at it
+    /// already looking at it (session open *and* terminal focused)
     fn notify_session_needs_attention(&self, session_id: SessionId) {
-        let is_active_session = self.state.active_session == Some(session_id);
-        if !is_active_session {
+        if self.viewed_session() != Some(session_id) {
             let session_name = self
                 .sessions
                 .get(session_id)
@@ -3035,6 +3089,53 @@ mod tests {
     #[test]
     fn test_input_mode_default() {
         assert_eq!(InputMode::default(), InputMode::Normal);
+    }
+
+    /// A session is only "watched" while it fills the screen *and* the
+    /// terminal window has focus. Notifications are suppressed exactly for
+    /// the watched session, so these four quadrants are the notification
+    /// policy: the open session stays silent under the user's gaze, and
+    /// rings like any other the moment they switch to another window.
+    #[test]
+    fn test_open_session_is_watched_only_while_terminal_focused() {
+        let open = Uuid::new_v4();
+
+        // Focused, session open: watched — its bell would be noise
+        assert_eq!(viewed_session(true, Some(open)), Some(open));
+        // Unfocused, session open: nobody is looking — it must ring
+        assert_eq!(viewed_session(false, Some(open)), None);
+        // No session open: nothing to suppress, focused or not
+        assert_eq!(viewed_session(true, None), None);
+        assert_eq!(viewed_session(false, None), None);
+    }
+
+    /// The attention flag may only be auto-cleared by an actual look. Raised
+    /// while the terminal is unfocused (or while a pane has the screen), it
+    /// must survive every tick until the user comes back — otherwise the
+    /// badge and title notification would be wiped milliseconds after being
+    /// raised, with nobody having seen either.
+    #[test]
+    fn test_attention_survives_until_the_user_actually_looks() {
+        let open = Uuid::new_v4();
+
+        // The user is away: the open session's flag stays up
+        assert_eq!(
+            acknowledgeable_session(false, Focus::Session, Some(open)),
+            None
+        );
+        // A pane has the screen: the session is not being read
+        assert_eq!(
+            acknowledgeable_session(true, Focus::Panes(Tab::Sessions), Some(open)),
+            None
+        );
+        // Back, with the session on screen: the look answers the flag
+        assert_eq!(
+            acknowledgeable_session(true, Focus::Session, Some(open)),
+            Some(open)
+        );
+        // Session focus with no session is a state that should not exist,
+        // but must still acknowledge nothing rather than panic
+        assert_eq!(acknowledgeable_session(true, Focus::Session, None), None);
     }
 
     /// The preview is worn only inside the picker, and only while the picker
