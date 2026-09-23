@@ -394,8 +394,17 @@ impl App {
                 self.state.needs_render = false;
             }
 
-            // Poll for events with timeout
-            if event::poll(tick_rate)? {
+            // Poll for events with timeout - none at all if the last pass
+            // ran out of output budget with a session's output still queued:
+            // a sleep here is time that output spends not on screen. With
+            // nothing queued this is the usual tick, so an idle Panoptes
+            // still sleeps.
+            let timeout = if self.sessions.output_backlogged() {
+                Duration::ZERO
+            } else {
+                tick_rate
+            };
+            if event::poll(timeout)? {
                 match event::read()? {
                     Event::Key(key) => {
                         // Dismiss the error message and startup notice on any
@@ -652,11 +661,11 @@ impl App {
     /// Poll session outputs - true if any session has new output.
     ///
     /// Two ways a session's screen can be made to stand still, and they are
-    /// not the same thing. A drag *holds*: the PTY is still drained, so the
+    /// not the same thing. A drag *holds*: the output is still taken, so the
     /// child keeps running, and the bytes are replayed on release. A Codex
     /// session scrolled up is *skipped*: that can last as long as the user
-    /// likes, and letting the child block on a full buffer is the right
-    /// backpressure for a read that may never end.
+    /// likes, and letting the child block once its reader's queue is full is
+    /// the right backpressure for a read that may never end.
     fn tick_output_polling(&mut self) -> bool {
         let dragging = self.state.dragging_session();
         self.sessions.set_output_hold(dragging);
@@ -3040,9 +3049,11 @@ fn should_forward_mouse_to_pty(mouse_enabled: bool, suspended: bool) -> bool {
 /// The one session, if any, whose PTY is not read at all this tick
 ///
 /// A Codex session the user has scrolled up in: the history has to stay put,
-/// and a scroll-up can last as long as the reader likes. Letting the child
-/// block on a full PTY buffer is the right backpressure for that - unlike a
-/// drag, which lasts a second and *holds* its output instead
+/// and a scroll-up can last as long as the reader likes. Its PTY's reader
+/// thread keeps draining into its bounded queue meanwhile; once that holds a
+/// megabyte the thread stops reading, the kernel buffer fills, and the child
+/// blocks. That is the right backpressure for a scroll-up - unlike a drag,
+/// which lasts a second and *holds* its output instead
 /// ([`SessionManager::set_output_hold`]).
 fn scrolled_codex_session(state: &AppState, sessions: &SessionManager) -> Option<SessionId> {
     if state.session_scroll_offset == 0 {
