@@ -46,6 +46,7 @@ PTY Output → Session buffer → TUI render
 - `agent/` - Agent adapters (Claude Code, Codex, Shell) with hook setup
 - `session/` - Session lifecycle, PTY management, terminal emulation
 - `session/state_machine.rs` - Pure agent-event state machine (hook event → state transition)
+- `session/pty_reader.rs` - Per-PTY reader thread draining output into a byte-bounded queue
 - `hooks/` - HTTP server for agent callbacks
 - `transcript/` - Reads agent transcripts on disk (Codex state, usage for both)
 - `input/` - Input handling by mode (normal, session, dialogs)

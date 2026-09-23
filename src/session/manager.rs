@@ -18,6 +18,7 @@ use crate::config::{Config, NotificationMethod};
 use crate::hooks::HookEvent;
 use crate::project::{BranchId, ProjectId};
 
+use super::pty_reader::{QUEUE_CAP, READ_CHUNK};
 use super::{
     state_machine, AttentionReason, PollOutcome, Session, SessionId, SessionInfo, SessionState,
     SessionStore, SessionType,
@@ -92,6 +93,9 @@ pub struct SessionManager {
     /// inert until the user opens one, at which point the entry moves from here
     /// into `sessions`.
     recovered: HashMap<SessionId, SessionInfo>,
+    /// Whether the last output poll left a session's output queued because
+    /// it ran out of budget (see [`SessionManager::output_backlogged`])
+    output_backlogged: bool,
     /// Run every session on a shell process, whatever its record says
     ///
     /// The one thing a test cannot do is launch a real Claude Code or Codex,
@@ -114,6 +118,17 @@ pub struct SessionEntry<'a> {
     pub info: &'a SessionInfo,
     /// Whether a process is currently attached
     pub live: bool,
+}
+
+/// What one session's share of an output poll did
+#[derive(Debug, Clone, Copy)]
+struct DrainPass {
+    /// Some read reached the screen
+    screen_moved: bool,
+    /// Bytes taken from the session's queue
+    taken: usize,
+    /// Output was left queued for the next pass
+    backlogged: bool,
 }
 
 /// What a pass of [`SessionManager::check_alive`] found
@@ -160,6 +175,7 @@ impl SessionManager {
             config,
             store,
             recovered,
+            output_backlogged: false,
             #[cfg(test)]
             spawn_as_shell: false,
         }
@@ -739,27 +755,48 @@ impl SessionManager {
     /// Poll all sessions for new output
     /// Returns list of session IDs that had new output
     pub fn poll_outputs(&mut self) -> Vec<SessionId> {
-        self.poll_outputs_except(None)
+        self.poll_outputs_except(None, None)
     }
 
-    /// Cap on `poll_output` calls per session per tick.
+    /// Cap on the bytes of output taken from the watched session in one pass
     ///
-    /// Each call reads at most one 4KB chunk, so this bounds a tick at
-    /// ~256KB per session: enough to keep up with the chattiest agent
-    /// without visible lag, but small enough that a runaway child (`yes`)
-    /// producing output faster than we drain it cannot starve the event
-    /// loop. Leftover data stays buffered in the PTY and is picked up on
-    /// the next tick.
-    const POLL_BUDGET_PER_SESSION_PER_TICK: usize = 64;
+    /// Each session's reader thread keeps its PTY drained into a queue of up
+    /// to [`QUEUE_CAP`] bytes, and the session the user is looking at may
+    /// have about that much taken per pass: a whole scroll burst lands in one
+    /// pass, instead of dribbling onto the screen over several. The cap is
+    /// what keeps a runaway child (`yes`) - whose thread refills the queue as
+    /// fast as a pass empties it - from starving the event loop. A read that
+    /// does not fit waits for the next pass, and the pass reports the backlog
+    /// so the loop comes back for it without sleeping.
+    const WATCHED_POLL_BUDGET: usize = QUEUE_CAP;
 
-    /// Poll all sessions for new output, optionally excluding one session.
+    /// Cap on the bytes of output taken from any other session in one pass
     ///
-    /// This is useful when the active session is scrolled up in history and the
-    /// UI should "freeze" that view while still polling other sessions.
+    /// Nobody is looking at a background session, so there is no burst to
+    /// land and no reason to hurry: its backlog never cuts the loop's sleep
+    /// short, and a pass takes one read's worth. That is the largest read the
+    /// reader queues, so a read always fits and a flooding session is slowed,
+    /// never stalled. It is also roughly what the UI thread managed when it
+    /// read the kernel's 1 KB buffer itself (measured: a background `yes`
+    /// costs about the same CPU as it did then), where the old 256 KB budget
+    /// fed a megabyte-a-queue flood through the emulator several times as
+    /// fast. The rest waits in the queue, and once that is full the child
+    /// blocks.
+    const BACKGROUND_POLL_BUDGET: usize = READ_CHUNK;
+
+    /// The per-pass byte budget for a session, by whether it is watched
+    fn poll_budget(watched: bool) -> usize {
+        if watched {
+            Self::WATCHED_POLL_BUDGET
+        } else {
+            Self::BACKGROUND_POLL_BUDGET
+        }
+    }
+
     /// Hold output back from one session, and from no other
     ///
-    /// The held session keeps draining its PTY, so its child never blocks on
-    /// a full buffer, but nothing reaches its screen until the hold is
+    /// The held session keeps having its output taken, so its child never
+    /// blocks on a full buffer, but nothing reaches its screen until the hold is
     /// released. Passing `None` - or a different session - releases whoever
     /// was holding, feeding everything held back through at once.
     pub fn set_output_hold(&mut self, held: Option<SessionId>) {
@@ -775,37 +812,86 @@ impl SessionManager {
             .map_or(0, |session| session.held_output_len())
     }
 
-    pub fn poll_outputs_except(&mut self, excluded: Option<SessionId>) -> Vec<SessionId> {
+    /// Poll all sessions for new output, optionally excluding one session.
+    ///
+    /// This is useful when the active session is scrolled up in history and the
+    /// UI should "freeze" that view while still polling other sessions.
+    /// `watched` is the session filling the screen, if any: it alone gets the
+    /// larger budget, and it alone can report a backlog.
+    pub fn poll_outputs_except(
+        &mut self,
+        excluded: Option<SessionId>,
+        watched: Option<SessionId>,
+    ) -> Vec<SessionId> {
         let mut sessions_with_output = Vec::new();
+        let mut backlogged = false;
 
         for (&session_id, session) in &mut self.sessions {
             if excluded == Some(session_id) {
                 continue;
             }
-            // Reading a suspended session's PTY returns an error, which
+            // A suspended session's PTY is dead, and its reader reports the
+            // read error (on Linux; macOS reads it as end of file), which
             // `poll_output` turns into `Exited` - and an Exited session ages
             // into the cleanup path that deletes its stored record.
             if !session.info.state.has_process() {
                 continue;
             }
-            let mut screen_moved = false;
-            // Drain available PTY data, up to a per-tick budget. A held
-            // session keeps draining - that is the point of holding rather
-            // than skipping - but its screen has not moved, so it is not
-            // reported as having output.
-            for _ in 0..Self::POLL_BUDGET_PER_SESSION_PER_TICK {
-                let outcome = session.poll_output();
-                if !outcome.read_something() {
-                    break;
-                }
-                screen_moved |= outcome == PollOutcome::Ingested;
-            }
-            if screen_moved {
+            let is_watched = watched == Some(session_id);
+            let pass = Self::drain_within_budget(session, Self::poll_budget(is_watched));
+            if pass.screen_moved {
                 sessions_with_output.push(session_id);
+            }
+            if pass.backlogged && is_watched {
+                tracing::trace!(
+                    session_id = %session_id,
+                    taken = pass.taken,
+                    "Output poll budget spent with output still queued"
+                );
+                backlogged = true;
             }
         }
 
+        self.output_backlogged = backlogged;
         sessions_with_output
+    }
+
+    /// Whether the last poll stopped on the watched session's budget with its
+    /// output still queued
+    ///
+    /// The event loop's cue not to sleep before the next pass. Only a budget
+    /// stop counts: output that merely arrived after a session was polled is
+    /// the normal case for a streaming agent, and is fine to leave for the
+    /// next tick. Only the watched session counts: a background flood waits
+    /// for the tick like it always did, and a session excluded from the poll
+    /// is not polled at all - its queue is meant to fill.
+    pub fn output_backlogged(&self) -> bool {
+        self.output_backlogged
+    }
+
+    /// Take a session's queued output, up to `budget` bytes
+    ///
+    /// A held session keeps draining - that is the point of holding rather
+    /// than skipping - but its screen has not moved, so it is not reported
+    /// as having output.
+    fn drain_within_budget(session: &mut Session, budget: usize) -> DrainPass {
+        let mut remaining = budget;
+        let mut screen_moved = false;
+        loop {
+            let outcome = session.poll_output_within(&mut remaining);
+            if !outcome.read_something() {
+                break;
+            }
+            screen_moved |= outcome == PollOutcome::Ingested;
+        }
+        DrainPass {
+            screen_moved,
+            taken: budget - remaining,
+            // A read queued now either did not fit what was left - which
+            // takes less left than the largest read - or arrived after the
+            // loop found the queue empty, which is not a backlog
+            backlogged: remaining < READ_CHUNK && session.has_pending_output(),
+        }
     }
 
     /// Check all sessions for exited processes
@@ -2410,7 +2496,7 @@ mod tests {
         // data - this is what freezes a scrolled-up view in place
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let with_output = manager.poll_outputs_except(Some(excluded));
+            let with_output = manager.poll_outputs_except(Some(excluded), None);
             assert!(
                 !with_output.contains(&excluded),
                 "the excluded session must not be polled"
@@ -2425,7 +2511,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        // The excluded session's output stayed buffered in the PTY and is
+        // The excluded session's output stayed queued by its reader and is
         // delivered once it is no longer excluded
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -2451,7 +2537,7 @@ mod tests {
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
 
-        // A producer far faster than the per-tick budget (~256KB) can drain:
+        // A producer far faster than the per-tick budget (64KB unwatched) can drain:
         // without the budget, poll_outputs spins here until all 8MB are gone.
         let info = SessionInfo::new(
             "runaway".to_string(),
@@ -2491,7 +2577,7 @@ mod tests {
         );
 
         // The budget stopped the drain mid-stream: data must still be pending
-        // (at most ~512KB of the 8MB can have been consumed above)
+        // (at most ~1MB of the 8MB can have been consumed above)
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if manager.poll_outputs().contains(&session_id) {
@@ -2503,6 +2589,168 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_poll_pass_takes_at_most_its_byte_budget() {
+        use crate::session::pty::PtyHandle;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        let info = SessionInfo::new(
+            "runaway".to_string(),
+            PathBuf::from("/tmp"),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let session_id = info.id;
+        let pty = PtyHandle::spawn(
+            "yes",
+            &[],
+            &PathBuf::from("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+        manager.register(Session::new(info, pty, 24, 80));
+
+        // Let the reader fill its queue, untouched
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while manager.get(session_id).unwrap().pty.queued_output_len() + READ_CHUNK <= QUEUE_CAP {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the queue never filled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // A budget well under what is queued: the pass stops at it, and says
+        // it left output behind
+        let budget = QUEUE_CAP / 4;
+        let session = manager.get_mut(session_id).unwrap();
+        let pass = SessionManager::drain_within_budget(session, budget);
+        assert!(pass.taken > 0, "a pass under budget must take something");
+        assert!(
+            pass.taken <= budget,
+            "took {} bytes against a budget of {}",
+            pass.taken,
+            budget
+        );
+        assert!(pass.screen_moved);
+        assert!(pass.backlogged, "a pass stopped by its budget is a backlog");
+        assert!(session.has_pending_output());
+
+        // The leftover is there for the next pass
+        let next = SessionManager::drain_within_budget(session, budget);
+        assert!(next.taken > 0 && next.taken <= budget);
+
+        // And the manager's own pass reports it to the event loop - for the
+        // session on screen
+        manager.poll_outputs_except(None, Some(session_id));
+        assert!(manager.output_backlogged());
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_a_background_flood_is_paced_by_the_tick() {
+        use crate::session::pty::PtyHandle;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        let info = SessionInfo::new(
+            "background".to_string(),
+            PathBuf::from("/tmp"),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let session_id = info.id;
+        let pty = PtyHandle::spawn(
+            "yes",
+            &[],
+            &PathBuf::from("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+        manager.register(Session::new(info, pty, 24, 80));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while manager.get(session_id).unwrap().pty.queued_output_len() + READ_CHUNK <= QUEUE_CAP {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the queue never filled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Nobody is watching it: the smaller budget, and however much is
+        // left queued, no backlog for the event loop to hurry over
+        let budget = SessionManager::poll_budget(false);
+        assert!(budget < SessionManager::poll_budget(true));
+        let session = manager.get_mut(session_id).unwrap();
+        let pass = SessionManager::drain_within_budget(session, budget);
+        assert!(pass.taken > 0 && pass.taken <= budget);
+        assert!(session.has_pending_output());
+
+        let with_output = manager.poll_outputs_except(None, None);
+        assert!(with_output.contains(&session_id));
+        assert!(
+            !manager.output_backlogged(),
+            "a background session's backlog must not cut the loop's sleep"
+        );
+
+        // Watching someone else changes nothing for it
+        manager.poll_outputs_except(None, Some(Uuid::new_v4()));
+        assert!(!manager.output_backlogged());
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_a_quiet_session_is_not_a_backlog() {
+        use crate::session::pty::PtyHandle;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+
+        let info = SessionInfo::new(
+            "quiet".to_string(),
+            PathBuf::from("/tmp"),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let session_id = info.id;
+        let pty = PtyHandle::spawn(
+            "sh",
+            &["-c", "echo hello; sleep 30"],
+            &PathBuf::from("/tmp"),
+            std::collections::HashMap::new(),
+            24,
+            80,
+        )
+        .unwrap();
+        manager.register(Session::new(info, pty, 24, 80));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !manager.poll_outputs().contains(&session_id) {
+            assert!(std::time::Instant::now() < deadline, "output never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Everything fit in the budget: the event loop may sleep as usual
+        assert!(!manager.output_backlogged());
 
         manager.shutdown_all();
     }
@@ -3152,8 +3400,8 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let reaped = loop {
-            // The PTY has to be drained for the child to be reapable, which is
-            // what the app's tick does in this order too
+            // Output is taken before reaping, which is what the app's tick
+            // does in this order too
             manager.get_mut(session_id).unwrap().poll_output();
             let scan = manager.check_alive();
             if scan.reaped {
