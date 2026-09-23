@@ -627,6 +627,22 @@ the second - `event_msg` contains no `*_begin` events at all - so
 `function_call_output` and are deliberately ignored, or every tool would be
 retired twice.
 
+**Codex rate limits.** Each `token_count` record carries a `rate_limits` block
+with two windows, `primary` (five hours, `window_minutes: 300`) and `secondary`
+(a week, `10080`), each with `used_percent` and a `resets_at` in epoch seconds;
+`plan_type` and `rate_limit_reached_type` sit beside them. Versions before
+0.156 wrote `resets_at` as an RFC 3339 string and `plan_type` inside `primary`,
+and both shapes are read. The block is only taken when `limit_id` is `codex`,
+or absent as in older versions: model-specific allowances such as the Spark
+model's `codex_bengalfox` report through the same record, and would otherwise
+overwrite the account's figures with an unrelated pool's (in real rollouts,
+about one `token_count` in fifteen). The session header shows whichever window
+is closer to stopping the user - higher `used_percent` first, the longer window
+on a tie - labelled by its length (`5h 12%`, `wk 40%`), or
+`limit hit · resets in 3h 20m` while `rate_limit_reached_type` is set. Each
+window merges independently, so an update naming only one never blanks the
+other.
+
 **Where reading starts.** A session that created its own transcript is read
 from the beginning: everything in the file describes what it has just been
 doing, including the opening seconds during which a Codex conversation is still
