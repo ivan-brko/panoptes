@@ -318,9 +318,24 @@ working on. Only `startup`, `resume`, `clear` and `fork` reset the session to
 `Waiting`; anything else leaves the state alone.
 
 **Codex hooks:** Limited to `notify` config firing `agent-turn-complete`
-events. The notify hook must not read stdin or it stalls Codex's output
-pipeline, so it cannot be extended. Codex state comes from its transcript
-instead - see Reading Agent Transcripts below.
+events. Codex spawns the `notify` argv directly, with no shell, and appends
+the event JSON as its final argument; stdin is `/dev/null` and output is
+discarded. Panoptes' hook ignores the event, and must never block on stdin.
+Codex state comes from its transcript instead - see Reading Agent
+Transcripts below.
+
+If `config.toml` already has a `notify` hook, Panoptes chains in front of it
+rather than replacing it (backing the file up first):
+
+```toml
+notify = ["bash", "-c", "'<panoptes hook>' \"$@\"; '<user argv>'... \"$@\"", "panoptes-notify"]
+```
+
+`panoptes-notify` fills `$0`, so the event lands in `"$@"` and both hooks
+receive it unchanged. The hooks are joined with `;`, so the user's runs even
+when Panoptes' fails. Chains written by older versions (`bash -lc`, no `$0`)
+dropped the event; they are rewritten to this shape when the user's argv can
+be recovered exactly, and reported for a manual merge when it cannot.
 
 ### Session States
 
