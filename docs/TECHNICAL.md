@@ -252,9 +252,48 @@ PTY dimensions are still computed from the *full* terminal via `FrameLayout`:
 the session view is full-screen, so the pane split must never reach the PTY.
 
 ### Session Output
-1. PTY reader captures output from Claude Code
-2. Output is buffered (ring buffer, max 10K lines by default)
-3. TUI renders visible portion with ANSI color support
+1. Each PTY has a reader thread (`pty-reader-<pid>`, `session/pty_reader.rs`)
+   that drains it continuously into a queue
+2. Each pass of the event loop takes queued output, up to a byte budget per
+   session, and feeds it through the virtual terminal
+3. Scrollback is kept by the emulator (10K lines by default)
+4. TUI renders visible portion with ANSI color support
+
+**Why a thread.** A PTY's kernel buffer holds about 1 KB on macOS, and a child
+that fills it waits for a read. When the UI thread read the PTY itself, once per
+loop pass with up to 16 ms of sleep between passes, a chatty child was held to
+roughly 64 KB/s. Claude Code's fullscreen renderer writes 300-700 KB per
+trackpad flick and does not block - it queues frames and delivers them late -
+so scrolling kept coasting for seconds after the wheel stopped.
+
+**The reader.** It owns a `dup` of the master fd, and closes it on exit. The fd
+is `O_NONBLOCK` (the open file description is shared with the writer, whose
+retry and timeout logic depends on it), so the thread waits in `poll` with a
+50 ms timeout and then reads in 64 KB chunks until `WouldBlock`. Every read is
+queued as its own chunk: read boundaries matter, because query replies use the
+cursor as of the read that carried the query, and a drag hold replays reads one
+at a time.
+
+**Backpressure.** The queue is capped at 1 MB per session, counted in bytes.
+When it is full the thread stops reading, the kernel buffer fills and the child
+blocks, exactly as before, but with room for a whole scroll burst. A Codex
+session the user has scrolled up in is not polled at all, and this is the
+backpressure it relies on.
+
+**End of stream.** A read error (`EIO` after the child dies on Linux) is queued
+after the reads before it; `Session::poll_output` turns it into `Exited` with a
+`PTY read error` reason once they are taken. End of file (how a dead child's
+master reads on macOS) ends the thread quietly, and reaping is left to
+`check_alive`. Dropping the `PtyHandle` stops the thread: it notices at its next
+poll timeout, or at once if it was waiting for room in the queue. It is never
+joined, so dropping a session does not stall the UI.
+
+**Byte budget.** `SessionManager::poll_outputs_except` takes at most about the
+queue's cap (1 MB) from a session per pass, so a burst lands in one pass while a
+runaway child (`yes`), whose thread refills the queue as fast as it empties,
+cannot starve the loop. When a pass stops on the budget with output still
+queued, the next `event::poll` does not sleep; with nothing queued, the loop
+waits its usual 16 ms tick, so an idle Panoptes still sleeps.
 
 ### Background Git Work
 Git operations that can take seconds (`git fetch --all`, creating or removing a
@@ -657,8 +696,8 @@ renders a compact resumed view rather than replaying the transcript. The
 conversation itself is intact - only the on-screen history is not.
 
 Three paths must exclude suspended sessions, and all three fail silently if
-missed: `poll_outputs` (reading a dead PTY reports as an error and becomes
-`Exited`), `check_alive` (reaping our own kill would notify the user of a
+missed: `poll_outputs` (a dead PTY's reader reports a read error, at least on
+Linux, which `poll_output` turns into `Exited`), `check_alive` (reaping our own kill would notify the user of a
 crash), and `cleanup_exited_sessions` (which calls `forget_session` and deletes
 the record from `sessions.json`, making the session permanently unrecoverable).
 `SessionState::has_process()` is the single predicate they all use.
