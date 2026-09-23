@@ -1977,6 +1977,65 @@ mod tests {
     }
 
     #[test]
+    fn test_may_suspend_allows_session_with_only_system_threads() {
+        // Through the watcher's own count: a Waiting Codex session whose only
+        // recent "children" are Codex's background threads has nothing
+        // running on its behalf, and must be suspendable like any idle one
+        let temp_dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let idle = 7200;
+
+        let rollouts = temp_dir.path().join("rollouts");
+        std::fs::create_dir_all(&rollouts).unwrap();
+        let mut paths = Vec::new();
+        for (name, meta) in [
+            (
+                "guardian.jsonl",
+                serde_json::json!({"id": "g", "forked_from_id": "conv",
+                    "source": {"subagent": {"other": "guardian"}},
+                    "thread_source": "guardian_review"}),
+            ),
+            (
+                "memory.jsonl",
+                serde_json::json!({"id": "m", "forked_from_id": "conv",
+                    "source": {"subagent": "memory_consolidation"}}),
+            ),
+        ] {
+            let path = rollouts.join(name);
+            let line = serde_json::json!({"type": "session_meta", "payload": meta});
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            paths.push(path);
+        }
+
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            temp_dir.path().to_path_buf(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        info.session_type = SessionType::OpenAICodex;
+        info.agent_session_id = Some("conv".to_string());
+        info.state = SessionState::Waiting;
+        info.last_engagement = now - chrono::Duration::seconds(10_000);
+        info.last_activity = now - chrono::Duration::seconds(10_000);
+
+        info.subagents = crate::transcript::watcher::count_subagents(&paths, "conv");
+        assert_eq!(info.subagents, 0);
+        assert!(SessionManager::may_suspend(&info, None, now, idle));
+
+        // Whereas one real subagent still holds it awake
+        let child = rollouts.join("child.jsonl");
+        let line = serde_json::json!({"type": "session_meta", "payload": {"id": "c",
+            "forked_from_id": "conv",
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "conv"}}}}});
+        std::fs::write(&child, format!("{line}\n")).unwrap();
+        paths.push(child);
+        info.subagents = crate::transcript::watcher::count_subagents(&paths, "conv");
+        assert_eq!(info.subagents, 1);
+        assert!(!SessionManager::may_suspend(&info, None, now, idle));
+    }
+
+    #[test]
     fn test_suspend_can_be_disabled() {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);

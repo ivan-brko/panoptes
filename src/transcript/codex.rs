@@ -40,16 +40,79 @@ pub struct RolloutMeta {
     /// deliberately independent of the file's mtime, which is bumped on every
     /// turn
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Whether this rollout belongs to a subagent rather than a real session
+    /// What kind of thread wrote this rollout
+    ///
+    /// Only a [`RolloutKind::Session`] can be a Panoptes session's own
+    /// conversation, and only a [`RolloutKind::Subagent`] counts as work its
+    /// parent is waiting on.
+    pub kind: RolloutKind,
+    /// The conversation this rollout was forked from, when it is a subagent's
+    pub parent_id: Option<String>,
+    /// Where the copy of the parent's history at the top of this rollout ends
+    pub copied_history: CopiedHistory,
+}
+
+/// What kind of thread wrote a rollout
+///
+/// Codex writes a rollout for more than the conversations a user is having,
+/// and the `session_meta` header is the only place that says which is which.
+/// The shapes below are from Codex's own `SessionSource` / `ThreadSource`
+/// (`protocol/src/protocol.rs` at `rust-v0.156.1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RolloutKind {
+    /// A conversation a user is having: `source` is `"cli"`, `"exec"`,
+    /// `"vscode"` and so on
+    Session,
+    /// Work the model delegated, which its parent is waiting on
     ///
     /// Codex subagents get their own rollout files, which look enough like a
     /// session's own to be claimed by mistake - a real example on this machine
     /// is a subagent rollout whose `cwd` is a Panoptes worktree, with its own
     /// fresh start timestamp.
-    pub is_subagent: bool,
-    /// The conversation this rollout was forked from, when it is a subagent's
-    pub parent_id: Option<String>,
+    Subagent,
+    /// A background thread Codex runs for itself - memory consolidation, or
+    /// the guardian that reviews approval requests
+    ///
+    /// These can carry subagent-shaped metadata, and the guardian names the
+    /// session it reviews for, but nothing user-visible is running while they
+    /// do. Counting one as a subagent would hold a Waiting session awake.
+    System,
 }
+
+/// How the copy of a parent's history at the top of a rollout is delimited
+///
+/// A forked rollout - every spawned subagent that inherits context is one -
+/// opens by replaying the parent's history: the parent's own `session_meta`,
+/// then its turns, re-stamped to the instant of the fork and written in one
+/// burst. None of it happened in this rollout, so a reader starting from the
+/// top must skip it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopiedHistory {
+    /// Nothing was copied: not a fork, or a fork whose history is referenced
+    /// (`history_base`) rather than copied in
+    None,
+    /// Paginated rollouts number every record, and a subagent's header names
+    /// the first ordinal that is its own (`subagent_history_start_ordinal`)
+    BeforeOrdinal(u64),
+    /// Legacy rollouts carry no boundary in the header. The burst ends at the
+    /// fork's own `thread_settings_applied` (the one naming this rollout's
+    /// thread, written in the same append as the copy - present in 0.156.1,
+    /// absent in 0.145, whose checkpoints name no thread), or,
+    /// on versions that predate it, at the first gap of a second or more
+    /// between records - a heuristic, see [`COPIED_HISTORY_MAX_GAP`]
+    Burst,
+}
+
+/// The longest pause between two records of one copied-history burst
+///
+/// A heuristic, and only the fallback for rollouts too old to mark where the
+/// copy ends. The copy is written in one synchronous append (every record of a
+/// real 0.142 fork shares the same few milliseconds), while the child's own
+/// work only lands after a model round trip - seconds later. The cost of the
+/// heuristic is the child's own `task_started`, written a few milliseconds
+/// after the copy and so indistinguishable from it; the turn's later records
+/// still arrive. T3 Code and `ccusage` use the same threshold.
+pub const COPIED_HISTORY_MAX_GAP: chrono::TimeDelta = chrono::TimeDelta::seconds(1);
 
 /// Every rollout file under a Codex sessions directory
 ///
@@ -104,7 +167,11 @@ pub fn read_session_meta(path: &Path) -> Option<RolloutMeta> {
         .read_line(&mut first_line)
         .ok()?;
 
-    let value: Value = serde_json::from_str(&first_line).ok()?;
+    meta_from_record(&serde_json::from_str(&first_line).ok()?)
+}
+
+/// Interpret a `session_meta` record, or `None` for any other record
+fn meta_from_record(value: &Value) -> Option<RolloutMeta> {
     if value.get("type").and_then(Value::as_str) != Some("session_meta") {
         return None;
     }
@@ -127,8 +194,9 @@ pub fn read_session_meta(path: &Path) -> Option<RolloutMeta> {
             .and_then(Value::as_str)
             .map(PathBuf::from),
         created_at,
-        is_subagent: is_subagent_meta(payload),
+        kind: rollout_kind(payload),
         parent_id: parent_conversation_id(payload),
+        copied_history: copied_history(payload),
     })
 }
 
@@ -146,6 +214,135 @@ pub fn parse_line(line: &str) -> Option<AgentEvent> {
         "response_item" => parse_response_item(payload),
         _ => None,
     }
+}
+
+/// Skips the copied parent history at the top of a rollout read from its start
+///
+/// Fed every complete line from the very first, in order. The first line is
+/// the rollout's own `session_meta`, which decides whether there is anything to
+/// skip (see [`CopiedHistory`]); for all but forks, the answer is no and the
+/// skipper retires after one line.
+#[derive(Debug, Default)]
+pub struct CopiedHistorySkip {
+    state: SkipState,
+}
+
+#[derive(Debug, Default)]
+enum SkipState {
+    /// The header has not been seen yet
+    #[default]
+    AwaitingMeta,
+    /// Inside the copy of a paginated subagent's inherited records
+    BeforeOrdinal(u64),
+    /// Inside a legacy fork's copied burst
+    Burst {
+        own_id: String,
+        /// The previous record's timestamp, for the gap heuristic
+        last: Option<chrono::DateTime<chrono::FixedOffset>>,
+    },
+    /// Past the copy, or there was none: everything from here is the
+    /// rollout's own
+    Done,
+}
+
+impl CopiedHistorySkip {
+    /// A skipper for a rollout about to be read from its first byte
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the copy has been left behind, so every later line is the
+    /// rollout's own and the skipper can be dropped
+    pub fn is_done(&self) -> bool {
+        matches!(self.state, SkipState::Done)
+    }
+
+    /// Whether this line is copied history that must not be read as news
+    pub fn skips(&mut self, line: &str) -> bool {
+        if self.is_done() {
+            return false;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            // Without a header first there is no copy to find. Inside one, an
+            // unparseable line is never an event, so skipping it is harmless,
+            // and it must not end the copy early.
+            if matches!(self.state, SkipState::AwaitingMeta) {
+                self.state = SkipState::Done;
+                return false;
+            }
+            return true;
+        };
+
+        match &mut self.state {
+            SkipState::AwaitingMeta => {
+                // Anything but a header first means this is not a rollout
+                // shape that copies history; read it all
+                self.state = match meta_from_record(&record) {
+                    Some(meta) => match meta.copied_history {
+                        CopiedHistory::None => SkipState::Done,
+                        CopiedHistory::BeforeOrdinal(start) => SkipState::BeforeOrdinal(start),
+                        CopiedHistory::Burst => SkipState::Burst {
+                            own_id: meta.id,
+                            last: record_timestamp(&record),
+                        },
+                    },
+                    None => SkipState::Done,
+                };
+                // The header is the rollout's own either way, and not an event
+                false
+            }
+            SkipState::BeforeOrdinal(start) => {
+                let inherited = record
+                    .get("ordinal")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|ordinal| ordinal < *start);
+                if !inherited {
+                    self.state = SkipState::Done;
+                }
+                inherited
+            }
+            SkipState::Burst { own_id, last } => {
+                // The exact end: the fork's own settings checkpoint, appended
+                // with the copy. The parent's copied checkpoints name the
+                // parent, or (before 0.156) no thread at all.
+                let payload = record.get("payload");
+                let own_checkpoint = record.get("type").and_then(Value::as_str)
+                    == Some("event_msg")
+                    && payload.and_then(|p| p.get("type")).and_then(Value::as_str)
+                        == Some("thread_settings_applied")
+                    && payload
+                        .and_then(|p| p.get("thread_id"))
+                        .and_then(Value::as_str)
+                        == Some(own_id.as_str());
+                if own_checkpoint {
+                    self.state = SkipState::Done;
+                    return true;
+                }
+
+                // The fallback: a pause the copy could not contain
+                let at = record_timestamp(&record);
+                if let (Some(at), Some(prev)) = (at, *last) {
+                    if at - prev >= COPIED_HISTORY_MAX_GAP {
+                        self.state = SkipState::Done;
+                        return false;
+                    }
+                }
+                if at.is_some() {
+                    *last = at;
+                }
+                true
+            }
+            SkipState::Done => false,
+        }
+    }
+}
+
+/// The envelope timestamp Codex writes on every record
+fn record_timestamp(record: &Value) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
 }
 
 /// `event_msg` records: the session narrating itself
@@ -293,16 +490,66 @@ fn parse_resets_at(value: &Value) -> Option<DateTime<Utc>> {
     }
 }
 
-/// Whether a `session_meta` payload belongs to a subagent
+/// Classify a `session_meta` payload
 ///
-/// See [`RolloutMeta::is_subagent`] for why this matters; consumers read it
-/// from the struct rather than re-parsing raw payloads.
-fn is_subagent_meta(payload: &Value) -> bool {
-    payload.get("forked_from_id").is_some_and(|v| !v.is_null())
-        || payload
-            .get("source")
-            .and_then(|s| s.get("subagent"))
-            .is_some()
+/// See [`RolloutKind`] for why this matters; consumers read it from the struct
+/// rather than re-parsing raw payloads.
+///
+/// System threads are recognised first because they wear subagent clothing:
+/// memory consolidation has been written as `source: {"subagent":
+/// "memory_consolidation"}` as well as `source: {"internal": ...}`, and the
+/// guardian is saved as `source: {"subagent": {"other": "guardian"}}`.
+/// `thread_source`, which newer versions add, names both outright.
+fn rollout_kind(payload: &Value) -> RolloutKind {
+    let source = payload.get("source");
+    let subagent = source.and_then(|s| s.get("subagent"));
+    let thread_source = payload.get("thread_source").and_then(Value::as_str);
+
+    let system = source.and_then(|s| s.get("internal")).is_some()
+        || matches!(
+            thread_source,
+            Some("memory_consolidation" | "guardian_review")
+        )
+        || subagent.and_then(Value::as_str) == Some("memory_consolidation")
+        || subagent
+            .and_then(|s| s.get("other"))
+            .and_then(Value::as_str)
+            == Some("guardian");
+    if system {
+        return RolloutKind::System;
+    }
+
+    let subagent = subagent.is_some()
+        || thread_source == Some("subagent")
+        || payload.get("forked_from_id").is_some_and(|v| !v.is_null());
+    if subagent {
+        RolloutKind::Subagent
+    } else {
+        RolloutKind::Session
+    }
+}
+
+/// Where a rollout's copy of its parent's history ends, from its header
+///
+/// Only a fork copies anything. Across every subagent rollout on this machine
+/// (0.115 to 0.142), each one with a `forked_from_id` opens with a second,
+/// copied `session_meta`, and each one without starts straight on its own
+/// `task_started` - so a subagent that is not a fork must not be skipped into.
+fn copied_history(payload: &Value) -> CopiedHistory {
+    if !payload.get("forked_from_id").is_some_and(|v| !v.is_null()) {
+        return CopiedHistory::None;
+    }
+    if let Some(start) = payload
+        .get("subagent_history_start_ordinal")
+        .and_then(Value::as_u64)
+    {
+        return CopiedHistory::BeforeOrdinal(start);
+    }
+    // A referenced fork points at the parent's file instead of copying it
+    if payload.get("history_base").is_some_and(|v| !v.is_null()) {
+        return CopiedHistory::None;
+    }
+    CopiedHistory::Burst
 }
 
 /// The conversation this rollout was forked from, if it is a subagent's
@@ -608,7 +855,8 @@ mod tests {
             meta.created_at.unwrap().to_rfc3339(),
             "2026-07-22T10:00:05+00:00"
         );
-        assert!(!meta.is_subagent);
+        assert_eq!(meta.kind, RolloutKind::Session);
+        assert_eq!(meta.copied_history, CopiedHistory::None);
         assert_eq!(meta.parent_id, None);
     }
 
@@ -655,7 +903,7 @@ mod tests {
 
         let meta = read_session_meta(&path).expect("valid session_meta");
         assert_eq!(meta.id, "child", "must report the rollout's own identity");
-        assert!(meta.is_subagent);
+        assert_eq!(meta.kind, RolloutKind::Subagent);
         assert_eq!(meta.parent_id.as_deref(), Some("parent"));
     }
 
@@ -680,23 +928,132 @@ mod tests {
     #[test]
     fn test_subagent_detection() {
         let forked = serde_json::json!({"id": "child", "forked_from_id": "parent"});
-        assert!(is_subagent_meta(&forked));
+        assert_eq!(rollout_kind(&forked), RolloutKind::Subagent);
         assert_eq!(parent_conversation_id(&forked).as_deref(), Some("parent"));
 
         let spawned = serde_json::json!({
             "id": "child",
             "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}}
         });
-        assert!(is_subagent_meta(&spawned));
+        assert_eq!(rollout_kind(&spawned), RolloutKind::Subagent);
         assert_eq!(parent_conversation_id(&spawned).as_deref(), Some("parent"));
 
+        // `/review` and compaction are still delegated work
+        let review = serde_json::json!({"id": "r", "source": {"subagent": "review"}});
+        assert_eq!(rollout_kind(&review), RolloutKind::Subagent);
+
         // A normal session, including one that has been resumed many times
-        let plain = serde_json::json!({"id": "own", "cwd": "/tmp"});
-        assert!(!is_subagent_meta(&plain));
+        let plain = serde_json::json!({"id": "own", "cwd": "/tmp", "source": "cli",
+            "thread_source": "user"});
+        assert_eq!(rollout_kind(&plain), RolloutKind::Session);
         assert_eq!(parent_conversation_id(&plain), None);
 
         // An explicit null must not read as "forked"
         let null_fork = serde_json::json!({"id": "own", "forked_from_id": null});
-        assert!(!is_subagent_meta(&null_fork));
+        assert_eq!(rollout_kind(&null_fork), RolloutKind::Session);
+    }
+
+    /// A redacted fixture, parsed as `read_session_meta` would
+    fn fixture_meta(fixture: &str) -> RolloutMeta {
+        let first = fixture.lines().next().unwrap();
+        meta_from_record(&serde_json::from_str(first).unwrap()).expect("fixture header")
+    }
+
+    #[test]
+    fn test_memory_consolidation_rollout_is_system() {
+        // 0.156.1 shape (`memories/write/src/runtime.rs`): an internal source
+        // and a thread_source both naming it
+        let meta = fixture_meta(include_str!("fixtures/memory_consolidation_rollout.jsonl"));
+        assert_eq!(meta.kind, RolloutKind::System);
+
+        // Older versions filed it as a subagent - the shape T3 Code filters
+        // and Codex's own rollout migration still recognises
+        let as_subagent = serde_json::json!({"id": "m",
+            "source": {"subagent": "memory_consolidation"}});
+        assert_eq!(rollout_kind(&as_subagent), RolloutKind::System);
+
+        // `thread_source` alone is enough, whatever `source` says
+        let by_thread_source = serde_json::json!({"id": "m", "source": "exec",
+            "thread_source": "memory_consolidation"});
+        assert_eq!(rollout_kind(&by_thread_source), RolloutKind::System);
+    }
+
+    #[test]
+    fn test_guardian_rollout_is_system_even_when_it_names_a_parent() {
+        // Saved as `SubAgent(Other("guardian"))` and forked from the session
+        // it reviews for (`core/src/thread_manager.rs`), so it links to a
+        // parent exactly like a subagent does
+        let guardian = serde_json::json!({"id": "g", "forked_from_id": "parent",
+            "source": {"subagent": {"other": "guardian"}},
+            "thread_source": "guardian_review"});
+        assert_eq!(rollout_kind(&guardian), RolloutKind::System);
+        assert_eq!(parent_conversation_id(&guardian).as_deref(), Some("parent"));
+
+        let internal = serde_json::json!({"id": "g", "source": {"internal": "guardian"}});
+        assert_eq!(rollout_kind(&internal), RolloutKind::System);
+    }
+
+    #[test]
+    fn test_copied_history_is_read_from_the_header() {
+        let legacy = fixture_meta(include_str!("fixtures/forked_legacy_rollout.jsonl"));
+        assert_eq!(legacy.copied_history, CopiedHistory::Burst);
+
+        let paginated = fixture_meta(include_str!("fixtures/forked_paginated_rollout.jsonl"));
+        assert_eq!(paginated.copied_history, CopiedHistory::BeforeOrdinal(4));
+
+        // A referenced fork keeps its inheritance in the parent's file
+        let referenced = serde_json::json!({"id": "c", "forked_from_id": "p",
+            "history_base": {"thread_id": "p", "end_ordinal_exclusive": 9, "end_byte_offset": 1}});
+        assert_eq!(copied_history(&referenced), CopiedHistory::None);
+
+        // A subagent that is not a fork starts on its own first turn
+        let unforked = serde_json::json!({"id": "c",
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "p"}}}});
+        assert_eq!(copied_history(&unforked), CopiedHistory::None);
+    }
+
+    /// The lines of a fixture the skipper lets through
+    fn kept(fixture: &str) -> Vec<&str> {
+        let mut skip = CopiedHistorySkip::new();
+        fixture.lines().filter(|line| !skip.skips(line)).collect()
+    }
+
+    #[test]
+    fn test_skip_ends_at_the_forks_own_settings_checkpoint() {
+        let fixture = include_str!("fixtures/forked_marked_rollout.jsonl");
+        let events: Vec<_> = kept(fixture).into_iter().filter_map(parse_line).collect();
+        // The parent's copied turn is gone - including its checkpoint, which
+        // names the parent - and the child's own turn, written 6ms after the
+        // copy, survives because the marker ends the copy exactly
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::TurnStarted { title: None },
+                AgentEvent::ToolStarted {
+                    key: "child-call-1".to_string(),
+                    name: "shell".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_skip_ends_at_the_subagents_first_own_ordinal() {
+        let fixture = include_str!("fixtures/forked_paginated_rollout.jsonl");
+        let events: Vec<_> = kept(fixture).into_iter().filter_map(parse_line).collect();
+        assert_eq!(events, vec![AgentEvent::TurnStarted { title: None }]);
+    }
+
+    #[test]
+    fn test_skip_leaves_ordinary_rollouts_alone() {
+        let fixture = include_str!("fixtures/memory_consolidation_rollout.jsonl");
+        let mut skip = CopiedHistorySkip::new();
+        assert!(fixture.lines().all(|line| !skip.skips(line)));
+        assert!(skip.is_done(), "the skipper retires after the header");
+
+        // A file that does not start with a header is read in full
+        let mut skip = CopiedHistorySkip::new();
+        assert!(!skip.skips(r#"{"type":"event_msg","payload":{"type":"task_started"}}"#));
+        assert!(skip.is_done());
     }
 }
