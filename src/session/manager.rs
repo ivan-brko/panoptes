@@ -283,7 +283,7 @@ impl SessionManager {
             .values()
             .filter(|info| !self.sessions.contains_key(&info.id))
             .collect();
-        recovered.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        recovered.sort_by_key(|a| std::cmp::Reverse(a.last_activity));
         entries.extend(
             recovered
                 .into_iter()
@@ -1400,7 +1400,7 @@ impl SessionManager {
             .collect();
 
         // The one that has been waiting longest is the one to offer first
-        sessions.sort_by(|a, b| a.info.last_activity.cmp(&b.info.last_activity));
+        sessions.sort_by_key(|a| a.info.last_activity);
 
         sessions
     }

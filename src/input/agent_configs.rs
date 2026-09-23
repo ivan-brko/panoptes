@@ -294,10 +294,10 @@ pub fn handle_creating_agent_session_key(
         KeyCode::Backspace => {
             app.state.session_draft.name.pop();
         }
-        KeyCode::Char(c) => {
-            if app.state.session_draft.name.len() < crate::app::MAX_SESSION_NAME_LEN {
-                app.state.session_draft.name.push(c);
-            }
+        KeyCode::Char(c)
+            if app.state.session_draft.name.len() < crate::app::MAX_SESSION_NAME_LEN =>
+        {
+            app.state.session_draft.name.push(c);
         }
         _ => {}
     }
@@ -473,10 +473,8 @@ pub(crate) fn adding_config_name_key<C: AgentProfile>(
         KeyCode::Backspace => {
             state.config_draft.name.pop();
         }
-        KeyCode::Char(c) => {
-            if state.config_draft.name.len() < MAX_CONFIG_NAME_LEN {
-                state.config_draft.name.push(c);
-            }
+        KeyCode::Char(c) if state.config_draft.name.len() < MAX_CONFIG_NAME_LEN => {
+            state.config_draft.name.push(c);
         }
         _ => {}
     }
@@ -574,11 +572,9 @@ pub(crate) fn adding_config_path_key<C: AgentProfile>(
             state.config_draft.path.pop();
             update_config_path_completions_state(state);
         }
-        KeyCode::Char(c) => {
-            if state.config_draft.path.len() < MAX_CONFIG_PATH_LEN {
-                state.config_draft.path.push(c);
-                update_config_path_completions_state(state);
-            }
+        KeyCode::Char(c) if state.config_draft.path.len() < MAX_CONFIG_PATH_LEN => {
+            state.config_draft.path.push(c);
+            update_config_path_completions_state(state);
         }
         _ => {}
     }
@@ -771,17 +767,15 @@ pub(crate) fn configs_section_key<C: AgentProfile>(
                 }
             }
         }
-        KeyCode::Char('d') => {
-            // Prompt for confirmation before deleting
-            if config_count > 0 {
-                let config_id = store
-                    .configs_sorted()
-                    .get(kind.view_selected_index(state))
-                    .map(|c| c.id());
-                if let Some(config_id) = config_id {
-                    state.pending_delete_agent_config = Some(config_id);
-                    state.input_mode = kind.confirming_delete_mode();
-                }
+        // Prompt for confirmation before deleting
+        KeyCode::Char('d') if config_count > 0 => {
+            let config_id = store
+                .configs_sorted()
+                .get(kind.view_selected_index(state))
+                .map(|c| c.id());
+            if let Some(config_id) = config_id {
+                state.pending_delete_agent_config = Some(config_id);
+                state.input_mode = kind.confirming_delete_mode();
             }
         }
         _ => {}

@@ -210,14 +210,14 @@ pub fn handle_worktree_select_base_key(
             app.state.worktree_wizard.base_list_index = 0;
             update_worktree_filtered_base_branches(app);
         }
-        KeyCode::Char(c) => {
-            // Enforce length limit for base search (same as branch names)
-            if app.state.worktree_wizard.base_search_text.len() < MAX_BRANCH_NAME_LEN {
-                app.state.worktree_wizard.base_search_text.push(c);
-                // Reset index when search changes
-                app.state.worktree_wizard.base_list_index = 0;
-                update_worktree_filtered_base_branches(app);
-            }
+        // Enforce length limit for base search (same as branch names)
+        KeyCode::Char(c)
+            if app.state.worktree_wizard.base_search_text.len() < MAX_BRANCH_NAME_LEN =>
+        {
+            app.state.worktree_wizard.base_search_text.push(c);
+            // Reset index when search changes
+            app.state.worktree_wizard.base_list_index = 0;
+            update_worktree_filtered_base_branches(app);
         }
         _ => {}
     }
@@ -362,16 +362,12 @@ pub fn handle_selecting_default_base_key(
                 filter_branch_refs(&app.state.available_branch_refs, &app.state.new_branch_name);
             select_default_base_branch(app);
         }
-        KeyCode::Char(c) => {
-            // Enforce length limit for branch name filter
-            if app.state.new_branch_name.len() < MAX_BRANCH_NAME_LEN {
-                app.state.new_branch_name.push(c);
-                app.state.filtered_branch_refs = filter_branch_refs(
-                    &app.state.available_branch_refs,
-                    &app.state.new_branch_name,
-                );
-                select_default_base_branch(app);
-            }
+        // Enforce length limit for branch name filter
+        KeyCode::Char(c) if app.state.new_branch_name.len() < MAX_BRANCH_NAME_LEN => {
+            app.state.new_branch_name.push(c);
+            app.state.filtered_branch_refs =
+                filter_branch_refs(&app.state.available_branch_refs, &app.state.new_branch_name);
+            select_default_base_branch(app);
         }
         _ => {}
     }

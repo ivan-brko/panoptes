@@ -74,7 +74,7 @@ impl SessionStore {
     /// Get all persisted sessions sorted by last activity (most recent first)
     pub fn sessions_sorted(&self) -> Vec<&SessionInfo> {
         let mut sessions: Vec<_> = self.sessions.values().collect();
-        sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        sessions.sort_by_key(|a| std::cmp::Reverse(a.last_activity));
         sessions
     }
 
