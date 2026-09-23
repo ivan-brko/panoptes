@@ -249,7 +249,9 @@ restored at that point, though the conversation itself is fully intact.
 
 Shell sessions are never suspended - they have no conversation to come back to,
 and killing one would end a running build or dev server. Neither is a session
-that is working, blocked on a permission dialog, or currently on screen.
+that is working, blocked on a permission dialog, or currently on screen - nor
+one whose finished turn left work behind: subagents, background shells or
+monitors, or a scheduled prompt such as `/loop`, all of which the kill would end.
 
 **When to change:** Lower it if you keep many sessions open and are short on
 memory; raise it, or set `0`, if you would rather never wait for a wake.

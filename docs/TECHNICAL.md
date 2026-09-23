@@ -355,8 +355,49 @@ warning; state tracking still works, but tool names and notification types are
 lost.
 
 **Claude Code hooks:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`,
-`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Notification`,
-`PermissionRequest`.
+`PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `StopFailure`,
+`Notification`, `PermissionRequest`, `PermissionDenied`, `SubagentStart`,
+`SubagentStop`, `Elicitation`, `ElicitationResult`. Every one is a symlink to
+the same script, re-created on each spawn, so an existing install picks up a
+newly registered event the next time a session starts. The rest of Claude's
+hooks are deliberately unregistered; `HOOK_EVENTS` in `agent/claude.rs` says
+why, one line each.
+
+| Hook | Payload fields used | `AgentEvent` | Effect |
+|---|---|---|---|
+| `StopFailure` | `error`, `last_assistant_message`, `error_details` | `TurnFailed` | fires *instead of* `Stop`: tools cleared, `Waiting`, `TurnFailed` attention, reason on the row |
+| `PermissionDenied` | `tool_name` (the `reason` is available but unused) | `ApprovalResolved` | `AwaitingApproval` demotes to `Thinking` and a matching approval flag clears; otherwise nothing |
+| `SubagentStart` / `SubagentStop` | `agent_id` | `SubagentStarted` / `SubagentFinished` | a set of running subagent IDs; its size is `SessionInfo::subagents` |
+| `Stop` / `SubagentStop` | `background_tasks`, `session_crons` | `BackgroundWork` | snapshot counts of background tasks and scheduled prompts |
+| `Elicitation` | `mcp_server_name`, `message` | `ApprovalRequested` | as an `elicitation_dialog` notification: `AwaitingApproval`, approval attention |
+| `ElicitationResult` | `mcp_server_name` | `ApprovalResolved` | clears it; the flag does not record the server, so any result does |
+
+The field names are Claude Code 2.1.280's own, from the hook-input schemas in
+its binary. Three findings shaped the design:
+
+- `PermissionDenied` only fires when auto mode's classifier refuses a call -
+  no dialog is shown, so there is usually no approval to resolve.
+- `TaskCreated` / `TaskCompleted` are the agent's to-do list (`TaskCreate`,
+  `TaskUpdate`), not background work, and a deleted item never fires
+  `TaskCompleted`. They are not registered.
+- Background work is instead listed on every `Stop` and `SubagentStop`, as
+  `background_tasks` (`{id, type, status, description, ...}`, `type` one of
+  `shell`, `subagent`, `monitor`, `workflow`, ...; running or pending, and
+  backgrounded) and `session_crons` (`{id, schedule, prompt}` for `/loop`,
+  `CronCreate`, `ScheduleWakeup`). Each list replaces the last count; a
+  payload without one - an older Claude, or the no-`jq` path - leaves the
+  count alone. The snapshot travels as a second event,
+  `state_machine::background_snapshot`, applied after the hook's own.
+
+Subagents are paired by `agent_id`, so a stop overtaking its start, or a stop
+for a subagent never seen starting, cannot drive the count below zero. The one
+leak - a subagent interrupted before its `SubagentStop` - is closed at the next
+`Stop`: a turn has ended, so every subagent still running is backgrounded and
+listed, and a list with no `subagent` entry retires every tracked ID. Background
+work outlives turns, so `UserPromptSubmit` keeps all of it; a fresh
+`SessionStart` and `SessionEnd` clear it. Codex's subagent count comes from its
+transcript watcher instead, which never watches a Claude session, so the two
+never feed one session.
 
 `SessionStart` does not only mean "a process came up". Its `source` is one of
 `startup`, `resume`, `clear`, `compact`, `fork` - and `compact` fires on its own
@@ -391,13 +432,19 @@ be recovered exactly, and reported for a manual merge when it cannot.
 | `Starting` | alive | spawned, agent hasn't reported in | spawn |
 | `Thinking` | alive | working, nothing in flight | `UserPromptSubmit`, last `PostToolUse` |
 | `Executing` | alive | one or more tools in flight | `PreToolUse`, shell foreground poll |
-| `AwaitingApproval` | alive | blocked on a permission dialog | `PermissionRequest` |
-| `Waiting` | alive | turn over, awaiting a prompt | `Stop`, shell foreground idle |
+| `AwaitingApproval` | alive | blocked on a permission dialog or an MCP question | `PermissionRequest`, `Elicitation` |
+| `Waiting` | alive | turn over, awaiting a prompt | `Stop`, `StopFailure`, shell foreground idle |
 | `Suspended` | killed by us | scrollback kept, wakes on interaction | idle sweep |
 | `Exited` | died itself | see `exit_reason` | `check_alive` |
 | `Resumable` | never spawned | loaded from `sessions.json` | `reconcile` at startup |
 
 Shell sessions render `Executing` as "Running" and `Waiting` as "Ready".
+
+A turn can end with work still running: a background shell, a monitor, a
+backgrounded subagent, or a `/loop` waiting to fire. A `Waiting` row says so -
+`Waiting · 1 subagent · 2 in background · 1 scheduled` - which is also why the
+suspend sweep leaves that session alone. Backgrounded subagents appear in both
+of Claude's reports, and are counted once, as subagents.
 
 Tool names do not live in the state. Subagents share one `session_id`, so
 several tools run at once; they are tracked in `SessionInfo::in_flight`, keyed
@@ -680,11 +727,12 @@ supplements: hooks already report state and arrive sooner, and two producers
 writing the same field would fight over it.
 
 One exception. A Claude turn that dies on an API error fires the `StopFailure`
-hook *instead of* `Stop`, and Panoptes does not subscribe to `StopFailure` yet,
-so no hook ever says the turn is over. Claude does write the failure to the
+hook *instead of* `Stop`. Claude also writes the failure to the
 transcript - an assistant record with `"isApiErrorMessage": true` and an
 `error` code such as `rate_limit` or `authentication_failed` - and the tailer
-turns that into `AgentEvent::TurnFailed`. The state machine moves the session
+turns that into `AgentEvent::TurnFailed`, the same event `StopFailure`
+translates to - both read the code through `transcript::claude::failure_reason`,
+so they agree on the label. The state machine moves the session
 to `Waiting` with a `TurnFailed` attention reason (a red `✗`, gated by
 `notify_on.failed`), and ignores a second `TurnFailed` while the session is
 still sitting on the first, so the hook and the transcript cannot double-fire
@@ -860,6 +908,12 @@ describes work a kill would destroy:
 - it is not the session the user is currently viewing
 - it has no `resume_blocker()`; suspending something with no way back is just
   closing it
+- it has no subagents, background tasks or scheduled prompts
+  (`SessionInfo::has_background_work`), whatever the agent. They all live in
+  the agent's process and die with it, and they are exactly what a `Waiting`
+  session that looks idle can still be running - Codex subagents in their own
+  rollouts, Claude's backgrounded shells, monitors and agents after its turn has
+  ended, and a `/loop` that is idle only until it fires
 - its conversation transcript is on disk - looked for only once every clause
   above has passed, so the per-tick sweep does no I/O (see *Missing
   transcripts*)
