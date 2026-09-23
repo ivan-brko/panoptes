@@ -395,8 +395,9 @@ impl App {
             }
 
             // Poll for events with timeout - none at all if the last pass
-            // ran out of output budget with a session's output still queued:
-            // a sleep here is time that output spends not on screen. With
+            // ran out of output budget with the watched session's output
+            // still queued: a sleep here is time that output spends not on
+            // screen. With
             // nothing queued this is the usual tick, so an idle Panoptes
             // still sleeps.
             let timeout = if self.sessions.output_backlogged() {
@@ -670,9 +671,14 @@ impl App {
         let dragging = self.state.dragging_session();
         self.sessions.set_output_hold(dragging);
 
+        // Only a session filling the screen is worth hurrying for
+        let watched = self
+            .state
+            .active_session
+            .filter(|_| self.state.focus == Focus::Session);
         let with_output = self
             .sessions
-            .poll_outputs_except(scrolled_codex_session(&self.state, &self.sessions));
+            .poll_outputs_except(scrolled_codex_session(&self.state, &self.sessions), watched);
         // A highlight is anchored to the screen it was made against, and new
         // output is a new screen
         self.state.expire_selection(&with_output);

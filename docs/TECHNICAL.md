@@ -289,11 +289,19 @@ poll timeout, or at once if it was waiting for room in the queue. It is never
 joined, so dropping a session does not stall the UI.
 
 **Byte budget.** `SessionManager::poll_outputs_except` takes at most about the
-queue's cap (1 MB) from a session per pass, so a burst lands in one pass while a
-runaway child (`yes`), whose thread refills the queue as fast as it empties,
-cannot starve the loop. When a pass stops on the budget with output still
-queued, the next `event::poll` does not sleep; with nothing queued, the loop
+queue's cap (1 MB) per pass from the *watched* session - the active one, while
+it fills the screen - so a scroll burst lands in one pass, while a runaway
+child (`yes`), whose thread refills the queue as fast as it empties, cannot
+starve the loop. When a pass stops on that budget with the watched session's
+output still queued, the next `event::poll` does not sleep; otherwise the loop
 waits its usual 16 ms tick, so an idle Panoptes still sleeps.
+
+Every other session gets one read's worth (64 KB) per pass, and its backlog
+never shortens the sleep. Nobody is looking at a background session, so a flood
+there is paced by the tick - its queue fills and the child blocks - and costs
+about what it did when the UI thread read the PTY itself, instead of a core
+spent parsing output no one sees. Since no read is bigger than the budget, a
+background session is slowed, never stalled.
 
 ### Background Git Work
 Git operations that can take seconds (`git fetch --all`, creating or removing a
