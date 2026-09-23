@@ -650,6 +650,9 @@ impl SessionManager {
         if spawn_result.agent_session_id.is_some() {
             info.agent_session_id = spawn_result.agent_session_id;
         }
+        if let Some(usage) = adapter.launch_usage(&spawn) {
+            info.usage.merge(usage);
+        }
 
         let session_id = info.id;
         let session = Session::with_scrollback(

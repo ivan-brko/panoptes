@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::adapter::{AgentAdapter, SpawnConfig};
+use super::events::{UsageSnapshot, WindowSource};
 
 /// Base hook script filename (shared across all sessions)
 const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
@@ -53,6 +54,29 @@ impl ClaudeCodeAdapter {
     /// Create a new Claude Code adapter with additional arguments
     pub fn with_args(args: Vec<String>) -> Self {
         Self { extra_args: args }
+    }
+
+    /// The context window a `--model` argument settles, if it settles one
+    ///
+    /// Only the `[1m]` suffix does: Claude Code then runs that model at 1M, but
+    /// its transcript logs the bare id, from which a 1M-capable older model
+    /// (`claude-sonnet-4-6`) would be read as 200k. Without the suffix the
+    /// transcript's own guess is as good as anything the argument could add.
+    fn launch_context_window(args: &[String]) -> Option<u64> {
+        // The last `--model` is the one Claude Code honours
+        let mut model = None;
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            if let Some(value) = arg.strip_prefix("--model=") {
+                model = Some(value);
+            } else if arg == "--model" {
+                model = args.next().map(String::as_str);
+            }
+        }
+        model?
+            .to_ascii_lowercase()
+            .ends_with("[1m]")
+            .then_some(1_000_000)
     }
 
     /// Get the path to the shared hook script
@@ -359,6 +383,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn agent_session_id(&self, spawn_config: &SpawnConfig) -> Option<String> {
         Some(Self::conversation_id(spawn_config))
     }
+
+    fn launch_usage(&self, spawn_config: &SpawnConfig) -> Option<UsageSnapshot> {
+        let window = Self::launch_context_window(&self.build_args(spawn_config))?;
+        Some(UsageSnapshot {
+            context_window: Some(window),
+            context_window_source: WindowSource::Launch,
+            ..Default::default()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -420,6 +453,43 @@ mod tests {
         let adapter = ClaudeCodeAdapter::new();
         let args = adapter.default_args();
         assert_eq!(args, vec!["--enable-auto-mode".to_string()]);
+    }
+
+    #[test]
+    fn test_launch_context_window() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let window = |list: &[&str]| ClaudeCodeAdapter::launch_context_window(&args(list));
+
+        assert_eq!(
+            window(&["--model", "claude-sonnet-4-6[1m]"]),
+            Some(1_000_000)
+        );
+        assert_eq!(window(&["--model=opus[1M]"]), Some(1_000_000));
+        // The last one wins, as it does for Claude Code
+        assert_eq!(window(&["--model", "sonnet[1m]", "--model", "haiku"]), None);
+        // No suffix, or no model at all: the transcript's guess stands
+        assert_eq!(window(&["--model", "claude-opus-5-5"]), None);
+        assert_eq!(window(&["--enable-auto-mode"]), None);
+        assert_eq!(window(&["--model"]), None);
+    }
+
+    #[test]
+    fn test_launch_usage_seeds_a_launch_window() {
+        let dir = TempDir::new().unwrap();
+        let spawn = test_spawn_config(dir.path().to_path_buf());
+
+        // What production spawns today: no `--model`, nothing to seed
+        assert_eq!(ClaudeCodeAdapter::new().launch_usage(&spawn), None);
+
+        let adapter = ClaudeCodeAdapter::with_args(vec![
+            "--model".to_string(),
+            "claude-sonnet-4-6[1m]".to_string(),
+        ]);
+        let usage = adapter.launch_usage(&spawn).expect("a launch window");
+        assert_eq!(usage.context_window, Some(1_000_000));
+        assert_eq!(usage.context_window_source, WindowSource::Launch);
+        // Nothing else is known yet, so the header still shows nothing
+        assert_eq!(usage.summary(), None);
     }
 
     #[test]
