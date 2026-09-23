@@ -6,6 +6,13 @@ use panoptes::logging;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Claude's status line runs this on every refresh: answer before touching
+    // config, logs or anything else
+    if std::env::args().nth(1).as_deref() == Some(panoptes::hooks::status_line::SUBCOMMAND) {
+        panoptes::hooks::status_line::run_subcommand();
+        return Ok(());
+    }
+
     // Ensure config directory exists (creates logs dir too)
     config::ensure_directories()?;
 

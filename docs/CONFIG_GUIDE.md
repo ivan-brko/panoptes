@@ -62,7 +62,8 @@ notification_method = "bell"
 attention_on_idle = false
 
 # Route Claude's status line through Panoptes, for rate limits and the real
-# context window. Your own status line still shows, unchanged.
+# context window. Your own status line still shows, unchanged; without one,
+# Panoptes shows a compact line of rate limits and cost.
 claude_status_line = true
 
 # Colour-capability tier for the UI palette
@@ -349,8 +350,20 @@ exactly what it prints. Your status line looks the same as without Panoptes.
   then `.claude/settings.json`, then `settings.json` in the session's Claude
   config directory (`CLAUDE_CONFIG_DIR`, else `~/.claude`). Its `padding` and
   `refreshInterval` are kept.
-- With no status line of your own, Panoptes' prints nothing. Claude still
-  reserves the row, so you see one blank line where none was.
+- With no status line of your own, Panoptes fills the row with a compact line
+  of its own, for example:
+
+  ```
+  5h 12% · wk 40% (resets Thu 18:00) · $2.14
+  ```
+
+  That is how much of Claude's five-hour and weekly allowances you have used,
+  when the one closer to running out resets (local time: `18:00` for later
+  today, `Thu 18:00` for another day), and what the session has cost so far.
+  Anything Claude has not reported yet is left out - before the first reply of
+  a session there are no rate limits, so it shows just the cost.
+- Configure a status line of your own and it replaces the compact line
+  completely; Panoptes only draws one when you have none.
 - A status line you set in `.claude/settings.local.json` is remembered inside
   Panoptes' command and put back when you turn this off. One set anywhere else
   is never touched, and is re-read at every spawn.
@@ -358,8 +371,9 @@ exactly what it prints. Your status line looks the same as without Panoptes.
   just runs your own command.
 
 Set it to `false` to opt out: the next Claude session spawned in a directory
-puts back whatever Panoptes wrapped there, and Claude sessions show model and
-context only, with the window inferred from the model name. Read when a session
+puts back whatever Panoptes wrapped there (or removes the compact line), and
+Claude sessions show model and context only, with the window inferred from the
+model name. Read when a session
 spawns; shown under **Settings → About / paths**.
 
 ---

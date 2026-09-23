@@ -13,8 +13,9 @@
 //! any lower layer, so the command *wraps* the user's own: it forwards the
 //! document to the hook server, then pipes the same document to the user's
 //! command and prints what that prints. With no user status line it prints
-//! nothing, which is as close as a command can get to Claude's default of no
-//! status line (Claude still reserves the row, so it shows as one blank line).
+//! Panoptes' own compact line instead, drawn by `panoptes status-line` (the
+//! executable that wrote the settings) - Claude reserves the row for any
+//! status line, so the alternative was an empty one.
 //!
 //! The user's command travels as an argument of ours, so a later spawn can
 //! tell its own command from the user's and never wraps itself. A command
@@ -403,13 +404,28 @@ exit 0
         let script_path = Self::status_line_script_path(config);
         super::install_executable_script(
             &script_path,
-            &Self::generate_status_line_script(&format!(
-                "http://127.0.0.1:{}/hook",
-                config.hook_port
-            )),
+            &Self::generate_status_line_script(
+                &format!("http://127.0.0.1:{}/hook", config.hook_port),
+                Self::default_status_line_exe().as_deref(),
+            ),
         )
         .context("Failed to install status line script")?;
         Ok(script_path)
+    }
+
+    /// The Panoptes executable that draws the default status line
+    ///
+    /// Taken from the running process, so it is the binary that wrote the
+    /// settings. `None` if the OS cannot say, in which case a user without a
+    /// status line of their own gets an empty one.
+    fn default_status_line_exe() -> Option<PathBuf> {
+        match std::env::current_exe() {
+            Ok(exe) => Some(exe),
+            Err(e) => {
+                tracing::warn!("Cannot locate the Panoptes executable: {e}");
+                None
+            }
+        }
     }
 
     /// Generate the status-line wrapper, posting to `hook_url`
@@ -422,14 +438,31 @@ exit 0
     /// ID is ours, and is checked to look like one before it is spliced in.
     ///
     /// Arguments: `[--local] [COMMAND]`, where `COMMAND` is the user's own
-    /// status line, run by `bash -c` as Claude would run it.
-    fn generate_status_line_script(hook_url: &str) -> String {
+    /// status line, run by `bash -c` as Claude would run it. Without one,
+    /// `panoptes_exe status-line` draws Panoptes' compact line instead (see
+    /// `hooks::status_line::compact_line`); with no `panoptes_exe` the line
+    /// is empty.
+    ///
+    /// Public only so the integration tests can run it against the real
+    /// binary.
+    #[doc(hidden)]
+    pub fn generate_status_line_script(hook_url: &str, panoptes_exe: Option<&Path>) -> String {
         let url = super::shell_quote(hook_url);
+        let default_line = match panoptes_exe {
+            // A missing or failing binary - a rebuilt checkout, a moved
+            // install - costs the line, never Claude an error
+            Some(exe) => format!(
+                "printf '%s' \"$input\" | {} status-line 2>/dev/null\n",
+                super::shell_quote(&exe.to_string_lossy())
+            ),
+            None => String::new(),
+        };
         format!(
             r#"#!/bin/sh
 # Panoptes status line for Claude Code
 # Forwards the status-line JSON on stdin to Panoptes, then runs the user's own
-# status line on the same input and prints what it prints.
+# status line on the same input and prints what it prints - or, if they have
+# none, Panoptes' own compact line.
 
 input="$(cat)"
 
@@ -461,7 +494,9 @@ if [ -n "${{1:-}}" ]; then
     printf '%s' "$input" | bash -c "$1"
     exit $?
 fi
-exit 0
+
+# No status line of the user's own: Panoptes' compact one
+{default_line}exit 0
 "#,
             local_flag = STATUS_LINE_LOCAL_FLAG,
         )
@@ -1707,6 +1742,20 @@ mod tests {
         session_id: Option<&str>,
         hold_curl: bool,
     ) -> StatusLineRun {
+        run_status_line_with(dir, script, user, session_id, hold_curl, None)
+    }
+
+    /// [`run_status_line`], with the wrapper drawing its default line with
+    /// `panoptes_exe`
+    #[cfg(unix)]
+    fn run_status_line_with(
+        dir: &Path,
+        script: &Path,
+        user: Option<&UserStatusLine>,
+        session_id: Option<&str>,
+        hold_curl: bool,
+        panoptes_exe: Option<&Path>,
+    ) -> StatusLineRun {
         use std::process::{Command, Stdio};
 
         let bin = dir.join("bin");
@@ -1734,7 +1783,10 @@ mod tests {
 
         super::super::install_executable_script(
             script,
-            &ClaudeCodeAdapter::generate_status_line_script("http://127.0.0.1:1/hook"),
+            &ClaudeCodeAdapter::generate_status_line_script(
+                "http://127.0.0.1:1/hook",
+                panoptes_exe,
+            ),
         )
         .unwrap();
 
@@ -1878,6 +1930,58 @@ mod tests {
         assert!(run.success);
         assert_eq!(run.stdout, "");
         assert!(run.posted.is_some(), "the figures are still forwarded");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_status_line_wrapper_without_a_user_command_draws_the_default_line() {
+        let dir = TempDir::new().unwrap();
+        let hostile = dir.path().join("it's a \"dir\" $HOME `id`");
+        let script = hostile.join("hooks").join(STATUS_LINE_SCRIPT_NAME);
+        // Stands in for the Panoptes binary: says how it was called, and
+        // what it was given
+        let seen = dir.path().join("seen.json");
+        let exe = hostile.join("panoptes");
+        super::super::install_executable_script(
+            &exe,
+            &format!(
+                "#!/bin/bash\ncat > {}\nprintf 'DEFAULT %s' \"$*\"\n",
+                super::super::shell_quote(&seen.to_string_lossy())
+            ),
+        )
+        .unwrap();
+
+        let run = run_status_line_with(dir.path(), &script, None, Some(SESSION), false, Some(&exe));
+        assert!(run.success);
+        assert_eq!(run.stdout, "DEFAULT status-line");
+        let seen: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
+        assert_eq!(seen["cost"]["total_cost_usd"], 0.1359288);
+        assert!(run.posted.is_some());
+
+        // A user's own command still wins over the default
+        let user = stub_user_status_line(&dir.path().join("sl.sh"), &dir.path().join("u.json"));
+        let run = run_status_line_with(
+            dir.path(),
+            &script,
+            Some(&user),
+            Some(SESSION),
+            false,
+            Some(&exe),
+        );
+        assert!(run.stdout.starts_with("MARKER"));
+
+        // A binary that has gone missing costs the line, not an error
+        let run = run_status_line_with(
+            dir.path(),
+            &script,
+            None,
+            Some(SESSION),
+            false,
+            Some(&dir.path().join("gone")),
+        );
+        assert!(run.success);
+        assert_eq!(run.stdout, "");
     }
 
     #[test]

@@ -435,9 +435,20 @@ layer, so Panoptes wraps rather than replaces it:
   put it back. A command from a lower layer is re-read from that layer at every
   spawn, so editing it takes effect. The wrapper recognises its own command by
   the script's file name and sees through it, so it never wraps itself.
-- With no user status line it prints nothing. Claude's default is no status
-  line at all, which a command cannot reproduce exactly: Claude reserves the
-  row, so it shows as one blank line.
+- With no user status line it prints Panoptes' compact line instead, by piping
+  the same input to `<panoptes> status-line`: the absolute path of the
+  executable that wrote the settings (`std::env::current_exe()`), baked into
+  the wrapper. Claude reserves the row for any status line, so the
+  alternative was a blank one. The subcommand answers before Panoptes touches
+  config or logs (about 25 ms a run, process start included), prints nothing
+  and exits 0 on input it cannot read, and a missing binary only costs the
+  line. It is drawn by `hooks::status_line::compact_line` from the same
+  `usage_from_payload` the header uses, so the binding window is picked by the
+  same rule - e.g. `5h 12% · wk 40% (resets Thu 18:00) · $2.14`. The reset is
+  local wall-clock time (`18:00` today, `Thu 18:00` on another day), not a
+  countdown: Claude redraws its status line on events, not on a clock, so a
+  countdown would go stale. A reset already past, or any missing field, is
+  left out.
 
 The envelope is built by splicing Claude's document in whole, not with `jq`:
 the document is already JSON and nothing is picked out of it, and the status

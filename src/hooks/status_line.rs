@@ -20,8 +20,12 @@
 //!
 //! Every field is read defensively: an absent or retyped field costs that
 //! figure, never the rest of the snapshot.
+//!
+//! The same document also draws Panoptes' own compact status line, for users
+//! who have none of their own ([`compact_line`], run as the hidden
+//! `panoptes status-line` subcommand).
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use serde_json::Value;
 
 use crate::agent::events::{base_model_id, RateLimitWindow, UsageSnapshot, WindowSource};
@@ -108,6 +112,87 @@ fn window(value: &Value, minutes: u64) -> Option<RateLimitWindow> {
         window_minutes: Some(minutes),
         resets_at,
     })
+}
+
+/// The subcommand the status-line wrapper runs for the default line
+pub const SUBCOMMAND: &str = "status-line";
+
+/// Run the `status-line` subcommand: the payload on stdin, one line out
+///
+/// Claude shows whatever this prints, so it never fails: unreadable input or
+/// a payload with nothing worth showing prints nothing, and it always exits
+/// successfully.
+pub fn run_subcommand() {
+    use std::io::{Read, Write};
+
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return;
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(&input) else {
+        return;
+    };
+    if let Some(line) = compact_line(&payload, Local::now()) {
+        let _ = std::io::stdout().write_all(line.as_bytes());
+    }
+}
+
+/// Panoptes' default status line, e.g. `5h 12% · wk 40% (resets Thu 18:00) · $2.14`
+///
+/// Both rate-limit windows, the binding one - picked by the same rule as the
+/// session header - with its reset time, then the session's cost. Any part
+/// the payload lacks is left out; before the first turn there are no rate
+/// limits, so the line is just the cost.
+///
+/// The reset is local wall-clock time: `18:00` when it falls today, `Thu 18:00`
+/// otherwise (the weekly window resets within seven days, so the weekday is
+/// never ambiguous). A countdown such as `in 3h 20m` would go stale, because
+/// Claude redraws its status line on events, not on a clock. A reset already
+/// past is left out rather than shown as a time that no longer means anything.
+pub fn compact_line<Tz>(payload: &Value, now: DateTime<Tz>) -> Option<String>
+where
+    Tz: TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let mut parts = Vec::new();
+
+    if let Some(usage) = usage_from_payload(payload) {
+        let binding = usage.binding_window();
+        for window in [&usage.primary, &usage.secondary].into_iter().flatten() {
+            let mut part = format!("{} {:.0}%", window.label(), window.used_percent);
+            if binding == Some(window) {
+                if let Some(at) = window.resets_at.filter(|at| *at > now.to_utc()) {
+                    part.push_str(&format!(" (resets {})", wall_clock(at, &now)));
+                }
+            }
+            parts.push(part);
+        }
+    }
+
+    let cost = payload
+        .get("cost")
+        .and_then(|c| c.get("total_cost_usd"))
+        .and_then(Value::as_f64)
+        .filter(|c| c.is_finite() && *c >= 0.0);
+    if let Some(cost) = cost {
+        parts.push(format!("${:.2}", cost));
+    }
+
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// `18:00` for a time later today, `Thu 18:00` for any other day
+fn wall_clock<Tz>(at: DateTime<Utc>, now: &DateTime<Tz>) -> String
+where
+    Tz: TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let at = at.with_timezone(&now.timezone());
+    if at.date_naive() == now.date_naive() {
+        at.format("%H:%M").to_string()
+    } else {
+        at.format("%a %H:%M").to_string()
+    }
 }
 
 #[cfg(test)]
@@ -198,5 +283,88 @@ mod tests {
         assert_eq!(usage.primary, None);
         assert_eq!(usage.secondary.as_ref().unwrap().resets_at, None);
         assert_eq!(usage.context_window, None);
+    }
+
+    /// When the fixture was captured
+    fn capture_time() -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(1_790_170_061, 0).unwrap()
+    }
+
+    #[test]
+    fn test_compact_line_from_the_fixture() {
+        // Wednesday 2026-09-23 13:27 UTC; the five-hour window binds and
+        // resets at 15:00 the same day
+        assert_eq!(
+            compact_line(&fixture(), capture_time()).as_deref(),
+            Some("5h 21% (resets 15:00) · wk 11% · $0.14")
+        );
+
+        // Local wall-clock time, not UTC
+        let zagreb = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(
+            compact_line(&fixture(), capture_time().with_timezone(&zagreb)).as_deref(),
+            Some("5h 21% (resets 17:00) · wk 11% · $0.14")
+        );
+    }
+
+    #[test]
+    fn test_compact_line_week_binding_names_the_day() {
+        let mut payload = fixture();
+        payload["rate_limits"]["seven_day"]["used_percentage"] = serde_json::json!(40.4);
+        payload["cost"]["total_cost_usd"] = serde_json::json!(2.137);
+
+        // The week resets Tuesday 2026-09-29 at 23:00 UTC
+        assert_eq!(
+            compact_line(&payload, capture_time()).as_deref(),
+            Some("5h 21% · wk 40% (resets Tue 23:00) · $2.14")
+        );
+    }
+
+    #[test]
+    fn test_compact_line_before_the_first_turn() {
+        // What Claude sends at startup: no rate limits yet, and no cost
+        // worth the name
+        let mut payload = fixture();
+        payload.as_object_mut().unwrap().remove("rate_limits");
+        payload["cost"]["total_cost_usd"] = serde_json::json!(0);
+        assert_eq!(
+            compact_line(&payload, capture_time()).as_deref(),
+            Some("$0.00")
+        );
+
+        // And without even a cost there is nothing to print
+        payload.as_object_mut().unwrap().remove("cost");
+        assert_eq!(compact_line(&payload, capture_time()), None);
+    }
+
+    #[test]
+    fn test_compact_line_without_cost_or_a_future_reset() {
+        let mut payload = fixture();
+        payload.as_object_mut().unwrap().remove("cost");
+        assert_eq!(
+            compact_line(&payload, capture_time()).as_deref(),
+            Some("5h 21% (resets 15:00) · wk 11%")
+        );
+
+        // A reset already past says nothing true any more
+        let later = DateTime::<Utc>::from_timestamp(1_790_180_000, 0).unwrap();
+        assert_eq!(
+            compact_line(&payload, later).as_deref(),
+            Some("5h 21% · wk 11%")
+        );
+    }
+
+    #[test]
+    fn test_compact_line_ignores_nonsense() {
+        let now = capture_time();
+        assert_eq!(compact_line(&Value::Null, now), None);
+        assert_eq!(compact_line(&serde_json::json!([1, 2]), now), None);
+        assert_eq!(
+            compact_line(
+                &serde_json::json!({"cost": {"total_cost_usd": "lots"}}),
+                now
+            ),
+            None
+        );
     }
 }

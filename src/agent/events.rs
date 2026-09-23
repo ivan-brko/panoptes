@@ -253,7 +253,7 @@ impl RateLimitWindow {
     }
 
     /// Short name for the window's length: `5h`, `wk`, or `limit` when unknown
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self.window_minutes {
             None | Some(0) => "limit".to_string(),
             Some(10_080) => "wk".to_string(),
@@ -403,7 +403,7 @@ impl UsageSnapshot {
     ///
     /// Higher usage wins; on a tie the longer window does, since it takes
     /// longer to recover from.
-    fn binding_window(&self) -> Option<&RateLimitWindow> {
+    pub(crate) fn binding_window(&self) -> Option<&RateLimitWindow> {
         match (&self.primary, &self.secondary) {
             (Some(a), Some(b)) => {
                 let a_key = (a.used_percent, a.window_minutes.unwrap_or(0));
