@@ -220,8 +220,14 @@ fn parse_token_count(payload: &Value) -> UsageSnapshot {
     let mut snapshot = UsageSnapshot {
         total_tokens: total,
         context_window: window,
-        // Codex states its window itself rather than leaving it to be guessed
-        context_window_source: WindowSource::Observed,
+        // Codex states its window itself rather than leaving it to be guessed.
+        // Only claimed when a window is actually present, so a record without
+        // one stays an empty snapshot
+        context_window_source: if window.is_some() {
+            WindowSource::Observed
+        } else {
+            WindowSource::default()
+        },
         context_window_model: None,
         model: info
             .and_then(|i| i.get("model"))
