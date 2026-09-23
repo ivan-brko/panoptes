@@ -15,7 +15,7 @@ use crate::agent::adapter::SpawnConfig;
 use crate::agent::events::AgentEvent;
 use crate::agent::AgentType;
 use crate::config::{Config, NotificationMethod};
-use crate::hooks::HookEvent;
+use crate::hooks::{HookEvent, HookEventType, SessionStartSource};
 use crate::project::{BranchId, ProjectId};
 
 use super::pty_reader::{QUEUE_CAP, READ_CHUNK};
@@ -268,6 +268,36 @@ impl SessionManager {
         self.recovered.get(&session_id)
     }
 
+    /// Look for each recovered session's conversation transcript, once
+    ///
+    /// Run when the recovery list is built, so a session whose transcript has
+    /// gone is listed as unavailable with the reason, rather than offered and
+    /// then failing at launch. The answer is cached on the entry, since the
+    /// list is rendered every frame; `resume_session` looks again anyway.
+    ///
+    /// `dirs_for` supplies the `CLAUDE_CONFIG_DIR` and `CODEX_HOME` a session
+    /// would resume under. The manager does not own the account stores, the
+    /// same reason `resume_session` takes them as arguments.
+    pub fn check_recovered_transcripts(
+        &mut self,
+        dirs_for: impl Fn(&SessionInfo) -> (Option<PathBuf>, Option<PathBuf>),
+    ) {
+        for info in self.recovered.values_mut() {
+            let (claude_config_dir, codex_home) = dirs_for(info);
+            info.transcript_missing = !info.conversation_transcript_exists(
+                claude_config_dir.as_deref(),
+                codex_home.as_deref(),
+            );
+            if info.transcript_missing {
+                tracing::info!(
+                    session_id = %info.id,
+                    conversation_id = info.agent_session_id.as_deref().unwrap_or("none"),
+                    "Recovered session's conversation transcript is missing; it cannot be resumed"
+                );
+            }
+        }
+    }
+
     /// Discard a recovered session without ever bringing it back
     pub fn discard_recovered(&mut self, session_id: SessionId) -> bool {
         if self.recovered.remove(&session_id).is_none() {
@@ -349,9 +379,15 @@ impl SessionManager {
     ) -> Result<SessionId> {
         let info = self
             .recovered
-            .get(&session_id)
-            .ok_or_else(|| anyhow!("No recovered session with ID {}", session_id))?
-            .clone();
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow!("No recovered session with ID {}", session_id))?;
+
+        // Looked for afresh rather than trusted from when the list was built:
+        // the file may have gone since, and the account may have changed. The
+        // answer is kept on the entry, so a refusal is listed with its reason.
+        info.transcript_missing = !info
+            .conversation_transcript_exists(claude_config_dir.as_deref(), codex_home.as_deref());
+        let info = info.clone();
 
         if let Some(reason) = info.resume_blocker() {
             return Err(anyhow!("Cannot resume '{}': {}", info.name, reason));
@@ -653,6 +689,10 @@ impl SessionManager {
         if let Some(usage) = adapter.launch_usage(&spawn) {
             info.usage.merge(usage);
         }
+        // Where this process keeps its conversations, for a transcript check
+        // made while it is live (see `suspend_idle_sessions`)
+        info.spawned_claude_config_dir = spawn.claude_config_dir.clone();
+        info.spawned_codex_home = spawn.codex_home.clone();
 
         let session_id = info.id;
         let session = Session::with_scrollback(
@@ -1115,8 +1155,11 @@ impl SessionManager {
         }
 
         // Suspending something that cannot be resumed is just closing it. If
-        // the conversation ID was never recorded, or the working directory has
-        // gone, there is no way back.
+        // the conversation ID was never recorded, the working directory has
+        // gone, or the transcript was found missing, there is no way back.
+        // Deliberately no filesystem look for the transcript here: this runs
+        // for every session on every tick. `suspend_idle_sessions` makes that
+        // look once, after every cheap clause has already said yes.
         if info.resume_blocker().is_some() {
             return false;
         }
@@ -1170,6 +1213,26 @@ impl SessionManager {
 
         for session in self.sessions.values_mut() {
             if !Self::may_suspend(&session.info, active, now, idle_secs) {
+                continue;
+            }
+
+            // The one clause too expensive for `may_suspend`, so it runs only
+            // for a session about to be killed. A conversation whose transcript
+            // is not on disk cannot be resumed - a Claude session that has not
+            // been sent a message yet, or has just been `/clear`ed, has none -
+            // so killing it would be closing it. The answer is cached, which
+            // keeps the sweep from looking again every tick; the next agent
+            // event clears it, since that is what writes a transcript.
+            let info = &session.info;
+            if !info.conversation_transcript_exists(
+                info.spawned_claude_config_dir.as_deref(),
+                info.spawned_codex_home.as_deref(),
+            ) {
+                tracing::debug!(
+                    session_id = %info.id,
+                    "Not suspending idle session: its conversation transcript is missing"
+                );
+                session.info.transcript_missing = true;
                 continue;
             }
 
@@ -1235,6 +1298,12 @@ impl SessionManager {
             session.info.clone()
         };
 
+        // Checked when the session was suspended, but not since - and it is the
+        // directories passed here, not the old process's, that `--resume` uses
+        let mut info = info;
+        info.transcript_missing = !info
+            .conversation_transcript_exists(claude_config_dir.as_deref(), codex_home.as_deref());
+
         if let Some(reason) = info.resume_blocker() {
             return Err(anyhow!("Cannot wake '{}': {}", info.name, reason));
         }
@@ -1253,7 +1322,6 @@ impl SessionManager {
             resume: info.resume_cursor(),
         };
 
-        let mut info = info;
         info.state = SessionState::Starting;
         info.state_entered_at = Utc::now();
         info.last_activity = Utc::now();
@@ -1320,7 +1388,71 @@ impl SessionManager {
             }
         };
 
+        self.follow_agent_conversation(session_id, event);
         self.apply_agent_event(session_id, state_machine::translate_hook(event))
+    }
+
+    /// Follow a Claude session onto a new conversation, if the event says it moved
+    ///
+    /// Claude changes conversation inside a live process: `/clear` starts a
+    /// new one, an in-TUI `/resume` switches to an old one, and `/branch`
+    /// forks into a copy. Each announces itself with a `SessionStart` carrying
+    /// the new ID. Without following it, the transcript being tailed is the
+    /// abandoned one, so usage freezes, and a suspension or a restart resumes
+    /// the abandoned conversation - silently dropping everything since.
+    ///
+    /// Only `agent_session_id` moves. The Panoptes `id` stays put: hooks route
+    /// on it, and it is this session's identity, not the conversation's.
+    ///
+    /// `compact` is excluded outright rather than trusted to carry the same ID:
+    /// it happens mid-turn with nobody asking, and is never a conversation
+    /// boundary. A `SessionStart` naming the conversation already recorded -
+    /// every process start - is a no-op, and in particular writes nothing.
+    ///
+    /// Returns whether the session moved.
+    pub fn follow_agent_conversation(&mut self, session_id: SessionId, event: &HookEvent) -> bool {
+        if event.event_type() != HookEventType::SessionStart
+            || event.session_start_source() == Some(SessionStartSource::Compact)
+        {
+            return false;
+        }
+        let Some(new_id) = event.agent_conversation_id() else {
+            return false;
+        };
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return false;
+        };
+        let info = &mut session.info;
+        if info.session_type != SessionType::ClaudeCode
+            || info.agent_session_id.as_deref() == Some(new_id)
+        {
+            return false;
+        }
+
+        let old_id = info.agent_session_id.clone();
+        let source = event.session_start_source();
+        info.agent_transcript_path = event.transcript_path().map(std::path::Path::to_path_buf);
+        // Where the tailer starts. A cleared or forked conversation is this
+        // session's own from its first line - and a fork's copied history only
+        // yields usage records, the last of which is the right figure anyway.
+        // A resumed one holds an older conversation, which attaches at its end
+        // and seeds usage from its tail, exactly as a relaunch with `--resume`
+        // does.
+        info.resumed_conversation = source == Some(SessionStartSource::Resume);
+        // The figures shown describe the conversation just left
+        info.usage = Default::default();
+        info.transcript_missing = false;
+
+        // Persists: the ID is the pointer a restart resumes from
+        self.set_agent_session_id(session_id, new_id.to_string());
+        tracing::info!(
+            session_id = %session_id,
+            old_conversation_id = old_id.as_deref().unwrap_or("none"),
+            new_conversation_id = %new_id,
+            source = ?source,
+            "Claude moved to another conversation; following it"
+        );
+        true
     }
 
     /// Apply a canonical agent event to a session
@@ -1343,6 +1475,11 @@ impl SessionManager {
                 return None;
             }
         };
+
+        // Whatever the agent just did may have written its transcript - a
+        // first prompt is what creates one - so a cached "missing" is stale.
+        // Clearing it costs nothing; the suspension sweep looks again, once.
+        session.info.transcript_missing = false;
 
         let applied = state_machine::apply(&mut session.info, event, Utc::now(), &self.config);
         applied.rang.then_some(session_id)
@@ -1794,11 +1931,40 @@ mod tests {
             .expect("Failed to spawn test process")
     }
 
+    /// The Claude account directory a test's sessions run under
+    ///
+    /// Always inside the test's temp dir. Passing `None` instead would mean the
+    /// default account, whose transcripts live in the real home directory.
+    fn claude_home(dir: &TempDir) -> PathBuf {
+        dir.path().join("claude-config")
+    }
+
+    /// Leave a conversation's transcript where Claude would have written it
+    fn write_claude_transcript(
+        config_dir: &std::path::Path,
+        working_dir: &std::path::Path,
+        conversation_id: &str,
+    ) {
+        let path =
+            crate::transcript::claude::transcript_path(config_dir, working_dir, conversation_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{}\n").unwrap();
+    }
+
     /// A session eligible for suspension: idle, resumable, turn finished
-    fn insert_suspendable_session(manager: &mut SessionManager) -> SessionId {
+    ///
+    /// Resumable includes its transcript being on disk, under an account
+    /// directory inside `dir`.
+    fn insert_suspendable_session(manager: &mut SessionManager, dir: &TempDir) -> SessionId {
         let session_id = insert_test_session(manager);
         let session = manager.get_mut(session_id).unwrap();
         session.info.agent_session_id = Some(session_id.to_string());
+        session.info.spawned_claude_config_dir = Some(claude_home(dir));
+        write_claude_transcript(
+            &claude_home(dir),
+            &session.info.working_dir,
+            &session_id.to_string(),
+        );
         session.set_state(SessionState::Waiting);
         let long_ago = Utc::now() - chrono::Duration::seconds(10_000);
         session.info.last_engagement = long_ago;
@@ -1812,7 +1978,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         // Something worth keeping in the scrollback
         manager
@@ -1848,7 +2014,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         manager.suspend_idle_sessions(7200, None);
 
@@ -1874,7 +2040,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         manager.suspend_idle_sessions(7200, None);
 
@@ -1893,7 +2059,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         manager.suspend_idle_sessions(7200, None);
 
@@ -2040,7 +2206,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         assert!(manager.suspend_idle_sessions(0, None).is_empty());
         assert_eq!(
@@ -2054,7 +2220,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         // Claude nags about once a minute for an unattended prompt. Counting
         // that as activity would keep the suspend clock permanently reset, and
@@ -2075,7 +2241,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         // Codex reports nothing between the start of a turn and its end, so a
         // Codex session that is genuinely working sits in Waiting the whole
@@ -2095,7 +2261,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         // Half a prompt typed into the box produces no agent events at all;
         // suspending here would throw it away
@@ -2109,14 +2275,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
         manager.suspend_idle_sessions(7200, None);
 
         manager.get_mut(session_id).unwrap().info.working_dir =
             temp_dir.path().join("deleted-worktree");
 
         let err = manager
-            .wake_session(session_id, 24, 80, None, None)
+            .wake_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
             .expect_err("waking into a missing directory must fail");
         assert!(
             err.to_string().contains("working directory is missing"),
@@ -2135,11 +2301,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         assert!(!manager.is_suspended(session_id));
         manager
-            .wake_session(session_id, 24, 80, None, None)
+            .wake_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
             .unwrap();
         assert_eq!(
             manager.get(session_id).unwrap().info.state,
@@ -2152,7 +2318,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config = test_config(&temp_dir);
         let mut manager = test_manager(&temp_dir, config);
-        let session_id = insert_suspendable_session(&mut manager);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
 
         manager.apply_agent_event(session_id, AgentEvent::Subagents { active: 3 });
         assert_eq!(manager.get(session_id).unwrap().info.subagents, 3);
@@ -3166,7 +3332,9 @@ mod tests {
         );
         info.session_type = SessionType::ClaudeCode;
         info.state = SessionState::Resumable;
-        info.agent_session_id = Some(Uuid::new_v4().to_string());
+        let conversation_id = Uuid::new_v4().to_string();
+        write_claude_transcript(&claude_home(dir), dir.path(), &conversation_id);
+        info.agent_session_id = Some(conversation_id);
         let session_id = info.id;
 
         manager.store.upsert(info.clone());
@@ -3186,7 +3354,7 @@ mod tests {
         let session_id = recoverable_agent(&mut manager, &temp_dir);
 
         let resumed = manager
-            .resume_session(session_id, 24, 80, None, None)
+            .resume_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
             .unwrap();
 
         // The Panoptes session ID is preserved, which is what keeps hook
@@ -3209,7 +3377,7 @@ mod tests {
         let session_id = recoverable_agent(&mut manager, &temp_dir);
 
         manager
-            .resume_session(session_id, 24, 80, None, None)
+            .resume_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
             .unwrap();
 
         let entries = manager.entries_in_order();
@@ -3230,7 +3398,7 @@ mod tests {
         let session_id = manager.recovered().next().unwrap().id;
 
         let err = manager
-            .resume_session(session_id, 24, 80, None, None)
+            .resume_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
             .unwrap_err();
 
         assert!(
@@ -3268,12 +3436,12 @@ mod tests {
         let session_id = recoverable_agent(&mut manager, &temp_dir);
 
         manager
-            .resume_session(session_id, 24, 80, None, None)
+            .resume_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
             .unwrap();
 
         // Guards against spawning a second process for one conversation
         assert!(manager
-            .resume_session(session_id, 24, 80, None, None)
+            .resume_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
             .is_err());
         assert_eq!(manager.len(), 1);
 
@@ -3293,7 +3461,7 @@ mod tests {
         let session_id = recoverable_agent(&mut manager, &temp_dir);
 
         manager
-            .resume_session(session_id, 24, 80, None, None)
+            .resume_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
             .unwrap();
 
         let stored = load_store(&store_path);
@@ -3376,6 +3544,364 @@ mod tests {
         );
 
         assert!(!manager.set_agent_session_id(Uuid::new_v4(), "codex-abc".to_string()));
+    }
+
+    // Following Claude across conversations
+
+    /// A `SessionStart` payload exactly as Claude Code 2.1.280 sends it
+    ///
+    /// Captured from a real `/clear` (field set and order verbatim; only the
+    /// paths are shortened). `resume` and `fork` carry the same fields, and a
+    /// process start adds `model`.
+    fn session_start_payload(source: &str, conversation_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": conversation_id,
+            "transcript_path": format!("/home/u/.claude/projects/-w/{conversation_id}.jsonl"),
+            "cwd": "/w",
+            "hook_event_name": "SessionStart",
+            "source": source,
+        })
+    }
+
+    /// A live Claude session on a known conversation, with its record on disk
+    fn claude_on_conversation(manager: &mut SessionManager, conversation_id: &str) -> SessionId {
+        let session_id = create_persistable(manager, "claude");
+        assert!(manager.set_agent_session_id(session_id, conversation_id.to_string()));
+        session_id
+    }
+
+    #[test]
+    fn test_session_start_clear_updates_agent_session_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let old = "549197fa-619a-4211-9c7a-7dc60ac360c7";
+        let new = "b8be72f6-b45c-41de-83d6-c1f76e30d1dd";
+        let session_id = claude_on_conversation(&mut manager, old);
+        manager.get_mut(session_id).unwrap().info.usage.total_tokens = Some(90_000);
+
+        manager.handle_hook_event(&hook(
+            session_id,
+            "SessionStart",
+            session_start_payload("clear", new),
+        ));
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.agent_session_id.as_deref(), Some(new));
+        // Panoptes' own identity does not move with the conversation
+        assert_eq!(info.id, session_id);
+        assert_eq!(
+            info.agent_transcript_path.as_deref(),
+            Some(std::path::Path::new(&format!(
+                "/home/u/.claude/projects/-w/{new}.jsonl"
+            )))
+        );
+        // The figures shown belonged to the conversation just left
+        assert_eq!(info.usage.total_tokens, None);
+        // A restart must resume the new conversation, not the cleared one
+        assert_eq!(
+            load_store(&store_path)
+                .get(session_id)
+                .unwrap()
+                .agent_session_id
+                .as_deref(),
+            Some(new)
+        );
+        assert_eq!(info.resume_cursor().as_deref(), Some(new));
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_session_start_resume_and_fork_follow_the_new_id_too() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = claude_on_conversation(&mut manager, "original");
+
+        // An in-TUI `/resume` to an older conversation
+        manager.handle_hook_event(&hook(
+            session_id,
+            "SessionStart",
+            session_start_payload("resume", "older"),
+        ));
+        assert_eq!(
+            manager
+                .get(session_id)
+                .unwrap()
+                .info
+                .agent_session_id
+                .as_deref(),
+            Some("older")
+        );
+
+        // `/branch`: the original is left intact, but the user is now in the
+        // branch, so that is what a restart must bring back
+        manager.handle_hook_event(&hook(
+            session_id,
+            "SessionStart",
+            session_start_payload("fork", "branched"),
+        ));
+        assert_eq!(
+            manager
+                .get(session_id)
+                .unwrap()
+                .info
+                .agent_session_id
+                .as_deref(),
+            Some("branched")
+        );
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_session_start_compact_keeps_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = claude_on_conversation(&mut manager, "conversation");
+
+        // Claude sends the conversation's own ID with `compact`. Even if it
+        // did not, compaction is never a conversation boundary.
+        for id in ["conversation", "something-else"] {
+            let event = hook(
+                session_id,
+                "SessionStart",
+                session_start_payload("compact", id),
+            );
+            assert!(!manager.follow_agent_conversation(session_id, &event));
+            manager.handle_hook_event(&event);
+            let info = &manager.get(session_id).unwrap().info;
+            assert_eq!(info.agent_session_id.as_deref(), Some("conversation"));
+            assert_eq!(info.agent_transcript_path, None);
+        }
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_session_start_same_id_is_noop() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = claude_on_conversation(&mut manager, "conversation");
+        manager
+            .get_mut(session_id)
+            .unwrap()
+            .info
+            .resumed_conversation = true;
+
+        // Every process start announces the conversation Panoptes dictated or
+        // resumed. With the record gone, any write would bring the file back.
+        std::fs::remove_file(&store_path).unwrap();
+        for source in ["startup", "resume"] {
+            let event = hook(
+                session_id,
+                "SessionStart",
+                session_start_payload(source, "conversation"),
+            );
+            assert!(!manager.follow_agent_conversation(session_id, &event));
+            manager.handle_hook_event(&event);
+        }
+
+        assert!(!store_path.exists(), "a no-op must not write the store");
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.agent_session_id.as_deref(), Some("conversation"));
+        // Nor does it change where the transcript is read from
+        assert!(info.resumed_conversation);
+        assert_eq!(info.agent_transcript_path, None);
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_only_claude_sessions_follow_a_session_start() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = claude_on_conversation(&mut manager, "rollout-id");
+        manager.get_mut(session_id).unwrap().info.session_type = SessionType::OpenAICodex;
+
+        let event = hook(
+            session_id,
+            "SessionStart",
+            session_start_payload("clear", "x"),
+        );
+        assert!(!manager.follow_agent_conversation(session_id, &event));
+
+        // Nor does a payload-less event (the no-`jq` path) move anything: the
+        // envelope's `session_id` is Panoptes' own, never a conversation ID
+        manager.get_mut(session_id).unwrap().info.session_type = SessionType::ClaudeCode;
+        let bare = hook(session_id, "SessionStart", serde_json::Value::Null);
+        assert!(!manager.follow_agent_conversation(session_id, &bare));
+        assert_eq!(
+            manager
+                .get(session_id)
+                .unwrap()
+                .info
+                .agent_session_id
+                .as_deref(),
+            Some("rollout-id")
+        );
+
+        manager.shutdown_all();
+    }
+
+    // Transcript existence
+
+    /// A recovered session whose working directory still exists
+    fn recovered_record(dir: &TempDir, session_type: SessionType) -> SessionManager {
+        let store = store_with_record(dir, |info| info.session_type = session_type);
+        let mut manager = SessionManager::with_store(test_config(dir), store);
+        manager.spawn_as_shell = true;
+        manager
+    }
+
+    #[test]
+    fn test_resume_blocked_when_claude_transcript_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = recovered_record(&temp_dir, SessionType::ClaudeCode);
+        let info = manager.recovered().next().unwrap().clone();
+        let conversation_id = info.agent_session_id.clone().unwrap();
+        // The transcript exists, but under a different account than the one
+        // this session resumes under - which `--resume` cannot see either
+        let other_account = temp_dir.path().join("other-account");
+        write_claude_transcript(&other_account, &info.working_dir, &conversation_id);
+
+        manager.check_recovered_transcripts(|_| (Some(claude_home(&temp_dir)), None));
+
+        let recovered = manager.get_recovered(info.id).unwrap();
+        assert_eq!(
+            recovered.resume_blocker(),
+            Some("conversation transcript is missing")
+        );
+        let err = manager
+            .resume_session(info.id, 24, 80, Some(claude_home(&temp_dir)), None)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("conversation transcript is missing"),
+            "error should explain why: {err}"
+        );
+        // Kept, as any refused resume is: the user can still discard it
+        assert_eq!(manager.recovered_count(), 1);
+
+        // Resume looks again rather than trusting the list: once the file is
+        // back, it goes through
+        write_claude_transcript(&claude_home(&temp_dir), &info.working_dir, &conversation_id);
+        manager
+            .resume_session(info.id, 24, 80, Some(claude_home(&temp_dir)), None)
+            .unwrap();
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_resume_blocked_when_codex_rollout_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = recovered_record(&temp_dir, SessionType::OpenAICodex);
+        let info = manager.recovered().next().unwrap().clone();
+        let conversation_id = info.agent_session_id.clone().unwrap();
+        let codex_home = temp_dir.path().join("codex-home");
+        let day = codex_home.join("sessions/2026/09/23");
+        std::fs::create_dir_all(&day).unwrap();
+        let meta = |id: &str| {
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"{id}","timestamp":"2026-09-23T10:00:00Z","cwd":"/w"}}}}"#
+            ) + "\n"
+        };
+        // Someone else's rollout is not this conversation
+        std::fs::write(
+            day.join("rollout-2026-09-23T10-00-00-someone-else.jsonl"),
+            meta("someone-else"),
+        )
+        .unwrap();
+
+        manager.check_recovered_transcripts(|_| (None, Some(codex_home.clone())));
+        assert_eq!(
+            manager.get_recovered(info.id).unwrap().resume_blocker(),
+            Some("conversation transcript is missing")
+        );
+        let err = manager
+            .resume_session(info.id, 24, 80, None, Some(codex_home.clone()))
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("conversation transcript is missing"));
+
+        std::fs::write(
+            day.join(format!(
+                "rollout-2026-09-23T10-00-00-{conversation_id}.jsonl"
+            )),
+            meta(&conversation_id),
+        )
+        .unwrap();
+        manager.check_recovered_transcripts(|_| (None, Some(codex_home.clone())));
+        assert_eq!(
+            manager.get_recovered(info.id).unwrap().resume_blocker(),
+            None
+        );
+    }
+
+    /// `resume_blocker` runs for every session on every tick, so it must never
+    /// look for the transcript itself - only report what a look found
+    #[test]
+    fn test_resume_blocker_check_is_not_on_hot_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
+        // No transcript anywhere for this conversation from here on
+        manager.get_mut(session_id).unwrap().info.agent_session_id =
+            Some("never-written".to_string());
+
+        // Were it looking, it would say missing
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(!info.conversation_transcript_exists(Some(&claude_home(&temp_dir)), None));
+        assert_eq!(info.resume_blocker(), None);
+
+        // The sweep does not look either while a cheap clause already says no:
+        // this session is on screen, so it is never a candidate
+        assert!(manager
+            .suspend_idle_sessions(7200, Some(session_id))
+            .is_empty());
+        assert!(!manager.get(session_id).unwrap().info.transcript_missing);
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_a_session_without_a_transcript_is_not_suspended() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
+        // What a Claude session looks like before its first message, or just
+        // after `/clear`: a conversation ID whose file does not exist yet
+        manager.get_mut(session_id).unwrap().info.agent_session_id =
+            Some("not-written-yet".to_string());
+
+        // Suspending it would be closing it: `--resume` would find nothing
+        assert!(manager.suspend_idle_sessions(7200, None).is_empty());
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.transcript_missing, "the look is cached");
+        assert_eq!(
+            info.resume_blocker(),
+            Some("conversation transcript is missing")
+        );
+
+        // The agent doing something is what writes a transcript, so it makes
+        // the cached answer stale
+        write_claude_transcript(
+            &claude_home(&temp_dir),
+            std::path::Path::new("/tmp"),
+            "not-written-yet",
+        );
+        manager.apply_agent_event(session_id, AgentEvent::TurnCompleted { last_message: None });
+        let session = manager.get_mut(session_id).unwrap();
+        assert!(!session.info.transcript_missing);
+        let long_ago = Utc::now() - chrono::Duration::seconds(10_000);
+        session.info.last_engagement = long_ago;
+        session.info.last_activity = long_ago;
+        assert_eq!(manager.suspend_idle_sessions(7200, None), vec![session_id]);
+
+        manager.shutdown_all();
     }
 
     /// A shell has no conversation, no transcript, and no state that outlives

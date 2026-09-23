@@ -436,12 +436,45 @@ pub struct SessionInfo {
     pub auto_close_after_command: bool,
     /// The agent's own conversation ID, used to resume this session after a restart.
     ///
-    /// For Claude Code this equals `id` - Panoptes dictates the conversation UUID
-    /// via `--session-id` rather than discovering it. For Codex it is resolved
-    /// from the rollout file, since Codex has no equivalent flag. Always `None`
-    /// for shell sessions, which have no conversation to resume.
+    /// For Claude Code this starts out equal to `id` - Panoptes dictates the
+    /// conversation UUID via `--session-id` rather than discovering it - but
+    /// does not stay that way: `/clear`, an in-TUI `/resume` and `/branch` move
+    /// the live process onto another conversation, and this follows it (see
+    /// `SessionManager::follow_agent_conversation`). `id` never moves; it is
+    /// Panoptes' identity for the session, not Claude's. For Codex it is
+    /// resolved from the rollout file, since Codex has no equivalent flag.
+    /// Always `None` for shell sessions, which have no conversation to resume.
     #[serde(default)]
     pub agent_session_id: Option<String>,
+    /// Where the agent said it writes the transcript of `agent_session_id`
+    ///
+    /// Only ever set together with that ID, from Claude's own `SessionStart`
+    /// payload, so the two cannot describe different conversations. Preferred
+    /// over the path Panoptes would derive from the working directory, which is
+    /// a reconstruction of Claude's naming rather than the name itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_transcript_path: Option<std::path::PathBuf>,
+    /// Whether the conversation's transcript was found missing when last looked for
+    ///
+    /// A cached answer, so that [`SessionInfo::resume_blocker`] can report it
+    /// without touching the filesystem - it is called on every tick. Refreshed
+    /// only where a look is affordable: when the recovery list is built, at
+    /// resume or wake, and at the moment a suspension is about to happen.
+    /// Not persisted: the file can come back, or go, between runs.
+    #[serde(skip)]
+    pub transcript_missing: bool,
+    /// The `CLAUDE_CONFIG_DIR` the live process was spawned with, if any
+    ///
+    /// Runtime only, like the process: it is what a transcript check made while
+    /// the session is live must look under. A recovered session has no process,
+    /// and the directory it resumes under is resolved afresh from its account.
+    #[serde(skip)]
+    pub spawned_claude_config_dir: Option<std::path::PathBuf>,
+    /// The `CODEX_HOME` the live process was spawned with, if any
+    ///
+    /// The Codex counterpart of `spawned_claude_config_dir`.
+    #[serde(skip)]
+    pub spawned_codex_home: Option<std::path::PathBuf>,
 }
 
 impl SessionInfo {
@@ -480,6 +513,11 @@ impl SessionInfo {
     ///
     /// Only agent sessions reach this: shells are never persisted, so they are
     /// never recovered.
+    ///
+    /// Called on hot paths - the suspension sweep every tick, and every render
+    /// of the session list - so it reads the transcript's existence from the
+    /// cached `transcript_missing` rather than looking for the file itself.
+    /// [`SessionInfo::conversation_transcript_exists`] is the look.
     pub fn resume_blocker(&self) -> Option<&'static str> {
         if !self.working_dir.exists() {
             return Some("working directory is missing");
@@ -487,7 +525,51 @@ impl SessionInfo {
         if self.agent_session_id.is_none() {
             return Some("no conversation was recorded");
         }
+        if self.transcript_missing {
+            return Some("conversation transcript is missing");
+        }
         None
+    }
+
+    /// Whether this session's conversation transcript is on disk
+    ///
+    /// Asks what `--resume` will ask: the conversation has to exist under the
+    /// config directory the agent is about to run with, not merely somewhere.
+    /// A transcript left under another account's `CLAUDE_CONFIG_DIR` or
+    /// `CODEX_HOME` is as unreachable as a deleted one. `None` for either
+    /// directory means the default account.
+    ///
+    /// Does filesystem work - a stat or two for Claude, a walk of the dated
+    /// rollout tree for Codex - so it must stay off every per-tick path; see
+    /// [`SessionInfo::resume_blocker`]. True when there is nothing to check (no
+    /// conversation recorded, or a shell), which other blockers already cover.
+    pub fn conversation_transcript_exists(
+        &self,
+        claude_config_dir: Option<&std::path::Path>,
+        codex_home: Option<&std::path::Path>,
+    ) -> bool {
+        let Some(conversation_id) = self.agent_session_id.as_deref() else {
+            return true;
+        };
+        match self.session_type {
+            SessionType::Shell => true,
+            SessionType::ClaudeCode => {
+                let config_dir = claude_config_dir
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(crate::transcript::default_claude_config_dir);
+                crate::transcript::claude::transcript_exists(
+                    &config_dir,
+                    &self.working_dir,
+                    conversation_id,
+                )
+            }
+            SessionType::OpenAICodex => {
+                let codex_home = codex_home
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(crate::transcript::default_codex_home);
+                crate::agent::codex::rollout_path(&codex_home, conversation_id).is_some()
+            }
+        }
     }
 
     /// Whether this session can be brought back
@@ -675,6 +757,10 @@ impl SessionInfo {
             codex_config_name: None,
             auto_close_after_command: false,
             agent_session_id: None,
+            agent_transcript_path: None,
+            transcript_missing: false,
+            spawned_claude_config_dir: None,
+            spawned_codex_home: None,
         }
     }
 

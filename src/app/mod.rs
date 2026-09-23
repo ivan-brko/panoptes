@@ -42,8 +42,10 @@ use crate::hooks::{
 use crate::input::agent_configs::AgentKind;
 use crate::logging::LogFileInfo;
 use crate::project::{BranchId, ProjectId, ProjectStore};
-use crate::session::{mouse_event_to_bytes, SessionId, SessionManager, SessionType};
-use crate::transcript::{TranscriptKind, TranscriptWatcher, WatchTarget};
+use crate::session::{mouse_event_to_bytes, SessionId, SessionInfo, SessionManager, SessionType};
+use crate::transcript::{
+    default_claude_config_dir, default_codex_home, TranscriptKind, TranscriptWatcher, WatchTarget,
+};
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::marquee::Marquee;
 use crate::tui::panes::{side_mode, PaneLayout, SideMode};
@@ -154,25 +156,11 @@ pub struct App {
 /// thread polls the files themselves far more often.
 const TRANSCRIPT_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 
-/// The default `CLAUDE_CONFIG_DIR`, used when a session ran on the default account
-fn default_claude_config_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".claude")
-}
-
 /// How often to scan for Codex rollout files while any session lacks an ID
 ///
 /// Codex writes its rollout within a moment of starting, so this resolves on the
 /// first or second scan and then stops costing anything.
 const CODEX_ID_SCAN_INTERVAL: Duration = Duration::from_secs(2);
-
-/// The default `CODEX_HOME`, used when a session ran on the default account
-fn default_codex_home() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join(".codex")
-}
 
 /// The colour preset the UI should be wearing, given where the user is
 ///
@@ -222,6 +210,80 @@ fn acknowledgeable_session(
         return None;
     }
     viewed_session(terminal_focused, active_session)
+}
+
+/// The account directories a session runs under, `None` meaning the default
+///
+/// A quiet lookup: an account deleted since is reported where it matters, when
+/// a session is actually relaunched (`App::resolve_agent_config_dirs`).
+fn account_dirs(
+    claude_config_store: &ClaudeConfigStore,
+    codex_config_store: &CodexConfigStore,
+    info: &SessionInfo,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let claude_config_dir = info
+        .claude_config_id
+        .and_then(|id| claude_config_store.get(id))
+        .and_then(|config| config.config_dir.clone());
+    let codex_home = info
+        .codex_config_id
+        .and_then(|id| codex_config_store.get(id))
+        .and_then(|config| config.codex_home.clone());
+    (claude_config_dir, codex_home)
+}
+
+/// Which transcript to follow for a session, and from where in it
+///
+/// Kept apart from `App` so the choice can be tested without one. Does no
+/// filesystem work for Claude; for Codex it has to find the rollout, whose
+/// name embeds a timestamp as well as the ID.
+fn watch_target_for(
+    info: &SessionInfo,
+    claude_config_dir: &std::path::Path,
+    codex_home: &std::path::Path,
+) -> Option<WatchTarget> {
+    let conversation_id = info.agent_session_id.as_deref()?;
+    // A session that started its own conversation owns everything in the
+    // file, including whatever it did in the seconds before Panoptes managed
+    // to locate it
+    let from_start = !info.resumed_conversation;
+
+    match info.session_type {
+        SessionType::Shell => None,
+
+        SessionType::ClaudeCode => Some(WatchTarget {
+            session_id: info.id,
+            kind: TranscriptKind::Claude,
+            // The path Claude reported, when it has, over our reconstruction
+            // of its naming. Both describe `conversation_id`: the reported one
+            // is only ever recorded alongside it.
+            path: info.agent_transcript_path.clone().unwrap_or_else(|| {
+                crate::transcript::claude::transcript_path(
+                    claude_config_dir,
+                    &info.working_dir,
+                    conversation_id,
+                )
+            }),
+            codex_sessions_dir: None,
+            conversation_id: None,
+            from_start,
+        }),
+
+        SessionType::OpenAICodex => {
+            // Codex names its rollouts by timestamp as well as ID, so unlike
+            // Claude the path has to be found rather than derived
+            let path = crate::agent::codex::rollout_path(codex_home, conversation_id)?;
+
+            Some(WatchTarget {
+                session_id: info.id,
+                kind: TranscriptKind::Codex,
+                path,
+                codex_sessions_dir: Some(codex_home.join("sessions")),
+                conversation_id: Some(conversation_id.to_string()),
+                from_start,
+            })
+        }
+    }
 }
 
 impl App {
@@ -284,7 +346,13 @@ impl App {
         tracing::debug!("Hook server started on port {}", hook_server.addr().port());
 
         // Create session manager
-        let sessions = SessionManager::new(config.clone());
+        let mut sessions = SessionManager::new(config.clone());
+        // Once, here, rather than whenever the list is drawn: a recovered
+        // session whose transcript has gone is listed as unavailable, instead
+        // of being offered and then failing at launch
+        sessions.check_recovered_transcripts(|info| {
+            account_dirs(&claude_config_store, &codex_config_store, info)
+        });
 
         // Start reading agent transcripts. Runs on its own thread: the reads
         // are incremental, but a burst of tool output can append a lot at once
@@ -2068,32 +2136,16 @@ impl App {
         }
         self.last_transcript_sync = Some(Instant::now());
 
-        let live: Vec<(SessionId, SessionType, PathBuf, Option<String>)> = self
-            .sessions
-            .iter()
-            .map(|(&id, session)| {
-                (
-                    id,
-                    session.info.session_type,
-                    session.info.working_dir.clone(),
-                    session.info.agent_session_id.clone(),
-                )
-            })
-            .collect();
+        let live: Vec<SessionId> = self.sessions.iter().map(|(&id, _)| id).collect();
 
         let mut still_here = Vec::new();
 
-        for (session_id, session_type, working_dir, conversation_id) in live {
+        for session_id in live {
             still_here.push(session_id);
 
             // A shell has no conversation, and a session whose ID has not been
             // resolved yet has no file to point at. Both resolve themselves.
-            let Some(conversation_id) = conversation_id else {
-                continue;
-            };
-            let Some(target) =
-                self.watch_target(session_id, session_type, &working_dir, &conversation_id)
-            else {
+            let Some(target) = self.watch_target(session_id) else {
                 continue;
             };
 
@@ -2117,64 +2169,20 @@ impl App {
     }
 
     /// Work out which file to follow for a session, if there is one
-    fn watch_target(
-        &self,
-        session_id: SessionId,
-        session_type: SessionType,
-        working_dir: &std::path::Path,
-        conversation_id: &str,
-    ) -> Option<WatchTarget> {
-        let info = self.sessions.get(session_id).map(|s| &s.info);
-        let claude_config_id = info.and_then(|i| i.claude_config_id);
-        let codex_config_id = info.and_then(|i| i.codex_config_id);
-        // A session that started its own conversation owns everything in the
-        // file, including whatever it did in the seconds before Panoptes
-        // managed to locate it
-        let from_start = info.is_some_and(|i| !i.resumed_conversation);
-
-        match session_type {
-            SessionType::Shell => None,
-
-            SessionType::ClaudeCode => {
-                let config_dir = claude_config_id
-                    .and_then(|id| self.claude_config_store.get(id))
-                    .and_then(|config| config.config_dir.clone())
-                    .unwrap_or_else(default_claude_config_dir);
-
-                Some(WatchTarget {
-                    session_id,
-                    kind: TranscriptKind::Claude,
-                    path: crate::transcript::claude::transcript_path(
-                        &config_dir,
-                        working_dir,
-                        conversation_id,
-                    ),
-                    codex_sessions_dir: None,
-                    conversation_id: None,
-                    from_start,
-                })
-            }
-
-            SessionType::OpenAICodex => {
-                let codex_home = codex_config_id
-                    .and_then(|id| self.codex_config_store.get(id))
-                    .and_then(|config| config.codex_home.clone())
-                    .unwrap_or_else(default_codex_home);
-
-                // Codex names its rollouts by timestamp as well as ID, so
-                // unlike Claude the path has to be found rather than derived
-                let path = crate::agent::codex::rollout_path(&codex_home, conversation_id)?;
-
-                Some(WatchTarget {
-                    session_id,
-                    kind: TranscriptKind::Codex,
-                    path,
-                    codex_sessions_dir: Some(codex_home.join("sessions")),
-                    conversation_id: Some(conversation_id.to_string()),
-                    from_start,
-                })
-            }
-        }
+    ///
+    /// Re-evaluated on every sync, which is what makes a Claude session that
+    /// moves to another conversation (`/clear`, `/resume`, `/branch`) switch
+    /// files: its `agent_session_id` changes, so the path does, and the sync
+    /// re-watches.
+    fn watch_target(&self, session_id: SessionId) -> Option<WatchTarget> {
+        let info = &self.sessions.get(session_id)?.info;
+        let (claude_config_dir, codex_home) =
+            account_dirs(&self.claude_config_store, &self.codex_config_store, info);
+        watch_target_for(
+            info,
+            &claude_config_dir.unwrap_or_else(default_claude_config_dir),
+            &codex_home.unwrap_or_else(default_codex_home),
+        )
     }
 
     /// Apply everything the transcript watcher has observed
@@ -3100,7 +3108,99 @@ fn mouse_debug_enabled_from_env() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use uuid::Uuid;
+
+    /// A live Claude session that was itself resumed, on conversation `a`
+    fn resumed_claude_session(temp_dir: &tempfile::TempDir) -> (SessionManager, SessionId) {
+        let mut sessions = SessionManager::with_store(
+            Config::default(),
+            crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+        let session_id = sessions
+            .insert_test_session("claude", Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+        let info = &mut sessions.get_mut(session_id).unwrap().info;
+        assert_eq!(info.session_type, SessionType::ClaudeCode);
+        info.agent_session_id = Some("a".to_string());
+        info.resumed_conversation = true;
+        (sessions, session_id)
+    }
+
+    fn session_start(session_id: SessionId, source: &str, id: &str) -> crate::hooks::HookEvent {
+        crate::hooks::HookEvent {
+            session_id: session_id.to_string(),
+            event: "SessionStart".to_string(),
+            timestamp: 1,
+            payload: serde_json::json!({
+                "session_id": id,
+                "transcript_path": format!("/reported/{id}.jsonl"),
+                "cwd": "/tmp",
+                "hook_event_name": "SessionStart",
+                "source": source,
+            }),
+        }
+    }
+
+    #[test]
+    fn test_watch_target_follows_new_conversation_from_start() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let claude_dir = temp_dir.path().join("claude");
+        let codex_home = temp_dir.path().join("codex");
+        let (mut sessions, session_id) = resumed_claude_session(&temp_dir);
+
+        // Before: the resumed conversation, derived from the working directory,
+        // and attached at its end so its history does not replay
+        let target = watch_target_for(
+            &sessions.get(session_id).unwrap().info,
+            &claude_dir,
+            &codex_home,
+        )
+        .unwrap();
+        assert_eq!(
+            target.path,
+            crate::transcript::claude::transcript_path(&claude_dir, Path::new("/tmp"), "a")
+        );
+        assert!(!target.from_start);
+
+        // `/clear`: a different path, so the sync re-watches - and from the
+        // first line, because every record in it is this session's own
+        sessions.handle_hook_event(&session_start(session_id, "clear", "b"));
+        let target = watch_target_for(
+            &sessions.get(session_id).unwrap().info,
+            &claude_dir,
+            &codex_home,
+        )
+        .unwrap();
+        assert_eq!(target.session_id, session_id);
+        assert_eq!(target.path, Path::new("/reported/b.jsonl"));
+        assert!(target.from_start);
+
+        // `/branch` likewise
+        sessions.handle_hook_event(&session_start(session_id, "fork", "c"));
+        let target = watch_target_for(
+            &sessions.get(session_id).unwrap().info,
+            &claude_dir,
+            &codex_home,
+        )
+        .unwrap();
+        assert_eq!(target.path, Path::new("/reported/c.jsonl"));
+        assert!(target.from_start);
+
+        // An in-TUI `/resume` lands in an older conversation, which attaches at
+        // its end exactly as a relaunch with `--resume` does
+        sessions.handle_hook_event(&session_start(session_id, "resume", "d"));
+        let target = watch_target_for(
+            &sessions.get(session_id).unwrap().info,
+            &claude_dir,
+            &codex_home,
+        )
+        .unwrap();
+        assert_eq!(target.path, Path::new("/reported/d.jsonl"));
+        assert!(!target.from_start);
+
+        sessions.shutdown_all();
+    }
 
     #[test]
     fn test_input_mode_default() {
