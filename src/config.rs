@@ -171,6 +171,18 @@ pub struct Config {
     #[serde(default)]
     pub attention_on_idle: bool,
 
+    /// Whether Claude sessions route their status line through Panoptes
+    ///
+    /// Claude reports its plan rate limits, and the running session's real
+    /// context window, only to a `statusLine` command. On (the default),
+    /// Panoptes installs one in the working directory's
+    /// `.claude/settings.local.json` that forwards the figures and then runs
+    /// the user's own status line, so what Claude displays is unchanged. Off,
+    /// Panoptes puts back whatever it wrapped and Claude sessions show no
+    /// rate limits. Read when a session spawns.
+    #[serde(default = "default_true")]
+    pub claude_status_line: bool,
+
     /// Which colour-capability tier the UI palette uses
     ///
     /// `auto` (the default) detects it from `COLORTERM`/`TERM`; the other
@@ -482,6 +494,7 @@ impl Default for Config {
             suspend_after_secs: default_suspend_after(),
             log_agent_events: false,
             attention_on_idle: false,
+            claude_status_line: true,
             theme: ThemeMode::default(),
             palette: Palette::default(),
             notify_on: NotifyOn::default(),
@@ -660,6 +673,7 @@ mod tests {
         original.notify_on.turn_complete = false;
         original.notify_on.stalled = true;
         original.attention_on_idle = true;
+        original.claude_status_line = false;
         original.custom_shortcuts.push(CustomShortcut::new(
             'v',
             "VSCode".to_string(),
@@ -671,6 +685,7 @@ mod tests {
         let parsed: Config = toml::from_str(&text).expect("config must round trip");
 
         assert!(parsed.attention_on_idle);
+        assert!(!parsed.claude_status_line);
         assert!(!parsed.notify_on.turn_complete);
         assert!(parsed.notify_on.stalled);
         assert!(parsed.notify_on.approval);
@@ -720,6 +735,8 @@ notification_method = "title"
         assert!(parsed.notify_on.crashed);
         assert!(parsed.notify_on.failed);
         assert!(!parsed.attention_on_idle);
+        // The status line is wrapped unless the user says otherwise
+        assert!(parsed.claude_status_line);
     }
 
     #[test]

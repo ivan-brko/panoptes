@@ -3,6 +3,33 @@
 //! This module implements the `AgentAdapter` trait for Claude Code CLI.
 //! It handles hook script installation, session settings configuration,
 //! and process spawning.
+//!
+//! # The status line
+//!
+//! Claude reports its plan rate limits, and the running session's real
+//! context window, only to a `statusLine` command, as JSON on stdin. Panoptes
+//! puts its own command in `<working dir>/.claude/settings.local.json`, next
+//! to the hooks. A `statusLine` there replaces whatever the user configured at
+//! any lower layer, so the command *wraps* the user's own: it forwards the
+//! document to the hook server, then pipes the same document to the user's
+//! command and prints what that prints. With no user status line it prints
+//! Panoptes' own compact line instead, drawn by `panoptes status-line` (the
+//! executable that wrote the settings) - Claude reserves the row for any
+//! status line, so the alternative was an empty one.
+//!
+//! The user's command travels as an argument of ours, so a later spawn can
+//! tell its own command from the user's and never wraps itself. A command
+//! that came from `settings.local.json` itself - the one layer Panoptes
+//! overwrites - is marked `--local`, so it can be put back when the feature
+//! is turned off (`claude_status_line = false`). One found at a lower layer is
+//! re-read from that layer at every spawn instead, so an edit to it is
+//! picked up.
+//!
+//! Like the hooks, the command is never removed when a session ends: the
+//! file is shared by every session in the working directory, including ones
+//! still running, and Claude re-reads it live. Left behind, it is inert
+//! outside Panoptes - without `PANOPTES_SESSION_ID` it posts nothing and
+//! only runs the user's command.
 
 use crate::config::Config;
 use crate::hooks::HookEventType;
@@ -15,6 +42,39 @@ use super::events::{UsageSnapshot, WindowSource};
 
 /// Base hook script filename (shared across all sessions)
 const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
+
+/// Status-line wrapper filename (shared across all sessions)
+///
+/// Also how a `statusLine` command is recognised as Panoptes' own, whatever
+/// directory it was installed to.
+const STATUS_LINE_SCRIPT_NAME: &str = "panoptes-statusline.sh";
+
+/// Marks a wrapped command that came from `settings.local.json` itself
+const STATUS_LINE_LOCAL_FLAG: &str = "--local";
+
+/// A user's own `statusLine`, found where Claude would find it
+#[derive(Debug, Clone, PartialEq)]
+struct UserStatusLine {
+    /// The whole setting - `padding`, `refreshInterval` and the rest are kept
+    setting: serde_json::Value,
+    /// The command it runs
+    command: String,
+    /// Whether it came from `settings.local.json`, the file Panoptes rewrites
+    local: bool,
+}
+
+/// What a spawn does to the working directory's `statusLine`
+#[derive(Debug, Clone, PartialEq)]
+enum StatusLinePlan {
+    /// Wrap the user's status line with the script at this path
+    Install {
+        script: PathBuf,
+        /// The user-level settings file, the lowest layer
+        user_settings: Option<PathBuf>,
+    },
+    /// Put back whatever Panoptes wrapped, if it wrapped anything
+    Restore,
+}
 
 /// Hook event types Panoptes registers with Claude Code
 ///
@@ -251,13 +311,26 @@ exit 0
         });
     }
 
+    /// Create the session-specific settings file, hooks only
+    ///
+    /// `Restore` leaves `statusLine` alone unless Panoptes wrapped one.
+    #[cfg(test)]
+    fn create_session_settings(
+        working_dir: &Path,
+        event_scripts: &[(HookEventType, PathBuf)],
+    ) -> Result<PathBuf> {
+        Self::write_session_settings(working_dir, event_scripts, &StatusLinePlan::Restore)
+    }
+
     /// Create the session-specific settings file
     ///
     /// This function MERGES hooks into existing settings rather than overwriting,
     /// preserving Claude Code trust settings and other user configurations.
-    fn create_session_settings(
+    /// `statusLine` is the one other key it may change, per `status_line`.
+    fn write_session_settings(
         working_dir: &Path,
         event_scripts: &[(HookEventType, PathBuf)],
+        status_line: &StatusLinePlan,
     ) -> Result<PathBuf> {
         // Create .claude directory in the working directory
         let claude_dir = working_dir.join(".claude");
@@ -298,6 +371,12 @@ exit 0
         // Merge hooks into settings (only overwrite the hooks key, preserve everything else)
         settings["hooks"] = serde_json::Value::Object(hooks);
 
+        Self::plan_status_line(
+            &mut settings,
+            status_line,
+            &claude_dir.join("settings.json"),
+        );
+
         // Create backup before writing if file exists (safeguard)
         if settings_path.exists() {
             let backup_path = settings_path.with_extension("json.bak");
@@ -313,6 +392,273 @@ exit 0
         .context("Failed to write settings file")?;
 
         Ok(settings_path)
+    }
+
+    /// Get the path to the shared status-line wrapper
+    fn status_line_script_path(config: &Config) -> PathBuf {
+        config.hooks_dir.join(STATUS_LINE_SCRIPT_NAME)
+    }
+
+    /// Install the shared status-line wrapper
+    fn install_status_line_script(config: &Config) -> Result<PathBuf> {
+        let script_path = Self::status_line_script_path(config);
+        super::install_executable_script(
+            &script_path,
+            &Self::generate_status_line_script(
+                &format!("http://127.0.0.1:{}/hook", config.hook_port),
+                Self::default_status_line_exe().as_deref(),
+            ),
+        )
+        .context("Failed to install status line script")?;
+        Ok(script_path)
+    }
+
+    /// The Panoptes executable that draws the default status line
+    ///
+    /// Taken from the running process, so it is the binary that wrote the
+    /// settings. `None` if the OS cannot say, in which case a user without a
+    /// status line of their own gets an empty one.
+    fn default_status_line_exe() -> Option<PathBuf> {
+        match std::env::current_exe() {
+            Ok(exe) => Some(exe),
+            Err(e) => {
+                tracing::warn!("Cannot locate the Panoptes executable: {e}");
+                None
+            }
+        }
+    }
+
+    /// Generate the status-line wrapper, posting to `hook_url`
+    ///
+    /// Claude runs it on every status-line refresh, so it is kept to the
+    /// shell's own builtins plus `date` and a backgrounded `curl`. The envelope
+    /// is built by splicing Claude's document in whole rather than with `jq`:
+    /// that is safe because the document is already JSON and nothing is
+    /// picked out of it, and it saves a process on the hot path. The session
+    /// ID is ours, and is checked to look like one before it is spliced in.
+    ///
+    /// Arguments: `[--local] [COMMAND]`, where `COMMAND` is the user's own
+    /// status line, run by `bash -c` as Claude would run it. Without one,
+    /// `panoptes_exe status-line` draws Panoptes' compact line instead (see
+    /// `hooks::status_line::compact_line`); with no `panoptes_exe` the line
+    /// is empty.
+    ///
+    /// Public only so the integration tests can run it against the real
+    /// binary.
+    #[doc(hidden)]
+    pub fn generate_status_line_script(hook_url: &str, panoptes_exe: Option<&Path>) -> String {
+        let url = super::shell_quote(hook_url);
+        let default_line = match panoptes_exe {
+            // A missing or failing binary - a rebuilt checkout, a moved
+            // install - costs the line, never Claude an error
+            Some(exe) => format!(
+                "printf '%s' \"$input\" | {} status-line 2>/dev/null\n",
+                super::shell_quote(&exe.to_string_lossy())
+            ),
+            None => String::new(),
+        };
+        format!(
+            r#"#!/bin/sh
+# Panoptes status line for Claude Code
+# Forwards the status-line JSON on stdin to Panoptes, then runs the user's own
+# status line on the same input and prints what it prints - or, if they have
+# none, Panoptes' own compact line.
+
+input="$(cat)"
+
+# Outside Panoptes there is nobody to tell: only the user's command runs
+sid="${{PANOPTES_SESSION_ID:-}}"
+case "$sid" in
+    '' | *[!0-9A-Fa-f-]*) sid="" ;;
+esac
+
+if [ -n "$sid" ] && [ -n "$input" ]; then
+    timestamp="$(date +%s 2>/dev/null)"
+    case "$timestamp" in
+        '' | *[!0-9]*) timestamp=0 ;;
+    esac
+    # Fire and forget, detached from stdout so Claude is not kept waiting
+    curl -s -X POST {url} \
+        -H "Content-Type: application/json" \
+        -d "{{\"session_id\":\"$sid\",\"event\":\"StatusLine\",\"timestamp\":$timestamp,\"payload\":$input}}" \
+        --connect-timeout 1 \
+        --max-time 2 \
+        > /dev/null 2>&1 &
+fi
+
+if [ "${{1:-}}" = "{local_flag}" ]; then
+    shift
+fi
+
+if [ -n "${{1:-}}" ]; then
+    printf '%s' "$input" | bash -c "$1"
+    exit $?
+fi
+
+# No status line of the user's own: Panoptes' compact one
+{default_line}exit 0
+"#,
+            local_flag = STATUS_LINE_LOCAL_FLAG,
+        )
+    }
+
+    /// The `statusLine` command that runs `script` in front of `user`'s
+    fn status_line_command(script: &Path, user: Option<&UserStatusLine>) -> String {
+        let mut words = vec![super::shell_quote(&script.to_string_lossy())];
+        if let Some(user) = user {
+            if user.local {
+                words.push(super::shell_quote(STATUS_LINE_LOCAL_FLAG));
+            }
+            words.push(super::shell_quote(&user.command));
+        }
+        words.join(" ")
+    }
+
+    /// Read a `statusLine` command back as Panoptes' own
+    ///
+    /// Returns whether it was marked local and the user command it wraps, or
+    /// `None` if it is not one of ours. Only the exact shape
+    /// [`Self::status_line_command`] writes is accepted.
+    fn parse_own_status_line(command: &str) -> Option<(bool, Option<String>)> {
+        let words = super::split_shell_quoted(command)?;
+        let (script, rest) = words.split_first()?;
+        if Path::new(script).file_name()? != STATUS_LINE_SCRIPT_NAME {
+            return None;
+        }
+        match rest {
+            [] => Some((false, None)),
+            [flag, user] if flag == STATUS_LINE_LOCAL_FLAG => Some((true, Some(user.clone()))),
+            [user] if user != STATUS_LINE_LOCAL_FLAG => Some((false, Some(user.clone()))),
+            _ => None,
+        }
+    }
+
+    /// The command a `statusLine` setting runs, if it is one Claude would run
+    fn setting_command(setting: &serde_json::Value) -> Option<&str> {
+        let object = setting.as_object()?;
+        if object.get("type").and_then(|t| t.as_str()) != Some("command") {
+            return None;
+        }
+        object
+            .get("command")?
+            .as_str()
+            .filter(|c| !c.trim().is_empty())
+    }
+
+    /// The user-level `settings.json` for a spawn's `CLAUDE_CONFIG_DIR`
+    ///
+    /// A profile's directory when it names one; otherwise whatever Panoptes'
+    /// own environment says, since the spawned process inherits it; otherwise
+    /// `~/.claude`.
+    fn user_settings_path(claude_config_dir: Option<&Path>) -> Option<PathBuf> {
+        let dir = match claude_config_dir {
+            Some(dir) => dir.to_path_buf(),
+            None => match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+                Some(dir) => PathBuf::from(dir),
+                None => dirs::home_dir()?.join(".claude"),
+            },
+        };
+        Some(dir.join("settings.json"))
+    }
+
+    /// Read one settings layer's `statusLine`, tolerating a missing or broken file
+    fn read_status_line_setting(path: &Path) -> Option<serde_json::Value> {
+        let content = std::fs::read_to_string(path).ok()?;
+        let settings: serde_json::Value = serde_json::from_str(&content).ok()?;
+        settings.get("statusLine").cloned()
+    }
+
+    /// The status line the user would see without Panoptes
+    ///
+    /// Claude takes `statusLine` from the highest layer that sets it: the
+    /// project's `settings.local.json`, then its `settings.json`, then the
+    /// user's `$CLAUDE_CONFIG_DIR/settings.json`. Panoptes' own command is
+    /// seen through, to the command it wraps; an unmarked one in the local
+    /// file wraps a lower layer's, which is read afresh from that layer.
+    fn resolve_user_status_line(
+        local_settings: &serde_json::Value,
+        project_settings: &Path,
+        user_settings: Option<&Path>,
+    ) -> Option<UserStatusLine> {
+        let layers = [
+            (local_settings.get("statusLine").cloned(), true),
+            (Self::read_status_line_setting(project_settings), false),
+            (
+                user_settings.and_then(Self::read_status_line_setting),
+                false,
+            ),
+        ];
+        for (setting, local) in layers {
+            let Some(setting) = setting else { continue };
+            let Some(command) = Self::setting_command(&setting) else {
+                continue;
+            };
+            let (command, local) = match Self::parse_own_status_line(command) {
+                // Ours: see through it. Only a local mark says the wrapped
+                // command lives nowhere else.
+                Some((marked, Some(wrapped))) if marked || !local => (wrapped, local),
+                Some(_) => continue,
+                None => (command.to_string(), local),
+            };
+            let mut setting = setting;
+            setting["command"] = serde_json::Value::String(command.clone());
+            return Some(UserStatusLine {
+                setting,
+                command,
+                local,
+            });
+        }
+        None
+    }
+
+    /// Apply a [`StatusLinePlan`] to the local settings about to be written
+    fn plan_status_line(
+        settings: &mut serde_json::Value,
+        plan: &StatusLinePlan,
+        project_settings: &Path,
+    ) {
+        match plan {
+            StatusLinePlan::Install {
+                script,
+                user_settings,
+            } => {
+                let user = Self::resolve_user_status_line(
+                    settings,
+                    project_settings,
+                    user_settings.as_deref(),
+                );
+                // The user's own options - padding, refresh interval - carry
+                // over; only the command is ours
+                let mut setting = user
+                    .as_ref()
+                    .map(|u| u.setting.clone())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                setting["type"] = serde_json::Value::String("command".to_string());
+                setting["command"] =
+                    serde_json::Value::String(Self::status_line_command(script, user.as_ref()));
+                settings["statusLine"] = setting;
+            }
+            StatusLinePlan::Restore => {
+                let Some(setting) = settings.get("statusLine") else {
+                    return;
+                };
+                let Some(own) =
+                    Self::setting_command(setting).and_then(Self::parse_own_status_line)
+                else {
+                    return;
+                };
+                match own {
+                    (true, Some(original)) => {
+                        settings["statusLine"]["command"] = serde_json::Value::String(original);
+                    }
+                    _ => {
+                        if let Some(object) = settings.as_object_mut() {
+                            object.remove("statusLine");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The Claude conversation ID this spawn will use
@@ -402,9 +748,18 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let event_scripts = Self::install_hook_script(config)?;
         // Note: We don't add the shared scripts to cleanup_paths since they're reused
 
+        let status_line = if config.claude_status_line {
+            StatusLinePlan::Install {
+                script: Self::install_status_line_script(config)?,
+                user_settings: Self::user_settings_path(spawn_config.claude_config_dir.as_deref()),
+            }
+        } else {
+            StatusLinePlan::Restore
+        };
+
         // Create session-specific settings file
         let settings_path =
-            Self::create_session_settings(&spawn_config.working_dir, &event_scripts)?;
+            Self::write_session_settings(&spawn_config.working_dir, &event_scripts, &status_line)?;
         cleanup_paths.push(settings_path);
 
         Ok(cleanup_paths)
@@ -1080,5 +1435,606 @@ mod tests {
 
         // Verify hooks were added (fresh settings object)
         assert!(settings.get("hooks").is_some());
+    }
+
+    // The status line: which one the user has, and the wrapper around it
+
+    /// Write a settings file with the given `statusLine`, or none
+    fn settings_file(path: &Path, status_line: Option<serde_json::Value>) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut settings = serde_json::json!({"model": "opus"});
+        if let Some(status_line) = status_line {
+            settings["statusLine"] = status_line;
+        }
+        std::fs::write(path, settings.to_string()).unwrap();
+    }
+
+    fn command_setting(command: &str) -> serde_json::Value {
+        serde_json::json!({"type": "command", "command": command})
+    }
+
+    /// The command a resolved status line runs, and whether it is local
+    fn resolved(
+        local: &serde_json::Value,
+        project: &Path,
+        user: Option<&Path>,
+    ) -> Option<(String, bool)> {
+        ClaudeCodeAdapter::resolve_user_status_line(local, project, user)
+            .map(|found| (found.command, found.local))
+    }
+
+    #[test]
+    fn test_resolves_effective_user_status_line() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("repo/.claude/settings.json");
+        // A profile's CLAUDE_CONFIG_DIR is where the user layer lives
+        let config_dir = dir.path().join("claude-work");
+        let user = ClaudeCodeAdapter::user_settings_path(Some(&config_dir)).expect("a user layer");
+        assert_eq!(user, config_dir.join("settings.json"));
+        let user = Some(user.as_path());
+        let no_local = serde_json::json!({});
+        let ours = Path::new("/elsewhere/hooks/panoptes-statusline.sh");
+
+        // Nothing anywhere, and missing files are not an error
+        assert_eq!(resolved(&no_local, &project, user), None);
+
+        // User layer only
+        settings_file(
+            &config_dir.join("settings.json"),
+            Some(command_setting("user-sl")),
+        );
+        assert_eq!(
+            resolved(&no_local, &project, user),
+            Some(("user-sl".to_string(), false))
+        );
+
+        // The project beats the user
+        settings_file(&project, Some(command_setting("project-sl")));
+        assert_eq!(
+            resolved(&no_local, &project, user),
+            Some(("project-sl".to_string(), false))
+        );
+
+        // And the local file beats both
+        let local = serde_json::json!({"statusLine": command_setting("local-sl")});
+        assert_eq!(
+            resolved(&local, &project, user),
+            Some(("local-sl".to_string(), true))
+        );
+
+        // Panoptes' own command wrapping a lower layer's is seen through, and
+        // that layer is read afresh - here it has changed since
+        let stale = UserStatusLine {
+            setting: command_setting("old-project-sl"),
+            command: "old-project-sl".to_string(),
+            local: false,
+        };
+        let local = serde_json::json!({"statusLine": command_setting(
+            &ClaudeCodeAdapter::status_line_command(ours, Some(&stale))
+        )});
+        assert_eq!(
+            resolved(&local, &project, user),
+            Some(("project-sl".to_string(), false))
+        );
+
+        // One wrapping the local file's own command gives it back
+        let original = UserStatusLine {
+            setting: command_setting("local-sl"),
+            command: "local-sl".to_string(),
+            local: true,
+        };
+        let local = serde_json::json!({"statusLine": command_setting(
+            &ClaudeCodeAdapter::status_line_command(ours, Some(&original))
+        )});
+        assert_eq!(
+            resolved(&local, &project, user),
+            Some(("local-sl".to_string(), true))
+        );
+
+        // A bare wrapper of ours, in any layer, is not a user status line
+        let bare = command_setting(&ClaudeCodeAdapter::status_line_command(ours, None));
+        settings_file(&project, Some(bare.clone()));
+        let local = serde_json::json!({ "statusLine": bare });
+        assert_eq!(
+            resolved(&local, &project, user),
+            Some(("user-sl".to_string(), false))
+        );
+
+        // Something Claude would not run is skipped, not wrapped
+        settings_file(
+            &project,
+            Some(serde_json::json!({"type": "static", "text": "x"})),
+        );
+        let local = serde_json::json!({"statusLine": {"type": "command", "command": "  "}});
+        assert_eq!(
+            resolved(&local, &project, user),
+            Some(("user-sl".to_string(), false))
+        );
+
+        // The user's other options travel with the command
+        settings_file(
+            &config_dir.join("settings.json"),
+            Some(
+                serde_json::json!({"type": "command", "command": "user-sl", "padding": 2, "refreshInterval": 10}),
+            ),
+        );
+        let found = ClaudeCodeAdapter::resolve_user_status_line(&no_local, &project, user).unwrap();
+        assert_eq!(found.setting["padding"], 2);
+        assert_eq!(found.setting["refreshInterval"], 10);
+    }
+
+    #[test]
+    fn test_own_status_line_command_round_trips() {
+        let script = Path::new("/it's a \"dir\" $HOME/panoptes-statusline.sh");
+        let user = |command: &str, local: bool| UserStatusLine {
+            setting: command_setting(command),
+            command: command.to_string(),
+            local,
+        };
+        for (found, expected) in [
+            (None, (false, None)),
+            (
+                Some(user("echo \"it's\" $(id) `x` --local", false)),
+                (false, Some("echo \"it's\" $(id) `x` --local".to_string())),
+            ),
+            (
+                Some(user("--local", true)),
+                (true, Some("--local".to_string())),
+            ),
+        ] {
+            let command = ClaudeCodeAdapter::status_line_command(script, found.as_ref());
+            assert_eq!(
+                ClaudeCodeAdapter::parse_own_status_line(&command),
+                Some(expected),
+                "for {command:?}"
+            );
+        }
+
+        // Anybody else's command is not ours, even one naming the script
+        for other in [
+            "~/.claude/statusline.sh",
+            "/x/panoptes-statusline.sh",
+            "'/x/panoptes-statusline.sh' 'a' 'b'",
+            "'/x/not-panoptes-statusline.sh'",
+        ] {
+            assert_eq!(
+                ClaudeCodeAdapter::parse_own_status_line(other),
+                None,
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_status_line_install_and_restore() {
+        let dir = TempDir::new().unwrap();
+        let working_dir = dir.path().join("repo");
+        let local_path = working_dir.join(".claude/settings.local.json");
+        let script = dir.path().join("hooks/panoptes-statusline.sh");
+        let user_settings = dir.path().join("claude/settings.json");
+        let install = StatusLinePlan::Install {
+            script: script.clone(),
+            user_settings: Some(user_settings.clone()),
+        };
+        let written = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&local_path).unwrap()).unwrap()
+        };
+        let write = |plan: &StatusLinePlan| {
+            ClaudeCodeAdapter::write_session_settings(&working_dir, &mock_event_scripts(), plan)
+                .unwrap();
+        };
+
+        // The user's own local status line, with an option of its own
+        settings_file(
+            &local_path,
+            Some(serde_json::json!({"type": "command", "command": "my-sl", "padding": 1})),
+        );
+        settings_file(&user_settings, Some(command_setting("user-sl")));
+
+        write(&install);
+        let first = written();
+        assert_eq!(first["statusLine"]["padding"], 1);
+        assert_eq!(first["statusLine"]["type"], "command");
+        let command = first["statusLine"]["command"].as_str().unwrap();
+        assert_eq!(
+            ClaudeCodeAdapter::parse_own_status_line(command),
+            Some((true, Some("my-sl".to_string())))
+        );
+        assert!(first["hooks"].get("Stop").is_some());
+        assert_eq!(first["model"], "opus");
+
+        // A second session in the same directory writes the same thing rather
+        // than wrapping the wrapper
+        write(&install);
+        assert_eq!(written(), first);
+
+        // Turned off, the user's own local status line comes back
+        write(&StatusLinePlan::Restore);
+        assert_eq!(
+            written()["statusLine"],
+            serde_json::json!({"type": "command", "command": "my-sl", "padding": 1})
+        );
+
+        // Wrapping the user layer's instead, restore removes the key: the user
+        // layer shows through again on its own
+        settings_file(&local_path, None);
+        write(&install);
+        assert_eq!(
+            ClaudeCodeAdapter::parse_own_status_line(
+                written()["statusLine"]["command"].as_str().unwrap()
+            ),
+            Some((false, Some("user-sl".to_string())))
+        );
+        write(&StatusLinePlan::Restore);
+        assert!(written().get("statusLine").is_none());
+
+        // And restoring when Panoptes never wrapped anything touches nothing
+        settings_file(&local_path, Some(command_setting("mine")));
+        write(&StatusLinePlan::Restore);
+        assert_eq!(written()["statusLine"], command_setting("mine"));
+    }
+
+    #[test]
+    fn test_setup_hooks_honours_the_status_line_switch() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = Config {
+            worktrees_dir: temp_dir.path().join("worktrees"),
+            hooks_dir: temp_dir.path().join("hooks"),
+            ..Config::default()
+        };
+        let mut spawn_config = test_spawn_config(temp_dir.path().join("repo"));
+        // Keep the real user layer out of it
+        spawn_config.claude_config_dir = Some(temp_dir.path().join("claude"));
+        let adapter = ClaudeCodeAdapter::new();
+        let status_line = |paths: &[PathBuf]| -> Option<serde_json::Value> {
+            let settings: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&paths[0]).unwrap()).unwrap();
+            settings.get("statusLine").cloned()
+        };
+
+        assert!(config.claude_status_line, "on by default");
+        let paths = adapter.setup_hooks(&config, &spawn_config).unwrap();
+        let installed = status_line(&paths).expect("a status line");
+        let script = config.hooks_dir.join(STATUS_LINE_SCRIPT_NAME);
+        assert!(script.is_file());
+        assert_eq!(
+            installed["command"].as_str(),
+            Some(super::super::shell_quote(&script.to_string_lossy()).as_str())
+        );
+
+        config.claude_status_line = false;
+        let paths = adapter.setup_hooks(&config, &spawn_config).unwrap();
+        assert_eq!(status_line(&paths), None);
+    }
+
+    // The status-line wrapper, executed
+    //
+    // Run the way Claude runs it: the settings' command string handed to
+    // `bash -c`, the payload on stdin, stdout read to EOF.
+
+    /// What one run of the wrapper did
+    #[cfg(unix)]
+    struct StatusLineRun {
+        /// Everything the wrapper printed
+        stdout: String,
+        /// Whether it exited successfully
+        success: bool,
+        /// Whether stdout closed while `curl` was still held (see
+        /// [`run_status_line`]), i.e. Claude was not kept waiting on it
+        finished_before_post: bool,
+        /// `curl`'s arguments, if it was called
+        posted: Option<Vec<String>>,
+    }
+
+    /// Run the wrapper at `script` in front of `user`'s command, in `dir`
+    ///
+    /// The PATH is sealed: a fake `curl` records its arguments to a file, and
+    /// only the binaries the wrapper and stubs genuinely need are there. With
+    /// `hold_curl` the fake stands in for a server that has not answered: it
+    /// records nothing until the wrapper's stdout has closed and the test
+    /// releases it. That is a sequence rather than a stopwatch, so a loaded
+    /// machine cannot flake it.
+    #[cfg(unix)]
+    fn run_status_line(
+        dir: &Path,
+        script: &Path,
+        user: Option<&UserStatusLine>,
+        session_id: Option<&str>,
+        hold_curl: bool,
+    ) -> StatusLineRun {
+        run_status_line_with(dir, script, user, session_id, hold_curl, None)
+    }
+
+    /// [`run_status_line`], with the wrapper drawing its default line with
+    /// `panoptes_exe`
+    #[cfg(unix)]
+    fn run_status_line_with(
+        dir: &Path,
+        script: &Path,
+        user: Option<&UserStatusLine>,
+        session_id: Option<&str>,
+        hold_curl: bool,
+        panoptes_exe: Option<&Path>,
+    ) -> StatusLineRun {
+        use std::process::{Command, Stdio};
+
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for tool in ["bash", "cat", "date", "sleep", "seq"] {
+            let link = bin.join(tool);
+            if !link.exists() {
+                std::os::unix::fs::symlink(which(tool), link).unwrap();
+            }
+        }
+        let capture = dir.join("curl.args");
+        let release = dir.join("curl.release");
+        let _ = std::fs::remove_file(&capture);
+        let _ = std::fs::remove_file(&release);
+        if !hold_curl {
+            std::fs::write(&release, "").unwrap();
+        }
+        // Held, it gives up after a minute so a failed test leaves nothing
+        let fake_curl = format!(
+            "#!/bin/bash\nfor _ in $(seq 1200); do [ -e {release} ] && break; sleep 0.05; done\nfor arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > {capture}\n",
+            release = super::super::shell_quote(&release.to_string_lossy()),
+            capture = super::super::shell_quote(&capture.to_string_lossy()),
+        );
+        super::super::install_executable_script(&bin.join("curl"), &fake_curl).unwrap();
+
+        super::super::install_executable_script(
+            script,
+            &ClaudeCodeAdapter::generate_status_line_script(
+                "http://127.0.0.1:1/hook",
+                panoptes_exe,
+            ),
+        )
+        .unwrap();
+
+        let command = ClaudeCodeAdapter::status_line_command(script, user);
+        let payload = dir.join("payload.json");
+        std::fs::write(
+            &payload,
+            include_str!("../../tests/fixtures/claude_status_line.json"),
+        )
+        .unwrap();
+        let stdout = dir.join("stdout");
+
+        // The pipe the wrapper writes to is made by this driver, not by the
+        // test process: `cat` reads it to EOF, as Claude does, and a pipe
+        // opened in a single-threaded shell cannot leak into another test's
+        // child and be held open by it
+        let mut cmd = Command::new(which("bash"));
+        cmd.arg("-c")
+            .arg(r#"set -o pipefail; bash -c "$1" < "$2" | cat > "$3""#)
+            .arg("driver")
+            .arg(&command)
+            .arg(&payload)
+            .arg(&stdout)
+            .env_clear()
+            .env("PATH", bin.display().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(id) = session_id {
+            cmd.env("PANOPTES_SESSION_ID", id);
+        }
+
+        let status = cmd.status().expect("run status line");
+        let finished_before_post = !capture.exists();
+        std::fs::write(&release, "").unwrap();
+
+        // curl is backgrounded, so it may still be on its way. Generous,
+        // because a loaded machine can take seconds to start a process;
+        // a run that should post nothing gets a shorter look.
+        let started = std::time::Instant::now();
+        let mut posted = None;
+        for _ in 0..2_000 {
+            if let Ok(bytes) = std::fs::read(&capture) {
+                if !bytes.is_empty() {
+                    posted = Some(
+                        String::from_utf8(bytes)
+                            .unwrap()
+                            .split_terminator('\0')
+                            .map(str::to_string)
+                            .collect(),
+                    );
+                    break;
+                }
+            }
+            let should_post = session_id.is_some_and(|id| Uuid::parse_str(id).is_ok());
+            if !should_post && started.elapsed().as_millis() > 500 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        StatusLineRun {
+            stdout: std::fs::read_to_string(&stdout).unwrap(),
+            success: status.success(),
+            finished_before_post,
+            posted,
+        }
+    }
+
+    /// A stub user status line that echoes a marker and records its stdin
+    #[cfg(unix)]
+    fn stub_user_status_line(path: &Path, seen: &Path) -> UserStatusLine {
+        let stub = format!(
+            "#!/bin/bash\ncat > {}\nprintf 'MARKER \"%s\" line\\nsecond line' \"$1\"\n",
+            super::super::shell_quote(&seen.to_string_lossy())
+        );
+        super::super::install_executable_script(path, &stub).unwrap();
+        // A shell command line, as a user would write it, with an argument
+        // that needs its quotes
+        let command = format!(
+            "{} \"it's \\$HOME\"",
+            super::super::shell_quote(&path.to_string_lossy())
+        );
+        UserStatusLine {
+            setting: command_setting(&command),
+            command,
+            local: false,
+        }
+    }
+
+    const SESSION: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    #[cfg(unix)]
+    fn test_status_line_wrapper_prints_the_users_output_and_posts() {
+        let dir = TempDir::new().unwrap();
+        // Both scripts live where a shell would split, expand and unquote
+        let hostile = dir.path().join("it's a \"dir\" $HOME `id`");
+        let script = hostile.join("hooks").join(STATUS_LINE_SCRIPT_NAME);
+        let seen = dir.path().join("seen.json");
+        let user = stub_user_status_line(&hostile.join("my status.sh"), &seen);
+
+        for local in [false, true] {
+            let user = UserStatusLine {
+                local,
+                ..user.clone()
+            };
+            let run = run_status_line(dir.path(), &script, Some(&user), Some(SESSION), false);
+
+            assert!(run.success);
+            assert_eq!(run.stdout, "MARKER \"it's $HOME\" line\nsecond line");
+            // The user's command saw the very document Claude sent
+            let seen: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
+            assert_eq!(seen["rate_limits"]["five_hour"]["used_percentage"], 21);
+
+            let posted = run.posted.expect("the payload was posted");
+            assert!(posted.contains(&"http://127.0.0.1:1/hook".to_string()));
+            assert!(posted.contains(&"--max-time".to_string()));
+            let body = &posted[posted.iter().position(|a| a == "-d").unwrap() + 1];
+            let envelope: crate::hooks::HookEvent =
+                serde_json::from_str(body).expect("the envelope is valid JSON");
+            assert_eq!(envelope.session_id, SESSION);
+            assert_eq!(envelope.event_type(), HookEventType::StatusLine);
+            assert!(envelope.timestamp > 0);
+            let usage = crate::hooks::status_line::usage_from_payload(&envelope.payload)
+                .expect("the payload arrives intact");
+            assert_eq!(usage.primary.unwrap().used_percent, 21.0);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_status_line_wrapper_without_a_user_command_prints_nothing() {
+        let dir = TempDir::new().unwrap();
+        let script = dir.path().join("hooks").join(STATUS_LINE_SCRIPT_NAME);
+
+        let run = run_status_line(dir.path(), &script, None, Some(SESSION), false);
+
+        // Claude's own default is no status line at all
+        assert!(run.success);
+        assert_eq!(run.stdout, "");
+        assert!(run.posted.is_some(), "the figures are still forwarded");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_status_line_wrapper_without_a_user_command_draws_the_default_line() {
+        let dir = TempDir::new().unwrap();
+        let hostile = dir.path().join("it's a \"dir\" $HOME `id`");
+        let script = hostile.join("hooks").join(STATUS_LINE_SCRIPT_NAME);
+        // Stands in for the Panoptes binary: says how it was called, and
+        // what it was given
+        let seen = dir.path().join("seen.json");
+        let exe = hostile.join("panoptes");
+        super::super::install_executable_script(
+            &exe,
+            &format!(
+                "#!/bin/bash\ncat > {}\nprintf 'DEFAULT %s' \"$*\"\n",
+                super::super::shell_quote(&seen.to_string_lossy())
+            ),
+        )
+        .unwrap();
+
+        let run = run_status_line_with(dir.path(), &script, None, Some(SESSION), false, Some(&exe));
+        assert!(run.success);
+        assert_eq!(run.stdout, "DEFAULT status-line");
+        let seen: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
+        assert_eq!(seen["cost"]["total_cost_usd"], 0.1359288);
+        assert!(run.posted.is_some());
+
+        // A user's own command still wins over the default
+        let user = stub_user_status_line(&dir.path().join("sl.sh"), &dir.path().join("u.json"));
+        let run = run_status_line_with(
+            dir.path(),
+            &script,
+            Some(&user),
+            Some(SESSION),
+            false,
+            Some(&exe),
+        );
+        assert!(run.stdout.starts_with("MARKER"));
+
+        // A binary that has gone missing costs the line, not an error
+        let run = run_status_line_with(
+            dir.path(),
+            &script,
+            None,
+            Some(SESSION),
+            false,
+            Some(&dir.path().join("gone")),
+        );
+        assert!(run.success);
+        assert_eq!(run.stdout, "");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_status_line_wrapper_does_not_wait_for_the_post() {
+        let dir = TempDir::new().unwrap();
+        let script = dir.path().join("hooks").join(STATUS_LINE_SCRIPT_NAME);
+        let seen = dir.path().join("seen.json");
+        let user = stub_user_status_line(&dir.path().join("sl.sh"), &seen);
+
+        // A server that has not answered must not hold up the status line
+        let run = run_status_line(dir.path(), &script, Some(&user), Some(SESSION), true);
+
+        assert!(run.stdout.starts_with("MARKER"));
+        assert!(
+            run.finished_before_post,
+            "the status line waited for the POST"
+        );
+        assert!(run.posted.is_some(), "and the POST still went out");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_status_line_wrapper_outside_panoptes_only_runs_the_user_command() {
+        let dir = TempDir::new().unwrap();
+        let script = dir.path().join("hooks").join(STATUS_LINE_SCRIPT_NAME);
+        let seen = dir.path().join("seen.json");
+        let user = stub_user_status_line(&dir.path().join("sl.sh"), &seen);
+
+        // Left behind in settings.local.json, then run by a plain `claude`
+        let run = run_status_line(dir.path(), &script, Some(&user), None, false);
+        assert!(run.stdout.starts_with("MARKER"));
+        assert_eq!(run.posted, None);
+
+        // A session ID that is not one of ours is not spliced into JSON
+        let run = run_status_line(dir.path(), &script, Some(&user), Some("x\",\"y"), false);
+        assert!(run.stdout.starts_with("MARKER"));
+        assert_eq!(run.posted, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_status_line_wrapper_passes_the_users_exit_status() {
+        let dir = TempDir::new().unwrap();
+        let script = dir.path().join("hooks").join(STATUS_LINE_SCRIPT_NAME);
+        let failing = UserStatusLine {
+            setting: command_setting("echo partial; exit 3"),
+            command: "echo partial; exit 3".to_string(),
+            local: false,
+        };
+
+        let run = run_status_line(dir.path(), &script, Some(&failing), Some(SESSION), false);
+        assert!(!run.success);
+        assert_eq!(run.stdout, "partial\n");
     }
 }

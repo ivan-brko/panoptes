@@ -27,8 +27,9 @@
 //! All of them are skipped, or the header would flash a subagent's model or a
 //! near-empty context over the real session.
 //!
-//! There is no rate-limit data anywhere in a Claude transcript, so those fields
-//! stay empty for Claude sessions rather than being guessed at.
+//! There is no rate-limit data anywhere in a Claude transcript. Claude reports
+//! its limits only to its status line, which Panoptes reads instead - see
+//! `hooks/status_line.rs`.
 
 use serde_json::Value;
 

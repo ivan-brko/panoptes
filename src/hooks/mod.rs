@@ -7,6 +7,7 @@
 //! `notify`.
 
 pub mod server;
+pub mod status_line;
 
 pub use server::{
     DroppedEventsCounter, HookEventReceiver, HookEventSender, ServerHandle, ServerStatus,
@@ -366,6 +367,11 @@ pub enum HookEventType {
     Interrupt,
     /// Agent turn complete (from Codex CLI notify hook)
     AgentTurnComplete,
+    /// Claude refreshed its status line; the payload is the document it
+    /// handed the `statusLine` command (see [`status_line`])
+    ///
+    /// Not a Claude hook: Panoptes' own status-line wrapper posts it.
+    StatusLine,
     /// Unknown event type
     Unknown,
 }
@@ -391,6 +397,7 @@ impl HookEventType {
             HookEventType::ElicitationResult => "ElicitationResult",
             HookEventType::Interrupt => "Interrupt",
             HookEventType::AgentTurnComplete => "AgentTurnComplete",
+            HookEventType::StatusLine => "StatusLine",
             HookEventType::Unknown => "Unknown",
         }
     }
@@ -422,6 +429,7 @@ impl From<&str> for HookEventType {
             "ElicitationResult" => HookEventType::ElicitationResult,
             "Interrupt" => HookEventType::Interrupt,
             "AgentTurnComplete" => HookEventType::AgentTurnComplete,
+            "StatusLine" => HookEventType::StatusLine,
             _ => HookEventType::Unknown,
         }
     }
@@ -806,6 +814,7 @@ mod tests {
             HookEventType::Elicitation,
             HookEventType::ElicitationResult,
             HookEventType::AgentTurnComplete,
+            HookEventType::StatusLine,
         ] {
             let str_repr = event_type.as_str();
             let parsed: HookEventType = str_repr.into();

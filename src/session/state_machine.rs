@@ -116,6 +116,13 @@ pub fn translate_hook(event: &HookEvent) -> AgentEvent {
         // Codex's `notify` hook, for versions without lifecycle hooks: the
         // agent is done and wants input
         HookEventType::AgentTurnComplete => AgentEvent::TurnCompleted { last_message: None },
+        // Figures only, never state: see `AgentEvent::UsageRefresh`
+        HookEventType::StatusLine => {
+            match crate::hooks::status_line::usage_from_payload(&event.payload) {
+                Some(usage) => AgentEvent::UsageRefresh(usage),
+                None => AgentEvent::Ignored,
+            }
+        }
         HookEventType::Unknown => AgentEvent::Ignored,
     }
 }
@@ -230,9 +237,14 @@ pub fn apply(
     // - `TitleChanged` renames the conversation; Codex can rewrite a thread's
     //   name while nothing else is happening, and a seeded title arrives on
     //   attach, long after the conversation last did anything.
+    // - `UsageRefresh` is Claude's status line rerunning, which it does on
+    //   timers as well as after turns.
     let is_activity = !matches!(
         event,
-        AgentEvent::IdleReminder | AgentEvent::Subagents { .. } | AgentEvent::TitleChanged { .. }
+        AgentEvent::IdleReminder
+            | AgentEvent::Subagents { .. }
+            | AgentEvent::TitleChanged { .. }
+            | AgentEvent::UsageRefresh(_)
     );
     if is_activity {
         info.last_activity = now;
@@ -433,7 +445,7 @@ pub fn apply(
             Move::Unchanged
         }
 
-        AgentEvent::Usage(usage) => {
+        AgentEvent::Usage(usage) | AgentEvent::UsageRefresh(usage) => {
             info.usage.merge(usage);
             Move::Unchanged
         }
@@ -1454,6 +1466,63 @@ mod tests {
         assert_eq!(info.state, SessionState::Executing);
         assert_eq!(info.in_flight.len(), 1);
         assert_eq!(info.usage.total_tokens, Some(1234));
+    }
+
+    /// The redacted Claude status-line capture, as the wrapper would post it
+    fn status_line_payload() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../tests/fixtures/claude_status_line.json")).unwrap()
+    }
+
+    #[test]
+    fn test_status_line_is_not_activity() {
+        let config = Config::default();
+        let mut info = test_info();
+        let long_ago = Utc::now() - chrono::Duration::hours(3);
+        info.set_state_at(SessionState::Waiting, long_ago);
+
+        let event = hook(info.id, "StatusLine", status_line_payload());
+        let applied = apply(&mut info, translate_hook(&event), Utc::now(), &config);
+
+        // Claude reruns its status line on timers too: a session nobody is
+        // using must still age towards the idle badge and suspension
+        assert!(!applied.rang);
+        assert_eq!(info.last_activity, long_ago);
+        assert_eq!(info.last_engagement, long_ago);
+        assert_eq!(info.state, SessionState::Waiting);
+        assert_eq!(info.attention, None);
+        // ...while its figures still land
+        assert_eq!(info.usage.primary.as_ref().unwrap().used_percent, 21.0);
+        assert_eq!(info.usage.secondary.as_ref().unwrap().used_percent, 11.0);
+    }
+
+    #[test]
+    fn test_observed_context_window_wins() {
+        let config = Config::default();
+        let mut info = test_info();
+
+        // The status line reports a 200k run of a model the table says is 1M
+        let mut payload = status_line_payload();
+        payload["model"]["id"] = serde_json::json!("claude-opus-5-5");
+        payload["context_window"]["context_window_size"] = serde_json::json!(200_000);
+        apply_hook(&mut info, "StatusLine", payload, &config);
+
+        // The transcript's next record carries the table's guess
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":50000,"output_tokens":100}}}"#;
+        let transcript = crate::transcript::claude::parse_line(line).unwrap();
+        let AgentEvent::Usage(guess) = &transcript else {
+            panic!("expected usage, got {transcript:?}");
+        };
+        assert_eq!(guess.context_window, Some(1_000_000));
+        apply(&mut info, transcript, Utc::now(), &config);
+
+        assert_eq!(info.usage.context_window, Some(200_000));
+        assert_eq!(
+            info.usage.context_window_source,
+            crate::agent::events::WindowSource::Observed
+        );
+        // The transcript's token count still lands against the observed window
+        assert_eq!(info.usage.total_tokens, Some(50_100));
+        assert_eq!(info.usage.context_percent().map(|p| p.round()), Some(25.0));
     }
 
     #[test]

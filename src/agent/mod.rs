@@ -19,6 +19,49 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Quote one word for a POSIX shell, so it arrives as exactly one argument
+///
+/// Single quotes make every character literal; an embedded `'` closes the
+/// quote, is escaped, and reopens it.
+pub(crate) fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', r"'\''"))
+}
+
+/// Split a string of words written by [`shell_quote`], joined by single spaces
+///
+/// Inside such a word the only `'` characters are its closing quote and the
+/// start of the `'\''` escape, so decoding is unambiguous. Returns `None` for
+/// anything else - hand-edited, unquoted, or otherwise off that exact shape -
+/// rather than guessing at how a shell would read it.
+pub(crate) fn split_shell_quoted(mut rest: &str) -> Option<Vec<String>> {
+    const ESCAPED_QUOTE: &str = r"'\''";
+    let mut words = Vec::new();
+    loop {
+        rest = rest.strip_prefix('\'')?;
+        let mut word = String::new();
+        loop {
+            let quote = rest.find('\'')?;
+            word.push_str(&rest[..quote]);
+            rest = &rest[quote..];
+            match rest.strip_prefix(ESCAPED_QUOTE) {
+                Some(after) => {
+                    word.push('\'');
+                    rest = after;
+                }
+                None => {
+                    rest = &rest[1..];
+                    break;
+                }
+            }
+        }
+        words.push(word);
+        if rest.is_empty() {
+            return Some(words);
+        }
+        rest = rest.strip_prefix(' ')?;
+    }
+}
+
 /// Write a script to disk and mark it executable (0755)
 ///
 /// The shared install step for every hook and helper script an adapter ships:
@@ -106,6 +149,29 @@ impl From<crate::session::SessionType> for AgentType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_split_shell_quoted_round_trips() {
+        let words = vec![
+            "/path/with space/it's".to_string(),
+            "--local".to_string(),
+            String::new(),
+            "echo \"$HOME\" `id` '' ;&|*".to_string(),
+        ];
+        let joined = words
+            .iter()
+            .map(|w| shell_quote(w))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(split_shell_quoted(&joined), Some(words));
+    }
+
+    #[test]
+    fn test_split_shell_quoted_refuses_other_shapes() {
+        for input in ["", "bare", "'unterminated", "'a'  'b'", "'a'b", "'a' "] {
+            assert_eq!(split_shell_quoted(input), None, "for {input:?}");
+        }
+    }
 
     #[test]
     fn test_agent_type_display() {

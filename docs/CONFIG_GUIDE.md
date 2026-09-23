@@ -61,6 +61,11 @@ notification_method = "bell"
 # Whether Claude's periodic "you have been idle" notification raises attention
 attention_on_idle = false
 
+# Route Claude's status line through Panoptes, for rate limits and the real
+# context window. Your own status line still shows, unchanged; without one,
+# Panoptes shows a compact line of rate limits and cost.
+claude_status_line = true
+
 # Colour-capability tier for the UI palette
 # Options: "auto" (detect from COLORTERM/TERM), "truecolor", "ansi256", "ansi16"
 theme = "auto"
@@ -323,6 +328,53 @@ is why Panoptes once treated the two alike and rang for both.
 With this off, the idle reminder is ignored entirely: a session you already
 know is waiting does not need to keep telling you. Turn it on if you want the
 reminder back.
+
+---
+
+### claude_status_line
+
+| Property | Value |
+|----------|-------|
+| Default | `true` |
+| Type | Boolean |
+
+Claude Code reports its plan rate limits (the five-hour and weekly windows),
+and the context window the session is really running with, only to a
+`statusLine` command. With this on, Panoptes installs one in the working
+directory's `.claude/settings.local.json`, next to its hooks. That setting
+outranks yours, so Panoptes' command *wraps* your status line: it forwards the
+figures to Panoptes, then runs your own command on the same input and prints
+exactly what it prints. Your status line looks the same as without Panoptes.
+
+- Your status line is found where Claude looks: `.claude/settings.local.json`,
+  then `.claude/settings.json`, then `settings.json` in the session's Claude
+  config directory (`CLAUDE_CONFIG_DIR`, else `~/.claude`). Its `padding` and
+  `refreshInterval` are kept.
+- With no status line of your own, Panoptes fills the row with a compact line
+  of its own, for example:
+
+  ```
+  5h 12% · wk 40% (resets Thu 18:00) · $2.14
+  ```
+
+  That is how much of Claude's five-hour and weekly allowances you have used,
+  when the one closer to running out resets (local time: `18:00` for later
+  today, `Thu 18:00` for another day), and what the session has cost so far.
+  Anything Claude has not reported yet is left out - before the first reply of
+  a session there are no rate limits, so it shows just the cost.
+- Configure a status line of your own and it replaces the compact line
+  completely; Panoptes only draws one when you have none.
+- A status line you set in `.claude/settings.local.json` is remembered inside
+  Panoptes' command and put back when you turn this off. One set anywhere else
+  is never touched, and is re-read at every spawn.
+- Like the hooks, the setting stays after the session ends. Outside Panoptes it
+  just runs your own command.
+
+Set it to `false` to opt out: the next Claude session spawned in a directory
+puts back whatever Panoptes wrapped there (or removes the compact line), and
+Claude sessions show model and context only, with the window inferred from the
+model name. Read when a session
+spawns; shown under **Settings → About / paths**.
 
 ---
 

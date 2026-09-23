@@ -43,7 +43,7 @@ pub const NOTIFICATION_ROWS: [&str; 7] = [
 /// Split from their values the way [`NOTIFICATION_ROWS`] is: the input handler
 /// needs the row count to move a cursor through them, and has no business
 /// building the paths and the hook's health to get it.
-pub const ABOUT_ROWS: [&str; 10] = [
+pub const ABOUT_ROWS: [&str; 11] = [
     "Version",
     "Hook server",
     "config.toml",
@@ -53,6 +53,7 @@ pub const ABOUT_ROWS: [&str; 10] = [
     "worktrees/",
     "hooks/",
     "scrollback_lines",
+    "claude_status_line",
     "log_agent_events",
 ];
 
@@ -402,7 +403,7 @@ fn checkbox(on: bool) -> String {
 }
 
 /// The value each About row shows, in list order
-fn about_values(ctx: &SettingsPaneContext) -> [String; 10] {
+fn about_values(ctx: &SettingsPaneContext) -> [String; 11] {
     let config = ctx.config;
     [
         env!("CARGO_PKG_VERSION").to_string(),
@@ -422,6 +423,7 @@ fn about_values(ctx: &SettingsPaneContext) -> [String; 10] {
         config.worktrees_dir.display().to_string(),
         config.hooks_dir.display().to_string(),
         format!("{} (new sessions only)", config.scrollback_lines),
+        format!("{} (new sessions only)", config.claude_status_line),
         format!("{} (startup only)", config.log_agent_events),
     ]
 }
@@ -429,7 +431,7 @@ fn about_values(ctx: &SettingsPaneContext) -> [String; 10] {
 /// Version, hook health, where the files live, and the startup-only settings
 ///
 /// Read-only, but it carries a cursor anyway - not to act on a row, but so the
-/// list can scroll: ten rows is more than a short pane holds, and without a
+/// list can scroll: eleven rows is more than a short pane holds, and without a
 /// selection to follow the tail was clipped with nothing on screen saying so.
 fn render_about(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext) {
     let t = theme();
@@ -642,7 +644,7 @@ mod tests {
         assert!(contains_line(&lines, "STOPPED"), "{lines:?}");
     }
 
-    /// A short pane cannot hold all ten rows, so the cursor has to drag the
+    /// A short pane cannot hold all eleven rows, so the cursor has to drag the
     /// list along with it - the last row used to be clipped silently
     #[test]
     fn test_about_scrolls_to_the_selected_row_in_a_short_pane() {
