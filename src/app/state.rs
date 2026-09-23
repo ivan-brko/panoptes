@@ -272,6 +272,25 @@ impl LoadingOverlay {
     }
 }
 
+/// The import overlay: conversations found on disk for one branch
+///
+/// Filled from a finished scan (`transcript::scan`) and held while the user
+/// picks. The branch it was opened for is kept rather than read back from the
+/// pane, so an adoption can never land on a branch the scan did not search.
+#[derive(Debug, Clone)]
+pub struct ConversationImport {
+    /// Where an adopted conversation's session belongs
+    pub project_id: ProjectId,
+    pub branch_id: BranchId,
+    pub working_dir: PathBuf,
+    /// Newest first
+    pub conversations: Vec<crate::transcript::scan::FoundConversation>,
+    /// Index into `conversations`
+    pub selected: usize,
+    /// A scan budget ran out, so older conversations may not be listed
+    pub truncated: bool,
+}
+
 /// Application state
 #[derive(Default)]
 pub struct AppState {
@@ -435,6 +454,8 @@ pub struct AppState {
     // --- Claude settings dialogs ---
     /// Pending Claude settings copy (after worktree creation)
     pub pending_claude_settings_copy: Option<ClaudeSettingsCopyState>,
+    /// The conversation import overlay, while it is open
+    pub conversation_import: Option<ConversationImport>,
     /// Pending Claude settings migration (before worktree deletion)
     pub pending_claude_settings_migrate: Option<ClaudeSettingsMigrateState>,
 

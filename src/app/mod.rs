@@ -20,7 +20,7 @@ pub use nav::{
 pub use selection::SessionSelection;
 pub use state::{
     cycle_next, cycle_prev, AppState, ClaudeSettingsCopyState, ClaudeSettingsMigrateState,
-    FolderMoveTarget, LoadingOverlay, SessionDraft, WorktreeWizardState,
+    ConversationImport, FolderMoveTarget, LoadingOverlay, SessionDraft, WorktreeWizardState,
 };
 
 // Re-exports from wizards (for backwards compatibility)
@@ -230,6 +230,58 @@ fn account_dirs(
         .and_then(|id| codex_config_store.get(id))
         .and_then(|config| config.codex_home.clone());
     (claude_config_dir, codex_home)
+}
+
+/// The accounts a conversation import searches, profiles first
+///
+/// Every Claude and Codex profile, then the default directory of each. A
+/// profile set up for the default directory is the same transcripts, and the
+/// scan keeps the first spelling of a directory, so listing profiles first is
+/// what makes such a conversation import under the profile's name rather than
+/// as "default". A profile without a directory of its own *is* the default.
+fn import_scan_accounts(
+    claude_config_store: &ClaudeConfigStore,
+    codex_config_store: &CodexConfigStore,
+) -> (
+    Vec<crate::transcript::scan::ScanAccount>,
+    Vec<crate::transcript::scan::ScanAccount>,
+) {
+    use crate::transcript::scan::ScanAccount;
+
+    let mut claude: Vec<ScanAccount> = claude_config_store
+        .configs_sorted()
+        .into_iter()
+        .map(|config| ScanAccount {
+            dir: config
+                .config_dir
+                .clone()
+                .unwrap_or_else(default_claude_config_dir),
+            config_id: Some(config.id),
+            name: Some(config.name.clone()),
+        })
+        .collect();
+    claude.push(ScanAccount {
+        dir: default_claude_config_dir(),
+        config_id: None,
+        name: None,
+    });
+
+    let mut codex: Vec<ScanAccount> = codex_config_store
+        .configs_sorted()
+        .into_iter()
+        .map(|config| ScanAccount {
+            dir: config.codex_home.clone().unwrap_or_else(default_codex_home),
+            config_id: Some(config.id),
+            name: Some(config.name.clone()),
+        })
+        .collect();
+    codex.push(ScanAccount {
+        dir: default_codex_home(),
+        config_id: None,
+        name: None,
+    });
+
+    (claude, codex)
 }
 
 /// Which transcript to follow for a session, and from where in it
@@ -2300,6 +2352,136 @@ impl App {
         Ok(true)
     }
 
+    /// Search a branch's working directory for conversations to import
+    ///
+    /// Runs as a background job behind the cancellable loading overlay: the
+    /// scan is bounded (`transcript::scan::ScanBudget`), but a cold disk can
+    /// still make it take a moment, and the UI must not freeze meanwhile. The
+    /// job's follow-up opens the picker ([`Self::open_conversation_import`]).
+    pub(crate) fn start_conversation_import(&mut self, project_id: ProjectId, branch_id: BranchId) {
+        let Some(branch) = self.project_store.get_branch(branch_id) else {
+            return;
+        };
+        let (claude_accounts, codex_accounts) =
+            import_scan_accounts(&self.claude_config_store, &self.codex_config_store);
+        let request = crate::transcript::scan::ScanRequest {
+            working_dir: branch.working_dir.clone(),
+            claude_accounts,
+            codex_accounts,
+            claimed: self.sessions.claimed_agent_session_ids(),
+            budget: crate::transcript::scan::ScanBudget::default(),
+        };
+        self.spawn_git_job(
+            "Looking for conversations...",
+            true,
+            background::GitTask::ScanConversations {
+                request: Box::new(request),
+            },
+            background::JobFollowUp::OpenConversationImport {
+                project_id,
+                branch_id,
+            },
+        );
+    }
+
+    /// Show what a conversation scan found, or say that it found nothing
+    ///
+    /// A cancelled scan opens nothing: `Esc` on the loading overlay reads as
+    /// "never mind", and a picker appearing anyway would contradict it.
+    fn open_conversation_import(
+        &mut self,
+        outcome: crate::transcript::scan::ScanOutcome,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) {
+        tracing::debug!(
+            found = outcome.conversations.len(),
+            files = outcome.counters.files_examined,
+            bytes = outcome.counters.bytes_read,
+            truncated = outcome.truncated,
+            cancelled = outcome.cancelled,
+            "Conversation scan finished"
+        );
+        if outcome.cancelled {
+            self.state
+                .header_notifications
+                .push("Conversation search cancelled");
+            return;
+        }
+        let Some(branch) = self.project_store.get_branch(branch_id) else {
+            return;
+        };
+        if outcome.conversations.is_empty() {
+            self.state.header_notifications.push(format!(
+                "No conversations to import for '{}'{}",
+                branch.name,
+                if outcome.truncated {
+                    " (search stopped early)"
+                } else {
+                    ""
+                }
+            ));
+            return;
+        }
+        self.state.conversation_import = Some(ConversationImport {
+            project_id,
+            branch_id,
+            working_dir: branch.working_dir.clone(),
+            conversations: outcome.conversations,
+            selected: 0,
+            truncated: outcome.truncated,
+        });
+        self.state.input_mode = InputMode::ImportingConversation;
+    }
+
+    /// Adopt the conversation selected in the import picker
+    ///
+    /// It becomes a resumable session on the branch, selected in the list so
+    /// `Enter` resumes it - nothing is spawned until then. The picker closes
+    /// either way; a failure is reported rather than leaving it open on a list
+    /// that may now be stale.
+    pub(crate) fn adopt_selected_conversation(&mut self) {
+        let Some(import) = self.state.conversation_import.take() else {
+            self.state.input_mode = InputMode::Normal;
+            return;
+        };
+        self.state.input_mode = InputMode::Normal;
+        let Some(conversation) = import.conversations.get(import.selected) else {
+            return;
+        };
+
+        match self.sessions.adopt_external_conversation(
+            conversation,
+            import.working_dir.clone(),
+            import.project_id,
+            import.branch_id,
+        ) {
+            Ok(session_id) => {
+                if let Some(index) = self
+                    .sessions
+                    .entries_for_branch(import.branch_id)
+                    .iter()
+                    .position(|entry| entry.info.id == session_id)
+                {
+                    self.state.branch_session_index = item_row(index);
+                }
+                let name = self
+                    .sessions
+                    .get_recovered(session_id)
+                    .map(|info| info.name.clone())
+                    .unwrap_or_default();
+                self.state.header_notifications.push(format!(
+                    "Imported '{}' - Enter resumes it",
+                    crate::tui::views::truncate_string(&name, 40)
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to import conversation");
+                self.state.error_message = Some(format!("Could not import: {}", e));
+            }
+        }
+    }
+
     /// Relaunch the agent of a session Panoptes suspended
     ///
     /// Returns `Ok(false)` when the session could not be brought back - its
@@ -2539,7 +2721,7 @@ impl App {
                 self.apply_job_result(result);
             } else {
                 self.state.error_message =
-                    Some("Background git operation failed unexpectedly".to_string());
+                    Some("Background operation failed unexpectedly".to_string());
             }
             dirty = true;
         }
@@ -2593,6 +2775,13 @@ impl App {
             ) => {
                 self.register_created_worktree(outcome, project_id, &branch_name, worktree_path);
             }
+            (
+                JobOutput::Conversations(outcome),
+                JobFollowUp::OpenConversationImport {
+                    project_id,
+                    branch_id,
+                },
+            ) => self.open_conversation_import(outcome, project_id, branch_id),
             (JobOutput::Completed(outcome), JobFollowUp::FinishBranchDelete { branch }) => {
                 if let Err(e) = outcome {
                     // Best-effort: the branch is deleted from Panoptes either way
@@ -2893,6 +3082,9 @@ impl App {
                 InputMode::SelectingDefaultBase => {
                     render_default_base_selector(frame, area, state);
                 }
+                InputMode::ImportingConversation => {
+                    crate::tui::views::render_conversation_import(frame, area, state);
+                }
                 InputMode::ConfirmingSessionDelete => {
                     render_session_delete_confirmation(frame, area, state, sessions);
                 }
@@ -3110,6 +3302,43 @@ mod tests {
     use super::*;
     use std::path::Path;
     use uuid::Uuid;
+
+    /// Every profile is searched under its name, and the default account
+    /// last, so the scan's dedupe credits a shared directory to the profile
+    #[test]
+    fn test_import_searches_every_profile_then_the_default() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mut claude = ClaudeConfigStore::with_path(temp_dir.path().join("claude.json"));
+        let work = crate::claude_config::ClaudeConfig::new(
+            "work".to_string(),
+            Some(PathBuf::from("/accounts/claude-work")),
+        );
+        let work_id = work.id;
+        claude.add(work);
+        // No directory of its own: this profile *is* the default account
+        let personal = crate::claude_config::ClaudeConfig::new("personal".to_string(), None);
+        let personal_id = personal.id;
+        claude.add(personal);
+        let codex = CodexConfigStore::with_path(temp_dir.path().join("codex.json"));
+
+        let (claude_accounts, codex_accounts) = import_scan_accounts(&claude, &codex);
+
+        let described: Vec<(PathBuf, Option<Uuid>)> = claude_accounts
+            .iter()
+            .map(|a| (a.dir.clone(), a.config_id))
+            .collect();
+        assert_eq!(
+            described,
+            vec![
+                (default_claude_config_dir(), Some(personal_id)),
+                (PathBuf::from("/accounts/claude-work"), Some(work_id)),
+                (default_claude_config_dir(), None),
+            ]
+        );
+        assert_eq!(codex_accounts.len(), 1);
+        assert_eq!(codex_accounts[0].dir, default_codex_home());
+        assert_eq!(codex_accounts[0].config_id, None);
+    }
 
     /// A live Claude session that was itself resumed, on conversation `a`
     fn resumed_claude_session(temp_dir: &tempfile::TempDir) -> (SessionManager, SessionId) {

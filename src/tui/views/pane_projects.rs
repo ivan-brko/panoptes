@@ -639,8 +639,10 @@ fn render_branch_sessions(
                 mode,
                 width,
             )],
+            // Import is offered here above all: an empty branch in a
+            // directory the user already works in is where it pays off
             "No sessions on this branch yet.\n\n\
-             n: new AI session\ns: shell session",
+             n: new AI session\ns: shell session\ni: import a conversation",
         );
         return;
     }
