@@ -43,7 +43,7 @@ pub const NOTIFICATION_ROWS: [&str; 7] = [
 /// Split from their values the way [`NOTIFICATION_ROWS`] is: the input handler
 /// needs the row count to move a cursor through them, and has no business
 /// building the paths and the hook's health to get it.
-pub const ABOUT_ROWS: [&str; 11] = [
+pub const ABOUT_ROWS: [&str; 12] = [
     "Version",
     "Hook server",
     "config.toml",
@@ -55,6 +55,7 @@ pub const ABOUT_ROWS: [&str; 11] = [
     "scrollback_lines",
     "claude_status_line",
     "log_agent_events",
+    "codex_shared_history",
 ];
 
 /// Pane 3's block title at the given density
@@ -403,7 +404,7 @@ fn checkbox(on: bool) -> String {
 }
 
 /// The value each About row shows, in list order
-fn about_values(ctx: &SettingsPaneContext) -> [String; 11] {
+fn about_values(ctx: &SettingsPaneContext) -> [String; 12] {
     let config = ctx.config;
     [
         env!("CARGO_PKG_VERSION").to_string(),
@@ -425,7 +426,28 @@ fn about_values(ctx: &SettingsPaneContext) -> [String; 11] {
         format!("{} (new sessions only)", config.scrollback_lines),
         format!("{} (new sessions only)", config.claude_status_line),
         format!("{} (startup only)", config.log_agent_events),
+        codex_shared_history_value(config, &ctx.state.codex_history_warnings),
     ]
+}
+
+/// The shared-history row: off, or on and where to, and whether the startup
+/// check of the shadow homes found anything (the log has the details)
+fn codex_shared_history_value(config: &Config, warnings: &[String]) -> String {
+    if !config.codex_shared_history {
+        return "false (startup only)".to_string();
+    }
+    let homes = crate::codex_config::CodexHomes::from_config(config);
+    let shared = homes.shared_home().display();
+    match warnings.len() {
+        0 => format!("true, in {} (startup only)", shared),
+        // The count leads, so a narrow pane truncates the path, not the news
+        n => format!(
+            "true, {} warning{} (see log), in {}",
+            n,
+            if n == 1 { "" } else { "s" },
+            shared
+        ),
+    }
 }
 
 /// Version, hook health, where the files live, and the startup-only settings
@@ -662,11 +684,33 @@ mod tests {
             render_settings_pane(frame, frame.size(), SideMode::Full, &ctx)
         });
 
-        assert!(contains_line(&lines, "▶ log_agent_events"), "{lines:?}");
+        assert!(contains_line(&lines, "▶ codex_shared_history"), "{lines:?}");
         // The window moved rather than growing: the first row is gone, and the
         // note that is not part of the list held its place
         assert!(!contains_line(&lines, "Version"), "{lines:?}");
         assert!(contains_line(&lines, "Read-only."), "{lines:?}");
+    }
+
+    #[test]
+    fn test_about_says_whether_codex_history_is_shared_and_warns_by_count() {
+        assert_eq!(
+            codex_shared_history_value(&Config::default(), &[]),
+            "false (startup only)"
+        );
+
+        let config = Config {
+            codex_shared_history: true,
+            codex_shared_home: Some(PathBuf::from("/srv/codex")),
+            ..Config::default()
+        };
+        assert_eq!(
+            codex_shared_history_value(&config, &[]),
+            "true, in /srv/codex (startup only)"
+        );
+        assert_eq!(
+            codex_shared_history_value(&config, &["a".to_string(), "b".to_string()]),
+            "true, 2 warnings (see log), in /srv/codex"
+        );
     }
 
     /// Selection is a focus affordance here as everywhere else

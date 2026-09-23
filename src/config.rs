@@ -199,6 +199,27 @@ pub struct Config {
     #[serde(default)]
     pub palette: Palette,
 
+    /// Whether every Codex account shares one conversation history
+    ///
+    /// Off by default, and nothing changes until it is turned on. When on, each
+    /// account that does not already live in the shared home is spawned from
+    /// a *shadow* home under `~/.panoptes/codex-homes/<account-id>/`, whose
+    /// credentials are the account's own and whose history, skills, plugins
+    /// and `config.toml` are symlinks into the shared home - so a conversation
+    /// started under one account can be resumed under another. The accounts'
+    /// own homes are never written; turning this off again is a full undo.
+    /// See `codex_config::homes`.
+    #[serde(default)]
+    pub codex_shared_history: bool,
+
+    /// The Codex home every account shares when `codex_shared_history` is on
+    ///
+    /// Unset means `~/.codex`. Must not change once shared history has been
+    /// used: Codex records each conversation's path through the shadow homes,
+    /// which point here, and moving it strands them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_shared_home: Option<PathBuf>,
+
     // Everything below serialises as a TOML table or array-of-tables. TOML has
     // no way to express a bare key after a table header, so any scalar field
     // added later must go ABOVE this line or it will be silently swallowed into
@@ -497,6 +518,8 @@ impl Default for Config {
             claude_status_line: true,
             theme: ThemeMode::default(),
             palette: Palette::default(),
+            codex_shared_history: false,
+            codex_shared_home: None,
             notify_on: NotifyOn::default(),
             custom_shortcuts: Vec::new(),
         }
@@ -691,6 +714,30 @@ mod tests {
         assert!(parsed.notify_on.approval);
         assert_eq!(parsed.custom_shortcuts.len(), 1);
         assert_eq!(parsed.scrollback_lines, original.scrollback_lines);
+    }
+
+    #[test]
+    fn test_codex_shared_history_is_off_unless_asked_for_and_round_trips() {
+        let config = Config::default();
+        assert!(!config.codex_shared_history);
+        assert_eq!(config.codex_shared_home, None);
+        // Unset stays out of the file, so it keeps meaning ~/.codex
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(!text.contains("codex_shared_home"), "{text}");
+
+        let on = Config {
+            codex_shared_history: true,
+            codex_shared_home: Some(PathBuf::from("/srv/codex")),
+            notify_on: NotifyOn {
+                stalled: true,
+                ..NotifyOn::default()
+            },
+            ..Config::default()
+        };
+        let parsed: Config = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
+        assert!(parsed.codex_shared_history);
+        assert_eq!(parsed.codex_shared_home, Some(PathBuf::from("/srv/codex")));
+        assert!(parsed.notify_on.stalled);
     }
 
     #[test]

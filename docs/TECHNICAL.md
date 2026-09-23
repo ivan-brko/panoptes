@@ -634,6 +634,7 @@ call in a row re-raised the badge moments after the user cleared the last one.
 | `~/.panoptes/sessions.json` | Session index for recovery after a restart |
 | `~/.panoptes/claude_configs.json` | Claude account configurations |
 | `~/.panoptes/codex_configs.json` | Codex account configurations |
+| `~/.panoptes/codex-homes/` | Per-account Codex shadow homes (only with `codex_shared_history`) |
 | `~/.panoptes/hooks/` | Hook scripts for Claude Code and Codex |
 | `~/.panoptes/worktrees/` | Git worktrees for branch isolation |
 | `~/.panoptes/logs/` | Application logs (7-day retention) |
@@ -669,6 +670,65 @@ Via the `CODEX_HOME` environment variable:
 2. **Set project defaults** - Each project can have a default Codex configuration (independent of Claude config)
 3. **Session selection** - When creating a Codex session with multiple configs available, a selector appears
 4. **Environment injection** - `CODEX_HOME` is set when spawning with a non-default configuration (defaults to `~/.codex/`)
+
+#### Shared Codex history (`codex_shared_history`)
+
+Off by default. When on, `codex_config::homes::CodexHomes` - built once from
+the config and owned by the `SessionManager` - is the single resolver for
+every Codex home:
+
+- **Reading** (`data_home` / `sessions_dir`): the resume-blocker transcript
+  check, conversation-ID discovery, the transcript watcher (rollout, subagent
+  scan) and thread titles (`session_index.jsonl`) all read the shared home,
+  canonicalised so two accounts key the watcher's per-directory caches by one
+  path. Off, it returns each account's own home unchanged. The conversation
+  importer (`import_scan_accounts`) asks it too: with shared history it
+  searches the shared tree once, crediting finds to the account that lives
+  in the shared home, else the default Codex profile.
+- **Spawning** (`prepare_spawn`, called in `spawn_and_register`, the tail of
+  create, resume and wake): an account whose home is the shared home runs
+  there directly; any other runs from its shadow,
+  `~/.panoptes/codex-homes/<account-id>/`, which is built or healed first.
+  The Codex adapter adds `CODEX_SQLITE_HOME=<shared home>` for any
+  `CODEX_HOME` under the shadows directory (`sqlite_home_for`).
+
+A shadow holds a symlink to the account's own `auth.json` (a copy would fork
+the refresh token) and symlinks for a fixed allow-list (`SHARED_ENTRIES`:
+`sessions`, `archived_sessions`, `thread-writer-locks`, `session_index.jsonl`,
+`history.jsonl`, `skills`, `plugins`, `rules`, `worktrees`, `cache`,
+`mcp-oauth-locks`, `.tmp`, `config.toml`); the targets are pre-created so
+nothing Codex writes goes private by accident. Everything else stays private.
+`thread-writer-locks` must be shared: it is Codex's one-writer-per-thread lock
+across processes. The SQLite files are shared through `CODEX_SQLITE_HOME`, not
+links, because some are created lazily.
+
+Invariants, from Codex 0.156.1:
+
+- **Shadows are never deleted or moved**, and the shared home never changes
+  under them: Codex's state DB stores `threads.rollout_path` *through the
+  shadow*, and resume trusts it. Deleting an account removes only its shadow's
+  `auth.json` link (`forget_account`).
+- **Healing never clobbers**: a missing or wrong link is replaced; a real
+  directory in a link's place is logged and left. The exception is
+  `session_index.jsonl`, which `codex delete` rewrites by rename - its new
+  lines are appended to the shared file and the link restored.
+- **The accounts' own homes are only read** (`auth.json`'s existence, and
+  `config.toml` for the startup divergence warning shown under About).
+- `config.toml` is shared, so the `notify` chain (and any hook config) is
+  written once, through the link; Codex resolves the link before its own
+  atomic writes.
+
+Discovery in a shared tree has no per-account directory to tell two accounts'
+sessions apart, only the claimed-ID set - which was already global (live and
+recovered sessions, every account), and grows as each pending session is
+resolved in start order. Subagent counting matches on the parent's
+conversation ID, which is globally unique, so a shared tree cannot confuse it.
+
+`panoptes merge-codex-history [ACCOUNT]` (`codex_config::merge`) copies an
+account's old rollouts and thread names into the shared home - copy, never
+move, never overwrite, via a temporary name so Codex never lists a partial
+file. Copied rollouts need no database rows; Codex lists and resumes them from
+the file.
 
 ### Session Display
 
@@ -888,7 +948,8 @@ hook that reported session starts would let the same path follow it.
 
 `--resume` fails at launch if the conversation's transcript is not where the
 agent will look: deleted, or left under a different `CLAUDE_CONFIG_DIR` or
-`CODEX_HOME` than the account the session resumes under. Such a session is
+`CODEX_HOME` than the account the session resumes under (with shared Codex
+history, the shared home stands in for every account's). Such a session is
 listed as unavailable - *conversation transcript is missing* - instead of being
 offered and then failing. For Claude, "where it will look" is
 `<config dir>/projects/<slug>/<id>.jsonl` (with every project directory tried

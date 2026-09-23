@@ -13,6 +13,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // A one-off, explicit copy of old Codex history into the shared home, run
+    // outside the TUI so a large copy cannot stall it
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(panoptes::codex_config::merge::COMMAND) {
+        let account = args.next();
+        let ok = panoptes::codex_config::merge::run_command(account.as_deref())?;
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+
     // Ensure config directory exists (creates logs dir too)
     config::ensure_directories()?;
 

@@ -77,6 +77,8 @@ PTY Output → Session buffer → TUI render
 - `agent_profiles.rs` - Generic agent profile store (`ProfileStore<C>`)
 - `claude_config/` - Claude Code multi-account configuration
 - `codex_config/` - Codex CLI multi-account configuration (CODEX_HOME)
+- `codex_config/homes.rs` - The one resolver for Codex homes; per-account shadow homes for
+  shared history (`codex_shared_history`), and `merge.rs` to copy old history in
 - `config.rs` - Configuration (~/.panoptes/)
 - `clipboard.rs` - Clipboard writes (`pbcopy` and friends, OSC 52 fallback)
 

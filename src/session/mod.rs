@@ -512,9 +512,11 @@ pub struct SessionInfo {
     /// and the directory it resumes under is resolved afresh from its account.
     #[serde(skip)]
     pub spawned_claude_config_dir: Option<std::path::PathBuf>,
-    /// The `CODEX_HOME` the live process was spawned with, if any
+    /// Where the live process keeps its Codex conversations, if not the default
     ///
-    /// The Codex counterpart of `spawned_claude_config_dir`.
+    /// The Codex counterpart of `spawned_claude_config_dir`: the account's own
+    /// `CODEX_HOME`, or with shared history the shared home - not the shadow
+    /// the process was actually handed, which only links there.
     #[serde(skip)]
     pub spawned_codex_home: Option<std::path::PathBuf>,
 }

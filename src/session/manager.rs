@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::agent::adapter::SpawnConfig;
 use crate::agent::events::AgentEvent;
 use crate::agent::AgentType;
+use crate::codex_config::CodexHomes;
 use crate::config::{Config, NotificationMethod};
 use crate::hooks::{HookEvent, HookEventType, SessionStartSource};
 use crate::project::{BranchId, ProjectId};
@@ -85,6 +86,9 @@ pub struct SessionManager {
     session_order: Vec<SessionId>,
     /// Application configuration
     config: Config,
+    /// Where each Codex account's conversations live, and what it is spawned
+    /// with (shared history, when enabled)
+    codex_homes: CodexHomes,
     /// Durable index of sessions, so they can be recovered after a restart
     store: SessionStore,
     /// Sessions inherited from a previous Panoptes run, not yet brought back
@@ -172,6 +176,7 @@ impl SessionManager {
         Self {
             sessions: HashMap::new(),
             session_order: Vec::new(),
+            codex_homes: CodexHomes::from_config(&config),
             config,
             store,
             recovered,
@@ -179,6 +184,20 @@ impl SessionManager {
             #[cfg(test)]
             spawn_as_shell: false,
         }
+    }
+
+    /// The resolver for Codex homes this manager spawns and reads with
+    ///
+    /// Callers that look for Codex conversations (discovery, the transcript
+    /// watcher) ask it too, so they read the same tree the agent writes.
+    pub fn codex_homes(&self) -> &CodexHomes {
+        &self.codex_homes
+    }
+
+    /// Swap the Codex home resolver, for tests that must not touch `~/.panoptes`
+    #[cfg(test)]
+    pub fn set_codex_homes(&mut self, codex_homes: CodexHomes) {
+        self.codex_homes = codex_homes;
     }
 
     /// Evict records that should never have been written
@@ -284,6 +303,9 @@ impl SessionManager {
     ) {
         for info in self.recovered.values_mut() {
             let (claude_config_dir, codex_home) = dirs_for(info);
+            // Where the conversation would be read from, which with shared
+            // history is the shared tree whatever the account
+            let codex_home = self.codex_homes.data_home_for(codex_home.as_deref());
             info.transcript_missing = !info.conversation_transcript_exists(
                 claude_config_dir.as_deref(),
                 codex_home.as_deref(),
@@ -474,8 +496,11 @@ impl SessionManager {
         // Looked for afresh rather than trusted from when the list was built:
         // the file may have gone since, and the account may have changed. The
         // answer is kept on the entry, so a refusal is listed with its reason.
-        info.transcript_missing = !info
-            .conversation_transcript_exists(claude_config_dir.as_deref(), codex_home.as_deref());
+        let codex_data_home = self.codex_homes.data_home_for(codex_home.as_deref());
+        info.transcript_missing = !info.conversation_transcript_exists(
+            claude_config_dir.as_deref(),
+            codex_data_home.as_deref(),
+        );
         let info = info.clone();
 
         if let Some(reason) = info.resume_blocker() {
@@ -762,11 +787,27 @@ impl SessionManager {
     fn spawn_and_register(
         &mut self,
         mut info: SessionInfo,
-        spawn: SpawnConfig,
+        mut spawn: SpawnConfig,
         agent: AgentType,
         rows: usize,
         cols: usize,
     ) -> Result<SessionId> {
+        // Where this process keeps its conversations, for a transcript check
+        // made while it is live (see `suspend_idle_sessions`). Taken from the
+        // account's own home before a shadow can replace it below.
+        let spawned_codex_home = self.codex_homes.data_home_for(spawn.codex_home.as_deref());
+
+        // With shared history, Codex runs from the account's shadow home. Every
+        // spawn - create, resume, wake - comes through here, so every spawn
+        // also heals the shadow. A shadow that cannot be built fails the spawn
+        // rather than silently running in the account's own home, where the
+        // shared conversations are not.
+        if agent == AgentType::OpenAICodex {
+            spawn.codex_home = self
+                .codex_homes
+                .prepare_spawn(info.codex_config_id, spawn.codex_home.as_deref())?;
+        }
+
         let adapter = self.create_adapter(agent);
         let spawn_result = adapter
             .spawn(&self.config, &spawn)
@@ -778,10 +819,8 @@ impl SessionManager {
         if let Some(usage) = adapter.launch_usage(&spawn) {
             info.usage.merge(usage);
         }
-        // Where this process keeps its conversations, for a transcript check
-        // made while it is live (see `suspend_idle_sessions`)
         info.spawned_claude_config_dir = spawn.claude_config_dir.clone();
-        info.spawned_codex_home = spawn.codex_home.clone();
+        info.spawned_codex_home = spawned_codex_home;
 
         let session_id = info.id;
         let session = Session::with_scrollback(
@@ -1394,8 +1433,11 @@ impl SessionManager {
         // Checked when the session was suspended, but not since - and it is the
         // directories passed here, not the old process's, that `--resume` uses
         let mut info = info;
-        info.transcript_missing = !info
-            .conversation_transcript_exists(claude_config_dir.as_deref(), codex_home.as_deref());
+        let codex_data_home = self.codex_homes.data_home_for(codex_home.as_deref());
+        info.transcript_missing = !info.conversation_transcript_exists(
+            claude_config_dir.as_deref(),
+            codex_data_home.as_deref(),
+        );
 
         if let Some(reason) = info.resume_blocker() {
             return Err(anyhow!("Cannot wake '{}': {}", info.name, reason));
@@ -4284,6 +4326,85 @@ mod tests {
             manager.get_recovered(info.id).unwrap().resume_blocker(),
             None
         );
+    }
+
+    /// With shared history, a conversation account A wrote is resumable under
+    /// account B: the resume check reads the shared tree, the relaunch runs
+    /// from B's shadow, and a live check afterwards reads the shared tree too
+    #[test]
+    fn test_shared_history_resumes_another_accounts_conversation() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(temp_dir.path()).unwrap();
+        let account_b = root.join("account-b");
+        std::fs::create_dir_all(&account_b).unwrap();
+        std::fs::write(
+            account_b.join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-fake"}"#,
+        )
+        .unwrap();
+        let shared = root.join("shared");
+        let shadows = root.join("panoptes/codex-homes");
+        let account_b_id = Uuid::new_v4();
+
+        let store = store_with_record(&temp_dir, |info| {
+            info.session_type = SessionType::OpenAICodex;
+            info.codex_config_id = Some(account_b_id);
+        });
+        let mut manager = SessionManager::with_store(test_config(&temp_dir), store);
+        manager.spawn_as_shell = true;
+        let info = manager.recovered().next().unwrap().clone();
+        let conversation_id = info.agent_session_id.clone().unwrap();
+
+        // Account A's rollout, in the shared tree only
+        let day = shared.join("sessions/2026/09/23");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join(format!("rollout-2026-09-23T10-00-00-{conversation_id}.jsonl")),
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"{conversation_id}","timestamp":"2026-09-23T10:00:00Z","cwd":"/w"}}}}"#
+            ) + "\n",
+        )
+        .unwrap();
+
+        // Off: B's own home has no such conversation, exactly as before
+        manager.check_recovered_transcripts(|_| (None, Some(account_b.clone())));
+        assert_eq!(
+            manager.get_recovered(info.id).unwrap().resume_blocker(),
+            Some("conversation transcript is missing")
+        );
+
+        // On: found, resumed, and B's shadow built on the way
+        manager.set_codex_homes(CodexHomes::new(
+            true,
+            shared.clone(),
+            shadows.clone(),
+            root.join("default-home"),
+        ));
+        manager.check_recovered_transcripts(|_| (None, Some(account_b.clone())));
+        assert_eq!(
+            manager.get_recovered(info.id).unwrap().resume_blocker(),
+            None
+        );
+        manager
+            .resume_session(info.id, 24, 80, None, Some(account_b.clone()))
+            .unwrap();
+
+        let shadow_b = shadows.join(account_b_id.to_string());
+        assert_eq!(
+            std::fs::read_link(shadow_b.join("sessions")).unwrap(),
+            shared.join("sessions")
+        );
+        let live = &manager.get(info.id).unwrap().info;
+        assert_eq!(live.spawned_codex_home.as_deref(), Some(shared.as_path()));
+        assert!(live.conversation_transcript_exists(None, live.spawned_codex_home.as_deref()));
+        // B's own home was only read
+        assert_eq!(
+            std::fs::read_dir(&account_b).unwrap().count(),
+            1,
+            "only auth.json"
+        );
+
+        manager.shutdown_all();
     }
 
     /// `resume_blocker` runs for every session on every tick, so it must never

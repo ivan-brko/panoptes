@@ -906,11 +906,7 @@ impl AgentAdapter for CodexAdapter {
         true
     }
 
-    fn generate_env(
-        &self,
-        _config: &Config,
-        spawn_config: &SpawnConfig,
-    ) -> HashMap<String, String> {
+    fn generate_env(&self, config: &Config, spawn_config: &SpawnConfig) -> HashMap<String, String> {
         let mut env = HashMap::new();
         env.insert(
             "PANOPTES_SESSION_ID".to_string(),
@@ -924,6 +920,17 @@ impl AgentAdapter for CodexAdapter {
             "CODEX_HOME".to_string(),
             codex_home.to_string_lossy().to_string(),
         );
+        // A shadow home (shared history) keeps its state databases in the
+        // shared home. Pointed there rather than linked, because Codex creates
+        // some of them lazily and would otherwise create them in the shadow.
+        if let Some(sqlite_home) =
+            crate::codex_config::CodexHomes::from_config(config).sqlite_home_for(&codex_home)
+        {
+            env.insert(
+                "CODEX_SQLITE_HOME".to_string(),
+                sqlite_home.to_string_lossy().to_string(),
+            );
+        }
         env
     }
 
@@ -2424,5 +2431,148 @@ notify = ["bash", "-lc", "'/test/codex-notify.sh' \"$@\"; 'echo' 'legacy-hook'"]
             discover_session_id(home.path(), cwd.path(), an_hour_ago(), &nothing_claimed())
                 .is_none()
         );
+    }
+
+    // Shared history across accounts (`codex_shared_history`)
+
+    /// A shared home, a shadows dir and two account homes with fake logins
+    fn shared_layout(root: &Path) -> (crate::codex_config::CodexHomes, PathBuf, PathBuf) {
+        let account_a = root.join("account-a");
+        let account_b = root.join("account-b");
+        for (home, key) in [(&account_a, "sk-fake-a"), (&account_b, "sk-fake-b")] {
+            std::fs::create_dir_all(home).unwrap();
+            std::fs::write(
+                home.join("auth.json"),
+                format!(r#"{{"OPENAI_API_KEY":"{key}"}}"#),
+            )
+            .unwrap();
+        }
+        let homes = crate::codex_config::CodexHomes::new(
+            true,
+            root.join("shared"),
+            root.join("panoptes/codex-homes"),
+            root.join("default-home"),
+        );
+        (homes, account_a, account_b)
+    }
+
+    #[test]
+    fn test_a_conversation_started_under_one_account_resumes_under_another() {
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (homes, account_a, account_b) = shared_layout(&root);
+        let cwd = TempDir::new().unwrap();
+        let id = "019aa0c9-8dea-7611-89d1-0000000000aa";
+
+        // Account A's Codex writes its rollout through A's shadow
+        let shadow_a = homes
+            .prepare_spawn(Some(Uuid::new_v4()), Some(&account_a))
+            .unwrap()
+            .unwrap();
+        write_rollout(&shadow_a, id, cwd.path(), an_hour_ago());
+
+        // Account B's resume check finds it, as does B's own shadow...
+        assert!(rollout_path(&homes.data_home(Some(&account_b)), id).is_some());
+        let shadow_b = homes
+            .prepare_spawn(Some(Uuid::new_v4()), Some(&account_b))
+            .unwrap()
+            .unwrap();
+        assert!(rollout_path(&shadow_b, id).is_some());
+
+        // ...and B's relaunch resumes it, from B's home with B's credentials
+        let mut spawn_config = resume_spawn_config(Some(id));
+        spawn_config.codex_home = Some(shadow_b.clone());
+        let adapter = CodexAdapter::new();
+        let args = adapter.build_args(&spawn_config);
+        assert_eq!(args.first().map(String::as_str), Some("resume"));
+        assert!(args.contains(&id.to_string()));
+        let env = adapter.generate_env(&Config::default(), &spawn_config);
+        assert_eq!(
+            env.get("CODEX_HOME"),
+            Some(&shadow_b.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            std::fs::read_to_string(shadow_b.join("auth.json")).unwrap(),
+            r#"{"OPENAI_API_KEY":"sk-fake-b"}"#
+        );
+    }
+
+    #[test]
+    fn test_two_accounts_starting_in_one_cwd_at_once_get_their_own_rollouts() {
+        // In a shared tree nothing but the claimed set keeps two accounts'
+        // sessions apart; the discovery sweep grows it as it resolves each
+        let tmp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (homes, account_a, account_b) = shared_layout(&root);
+        let cwd = TempDir::new().unwrap();
+        let started = an_hour_ago();
+        let shadow_a = homes
+            .prepare_spawn(Some(Uuid::new_v4()), Some(&account_a))
+            .unwrap()
+            .unwrap();
+        let shadow_b = homes
+            .prepare_spawn(Some(Uuid::new_v4()), Some(&account_b))
+            .unwrap()
+            .unwrap();
+        write_rollout(&shadow_a, "rollout-of-a", cwd.path(), started);
+        write_rollout(
+            &shadow_b,
+            "rollout-of-b",
+            cwd.path(),
+            started + chrono::Duration::seconds(1),
+        );
+
+        let mut claimed = nothing_claimed();
+        let a = discover_session_id(
+            &homes.data_home(Some(&account_a)),
+            cwd.path(),
+            started,
+            &claimed,
+        )
+        .unwrap();
+        claimed.insert(a.clone());
+        let b = discover_session_id(
+            &homes.data_home(Some(&account_b)),
+            cwd.path(),
+            started,
+            &claimed,
+        )
+        .unwrap();
+
+        assert_eq!(a, "rollout-of-a");
+        assert_eq!(b, "rollout-of-b");
+    }
+
+    #[test]
+    fn test_only_a_shadow_home_gets_the_shared_sqlite_home() {
+        let tmp = TempDir::new().unwrap();
+        let shared = tmp.path().join("shared-not-created");
+        let adapter = CodexAdapter::new();
+        let config = Config {
+            codex_shared_history: true,
+            codex_shared_home: Some(shared.clone()),
+            ..Config::default()
+        };
+        let shadows =
+            crate::config::config_dir().join(crate::codex_config::homes::SHADOWS_DIR_NAME);
+
+        let mut spawn_config = resume_spawn_config(None);
+        spawn_config.codex_home = Some(shadows.join(Uuid::new_v4().to_string()));
+        let env = adapter.generate_env(&config, &spawn_config);
+        assert_eq!(
+            env.get("CODEX_SQLITE_HOME"),
+            Some(&shared.to_string_lossy().to_string())
+        );
+
+        // An account spawned in its own home, or anything with the flag off,
+        // is left exactly as before
+        spawn_config.codex_home = Some(tmp.path().join("account"));
+        assert!(!adapter
+            .generate_env(&config, &spawn_config)
+            .contains_key("CODEX_SQLITE_HOME"));
+        spawn_config.codex_home = Some(shadows.join("x"));
+        assert!(!adapter
+            .generate_env(&Config::default(), &spawn_config)
+            .contains_key("CODEX_SQLITE_HOME"));
     }
 }

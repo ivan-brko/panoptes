@@ -3,9 +3,14 @@
 //! This module handles multiple OpenAI Codex CLI configurations (accounts) that can be
 //! used with different projects. Each configuration points to a different
 //! CODEX_HOME, allowing users to switch between different Codex accounts.
+//! With `codex_shared_history` on, the accounts share one history through
+//! per-account shadow homes ([`homes`]).
 
+pub mod homes;
+pub mod merge;
 pub mod store;
 
+pub use homes::CodexHomes;
 pub use store::CodexConfigStore;
 
 use serde::{Deserialize, Serialize};
