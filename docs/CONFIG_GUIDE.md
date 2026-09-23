@@ -74,6 +74,11 @@ theme = "auto"
 # Options: "peacock" (default), "io", "hera", "argus"
 palette = "peacock"
 
+# Share one Codex history (and skills, plugins, config.toml) across every
+# Codex account. Off by default; see the reference below before turning it on.
+codex_shared_history = false
+# codex_shared_home = "~/.codex"   # the home they share (default ~/.codex)
+
 # Which attention reasons produce a notification
 [notify_on]
 approval = true       # a permission dialog is blocking a turn
@@ -278,6 +283,93 @@ Writes every raw line Panoptes reads from an agent's transcript to
 Turn this on when a session's state looks wrong. The log holds exactly what the
 agent wrote, so what Panoptes concluded can be checked against what it was
 given. Leave it off otherwise - it grows with every tool call.
+
+---
+
+### codex_shared_history
+
+| Property | Value |
+|----------|-------|
+| Default | `false` |
+| Type | Boolean |
+| Read | At startup |
+
+Lets every Codex account (Settings > Codex accounts) share one conversation
+history, so a conversation started under one account can be resumed under
+another - the thing you want when one account hits its rate limit. Skills,
+plugins and Codex's own `config.toml` are shared too, so they are installed
+and configured once.
+
+**How it works.** An account whose `CODEX_HOME` already *is* the shared home
+runs there directly, as before. Every other account is started from a *shadow*
+home, `~/.panoptes/codex-homes/<account-id>/`, built (and repaired) by Panoptes
+at startup and before every Codex launch:
+
+| In the shadow home | What it is |
+|--------------------|------------|
+| `auth.json` | A symlink to the account's **own** `auth.json` - never a copy, so a token refresh is seen by both |
+| `sessions/`, `archived_sessions/`, `thread-writer-locks/`, `session_index.jsonl`, `history.jsonl`, `skills/`, `plugins/`, `rules/`, `worktrees/`, `cache/`, `mcp-oauth-locks/`, `.tmp/`, `config.toml` | Symlinks into the shared home |
+| Everything else (`models_cache.json`, `log/`, `tmp/`, `memories/`, anything a newer Codex adds, ...) | Private to the account |
+
+Codex's state databases are shared by starting it with
+`CODEX_SQLITE_HOME=<shared home>` rather than by symlink.
+
+**What is not touched.** The account's own `CODEX_HOME` is only ever read. Its
+existing conversations stay where they are and are *not* visible to the other
+accounts until you copy them over (below).
+
+**Turning it off** is a full undo: every account goes back to running in its
+own home, which was never changed. Conversations started while it was on stay
+in the shared home. Leave the shadow homes in place - Codex's database refers
+to conversations through them, and deleting one makes those conversations
+impossible to resume from any account.
+
+**Bringing old conversations over.** Run, with Panoptes' own config in place:
+
+```bash
+panoptes merge-codex-history          # every account
+panoptes merge-codex-history Work     # one account, by name
+```
+
+It **copies** each account's rollouts (`sessions/`, `archived_sessions/`) and
+thread names into the shared home, never overwriting and never moving
+anything. Run it again whenever you like; what is already there is skipped.
+
+**Things to know:**
+
+- **Settings follow the shared `config.toml`.** An account whose own
+  `config.toml` differs (for example `forced_login_method`, a custom
+  `model_provider`) now runs with the shared one. Panoptes logs the keys that
+  differ at startup, and Settings > About / paths shows the warning count.
+- **Keyring logins** (`cli_auth_credentials_store = "keyring"` or `"auto"`)
+  are tied to the Codex home's path and cannot follow the account into its
+  shadow. Log in once per account with
+  `CODEX_HOME=~/.panoptes/codex-homes/<account-id> codex login`.
+- **`codex delete`** of a named thread replaces the shadow's
+  `session_index.jsonl` link with a private copy; Panoptes merges it back and
+  relinks it on the next launch.
+- **`allow_symlinked_codex_home`** is *not* set, and is not needed for any of
+  this. It is a macOS sandbox switch that only matters if you configure a
+  sandbox writable root inside a Codex home; if you do, set it to `true` at the
+  top level of the shared `config.toml`.
+- **Known caveat - encrypted reasoning.** Codex sends earlier turns' reasoning
+  back to OpenAI encrypted. If OpenAI refuses reasoning encrypted for one
+  account when it comes from another, the first turn after resuming another
+  account's conversation fails. This has not been observed, but has not been
+  ruled out either: before relying on it, resume one of account A's
+  conversations under account B and send a single message.
+
+### codex_shared_home
+
+| Property | Value |
+|----------|-------|
+| Default | unset (`~/.codex`) |
+| Type | Path (`~` is expanded) |
+| Read | At startup |
+
+The Codex home every account shares when `codex_shared_history` is on. Choose
+it once and keep it: shadow homes link to it, and Codex records conversation
+paths through them.
 
 ---
 
