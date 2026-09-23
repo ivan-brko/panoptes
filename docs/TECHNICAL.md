@@ -417,7 +417,7 @@ Attention is separate from state: state describes the process, attention
 describes the user's queue. A session stays `AwaitingApproval` after you glance
 at it and clear the flag, because the dialog is still open.
 
-1. An event raises an `AttentionReason` - `Approval`, `TurnComplete`, `Stalled`, or `Crashed`
+1. An event raises an `AttentionReason` - `Approval`, `TurnComplete`, `Stalled`, `Crashed`, or `TurnFailed`
 2. The badge appears in every session list, coloured by reason
 3. If `notify_on` allows that reason, and the session is not the one you are looking at, `notification_method` fires
 4. The bell rings only when the reason is new, not on every repeat
@@ -495,7 +495,7 @@ See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for the full reference.
 | `state_timeout_secs` | 300 | Seconds before an in-flight tool report stops being believed |
 | `suspend_after_secs` | 7200 (2h) | Seconds a session may sit inactive before its agent process is suspended; 0 disables |
 | `log_agent_events` | false | Log raw agent transcript lines for debugging |
-| `notify_on` | approval, turn_complete, crashed | Which attention reasons ring the bell |
+| `notify_on` | approval, turn_complete, crashed, failed | Which attention reasons ring the bell |
 | `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
 | `theme` | `auto` | Colour-capability tier: `auto` / `truecolor` / `ansi256` / `ansi16` |
 | `palette` | `peacock` | Colour preset: `peacock` / `io` / `hera` / `argus` |
@@ -602,8 +602,8 @@ the only channel there is.
 |---|---|---|
 | File | `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<uuid>.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
 | Path is | derived from cwd and ID | searched for, since the name embeds a timestamp |
-| Drives state | no - hooks own it | **yes** |
-| Contributes | context usage, model | state, context usage, model, rate limits |
+| Drives state | only for a failed turn - hooks own the rest | **yes** |
+| Contributes | context usage, model, failed turns | state, context usage, model, rate limits |
 | Measured flush latency | immediate | under 50ms |
 
 The two tailers have deliberately different jobs. Codex's rollout drives its
@@ -611,6 +611,24 @@ state, which is what brings it to parity with Claude - until this, a Codex
 session could only ever report "my turn ended". Claude's transcript only
 supplements: hooks already report state and arrive sooner, and two producers
 writing the same field would fight over it.
+
+One exception. A Claude turn that dies on an API error fires the `StopFailure`
+hook *instead of* `Stop`, and Panoptes does not subscribe to `StopFailure` yet,
+so no hook ever says the turn is over. Claude does write the failure to the
+transcript - an assistant record with `"isApiErrorMessage": true` and an
+`error` code such as `rate_limit` or `authentication_failed` - and the tailer
+turns that into `AgentEvent::TurnFailed`. The state machine moves the session
+to `Waiting` with a `TurnFailed` attention reason (a red `✗`, gated by
+`notify_on.failed`), and ignores a second `TurnFailed` while the session is
+still sitting on the first, so the hook and the transcript cannot double-fire
+once both report it.
+
+The Claude tailer skips records that are not the live conversation's own:
+subagent turns (`isSidechain`), injected records (`isMeta`), compaction
+summaries (`isCompactSummary`), and placeholders Claude wrote locally
+(`"model": "<synthetic>"`, zeroed usage). Counting them would flash a
+subagent's model, or a near-empty context, over the real session. A
+subagent's API error is skipped with the rest - it is the subagent's failure.
 
 Everything converges on `AgentEvent`, a vocabulary neither agent speaks.
 `SessionManager::apply_agent_event` is the single ingest path; hooks and both

@@ -75,6 +75,7 @@ approval = true       # a permission dialog is blocking a turn
 turn_complete = true  # an agent finished its turn
 stalled = false       # a tool has been in flight far longer than expected
 crashed = true        # a session's process died unexpectedly
+failed = true         # a turn died on an API error (usage limit, login, overload)
 
 # Custom shortcuts for spawning shell sessions with predefined commands
 [[custom_shortcuts]]
@@ -275,7 +276,7 @@ given. Leave it off otherwise - it grows with every tool call.
 
 | Property | Value |
 |----------|-------|
-| Default | `approval = true`, `turn_complete = true`, `stalled = false`, `crashed = true` |
+| Default | `approval = true`, `turn_complete = true`, `stalled = false`, `crashed = true`, `failed = true` |
 | Type | Table of booleans |
 
 Which reasons for wanting your attention are worth interrupting you for.
@@ -291,7 +292,13 @@ approval = true
 turn_complete = true
 stalled = false
 crashed = true
+failed = true
 ```
+
+`failed` covers a turn that died on an API error - a usage limit, an expired
+login, an overloaded API - rather than finishing. The agent is still running and
+back at its prompt, so it is kept apart from `crashed`: the fix is usually to
+wait or log in, not to restart anything. Claude Code only, for now.
 
 **When to change:** Set `turn_complete = false` if you run many agents at once
 and only want to hear about the ones that are actually blocked on you.
@@ -498,7 +505,7 @@ EOF
 
 ## Reloading Configuration
 
-Six settings can be changed while Panoptes is running, from **Settings →
+Seven settings can be changed while Panoptes is running, from **Settings →
 Notifications**. They take effect on the next event, with no restart:
 
 | Row | Field |
@@ -508,6 +515,7 @@ Notifications**. They take effect on the next event, with no restart:
 | …on turn finished | `notify_on.turn_complete` |
 | …on tool stalled | `notify_on.stalled` |
 | …on session crashed | `notify_on.crashed` |
+| …on turn failed | `notify_on.failed` |
 | Idle nudge counts as attention | `attention_on_idle` |
 
 The colour preset is live too, from **Settings → Theme**: `Up`/`Down` repaints
