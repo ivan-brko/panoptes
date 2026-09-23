@@ -60,6 +60,32 @@ impl TranscriptKind {
     }
 }
 
+/// The `CLAUDE_CONFIG_DIR` a session on the default account writes under
+///
+/// A default-account session is spawned without a `CLAUDE_CONFIG_DIR` of its
+/// own, so it inherits whatever Panoptes was started with. Looking in
+/// `~/.claude` regardless would miss every transcript of a user who sets it in
+/// their shell - and would call each of their conversations missing.
+pub fn default_claude_config_dir() -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".claude"))
+}
+
+/// The `CODEX_HOME` a session on the default account writes under
+///
+/// Unlike Claude, not inherited: the Codex adapter always sets `CODEX_HOME`
+/// explicitly, to this, so that its hook configuration and the running Codex
+/// agree on where they live.
+pub fn default_codex_home() -> PathBuf {
+    home_dir().join(".codex")
+}
+
+fn home_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
+}
+
 /// Follows one transcript file, yielding events as they are appended
 ///
 /// Holds a byte offset rather than re-reading, and keeps any trailing partial

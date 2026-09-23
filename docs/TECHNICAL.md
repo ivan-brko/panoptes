@@ -563,8 +563,11 @@ needed to relaunch it.
 
 - **Claude Code**: Panoptes dictates the conversation UUID with `--session-id`
   rather than discovering it, so the Panoptes session ID and the Claude session
-  ID are the same value. Resume passes `--resume <uuid>`; `--fork-session` is
-  never used, since forking would mint a new ID and orphan the stored pointer.
+  ID start out as the same value. Resume passes `--resume <uuid>`, which keeps
+  the ID (its `SessionStart` reports `source: resume` with the same
+  `session_id`); `--fork-session` is never used, since forking mints a new ID.
+  The two IDs do not stay equal, though: see *Following Claude across
+  conversations* below.
 - **Codex**: has no equivalent flag, so its ID is discovered instead. Codex
   writes a rollout file whose first line is a `session_meta` record carrying the
   session `id` and the `cwd` it started in; Panoptes matches on that `cwd` plus
@@ -588,8 +591,72 @@ rather than sets aside, the quit prompt counts the live ones and says so.
 
 At startup every record is reconciled to `SessionState::Resumable` and listed
 inertly - nothing is spawned until the user opens it. A record whose working
-directory has been deleted, or which never recorded a conversation ID, is still
-listed but shows why it cannot be brought back.
+directory has been deleted, which never recorded a conversation ID, or whose
+conversation transcript is missing, is still listed but shows why it cannot be
+brought back.
+
+#### Following Claude across conversations
+
+Claude Code changes conversation inside a live process, and each change mints
+or selects a different conversation ID. It announces every one through a
+`SessionStart` hook whose payload carries the new `session_id` and
+`transcript_path` (observed with Claude Code 2.1.280; the `compact` row is read
+from its code, which reuses the session's own ID):
+
+| Trigger | `source` | Payload `session_id` |
+|---|---|---|
+| process start with `--session-id` | `startup` | the dictated ID |
+| process start with `--resume <id>` | `resume` | the same `<id>` |
+| `/clear` | `clear` | a new ID |
+| `/resume` inside the TUI | `resume` | the chosen conversation's ID |
+| `/branch`, or `--resume <id> --fork-session` | `fork` | a new ID; the original is left intact |
+| context compaction | `compact` | unchanged |
+
+On any `SessionStart` except `compact` whose payload ID differs from the stored
+one, `SessionManager::follow_agent_conversation` moves `agent_session_id` to it,
+persists the record, and logs both IDs. The Panoptes session ID never moves -
+hooks route on it, and it is the session's identity, not the conversation's.
+The payload's `transcript_path` is kept alongside the new ID, and preferred over
+the path derived from the working directory when choosing what to tail. Without
+this, a `/clear` froze the usage display on the abandoned transcript, and a
+suspension or a restart silently resumed the conversation from before it.
+
+The transcript watcher follows on its own: `sync_transcript_watchers` recomputes
+each session's target every couple of seconds and re-watches when the path
+changes. A cleared or forked conversation is read from its first line, since
+every record in it is this session's; an in-TUI `/resume` lands in an older
+conversation and attaches at its end, as a relaunch with `--resume` does.
+
+Codex's in-TUI `/new` and `/resume` are not followed: Codex's only hook channel
+today is the single `notify` event, which carries no conversation ID. A Codex
+hook that reported session starts would let the same path follow it.
+
+#### Missing transcripts
+
+`--resume` fails at launch if the conversation's transcript is not where the
+agent will look: deleted, or left under a different `CLAUDE_CONFIG_DIR` or
+`CODEX_HOME` than the account the session resumes under. Such a session is
+listed as unavailable - *conversation transcript is missing* - instead of being
+offered and then failing. For Claude, "where it will look" is
+`<config dir>/projects/<slug>/<id>.jsonl` (with every project directory tried
+if our slug disagrees with Claude's); for Codex, a rollout under
+`<CODEX_HOME>/sessions` whose `session_meta.id` is the ID.
+
+`resume_blocker` is called every tick (the suspension sweep) and every frame
+(the session list), so it does no I/O: it reports a cached
+`SessionInfo::transcript_missing`. The actual look,
+`SessionInfo::conversation_transcript_exists`, happens only when the recovery
+list is built at startup, again at resume and at wake, and for a live session
+once at the moment it would otherwise be suspended - after every cheap reason
+not to has already been ruled out. A live session is not kept awake by this
+unless its transcript is missing at that moment, which is exactly when
+suspending it would be closing it: a Claude session that has not yet been sent
+a message, or has just been `/clear`ed, has no transcript on disk yet. The next
+agent event clears the cached answer, since that is what writes a transcript.
+
+A default-account Claude session inherits Panoptes' own `CLAUDE_CONFIG_DIR`, if
+set, so that - not `~/.claude` - is where its transcripts are looked for. Codex
+does not inherit: its adapter always sets `CODEX_HOME` explicitly.
 
 ### Reading Agent Transcripts
 
@@ -601,7 +668,7 @@ the only channel there is.
 | | Claude Code | Codex CLI |
 |---|---|---|
 | File | `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<uuid>.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
-| Path is | derived from cwd and ID | searched for, since the name embeds a timestamp |
+| Path is | as reported by `SessionStart` after a conversation change, else derived from cwd and ID | searched for, since the name embeds a timestamp |
 | Drives state | only for a failed turn - hooks own the rest | **yes** |
 | Contributes | context usage, model, failed turns | state, context usage, model, rate limits |
 | Measured flush latency | immediate | under 50ms |
@@ -787,6 +854,9 @@ describes work a kill would destroy:
 - it is not the session the user is currently viewing
 - it has no `resume_blocker()`; suspending something with no way back is just
   closing it
+- its conversation transcript is on disk - looked for only once every clause
+  above has passed, so the per-tick sweep does no I/O (see *Missing
+  transcripts*)
 
 Waking spawns a fresh agent through the same `--resume` path a recovered session
 uses, and **discards the terminal buffer at that moment**. Reusing it would have

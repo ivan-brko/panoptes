@@ -242,6 +242,33 @@ pub fn transcript_path(
         .join(format!("{}.jsonl", conversation_id))
 }
 
+/// Whether a conversation's transcript exists under a config directory
+///
+/// `claude --resume` only finds a conversation in the config directory it runs
+/// under, so this is exactly the question of whether a resume can succeed.
+///
+/// Looks where [`transcript_path`] says first, which is one stat. Failing
+/// that, every project directory is tried: Claude derives the directory name
+/// itself, and a mismatch with ours must not be reported as a lost
+/// conversation, since the user would then be refused a resume that works.
+/// Still one level of directory listing, never a recursive walk.
+pub fn transcript_exists(
+    claude_config_dir: &std::path::Path,
+    working_dir: &std::path::Path,
+    conversation_id: &str,
+) -> bool {
+    if transcript_path(claude_config_dir, working_dir, conversation_id).is_file() {
+        return true;
+    }
+    let file_name = format!("{}.jsonl", conversation_id);
+    let Ok(projects) = std::fs::read_dir(claude_config_dir.join("projects")) else {
+        return false;
+    };
+    projects
+        .flatten()
+        .any(|project| project.path().join(&file_name).is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +498,28 @@ mod tests {
             ),
             Path::new("/home/u/.claude/projects/-Users-ivan-Projects-panoptes/abc-123.jsonl")
         );
+    }
+
+    #[test]
+    fn test_transcript_exists_finds_the_file_even_under_a_different_slug() {
+        let config = tempfile::TempDir::new().unwrap();
+        let working_dir = Path::new("/w/project");
+        assert!(!transcript_exists(config.path(), working_dir, "abc"));
+
+        // Where we would derive it
+        let derived = transcript_path(config.path(), working_dir, "abc");
+        std::fs::create_dir_all(derived.parent().unwrap()).unwrap();
+        std::fs::write(&derived, "{}\n").unwrap();
+        assert!(transcript_exists(config.path(), working_dir, "abc"));
+
+        // Filed by Claude under a directory name we did not predict
+        let elsewhere = config.path().join("projects").join("-private-w-project");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("def.jsonl"), "{}\n").unwrap();
+        assert!(transcript_exists(config.path(), working_dir, "def"));
+
+        // Another config directory is another account: not found there
+        let other = tempfile::TempDir::new().unwrap();
+        assert!(!transcript_exists(other.path(), working_dir, "abc"));
     }
 }
