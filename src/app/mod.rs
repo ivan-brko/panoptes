@@ -397,9 +397,8 @@ impl App {
             // Poll for events with timeout - none at all if the last pass
             // ran out of output budget with the watched session's output
             // still queued: a sleep here is time that output spends not on
-            // screen. With
-            // nothing queued this is the usual tick, so an idle Panoptes
-            // still sleeps.
+            // screen. With nothing queued this is the usual tick, so an idle
+            // Panoptes still sleeps.
             let timeout = if self.sessions.output_backlogged() {
                 Duration::ZERO
             } else {
