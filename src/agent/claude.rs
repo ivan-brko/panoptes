@@ -22,9 +22,40 @@ const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
 /// guess about keystrokes, and `SessionStart`/`SessionEnd` bracket the process
 /// so its lifecycle does not have to be inferred from PTY output alone.
 ///
-/// Claude offers more hooks than this (`PreCompact`, `PostCompact`,
-/// `SubagentStop`); they are left unregistered rather than registered and
-/// ignored, since an event nothing consumes is just cost.
+/// The newer events each close a gap the older set left:
+///
+/// - `StopFailure` fires *instead of* `Stop` when a turn dies on an API error
+///   or a usage limit. Without it the session sat in `Thinking` until the
+///   stall watchdog guessed, with no reason to show.
+/// - `PermissionDenied` fires when auto mode's classifier refuses a tool
+///   call. The turn carries on, so any approval still showing is stale.
+/// - `SubagentStart`/`SubagentStop` count the subagents running inside the
+///   session, and `Stop`'s own payload lists the background work outliving
+///   the turn. Both keep the suspend sweep off a session that only looks idle.
+/// - `Elicitation`/`ElicitationResult` bracket an MCP server's question to
+///   the user, which otherwise only arrives as a `Notification` whose
+///   `notification_type` is not guaranteed.
+///
+/// Claude offers more hooks than this, deliberately left unregistered, since
+/// an event nothing consumes is just a process spawn per firing:
+///
+/// - `PreCompact`/`PostCompact`: `SessionStart` with `source: compact`
+///   already reports compaction, and it changes no state.
+/// - `PostToolBatch`: the per-tool events already say everything it does.
+/// - `UserPromptExpansion`: `UserPromptSubmit` already starts the turn.
+/// - `PreModelSwitch`/`PostModelSwitch`: the model comes from the transcript.
+/// - `Setup`: one-off repository setup, before any session state exists.
+/// - `TeammateIdle`: agent teams are not modelled.
+/// - `TaskCreated`/`TaskCompleted`: despite the names, these are the agent's
+///   to-do list (`TaskCreate`/`TaskUpdate`), not background work - and a
+///   deleted item never fires `TaskCompleted`, so counting them would leak.
+///   Background work comes from `Stop`'s `background_tasks` instead.
+/// - `ConfigChange`: settings edits change nothing Panoptes shows.
+/// - `WorktreeCreate`/`WorktreeRemove`: Panoptes manages its own worktrees.
+/// - `InstructionsLoaded`, `FileChanged`, `DirectoryAdded`, `MessageDisplay`:
+///   nothing in the session model depends on them.
+/// - `CwdChanged`: worth a follow-up, since Panoptes shows a working directory,
+///   but not handled yet.
 const HOOK_EVENTS: &[HookEventType] = &[
     HookEventType::SessionStart,
     HookEventType::SessionEnd,
@@ -33,8 +64,14 @@ const HOOK_EVENTS: &[HookEventType] = &[
     HookEventType::PostToolUse,
     HookEventType::PostToolUseFailure,
     HookEventType::Stop,
+    HookEventType::StopFailure,
     HookEventType::Notification,
     HookEventType::PermissionRequest,
+    HookEventType::PermissionDenied,
+    HookEventType::SubagentStart,
+    HookEventType::SubagentStop,
+    HookEventType::Elicitation,
+    HookEventType::ElicitationResult,
 ];
 
 /// Claude Code adapter for spawning and managing Claude Code sessions
@@ -794,8 +831,14 @@ mod tests {
             HookEventType::PostToolUse,
             HookEventType::PostToolUseFailure,
             HookEventType::Stop,
+            HookEventType::StopFailure,
             HookEventType::Notification,
             HookEventType::PermissionRequest,
+            HookEventType::PermissionDenied,
+            HookEventType::SubagentStart,
+            HookEventType::SubagentStop,
+            HookEventType::Elicitation,
+            HookEventType::ElicitationResult,
         ] {
             assert!(
                 HOOK_EVENTS.contains(&required),
@@ -842,6 +885,18 @@ mod tests {
                 "Script should be executable"
             );
         }
+
+        // An install from before the newer events were registered has no
+        // symlink for them. Installing runs on every spawn, so the next spawn
+        // must fill them in.
+        for event in ["StopFailure", "SubagentStart", "ElicitationResult"] {
+            std::fs::remove_file(config.hooks_dir.join(format!("{}.sh", event))).unwrap();
+        }
+        ClaudeCodeAdapter::install_hook_script(&config).unwrap();
+        for event in HOOK_EVENTS {
+            let symlink = config.hooks_dir.join(format!("{}.sh", event.as_str()));
+            assert!(symlink.is_symlink(), "{} must be re-created", event);
+        }
     }
 
     #[test]
@@ -868,6 +923,28 @@ mod tests {
         assert!(hooks.get("Notification").is_some());
         assert!(hooks.get("PermissionRequest").is_some());
         assert!(hooks.get("Stop").is_some());
+
+        // Every registered event gets its own entry, pointing at its own
+        // symlink - the newer events included
+        for event in HOOK_EVENTS {
+            let command = hooks[event.as_str()][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{} must be registered", event));
+            assert!(command.ends_with(&format!("/{}.sh", event.as_str())));
+        }
+        for event in [
+            "StopFailure",
+            "PermissionDenied",
+            "SubagentStart",
+            "SubagentStop",
+            "Elicitation",
+            "ElicitationResult",
+        ] {
+            assert!(hooks.get(event).is_some(), "{} must be registered", event);
+        }
+        // To-do list events are not background work, and stay unregistered
+        assert!(hooks.get("TaskCreated").is_none());
+        assert!(hooks.get("TaskCompleted").is_none());
     }
 
     #[test]
