@@ -1,8 +1,10 @@
 //! Hooks module
 //!
 //! This module handles receiving state updates from agents via HTTP callbacks.
-//! Claude Code's hook system sends POST requests when state changes occur;
-//! Codex CLI sends a single `AgentTurnComplete` through its `notify` hook.
+//! Claude Code's hook system sends POST requests when state changes occur.
+//! Codex sends the same lifecycle events through its own hooks (0.156.1 and
+//! later), and older Codex versions a single `AgentTurnComplete` through
+//! `notify`.
 
 pub mod server;
 
@@ -25,9 +27,8 @@ use serde::{Deserialize, Serialize};
 /// shell script. Nested, the two can never collide.
 ///
 /// `payload` is `#[serde(default)]` so the older flat shape still parses. The
-/// Codex `notify` script (see `agent/codex.rs`) still emits it, and it must
-/// keep working: Codex hooks cannot be extended without stalling its output
-/// pipeline, so PAN-3 replaces that channel rather than this ticket widening it.
+/// Codex `notify` script (see `agent/codex.rs`) still emits it for Codex
+/// versions without lifecycle hooks, and it must keep working there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookEvent {
     /// The Panoptes session ID this event belongs to (from `PANOPTES_SESSION_ID`)
@@ -155,7 +156,10 @@ impl HookEvent {
     /// The subagent a `SubagentStart` / `SubagentStop` is about
     ///
     /// The same ID on both, which is what pairs them: subagents run
-    /// concurrently, so their ends arrive in any order.
+    /// concurrently, so their ends arrive in any order. Codex also sets it on
+    /// a subagent's own `UserPromptSubmit`, tool and permission events, which
+    /// it sends under the *parent's* session - it is the only thing telling
+    /// them apart from the parent's own.
     pub fn agent_id(&self) -> Option<&str> {
         self.str_field("agent_id")
     }
@@ -314,7 +318,10 @@ impl From<&str> for SessionStartSource {
     }
 }
 
-/// Known hook event types from Claude Code
+/// Known hook event types from Claude Code and Codex
+///
+/// The two agents share one vocabulary: Codex's lifecycle hooks deliberately
+/// mirror Claude's names and payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEventType {
     /// Session has started
@@ -352,6 +359,11 @@ pub enum HookEventType {
     Elicitation,
     /// The user answered, declined or cancelled an MCP elicitation
     ElicitationResult,
+    /// The user interrupted the turn (Codex)
+    ///
+    /// Codex fires neither `Stop` nor `PostToolUse` for a turn cut short, so
+    /// without this an aborted turn would never be reported as over.
+    Interrupt,
     /// Agent turn complete (from Codex CLI notify hook)
     AgentTurnComplete,
     /// Unknown event type
@@ -377,6 +389,7 @@ impl HookEventType {
             HookEventType::SubagentStop => "SubagentStop",
             HookEventType::Elicitation => "Elicitation",
             HookEventType::ElicitationResult => "ElicitationResult",
+            HookEventType::Interrupt => "Interrupt",
             HookEventType::AgentTurnComplete => "AgentTurnComplete",
             HookEventType::Unknown => "Unknown",
         }
@@ -407,6 +420,7 @@ impl From<&str> for HookEventType {
             "SubagentStop" => HookEventType::SubagentStop,
             "Elicitation" => HookEventType::Elicitation,
             "ElicitationResult" => HookEventType::ElicitationResult,
+            "Interrupt" => HookEventType::Interrupt,
             "AgentTurnComplete" => HookEventType::AgentTurnComplete,
             _ => HookEventType::Unknown,
         }

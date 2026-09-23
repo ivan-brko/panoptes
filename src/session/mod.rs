@@ -425,6 +425,18 @@ pub struct SessionInfo {
     /// same reason as `background_tasks`.
     #[serde(skip)]
     pub session_crons: usize,
+    /// Whether the agent's lifecycle hooks are reporting for this session
+    ///
+    /// Set by the first lifecycle hook to arrive. From then on the hooks own
+    /// the session's state - including the subagent count, kept in
+    /// `subagent_ids` - and a Codex rollout contributes usage and titles
+    /// only: two producers describing the same turn would otherwise fight
+    /// over it. Stays false for a Codex too old to have hooks, whose rollout
+    /// keeps driving state as before, and for Claude, whose transcript never
+    /// drove it. Not persisted: it describes the running process, and the
+    /// next one proves itself afresh.
+    #[serde(skip)]
+    pub hooks_live: bool,
     /// Whether this session reattached to a conversation that already existed
     ///
     /// Decides where transcript reading starts. A fresh session's transcript
@@ -811,6 +823,7 @@ impl SessionInfo {
             subagent_ids: HashSet::new(),
             background_tasks: 0,
             session_crons: 0,
+            hooks_live: false,
             resumed_conversation: false,
             auto_named: false,
             exit_reason: None,

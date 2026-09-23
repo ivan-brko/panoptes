@@ -5,10 +5,10 @@
 //! measured flush latency is under 50ms, comfortably fast enough to drive a
 //! live display.
 //!
-//! This is the only usable channel for Codex state. Its `notify` hook fires
-//! once per turn and cannot be extended: the script is forbidden from reading
-//! stdin, because a blocking read stalls Codex's output pipeline and drops
-//! typed characters (see `agent/codex.rs`).
+//! For a Codex without lifecycle hooks (before 0.156.1) this is the only
+//! usable channel for its state: `notify` fires once per turn and cannot be
+//! extended. Where the hooks report, they own the state and this file supplies
+//! usage figures only (see `state_machine::admits_transcript_event`).
 //!
 //! Two shapes matter. `event_msg` records describe what the session is doing;
 //! `response_item` records describe what the model emitted. Tool *starts* only

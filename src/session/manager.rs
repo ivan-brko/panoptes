@@ -1481,8 +1481,23 @@ impl SessionManager {
             }
         };
 
-        self.follow_agent_conversation(session_id, event);
-        let rang = self.apply_agent_event(session_id, state_machine::translate_hook(event));
+        let is_codex = self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| session.info.session_type == SessionType::OpenAICodex);
+        // Each agent's conversation bookkeeping, then its own translation.
+        // `follow_agent_conversation` is Claude's and `note_codex_hook`
+        // Codex's; neither acts on the other agent's sessions.
+        let meaning = if is_codex {
+            if !self.note_codex_hook(session_id, event) {
+                return None;
+            }
+            state_machine::translate_codex_hook(event)
+        } else {
+            self.follow_agent_conversation(session_id, event);
+            state_machine::translate_hook(event)
+        };
+        let rang = self.apply_agent_event(session_id, meaning);
         // Never rings: it only records what is still running
         if let Some(snapshot) = state_machine::background_snapshot(event) {
             self.apply_agent_event(session_id, snapshot);
@@ -1551,6 +1566,97 @@ impl SessionManager {
             "Claude moved to another conversation; following it"
         );
         true
+    }
+
+    /// Bookkeeping a Codex hook does beyond moving the session's state
+    ///
+    /// Returns whether the event should still be applied.
+    ///
+    /// - Any lifecycle hook proves the hooks are reporting, which hands them
+    ///   the session's state (see [`SessionInfo::hooks_live`]).
+    /// - `notify`'s `AgentTurnComplete` is then a second report of the turn
+    ///   `Stop` already ended. A `CODEX_HOME` configured by an older Panoptes
+    ///   still has `notify` installed, so it keeps arriving; it is dropped
+    ///   rather than applied twice.
+    /// - `SessionStart` names the conversation outright, so the session gets
+    ///   its resumable pointer at once instead of waiting for the rollout
+    ///   file to be found and guessed at. Every `SessionStart` but `compact`
+    ///   is adopted, not just the first: `/new`, an in-TUI `/resume` and a
+    ///   fork move the session onto another conversation, and the pointer
+    ///   must follow it - the Codex counterpart of
+    ///   [`Self::follow_agent_conversation`]. Subagents never send one.
+    fn note_codex_hook(&mut self, session_id: SessionId, event: &HookEvent) -> bool {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return true;
+        };
+        match event.event_type() {
+            HookEventType::AgentTurnComplete => return !session.info.hooks_live,
+            HookEventType::Unknown => return true,
+            _ => {}
+        }
+        let info = &mut session.info;
+        if !info.hooks_live {
+            info.hooks_live = true;
+            // The hooks count subagents by ID from here on. A figure the
+            // rollout scan left behind would otherwise linger, since the
+            // scan's updates are no longer admitted to correct it.
+            if info.subagent_ids.is_empty() {
+                info.subagents = 0;
+            }
+            tracing::info!(
+                session_id = %session_id,
+                "Codex lifecycle hooks are reporting; the rollout now supplies usage only"
+            );
+        }
+        if event.event_type() != HookEventType::SessionStart
+            || event.session_start_source() == Some(SessionStartSource::Compact)
+        {
+            return true;
+        }
+        let Some(conversation_id) = event.agent_conversation_id() else {
+            return true;
+        };
+        if info.agent_session_id.as_deref() == Some(conversation_id) {
+            return true;
+        }
+        // Moving from one conversation to another inside a live process
+        // (`/new`, an in-TUI `/resume`, a fork) rather than naming the first:
+        // the figures shown describe the one left, and a resumed conversation
+        // is attached at its end rather than replayed
+        if info.agent_session_id.is_some() {
+            info.resumed_conversation =
+                event.session_start_source() == Some(SessionStartSource::Resume);
+            info.usage = Default::default();
+        }
+        let conversation_id = conversation_id.to_string();
+        self.set_agent_session_id(session_id, conversation_id.clone());
+        tracing::info!(
+            session_id = %session_id,
+            codex_session_id = %conversation_id,
+            "Codex conversation ID reported by SessionStart; session is now resumable"
+        );
+        true
+    }
+
+    /// Apply an event read from an agent's transcript
+    ///
+    /// The transcript tailers' way in. Differs from [`Self::apply_agent_event`]
+    /// only in deferring to hooks: once a session's lifecycle hooks are live,
+    /// only usage figures and titles get through (see
+    /// [`state_machine::admits_transcript_event`]).
+    pub fn apply_transcript_event(
+        &mut self,
+        session_id: SessionId,
+        event: AgentEvent,
+    ) -> Option<SessionId> {
+        let admitted = self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| state_machine::admits_transcript_event(&session.info, &event));
+        if !admitted {
+            return None;
+        }
+        self.apply_agent_event(session_id, event)
     }
 
     /// Apply a canonical agent event to a session
@@ -4239,6 +4345,277 @@ mod tests {
         session.info.last_engagement = long_ago;
         session.info.last_activity = long_ago;
         assert_eq!(manager.suspend_idle_sessions(7200, None), vec![session_id]);
+
+        manager.shutdown_all();
+    }
+
+    // Codex lifecycle hooks
+
+    /// A persisted session relabelled as Codex: no Codex binary needed
+    fn create_codex(manager: &mut SessionManager) -> SessionId {
+        let session_id = create_persistable(manager, "codex");
+        manager.get_mut(session_id).unwrap().info.session_type = SessionType::OpenAICodex;
+        session_id
+    }
+
+    fn codex_hook(session_id: SessionId, event: &str, payload: serde_json::Value) -> HookEvent {
+        let mut payload = payload;
+        payload["session_id"] = "019a0ce7-0000-7000-8000-000000000001".into();
+        payload["hook_event_name"] = event.into();
+        hook(session_id, event, payload)
+    }
+
+    #[test]
+    fn test_codex_session_start_hook_sets_conversation_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(store_path.clone()),
+        );
+        let session_id = create_codex(&mut manager);
+        assert_eq!(manager.sessions_pending_codex_id().len(), 1);
+
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "SessionStart",
+            serde_json::json!({"source": "startup"}),
+        ));
+
+        // Resolved and persisted on the spot: no rollout scan needed
+        assert!(manager.sessions_pending_codex_id().is_empty());
+        let stored = load_store(&store_path);
+        assert_eq!(
+            stored.get(session_id).unwrap().agent_session_id.as_deref(),
+            Some("019a0ce7-0000-7000-8000-000000000001")
+        );
+
+        // `/new` or a fork moves the session onto another conversation, and
+        // the pointer follows
+        let mut switched = codex_hook(
+            session_id,
+            "SessionStart",
+            serde_json::json!({"source": "clear"}),
+        );
+        switched.payload["session_id"] = "019a0ce7-0000-7000-8000-000000000002".into();
+        manager.handle_hook_event(&switched);
+        assert_eq!(
+            manager
+                .get(session_id)
+                .unwrap()
+                .info
+                .agent_session_id
+                .as_deref(),
+            Some("019a0ce7-0000-7000-8000-000000000002")
+        );
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_claude_session_start_does_not_take_the_codex_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_persistable(&mut manager, "claude");
+        let mut payload = serde_json::json!({
+            "source": "clear",
+            "transcript_path": "/home/u/.claude/projects/-w/new.jsonl",
+        });
+        payload["session_id"] = "b8be72f6-b45c-41de-83d6-c1f76e30d1dd".into();
+
+        manager.handle_hook_event(&hook(session_id, "SessionStart", payload));
+
+        // Claude's own follower handled it - it alone records the path -
+        // and nothing Codex-only happened
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(
+            info.agent_session_id.as_deref(),
+            Some("b8be72f6-b45c-41de-83d6-c1f76e30d1dd")
+        );
+        assert_eq!(
+            info.agent_transcript_path.as_deref(),
+            Some(std::path::Path::new(
+                "/home/u/.claude/projects/-w/new.jsonl"
+            ))
+        );
+        assert!(!info.hooks_live);
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_codex_session_start_does_not_take_the_claude_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_codex(&mut manager);
+
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "SessionStart",
+            serde_json::json!({
+                "source": "startup",
+                "transcript_path": "/home/u/.codex/sessions/2026/09/23/rollout-x.jsonl",
+            }),
+        ));
+
+        // The ID is taken, but Claude's transcript-path pointer is not: a
+        // Codex rollout is found by conversation ID, never by that path
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.agent_session_id.is_some());
+        assert!(info.agent_transcript_path.is_none());
+        assert!(info.hooks_live);
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_codex_hooks_live_suppresses_rollout_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_codex(&mut manager);
+
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "Stop",
+            serde_json::json!({"last_assistant_message": "done"}),
+        ));
+        let info = &manager.get(session_id).unwrap().info;
+        assert!(info.hooks_live, "the first hook hands the hooks the state");
+        assert_eq!(info.state, SessionState::Waiting);
+
+        // The rollout's view of the same turns no longer moves anything...
+        manager.apply_transcript_event(session_id, AgentEvent::TurnStarted { title: None });
+        manager.apply_transcript_event(
+            session_id,
+            AgentEvent::ToolStarted {
+                key: "call_9".to_string(),
+                name: "exec_command".to_string(),
+            },
+        );
+        manager.apply_transcript_event(session_id, AgentEvent::Subagents { active: 4 });
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Waiting);
+        assert!(info.in_flight.is_empty());
+        assert_eq!(info.subagents, 0);
+
+        // ...but its usage figures, which no hook carries, still merge
+        let usage = crate::agent::events::UsageSnapshot {
+            model: Some("gpt-5.5".to_string()),
+            ..Default::default()
+        };
+        manager.apply_transcript_event(session_id, AgentEvent::Usage(usage));
+        assert_eq!(
+            manager.get(session_id).unwrap().info.usage.model.as_deref(),
+            Some("gpt-5.5")
+        );
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_codex_hooks_own_the_subagent_count() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_codex(&mut manager);
+
+        // A figure the rollout scan reported before any hook arrived
+        manager.apply_transcript_event(session_id, AgentEvent::Subagents { active: 3 });
+        assert_eq!(manager.get(session_id).unwrap().info.subagents, 3);
+
+        // The first hook hands the count to the hooks, which know of none yet
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "UserPromptSubmit",
+            serde_json::json!({"prompt": "go"}),
+        ));
+        assert_eq!(manager.get(session_id).unwrap().info.subagents, 0);
+
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "SubagentStart",
+            serde_json::json!({"agent_id": "child-1", "agent_type": "default"}),
+        ));
+        // The scan no longer gets a say
+        manager.apply_transcript_event(session_id, AgentEvent::Subagents { active: 0 });
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.subagents, 1);
+        assert!(info.has_background_work());
+
+        // Hook-counted subagents die with the process, like Claude's
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "SessionEnd",
+            serde_json::json!({"reason": "other"}),
+        ));
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.subagents, 0);
+        assert!(info.subagent_ids.is_empty());
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_codex_without_hooks_is_driven_by_the_rollout_as_before() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_codex(&mut manager);
+
+        manager.apply_transcript_event(session_id, AgentEvent::TurnStarted { title: None });
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Thinking
+        );
+        manager.apply_transcript_event(
+            session_id,
+            AgentEvent::ToolStarted {
+                key: "call_1".to_string(),
+                name: "exec_command".to_string(),
+            },
+        );
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Executing
+        );
+        manager.apply_transcript_event(session_id, AgentEvent::Subagents { active: 2 });
+        assert_eq!(manager.get(session_id).unwrap().info.subagents, 2);
+
+        // `notify` still ends the turn for a Codex without lifecycle hooks
+        let rang = manager.handle_hook_event(&hook(
+            session_id,
+            "AgentTurnComplete",
+            serde_json::Value::Null,
+        ));
+        assert_eq!(rang, Some(session_id));
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.state, SessionState::Waiting);
+        assert!(!info.hooks_live, "notify is not a lifecycle hook");
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_codex_notify_is_ignored_once_hooks_are_live() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_codex(&mut manager);
+
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "UserPromptSubmit",
+            serde_json::json!({"prompt": "go"}),
+        ));
+        // A CODEX_HOME set up by an older Panoptes still has `notify`
+        // installed; `Stop` is the report of record
+        let rang = manager.handle_hook_event(&hook(
+            session_id,
+            "AgentTurnComplete",
+            serde_json::Value::Null,
+        ));
+        assert_eq!(rang, None);
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Thinking
+        );
 
         manager.shutdown_all();
     }
