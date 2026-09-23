@@ -145,7 +145,7 @@ acts on whatever is selected. The Sessions pane numbers its rows, so number keys
 
 ### Session Naming
 
-You name each session when you create it, making it easy to remember what each one is working on ("frontend-auth", "api-refactor", "test-fixes").
+You name each session when you create it, making it easy to remember what each one is working on ("frontend-auth", "api-refactor", "test-fixes"). Leave the name blank and the session takes the title Claude Code or Codex gives the conversation, following it as the agent revises it; a name you typed is never replaced.
 
 ### Shell Sessions
 

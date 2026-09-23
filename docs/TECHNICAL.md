@@ -670,7 +670,7 @@ the only channel there is.
 | File | `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<uuid>.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
 | Path is | as reported by `SessionStart` after a conversation change, else derived from cwd and ID | searched for, since the name embeds a timestamp |
 | Drives state | only for a failed turn - hooks own the rest | **yes** |
-| Contributes | context usage, model, failed turns | state, context usage, model, rate limits |
+| Contributes | context usage, model, title, failed turns | state, context usage, model, rate limits, title (from `session_index.jsonl`) |
 | Measured flush latency | immediate | under 50ms |
 
 The two tailers have deliberately different jobs. Codex's rollout drives its
@@ -696,6 +696,12 @@ summaries (`isCompactSummary`), and placeholders Claude wrote locally
 (`"model": "<synthetic>"`, zeroed usage). Counting them would flash a
 subagent's model, or a near-empty context, over the real session. A
 subagent's API error is skipped with the rest - it is the subagent's failure.
+
+**Agent titles.** Claude's `ai-title` records and the newest `thread_name` for
+the session's thread in Codex's shared `$CODEX_HOME/session_index.jsonl`
+(followed once per poll per `CODEX_HOME`, and searched in full on attach)
+become `AgentEvent::TitleChanged`, which renames only an auto-generated session
+name, persists it, and is not activity.
 
 Everything converges on `AgentEvent`, a vocabulary neither agent speaks.
 `SessionManager::apply_agent_event` is the single ingest path; hooks and both
