@@ -99,7 +99,7 @@ Panoptes understands git. It organizes sessions by repository and branch, and us
 
 ### Real-Time State Tracking
 
-Through agent hook systems, Panoptes knows exactly what each session is doing at any moment. Claude Code provides granular tool-use tracking (Thinking, Executing, Waiting), while Codex provides turn-complete notifications (Thinking, Waiting). No more guessing if a session is still working or waiting for you.
+Through agent hook systems, Panoptes knows exactly what each session is doing at any moment. Claude Code and Codex (0.156.1 and later) both provide granular tool-use tracking (Thinking, Executing, Waiting) and tell Panoptes when they are waiting for your approval; older Codex versions are tracked from their session logs. No more guessing if a session is still working or waiting for you.
 
 ### Attention System
 

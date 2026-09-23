@@ -130,7 +130,9 @@ editor indexes more happily. Moving it does not relocate existing worktrees.
 | Type | Absolute path |
 
 Where Panoptes writes the hook scripts it registers with Claude Code and Codex.
-It rewrites them on startup, so treat this directory as generated.
+It rewrites them on startup, so treat this directory as generated. Codex's
+per-event hooks live in its `codex/` subdirectory, and Codex is given their
+paths on each session's command line rather than in `CODEX_HOME`.
 
 **When to change:** Rarely. Mainly if `~/.panoptes/` is on a filesystem that
 cannot hold executable scripts.

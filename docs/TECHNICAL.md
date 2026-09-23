@@ -410,12 +410,86 @@ whenever the context window fills, in the middle of a turn the agent is still
 working on. Only `startup`, `resume`, `clear` and `fork` reset the session to
 `Waiting`; anything else leaves the state alone.
 
-**Codex hooks:** Limited to `notify` config firing `agent-turn-complete`
-events. Codex spawns the `notify` argv directly, with no shell, and appends
-the event JSON as its final argument; stdin is `/dev/null` and output is
-discarded. Panoptes' hook ignores the event, and must never block on stdin.
-Codex state comes from its transcript instead - see Reading Agent
-Transcripts below.
+**Codex lifecycle hooks (Codex 0.156.1 and later):** `SessionStart`,
+`SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+`PermissionRequest`, `Stop`, `SubagentStart`, `SubagentStop`, `Interrupt`.
+Codex's hooks are Claude-compatible - the same `{"hooks": {"<Event>": [{"hooks":
+[{"type": "command", ...}]}]}}` declarations, the same JSON payload on stdin -
+so they run the same script, through per-event symlinks in
+`~/.panoptes/hooks/codex/`.
+
+Nothing is written into `CODEX_HOME`. The hooks are declared for each spawn
+as `-c hooks.<Event>=[...]` root options, ahead of any `resume` subcommand
+(`agent/codex.rs::lifecycle_hook_args`). Codex runs a hook only once it is
+*trusted*: an untrusted one stops startup at a "Hooks need review" screen,
+and hooks declared through `-c` are no exception. So one more override,
+`-c hooks.state={...}`, sets a `trusted_hash` for each Panoptes hook, keyed
+`/<session-flags>/config.toml:<event>:0:0`. This trusts nothing but Panoptes'
+own declarations:
+
+- Codex reads `hooks.state` only from the user's `config.toml` and from `-c`
+  overrides - never from a project or plugin - and each key names one hook
+  declared by the same overrides.
+- The hash is Codex's own `hook_hash`, reproduced in `hook_trust_hash`:
+  SHA-256 over the canonical JSON of the normalized declaration (event, the
+  command *string*, timeout, async). The script body is not hashed, so
+  reinstalling it never needs re-trusting.
+- The user's and the project's hooks keep whatever trust they had, and a new
+  one still prompts.
+- Nothing in the key or the hash involves `CODEX_HOME`: the key's path is
+  Codex's fixed placeholder for the `-c` layer, and the command names a
+  script in Panoptes' own hooks directory. The same overrides are trusted
+  whichever `CODEX_HOME` a session runs against. `--dangerously-bypass-hook-trust`, which would switch the
+  check off for all of them, is not used.
+
+A Codex that hashed differently would show every Panoptes hook as modified
+and prompt on every spawn, so lifecycle hooks are gated on `codex --version`
+(probed at most every ten minutes) being at least 0.156.1, the version the
+hash was verified against; a unit test pins the hash Codex accepted.
+
+Codex waits for each hook, including `PermissionRequest` before it shows the
+approval dialog, and treats exit 0 with empty stdout as "no opinion". Plain
+stdout from `SessionStart` or `UserPromptSubmit` would be fed to the model as
+context. The script prints nothing, backgrounds its `curl`, and exits 0 at once,
+so it never influences a decision. Codex runs hooks through `$SHELL -lc` in the
+session's working directory, with the session's environment, so
+`PANOPTES_SESSION_ID` reaches them. Hooks from every layer run, so a user's own
+Codex hooks coexist with Panoptes'.
+
+What the Codex hooks mean differs from Claude's in three places
+(`state_machine::translate_codex_hook`, `SessionManager::handle_hook_event`):
+
+- **Subagents.** Codex reports a subagent's own `UserPromptSubmit`,
+  `PreToolUse` and `PostToolUse` under the *parent's* `session_id`, marked only
+  by `agent_id`. A subagent routinely outlives the turn that spawned it - the
+  parent's `Stop` fires while the child works - so those events do not move
+  the parent's state. `SubagentStart`/`SubagentStop` keep the subagent count
+  instead, exactly as Claude's do (`subagent_ids`, paired on `agent_id`), so
+  a Codex session with a live subagent counts as background work and is not
+  suspended. A subagent's `PermissionRequest` still
+  raises `AwaitingApproval`, since the user has to answer it either way.
+- **`Interrupt`** ends a turn the user cut short, which Codex reports with no
+  `PostToolUse` or `Stop`.
+- **`SessionStart`** fires as the first turn begins, not when the process
+  starts, and carries the conversation (thread) ID, which Panoptes records at
+  once. Every `SessionStart` is adopted, since `/new` and forks move the
+  session to a new conversation.
+
+The first lifecycle hook marks the session `hooks_live`, and from then on the
+hooks own its state: the rollout contributes usage figures and the
+conversation title only (`state_machine::admits_transcript_event`), its
+recency-based subagent count
+is ignored, and a `notify` event left installed by an older Panoptes is
+dropped as a duplicate of `Stop`. One known gap: Codex fires no hook for a
+turn that fails on an API error, so with hooks live such a turn is not
+reported as over, and the session reads `Thinking` until the next prompt.
+
+**Codex `notify` (Codex before 0.156.1):** Limited to `notify` config firing
+`agent-turn-complete` events. Codex spawns the `notify` argv directly, with no
+shell, and appends the event JSON as its final argument; stdin is `/dev/null`
+and output is discarded. Panoptes' hook ignores the event, and must never block
+on stdin. The rest of such a session's state comes from its rollout - see
+Reading Agent Transcripts below.
 
 If `config.toml` already has a `notify` hook, Panoptes chains in front of it
 rather than replacing it (backing the file up first):
@@ -438,7 +512,7 @@ be recovered exactly, and reported for a manual merge when it cannot.
 | `Thinking` | alive | working, nothing in flight | `UserPromptSubmit`, last `PostToolUse` |
 | `Executing` | alive | one or more tools in flight | `PreToolUse`, shell foreground poll |
 | `AwaitingApproval` | alive | blocked on a permission dialog or an MCP question | `PermissionRequest`, `Elicitation` |
-| `Waiting` | alive | turn over, awaiting a prompt | `Stop`, `StopFailure`, shell foreground idle |
+| `Waiting` | alive | turn over, awaiting a prompt | `Stop`, `StopFailure`, `Interrupt` (Codex), shell foreground idle |
 | `Suspended` | killed by us | scrollback kept, wakes on interaction | idle sweep |
 | `Exited` | died itself | see `exit_reason` | `check_alive` |
 | `Resumable` | never spawned | loaded from `sessions.json` | `reconcile` at startup |
@@ -620,13 +694,18 @@ needed to relaunch it.
   `session_id`); `--fork-session` is never used, since forking mints a new ID.
   The two IDs do not stay equal, though: see *Following Claude across
   conversations* below.
-- **Codex**: has no equivalent flag, so its ID is discovered instead. Codex
-  writes a rollout file whose first line is a `session_meta` record carrying the
-  session `id` and the `cwd` it started in; Panoptes matches on that `cwd` plus
-  the session start time. A throttled scan runs only while some Codex session
-  still lacks an ID, so it costs nothing in the steady state. The notify hook
-  cannot be used for this - it must not read stdin, or it stalls Codex's output
-  pipeline and drops keystrokes.
+- **Codex**: has no equivalent flag. With lifecycle hooks, its `SessionStart`
+  hook reports the ID as the first turn begins, and Panoptes records it at once
+  (well under a second after the first prompt, measured). Without hooks the ID
+  is discovered instead. Codex writes a rollout file whose first line is a
+  `session_meta` record carrying the session `id` and the `cwd` it started in;
+  Panoptes matches on that `cwd` plus the session start time. A throttled scan
+  runs only while some Codex session still lacks an ID, so it costs nothing in
+  the steady state. It leaves a rollout younger than five seconds alone
+  (`CODEX_HOOK_GRACE`), so a hook can claim it first: guessing is what goes
+  wrong when several sessions share a directory. The notify hook cannot be used
+  for this - it must not read stdin, or it stalls Codex's output pipeline and
+  drops keystrokes.
 - **Shell**: has no conversation, and is therefore **not persisted at all**. Its
   state is the scrollback, the environment, and the processes it is running,
   none of which survive the PTY; respawning `$SHELL` in the recorded directory
@@ -768,22 +847,24 @@ does not inherit: its adapter always sets `CODEX_HOME` explicitly.
 
 Both agents write a complete record of every conversation to disk as it
 happens, and Panoptes knows where because it stores each session's conversation
-ID. Reading those files needs no cooperation from the agent, and for Codex it is
-the only channel there is.
+ID. Reading those files needs no cooperation from the agent, and for a Codex
+without lifecycle hooks it is the only channel there is.
 
 | | Claude Code | Codex CLI |
 |---|---|---|
 | File | `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<uuid>.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
 | Path is | as reported by `SessionStart` after a conversation change, else derived from cwd and ID | searched for, since the name embeds a timestamp |
-| Drives state | only for a failed turn - hooks own the rest | **yes** |
-| Contributes | context usage, model, title, failed turns | state, context usage, model, rate limits, title (from `session_index.jsonl`) |
+| Drives state | only for a failed turn - hooks own the rest | only until lifecycle hooks report (never, on 0.156.1+) |
+| Contributes | context usage, model, title, failed turns | context usage, model, rate limits, title (from `session_index.jsonl`); state and subagents without hooks |
 | Measured flush latency | immediate | under 50ms |
 
-The two tailers have deliberately different jobs. Codex's rollout drives its
-state, which is what brings it to parity with Claude - until this, a Codex
-session could only ever report "my turn ended". Claude's transcript only
-supplements: hooks already report state and arrive sooner, and two producers
-writing the same field would fight over it.
+The two tailers have deliberately different jobs. For a Codex without
+lifecycle hooks, the rollout drives its state, since `notify` can only ever
+report "my turn ended". Where hooks report, the transcript only supplements:
+hooks report state sooner, and two producers writing the same field would
+fight over it. Which applies is decided per session, by whether a lifecycle
+hook has arrived (`SessionInfo::hooks_live`), and enforced by
+`SessionManager::apply_transcript_event`.
 
 One exception. A Claude turn that dies on an API error fires the `StopFailure`
 hook *instead of* `Stop`. Claude also writes the failure to the
@@ -901,13 +982,15 @@ the copy and a fresh fork does not show its parent's token count.
 but a burst of tool output can append a lot at once and parsing that on the
 render thread would show as a stutter.
 
-**Subagents.** Codex subagents write their own separate rollout files, so a
-parent looks completely idle while its children work - the mirror image of
-Claude, whose subagents share the parent's session ID and show up in
-`in_flight`. A child names its parent in `forked_from_id`, so discovery is
-exact. Liveness is not: there is no reliable "this subagent exited" signal, so
-it is inferred from recent writes. That is why the display is a count and not a
-claim, and why a session with subagents is never suspended.
+**Subagents.** Codex subagents run as their own threads, so a parent looks
+completely idle while its children work - the mirror image of Claude, whose
+subagents share the parent's session ID and show up in `in_flight`. With
+lifecycle hooks the count is exact: `SubagentStart` and `SubagentStop` name
+each subagent by `agent_id`. Without them it comes from the rollouts. A child
+writes its own rollout and names its parent in `forked_from_id`, so discovery
+is exact, but liveness is not. There is no "this subagent exited" record, so
+it is inferred from recent writes. Either way the display is a count and not a
+claim, and a session with subagents is never suspended.
 
 Not every rollout with subagent-shaped metadata is a subagent. Each header is
 classified as a `RolloutKind`, and only `Subagent` is counted:
