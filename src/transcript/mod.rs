@@ -20,6 +20,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod session_index;
 pub mod watcher;
 
 use std::io::{Read, Seek, SeekFrom};
@@ -45,9 +46,10 @@ const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
 /// Which agent wrote a transcript, and therefore how to read it
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptKind {
-    /// Codex rollout - drives session state
+    /// Codex rollout - drives session state (its title comes from
+    /// [`session_index`], not the rollout)
     Codex,
-    /// Claude Code transcript - contributes usage, and failed turns
+    /// Claude Code transcript - contributes usage, the title, and failed turns
     Claude,
 }
 

@@ -1463,6 +1463,9 @@ impl SessionManager {
     ///
     /// Returns the session ID if this raised a new, bell-worthy reason to look
     /// at the session.
+    ///
+    /// An adopted agent title is written to the durable index straight away:
+    /// the name is identity, not live state, and a crash must not revert it.
     pub fn apply_agent_event(
         &mut self,
         session_id: SessionId,
@@ -1480,8 +1483,21 @@ impl SessionManager {
         // first prompt is what creates one - so a cached "missing" is stale.
         // Clearing it costs nothing; the suspension sweep looks again, once.
         session.info.transcript_missing = false;
+        // Only a title can rename a session, so only then is the old name kept
+        // to compare against
+        let may_rename = matches!(
+            &event,
+            AgentEvent::TitleChanged { .. }
+                | AgentEvent::TurnStarted { title: Some(_) }
+                | AgentEvent::SessionReset { title: Some(_) }
+        );
+        let name_before = may_rename.then(|| session.info.name.clone());
 
         let applied = state_machine::apply(&mut session.info, event, Utc::now(), &self.config);
+        let renamed = name_before.is_some_and(|before| before != session.info.name);
+        if renamed {
+            self.persist_session(session_id);
+        }
         applied.rang.then_some(session_id)
     }
 
@@ -3516,6 +3532,40 @@ mod tests {
         );
 
         manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_adopted_agent_title_survives_a_restart() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(store_path.clone()),
+        );
+
+        let session_id = create_persistable(&mut manager, "session-1");
+        assert!(manager.set_auto_named(session_id, true));
+        manager.apply_agent_event(
+            session_id,
+            AgentEvent::TitleChanged {
+                title: "Fix the login redirect".to_string(),
+            },
+        );
+
+        // On disk as soon as it is adopted, not only at a clean shutdown
+        let stored = load_store(&store_path);
+        let record = stored.get(session_id).unwrap();
+        assert_eq!(record.name, "Fix the login redirect");
+        assert!(
+            record.auto_named,
+            "a later, better title may still replace it"
+        );
+
+        manager.shutdown_all();
+        assert_eq!(
+            load_store(&store_path).get(session_id).unwrap().name,
+            "Fix the login redirect"
+        );
     }
 
     #[test]
