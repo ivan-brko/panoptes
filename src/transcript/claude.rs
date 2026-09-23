@@ -13,10 +13,12 @@
 //!
 //! That last one breaks the rule deliberately. A turn that dies on an API
 //! error (usage limit, expired login, overload) fires Claude's `StopFailure`
-//! hook *instead of* `Stop`, and Panoptes does not subscribe to `StopFailure`
-//! yet. Without this the session would sit in `Thinking` until the stall
-//! watchdog flagged it, with no reason given. The state machine ignores a
-//! repeat, so once the hook is wired up the two cannot double-fire.
+//! hook *instead of* `Stop`, and that hook is the primary report. The
+//! transcript's record is the backstop for a hook that never arrived - a
+//! dropped delivery, a Claude too old to send it - which would leave the
+//! session in `Thinking` until the stall watchdog flagged it, unexplained. Both
+//! read the code through [`failure_reason`], and the state machine ignores a
+//! repeat, so the two cannot double-fire.
 //!
 //! Not every record describes the live conversation. Subagent (sidechain)
 //! messages carry the subagent's model and context; meta records and

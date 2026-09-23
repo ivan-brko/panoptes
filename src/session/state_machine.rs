@@ -74,10 +74,76 @@ pub fn translate_hook(event: &HookEvent) -> AgentEvent {
             },
             kind => AgentEvent::from(kind),
         },
+        // Fires in place of `Stop` when the turn dies on an API error. The
+        // code is the same enum the transcript's failed-turn record carries,
+        // and the message text is what the transcript's own reading uses, so
+        // both reports of one failure agree on its label.
+        HookEventType::StopFailure => AgentEvent::TurnFailed {
+            reason: crate::transcript::claude::failure_reason(
+                event.failure_code(),
+                event
+                    .last_assistant_message()
+                    .or_else(|| event.error_details()),
+            ),
+        },
+        // Denied without a dialog - auto mode's classifier said no. The turn
+        // carries on, told why, so it resolves an approval rather than
+        // ending anything.
+        HookEventType::PermissionDenied => AgentEvent::ApprovalResolved {
+            tool: event.tool_name().map(str::to_string),
+        },
+        // Without an ID a start cannot be paired with its stop, and counting
+        // one anyway risks a subagent that never finishes blocking suspension
+        // for good. Only the no-`jq` degraded path omits it.
+        HookEventType::SubagentStart => match event.agent_id() {
+            Some(id) => AgentEvent::SubagentStarted { id: id.to_string() },
+            None => AgentEvent::Ignored,
+        },
+        HookEventType::SubagentStop => match event.agent_id() {
+            Some(id) => AgentEvent::SubagentFinished { id: id.to_string() },
+            None => AgentEvent::Ignored,
+        },
+        // The same meaning as the `elicitation_dialog` notification, which
+        // this reports more reliably
+        HookEventType::Elicitation => AgentEvent::from(NotificationKind::Elicitation),
+        // Answered, declined or cancelled: either way the question is gone.
+        // Approval attention does not record which server asked, so any
+        // result resolves it.
+        HookEventType::ElicitationResult => AgentEvent::ApprovalResolved { tool: None },
         // Codex CLI's only hook: the agent is done and wants input
         HookEventType::AgentTurnComplete => AgentEvent::TurnCompleted { last_message: None },
         HookEventType::Unknown => AgentEvent::Ignored,
     }
+}
+
+/// The background-work snapshot a hook carries alongside its main meaning
+///
+/// `Stop` and `SubagentStop` list the work still in flight in the session,
+/// which is a second, independent fact from "the turn ended" - so it travels
+/// as its own event, applied after [`translate_hook`]'s, rather than widening
+/// an event every agent produces. `None` for every other hook, and for a
+/// `Stop` that listed nothing at all (an older Claude, or the no-`jq` path),
+/// which says nothing about background work rather than "there is none".
+pub fn background_snapshot(event: &HookEvent) -> Option<AgentEvent> {
+    let subagents = match event.event_type() {
+        // At the end of a turn every subagent still running is a backgrounded
+        // one, and so is listed
+        HookEventType::Stop => event.background_subagents(),
+        // Mid-turn, foreground subagents are running but never listed, so a
+        // zero here proves nothing
+        HookEventType::SubagentStop => None,
+        _ => return None,
+    };
+    let tasks = event.background_tasks().map(<[_]>::len);
+    let crons = event.session_crons().map(<[_]>::len);
+    if tasks.is_none() && crons.is_none() {
+        return None;
+    }
+    Some(AgentEvent::BackgroundWork {
+        tasks,
+        crons,
+        subagents,
+    })
 }
 
 /// Apply a canonical agent event to a session
@@ -92,8 +158,8 @@ pub fn apply(
     now: DateTime<Utc>,
     config: &Config,
 ) -> Applied {
-    // A failed turn can be reported twice: by the transcript tailer, and -
-    // once it is subscribed to - by Claude's `StopFailure` hook. Whichever
+    // A failed turn is reported twice: by the transcript tailer, and by
+    // Claude's `StopFailure` hook. Whichever
     // lands second must not ring again or re-flag a session the user has
     // already looked at. `turn_failure` rather than `attention` is what marks
     // it, because attention is cleared the moment the session is viewed and
@@ -149,6 +215,10 @@ pub fn apply(
             }
             info.in_flight.clear();
             info.turn_failure = None;
+            // A fresh process has no background work; `/clear` and friends
+            // hand over a new conversation the old one's work does not
+            // report into
+            info.clear_background_work();
             clear_attention = true;
             // The agent is up but has not been asked anything yet
             Move::Authoritative(SessionState::Waiting)
@@ -166,8 +236,10 @@ pub fn apply(
             // The process is on its way out but has not gone yet. Leave the
             // Exited transition to `check_alive`, which is the only place
             // that can tell a clean exit from a crash; just stop claiming
-            // that tools are still running.
+            // that tools are still running - or that background work is,
+            // since it goes down with the process.
             info.in_flight.clear();
+            info.clear_background_work();
             Move::Unchanged
         }
 
@@ -178,6 +250,8 @@ pub fn apply(
             // A prompt is a clean turn boundary: anything still marked in
             // flight from the previous turn is stale, and the user is
             // demonstrably present so nothing needs flagging for them.
+            // Background work is deliberately kept: it outlives turns, and
+            // its finishing is itself what starts one.
             info.in_flight.clear();
             info.turn_failure = None;
             clear_attention = true;
@@ -225,11 +299,11 @@ pub fn apply(
         }
 
         AgentEvent::TurnFailed { reason } => {
-            // Claude's only report of this today is its transcript, which
-            // otherwise never drives state (see `transcript::claude`): a turn
-            // that dies on an API error fires `StopFailure` instead of `Stop`,
-            // so without this the session would sit in `Thinking` until the
-            // stall watchdog guessed at it. Like a finished turn, nothing is
+            // A turn that dies on an API error fires `StopFailure` instead of
+            // `Stop`, and Claude also records it in its transcript, which
+            // otherwise never drives state (see `transcript::claude`). Without
+            // this the session would sit in `Thinking` until the stall
+            // watchdog guessed at it. Like a finished turn, nothing is
             // running any more and the agent is back at its prompt - but
             // unlike an interrupt, nobody chose this, so it is flagged.
             info.in_flight.clear();
@@ -241,6 +315,67 @@ pub fn apply(
         AgentEvent::ApprovalRequested { tool } => {
             attention = Some(AttentionReason::Approval { tool });
             Move::AtLeast(SessionState::AwaitingApproval)
+        }
+
+        AgentEvent::ApprovalResolved { tool } => {
+            // Resolves the approval flag only if it is for this tool, or
+            // either side does not know which tool - another subagent's
+            // dialog for a different tool is still open and still wants the
+            // user.
+            let resolves =
+                |flagged: &Option<String>| tool.is_none() || flagged.is_none() || *flagged == tool;
+            let other_dialog_open = match &info.attention {
+                Some(AttentionReason::Approval { tool: flagged }) if resolves(flagged) => {
+                    clear_attention = true;
+                    false
+                }
+                Some(AttentionReason::Approval { .. }) => true,
+                _ => false,
+            };
+            // The turn goes on after a denial or an answer, so the session is
+            // back to working rather than waiting
+            if info.state == SessionState::AwaitingApproval && !other_dialog_open {
+                Move::Authoritative(SessionState::Thinking)
+            } else {
+                Move::Unchanged
+            }
+        }
+
+        AgentEvent::SubagentStarted { id } => {
+            info.subagent_ids.insert(id);
+            info.subagents = info.subagent_ids.len();
+            Move::Unchanged
+        }
+
+        AgentEvent::SubagentFinished { id } => {
+            // A stop never seen started - its start was dropped, or landed
+            // before a reset - is a no-op rather than a decrement, which is
+            // the clamp at zero
+            if info.subagent_ids.remove(&id) {
+                info.subagents = info.subagent_ids.len();
+            }
+            Move::Unchanged
+        }
+
+        AgentEvent::BackgroundWork {
+            tasks,
+            crons,
+            subagents,
+        } => {
+            if let Some(tasks) = tasks {
+                info.background_tasks = tasks;
+            }
+            if let Some(crons) = crons {
+                info.session_crons = crons;
+            }
+            // The one safety net for a subagent whose stop never arrived - an
+            // interrupted turn, a dropped hook - which would otherwise block
+            // suspension for good. Only zero is conclusive: the listed tasks
+            // carry their own IDs, not the subagents'.
+            if subagents == Some(0) {
+                info.forget_subagent_ids();
+            }
+            Move::Unchanged
         }
 
         AgentEvent::IdleReminder => {
@@ -333,7 +468,11 @@ mod tests {
         config: &Config,
     ) -> bool {
         let event = hook(info.id, event, payload);
-        apply(info, translate_hook(&event), Utc::now(), config).rang
+        let rang = apply(info, translate_hook(&event), Utc::now(), config).rang;
+        if let Some(snapshot) = background_snapshot(&event) {
+            apply(info, snapshot, Utc::now(), config);
+        }
+        rang
     }
 
     #[test]
@@ -902,6 +1041,331 @@ mod tests {
             &config,
         );
         assert!(apply(&mut info, failed(), later, &config).rang);
+    }
+
+    #[test]
+    fn test_stop_failure_ends_turn_with_failed_attention() {
+        let config = Config::default();
+        let mut info = test_info();
+
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        let bash = serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"});
+        apply_hook(&mut info, "PreToolUse", bash, &config);
+
+        // Fires instead of Stop; the tool's PostToolUse never comes
+        let failure = serde_json::json!({
+            "hook_event_name": "StopFailure",
+            "error": "rate_limit",
+            "last_assistant_message": "You've hit your limit · resets 3pm"
+        });
+        assert!(
+            apply_hook(&mut info, "StopFailure", failure.clone(), &config),
+            "a failed turn is bell-worthy"
+        );
+        assert_eq!(info.state, SessionState::Waiting);
+        assert!(info.in_flight.is_empty());
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::TurnFailed {
+                reason: Some("usage limit".to_string())
+            })
+        );
+        assert_eq!(info.failed_turn(), Some("usage limit"));
+
+        // The transcript reports the same failure moments later
+        assert!(!apply_hook(&mut info, "StopFailure", failure, &config));
+
+        // Prompt-too-long shares `invalid_request` and is told apart by the
+        // message, as the transcript's own reading does
+        let mut info = test_info();
+        let too_long = serde_json::json!({
+            "error": "invalid_request",
+            "error_details": "400",
+            "last_assistant_message": "Prompt is too long"
+        });
+        apply_hook(&mut info, "StopFailure", too_long, &config);
+        assert_eq!(info.failed_turn(), Some("prompt too long"));
+
+        // The no-jq path still ends the turn, just without a reason
+        let mut info = test_info();
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        apply_hook(&mut info, "StopFailure", serde_json::Value::Null, &config);
+        assert_eq!(info.state, SessionState::Waiting);
+        assert_eq!(info.failed_turn(), Some("turn failed"));
+    }
+
+    #[test]
+    fn test_permission_denied_demotes_awaiting_approval() {
+        let config = Config::default();
+        let mut info = test_info();
+
+        apply_hook(
+            &mut info,
+            "PermissionRequest",
+            serde_json::json!({"tool_name": "Bash"}),
+            &config,
+        );
+        assert_eq!(info.state, SessionState::AwaitingApproval);
+
+        let denied = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_use_id": "toolu_07",
+            "reason": "Deleting files outside the task"
+        });
+        assert!(!apply_hook(&mut info, "PermissionDenied", denied, &config));
+
+        // The turn carries on after a denial
+        assert_eq!(info.state, SessionState::Thinking);
+        assert!(info.attention.is_none());
+
+        // A denial for one tool does not resolve another subagent's dialog
+        let mut info = test_info();
+        apply_hook(
+            &mut info,
+            "PermissionRequest",
+            serde_json::json!({"tool_name": "Edit"}),
+            &config,
+        );
+        apply_hook(
+            &mut info,
+            "PermissionDenied",
+            serde_json::json!({"tool_name": "Bash"}),
+            &config,
+        );
+        assert_eq!(info.state, SessionState::AwaitingApproval);
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::Approval {
+                tool: Some("Edit".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn test_permission_denied_without_pending_approval_is_noop() {
+        let config = Config::default();
+
+        // Auto mode denies mid-turn with no dialog ever shown
+        let mut info = test_info();
+        let bash = serde_json::json!({"tool_name": "Bash", "tool_use_id": "t1"});
+        apply_hook(&mut info, "PreToolUse", bash, &config);
+        let denied = serde_json::json!({"tool_name": "Bash", "reason": "no"});
+        apply_hook(&mut info, "PermissionDenied", denied.clone(), &config);
+        assert_eq!(info.state, SessionState::Executing);
+        assert_eq!(info.in_flight.len(), 1);
+
+        // Nor does it touch a finished turn's flag
+        let mut info = test_info();
+        apply_hook(&mut info, "Stop", serde_json::json!({}), &config);
+        apply_hook(&mut info, "PermissionDenied", denied, &config);
+        assert_eq!(info.state, SessionState::Waiting);
+        assert_eq!(info.attention, Some(AttentionReason::TurnComplete));
+    }
+
+    #[test]
+    fn test_elicitation_raises_and_its_result_clears_attention() {
+        let config = Config::default();
+        let mut info = test_info();
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+
+        let ask = serde_json::json!({
+            "mcp_server_name": "linear",
+            "message": "Which team should own this issue?"
+        });
+        assert!(apply_hook(&mut info, "Elicitation", ask, &config));
+        assert_eq!(info.state, SessionState::AwaitingApproval);
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::Approval { tool: None })
+        );
+
+        let answer = serde_json::json!({"mcp_server_name": "linear", "action": "decline"});
+        assert!(!apply_hook(&mut info, "ElicitationResult", answer, &config));
+        assert_eq!(info.state, SessionState::Thinking);
+        assert!(info.attention.is_none());
+    }
+
+    #[test]
+    fn test_subagent_start_stop_counts() {
+        let config = Config::default();
+        let mut info = test_info();
+        let start = |id: &str| serde_json::json!({"agent_id": id, "agent_type": "Explore"});
+        let stop = |id: &str| serde_json::json!({"agent_id": id, "agent_type": "Explore"});
+
+        apply_hook(&mut info, "SubagentStart", start("a1"), &config);
+        apply_hook(&mut info, "SubagentStart", start("a2"), &config);
+        assert_eq!(info.subagents, 2);
+
+        // A repeated start is the same subagent
+        apply_hook(&mut info, "SubagentStart", start("a1"), &config);
+        assert_eq!(info.subagents, 2);
+
+        // Stops arrive in any order and retire their own subagent
+        apply_hook(&mut info, "SubagentStop", stop("a2"), &config);
+        assert_eq!(info.subagents, 1);
+        assert!(info.subagent_ids.contains("a1"));
+
+        // A stop without a start clamps at zero rather than going below it
+        apply_hook(&mut info, "SubagentStop", stop("a1"), &config);
+        apply_hook(&mut info, "SubagentStop", stop("never-started"), &config);
+        assert_eq!(info.subagents, 0);
+
+        // Nothing to pair without an ID (the no-jq path): not counted at all
+        apply_hook(&mut info, "SubagentStart", serde_json::Value::Null, &config);
+        assert_eq!(info.subagents, 0);
+
+        // A turn ending with no subagent in the background retires any whose
+        // stop never arrived - an interrupted foreground subagent
+        apply_hook(&mut info, "SubagentStart", start("lost"), &config);
+        let settled = serde_json::json!({"background_tasks": [], "session_crons": []});
+        apply_hook(&mut info, "Stop", settled, &config);
+        assert_eq!(info.subagents, 0);
+
+        // While one listed as backgrounded keeps them
+        apply_hook(&mut info, "SubagentStart", start("bg"), &config);
+        let listed = serde_json::json!({"background_tasks": [
+            {"id": "t1", "type": "subagent", "status": "running", "description": "audit"}
+        ]});
+        apply_hook(&mut info, "Stop", listed, &config);
+        assert_eq!(info.subagents, 1);
+
+        // A subagent finishing mid-turn lists no foreground siblings, so its
+        // empty list must not retire them
+        apply_hook(&mut info, "SubagentStart", start("fg"), &config);
+        let sibling_done = serde_json::json!({"agent_id": "other", "background_tasks": []});
+        apply_hook(&mut info, "SubagentStop", sibling_done, &config);
+        assert_eq!(info.subagents, 2);
+    }
+
+    #[test]
+    fn test_stop_snapshot_sets_background_work() {
+        let config = Config::default();
+        let mut info = test_info();
+
+        let stop = serde_json::json!({
+            "last_assistant_message": "Dev server is up.",
+            "background_tasks": [
+                {"id": "b1", "type": "shell", "status": "running",
+                 "description": "npm run dev", "command": "npm run dev"},
+                {"id": "b2", "type": "monitor", "status": "running",
+                 "description": "CI", "server": "github", "tool": "watch_run"}
+            ],
+            "session_crons": [
+                {"id": "k1", "schedule": "*/5 * * * *", "recurring": true,
+                 "prompt": "check the deploy"}
+            ]
+        });
+        apply_hook(&mut info, "Stop", stop, &config);
+        assert_eq!(info.state, SessionState::Waiting);
+        assert_eq!((info.background_tasks, info.session_crons), (2, 1));
+        assert!(info.has_background_work());
+
+        // Background work outlives turns: a new prompt keeps it
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        assert_eq!((info.background_tasks, info.session_crons), (2, 1));
+
+        // A Stop that does not list any - an older Claude, the no-jq path -
+        // says nothing, which is not the same as "none"
+        apply_hook(
+            &mut info,
+            "Stop",
+            serde_json::json!({"last_assistant_message": "ok"}),
+            &config,
+        );
+        apply_hook(&mut info, "Stop", serde_json::Value::Null, &config);
+        assert_eq!((info.background_tasks, info.session_crons), (2, 1));
+
+        // A snapshot, not a delta: the next list replaces the last
+        let one_left = serde_json::json!({
+            "background_tasks": [{"id": "b1", "type": "shell", "status": "running",
+                                  "description": "npm run dev"}],
+            "session_crons": [{"id": "k1", "schedule": "*/5 * * * *", "prompt": "p"}]
+        });
+        apply_hook(&mut info, "Stop", one_left, &config);
+        assert_eq!((info.background_tasks, info.session_crons), (1, 1));
+
+        // A subagent finishing reports the same snapshot
+        let subagent_stop = serde_json::json!({
+            "agent_id": "a1", "background_tasks": [], "session_crons": [{"id": "k1"}]
+        });
+        apply_hook(&mut info, "SubagentStop", subagent_stop, &config);
+        assert_eq!((info.background_tasks, info.session_crons), (0, 1));
+
+        // `/clear` hands over a fresh conversation, and ending the process
+        // takes everything with it
+        info.background_tasks = 3;
+        info.subagent_ids.insert("a9".to_string());
+        info.subagents = 1;
+        apply_hook(
+            &mut info,
+            "SessionStart",
+            serde_json::json!({"source": "clear"}),
+            &config,
+        );
+        assert!(!info.has_background_work());
+
+        info.background_tasks = 3;
+        info.session_crons = 2;
+        apply_hook(
+            &mut info,
+            "SessionEnd",
+            serde_json::json!({"reason": "exit"}),
+            &config,
+        );
+        assert!(!info.has_background_work());
+
+        // Mid-turn compaction is not a boundary
+        info.background_tasks = 1;
+        apply_hook(
+            &mut info,
+            "SessionStart",
+            serde_json::json!({"source": "compact"}),
+            &config,
+        );
+        assert_eq!(info.background_tasks, 1);
+    }
+
+    #[test]
+    fn test_codex_subagent_count_survives_a_reset() {
+        let config = Config::default();
+        let mut info = test_info();
+        info.session_type = SessionType::OpenAICodex;
+
+        // The watcher only re-sends its count when it changes, so a reset
+        // must not zero a figure it did not produce
+        apply(
+            &mut info,
+            AgentEvent::Subagents { active: 2 },
+            Utc::now(),
+            &config,
+        );
+        apply(
+            &mut info,
+            AgentEvent::SessionReset { title: None },
+            Utc::now(),
+            &config,
+        );
+        assert_eq!(info.subagents, 2);
     }
 
     #[test]

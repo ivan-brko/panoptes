@@ -70,11 +70,29 @@ pub fn session_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
     // this. The count is inferred from recent writes and will sometimes be
     // stale, which is why it is a count rather than a claim about what they
     // are doing.
-    match info.subagents {
+    let mut display = match info.subagents {
         0 => base,
         1 => format!("{} · 1 subagent", base),
         n => format!("{} · {} subagents", base, n),
+    };
+
+    // A finished turn can leave work behind - a dev server, a monitor, a
+    // `/loop` - and that session is the one the suspend sweep will not touch,
+    // so say why. Only once the turn has settled: mid-turn, the work is
+    // what the state already describes. Backgrounded subagents are listed by
+    // the agent as background tasks too, and are already counted above.
+    if info.state == SessionState::Waiting {
+        let background = info
+            .background_tasks
+            .saturating_sub(info.subagent_ids.len());
+        if background > 0 {
+            display.push_str(&format!(" · {} in background", background));
+        }
+        if info.session_crons > 0 {
+            display.push_str(&format!(" · {} scheduled", info.session_crons));
+        }
     }
+    display
 }
 
 fn base_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
@@ -423,6 +441,39 @@ mod tests {
             session_state_display(&info, later),
             "Waiting - 3m ✗ usage limit"
         );
+    }
+
+    #[test]
+    fn test_waiting_state_names_background_work() {
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let now = Utc::now();
+        info.set_state_at(SessionState::Waiting, now);
+        info.last_activity = now;
+
+        info.background_tasks = 2;
+        info.session_crons = 1;
+        assert_eq!(
+            session_state_display(&info, now),
+            "Waiting · 2 in background · 1 scheduled"
+        );
+
+        // A backgrounded Claude subagent is both a subagent and a background
+        // task; it is counted once
+        info.subagent_ids.insert("a1".to_string());
+        info.subagents = 1;
+        assert_eq!(
+            session_state_display(&info, now),
+            "Waiting · 1 subagent · 1 in background · 1 scheduled"
+        );
+
+        // Mid-turn the state already says what is happening
+        info.set_state_at(SessionState::Thinking, now);
+        assert_eq!(session_state_display(&info, now), "Thinking · 1 subagent");
     }
 
     #[test]

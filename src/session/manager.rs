@@ -1164,10 +1164,14 @@ impl SessionManager {
             return false;
         }
 
-        // Codex subagents are children of this process. The parent shows as
-        // Waiting the whole time they work, so without this the one case that
-        // most looks idle is the one where killing it destroys the most.
-        if info.subagents > 0 {
+        // Subagents, background tasks and scheduled prompts all live in this
+        // process, whatever the agent. The parent shows as Waiting the whole
+        // time they work - Codex subagents in their own rollouts, Claude's
+        // backgrounded shells, monitors and agents after its turn has ended -
+        // so without this the case that most looks idle is the one where
+        // killing it destroys the most. A scheduled prompt (`/loop`) is no
+        // different: it is only idle until it fires, and the kill cancels it.
+        if info.has_background_work() {
             return false;
         }
 
@@ -1389,7 +1393,12 @@ impl SessionManager {
         };
 
         self.follow_agent_conversation(session_id, event);
-        self.apply_agent_event(session_id, state_machine::translate_hook(event))
+        let rang = self.apply_agent_event(session_id, state_machine::translate_hook(event));
+        // Never rings: it only records what is still running
+        if let Some(snapshot) = state_machine::background_snapshot(event) {
+            self.apply_agent_event(session_id, snapshot);
+        }
+        rang
     }
 
     /// Follow a Claude session onto a new conversation, if the event says it moved
@@ -2158,6 +2167,164 @@ mod tests {
         assert!(!SessionManager::may_suspend(&fresh, None, now, idle));
     }
 
+    /// An idle, resumable Claude session in `Waiting`, fed `hooks` through
+    /// the same translation the manager uses
+    fn idle_claude_session_after(
+        temp_dir: &TempDir,
+        now: DateTime<Utc>,
+        hooks: &[(&str, serde_json::Value)],
+    ) -> SessionInfo {
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            temp_dir.path().to_path_buf(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        info.agent_session_id = Some(info.id.to_string());
+        let config = Config::default();
+        let long_ago = now - chrono::Duration::seconds(10_000);
+        for (event, payload) in hooks {
+            let event = HookEvent {
+                session_id: info.id.to_string(),
+                event: event.to_string(),
+                timestamp: 0,
+                payload: payload.clone(),
+            };
+            state_machine::apply(
+                &mut info,
+                state_machine::translate_hook(&event),
+                long_ago,
+                &config,
+            );
+            if let Some(snapshot) = state_machine::background_snapshot(&event) {
+                state_machine::apply(&mut info, snapshot, long_ago, &config);
+            }
+        }
+        info.last_engagement = long_ago;
+        info.last_activity = long_ago;
+        info
+    }
+
+    #[test]
+    fn test_may_suspend_refuses_session_with_background_tasks() {
+        let temp_dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let idle = 7200;
+
+        let quiet = idle_claude_session_after(
+            &temp_dir,
+            now,
+            &[(
+                "Stop",
+                serde_json::json!({"background_tasks": [], "session_crons": []}),
+            )],
+        );
+        assert_eq!(quiet.state, SessionState::Waiting);
+        assert!(
+            SessionManager::may_suspend(&quiet, None, now, idle),
+            "the baseline case must be suspendable or this test proves nothing"
+        );
+
+        // A dev server left running in the background dies with the process
+        let shell = idle_claude_session_after(
+            &temp_dir,
+            now,
+            &[(
+                "Stop",
+                serde_json::json!({"background_tasks": [{"id": "b1", "type": "shell",
+                    "status": "running", "description": "npm run dev"}]}),
+            )],
+        );
+        assert_eq!(shell.background_tasks, 1);
+        assert!(!SessionManager::may_suspend(&shell, None, now, idle));
+
+        // So does a `/loop`, which is only idle until it fires
+        let looping = idle_claude_session_after(
+            &temp_dir,
+            now,
+            &[(
+                "Stop",
+                serde_json::json!({"background_tasks": [], "session_crons": [
+                    {"id": "k1", "schedule": "*/10 * * * *", "prompt": "check CI"}]}),
+            )],
+        );
+        assert_eq!(looping.session_crons, 1);
+        assert!(!SessionManager::may_suspend(&looping, None, now, idle));
+
+        // Whatever the agent: the rule is about the process, not about Claude
+        let mut codex = quiet.clone();
+        codex.session_type = SessionType::OpenAICodex;
+        codex.background_tasks = 1;
+        assert!(!SessionManager::may_suspend(&codex, None, now, idle));
+
+        // Once the work is reported finished, the session is idle again
+        let finished = idle_claude_session_after(
+            &temp_dir,
+            now,
+            &[
+                (
+                    "Stop",
+                    serde_json::json!({"background_tasks": [{"id": "b1", "type": "shell",
+                        "status": "running", "description": "npm test"}]}),
+                ),
+                ("UserPromptSubmit", serde_json::json!({})),
+                (
+                    "Stop",
+                    serde_json::json!({"background_tasks": [], "session_crons": []}),
+                ),
+            ],
+        );
+        assert!(SessionManager::may_suspend(&finished, None, now, idle));
+    }
+
+    #[test]
+    fn test_may_suspend_refuses_claude_session_with_subagents() {
+        let temp_dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let idle = 7200;
+
+        // A backgrounded subagent still working after the turn ended
+        let working = idle_claude_session_after(
+            &temp_dir,
+            now,
+            &[
+                ("UserPromptSubmit", serde_json::json!({})),
+                (
+                    "SubagentStart",
+                    serde_json::json!({"agent_id": "a1", "agent_type": "general-purpose"}),
+                ),
+                (
+                    "Stop",
+                    serde_json::json!({"background_tasks": [{"id": "t1", "type": "subagent",
+                        "status": "running", "description": "Audit deps"}]}),
+                ),
+            ],
+        );
+        assert_eq!(working.session_type, SessionType::ClaudeCode);
+        assert_eq!(working.state, SessionState::Waiting);
+        assert_eq!(working.subagents, 1);
+        assert!(!SessionManager::may_suspend(&working, None, now, idle));
+
+        // Its stop frees the session
+        let done = idle_claude_session_after(
+            &temp_dir,
+            now,
+            &[
+                (
+                    "SubagentStart",
+                    serde_json::json!({"agent_id": "a1", "agent_type": "general-purpose"}),
+                ),
+                ("Stop", serde_json::json!({})),
+                (
+                    "SubagentStop",
+                    serde_json::json!({"agent_id": "a1", "background_tasks": []}),
+                ),
+            ],
+        );
+        assert_eq!(done.subagents, 0);
+        assert!(SessionManager::may_suspend(&done, None, now, idle));
+    }
+
     #[test]
     fn test_may_suspend_allows_session_with_only_system_threads() {
         // Through the watcher's own count: a Waiting Codex session whose only
@@ -2249,6 +2416,39 @@ mod tests {
             ));
         }
 
+        assert_eq!(manager.suspend_idle_sessions(7200, None), vec![session_id]);
+    }
+
+    #[test]
+    fn test_suspend_sweep_sees_background_work_from_hooks() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = test_config(&temp_dir);
+        let mut manager = test_manager(&temp_dir, config);
+        let session_id = insert_suspendable_session(&mut manager, &temp_dir);
+        let age = |manager: &mut SessionManager| {
+            let info = &mut manager.get_mut(session_id).unwrap().info;
+            let long_ago = Utc::now() - chrono::Duration::seconds(10_000);
+            info.last_engagement = long_ago;
+            info.last_activity = long_ago;
+        };
+
+        // The snapshot rides on `Stop`, alongside the end of the turn, and the
+        // manager must apply both
+        manager.handle_hook_event(&hook(
+            session_id,
+            "Stop",
+            serde_json::json!({"background_tasks": [{"id": "b1", "type": "monitor",
+                "status": "running", "description": "CI"}], "session_crons": []}),
+        ));
+        age(&mut manager);
+        assert!(manager.suspend_idle_sessions(7200, None).is_empty());
+
+        manager.handle_hook_event(&hook(
+            session_id,
+            "Stop",
+            serde_json::json!({"background_tasks": [], "session_crons": []}),
+        ));
+        age(&mut manager);
         assert_eq!(manager.suspend_idle_sessions(7200, None), vec![session_id]);
     }
 

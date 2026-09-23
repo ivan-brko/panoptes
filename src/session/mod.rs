@@ -17,7 +17,7 @@ pub use pty::{mouse_event_to_bytes, ExitInfo, PtyHandle, PtyWriteTimedOut};
 pub use store::{sessions_file_path, SessionStore};
 pub use vterm::{VirtualTerminal, DEFAULT_SCROLLBACK_ROWS};
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
@@ -392,11 +392,39 @@ pub struct SessionInfo {
     pub usage: crate::agent::events::UsageSnapshot,
     /// Subagents this session appears to be running
     ///
-    /// Only meaningful for Codex, whose subagents write their own separate
-    /// rollout files and would otherwise leave the parent looking idle. Claude
-    /// subagents share the parent's session and show up in `in_flight` instead.
+    /// Fed differently per agent, and never by both for one session. Codex
+    /// subagents write their own separate rollout files and would otherwise
+    /// leave the parent looking idle, so the transcript watcher infers a
+    /// count from recent writes. Claude reports its own through the
+    /// `SubagentStart` / `SubagentStop` hooks, tracked by ID in
+    /// `subagent_ids`, and this is kept equal to that set's size. The watcher
+    /// only counts for sessions with a Codex home, so a Claude session never
+    /// receives its figure.
     #[serde(skip)]
     pub subagents: usize,
+    /// The Claude subagents behind `subagents`, by the agent's own ID
+    ///
+    /// A set rather than a counter because subagents run concurrently and
+    /// their hooks are delivered in the background, so a stop can overtake a
+    /// start; and a stop for an ID never seen started is a no-op rather than
+    /// a decrement below the truth.
+    #[serde(skip)]
+    pub subagent_ids: HashSet<String>,
+    /// Background tasks still in flight after the turn settled
+    ///
+    /// Backgrounded shells, monitors, subagents and workflows, as last
+    /// listed by the agent at the end of a turn. Not persisted: a restarted
+    /// agent has none - the kill that ended the process ended them too.
+    #[serde(skip)]
+    pub background_tasks: usize,
+    /// Session-scoped scheduled prompts (`/loop`, `CronCreate`,
+    /// `ScheduleWakeup`) that will wake the session later
+    ///
+    /// They live in the agent's process, so a session sitting in `Waiting`
+    /// with one of these is idle only until it fires. Not persisted, for the
+    /// same reason as `background_tasks`.
+    #[serde(skip)]
+    pub session_crons: usize,
     /// Whether this session reattached to a conversation that already existed
     ///
     /// Decides where transcript reading starts. A fresh session's transcript
@@ -595,6 +623,39 @@ impl SessionInfo {
         }
     }
 
+    /// Whether anything still runs, or is scheduled to run, in this session's
+    /// process beyond the turn itself
+    ///
+    /// Subagents, background tasks and scheduled prompts all die with the
+    /// process, and all of them can be live while the session sits in
+    /// `Waiting` looking finished.
+    pub fn has_background_work(&self) -> bool {
+        self.subagents > 0 || self.background_tasks > 0 || self.session_crons > 0
+    }
+
+    /// Forget every subagent, background task and scheduled prompt
+    ///
+    /// For when the agent reports the conversation replaced or the process
+    /// going away, either of which takes them all with it.
+    pub fn clear_background_work(&mut self) {
+        self.forget_subagent_ids();
+        self.background_tasks = 0;
+        self.session_crons = 0;
+    }
+
+    /// Drop every hook-reported subagent
+    ///
+    /// Touches `subagents` only when this session's count came from hooks.
+    /// A Codex count belongs to the transcript watcher, which only re-sends
+    /// it when it changes; zeroing it here would hide live subagents until
+    /// one of them happened to finish.
+    pub fn forget_subagent_ids(&mut self) {
+        if !self.subagent_ids.is_empty() {
+            self.subagent_ids.clear();
+            self.subagents = 0;
+        }
+    }
+
     /// Check if this session needs attention
     ///
     /// Attention is decoupled from state because subagents share a session_id -
@@ -747,6 +808,9 @@ impl SessionInfo {
             turn_failure: None,
             usage: crate::agent::events::UsageSnapshot::default(),
             subagents: 0,
+            subagent_ids: HashSet::new(),
+            background_tasks: 0,
+            session_crons: 0,
             resumed_conversation: false,
             auto_named: false,
             exit_reason: None,
