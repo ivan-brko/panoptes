@@ -410,6 +410,62 @@ whenever the context window fills, in the middle of a turn the agent is still
 working on. Only `startup`, `resume`, `clear` and `fork` reset the session to
 `Waiting`; anything else leaves the state alone.
 
+**Claude's status line.** Claude Code reports its plan rate limits, and the
+running session's real context window, in one place only: the JSON it pipes to
+a `statusLine` command on every status-line refresh. Panoptes installs its own
+`statusLine` in the same `settings.local.json` as the hooks, pointing at
+`~/.panoptes/hooks/panoptes-statusline.sh`. It POSTs the document as a
+`StatusLine` envelope (backgrounded, `curl --max-time 2`, detached from stdout
+so Claude never waits on it), and translates to `AgentEvent::UsageRefresh`.
+
+A `statusLine` in `settings.local.json` replaces the user's own from any lower
+layer, so Panoptes wraps rather than replaces it:
+
+- At spawn it resolves the effective user status line the way Claude would:
+  the project's `settings.local.json`, then `.claude/settings.json`, then
+  `$CLAUDE_CONFIG_DIR/settings.json` (the profile's directory, else the
+  environment's, else `~/.claude`). Only `type: "command"` settings count.
+- The installed command is `'<wrapper>' ['--local'] '<user command>'`. The
+  wrapper reads stdin once, forwards it, then pipes the same bytes to
+  `bash -c '<user command>'` and exits with its status, so the user's output
+  reaches Claude untouched. The user's other options (`padding`,
+  `refreshInterval`) are copied onto Panoptes' setting.
+- `--local` marks a command that came from `settings.local.json` itself, the
+  one layer Panoptes overwrites; that is what lets `claude_status_line = false`
+  put it back. A command from a lower layer is re-read from that layer at every
+  spawn, so editing it takes effect. The wrapper recognises its own command by
+  the script's file name and sees through it, so it never wraps itself.
+- With no user status line it prints nothing. Claude's default is no status
+  line at all, which a command cannot reproduce exactly: Claude reserves the
+  row, so it shows as one blank line.
+
+The envelope is built by splicing Claude's document in whole, not with `jq`:
+the document is already JSON and nothing is picked out of it, and the status
+line runs often enough that a process saved matters. The session ID spliced
+beside it is checked to look like a UUID first. Without `PANOPTES_SESSION_ID`
+(a plain `claude` run in the same directory) nothing is posted and only the
+user's command runs.
+
+Like the hooks, the status line is never removed when a session ends - Panoptes
+does not clean `settings.local.json` up at all. The file is shared by every
+session in the working directory, running ones included, and Claude re-reads it
+live, so removing the key on one session's exit would strip it from its
+neighbours. Every spawn in a directory writes the same setting, so concurrent
+sessions agree on it; each wrapper run reads its own session from the
+environment.
+
+Captured from Claude Code 2.1.280 (`tests/fixtures/claude_status_line.json`):
+`rate_limits.five_hour` / `rate_limits.seven_day`, each `{used_percentage,
+resets_at}` with a 0-100 percentage and `resets_at` in epoch seconds;
+`context_window.context_window_size` and `current_usage`; `model.id` with any
+`[1m]` suffix. `rate_limits` is absent until the first API response of the
+process, and `current_usage` is `null` until the first turn. The command runs at
+startup and after state changes (token usage, permission mode, model, effort,
+vim mode), debounced - one turn produced a single refresh - and on timers:
+when a rate-limit window resets, when the prompt cache expires, and every
+`refreshInterval` seconds if the user set one. Many of those fire while nobody
+is doing anything, which is why `UsageRefresh` is not activity.
+
 **Codex lifecycle hooks (Codex 0.156.1 and later):** `SessionStart`,
 `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
 `PermissionRequest`, `Stop`, `SubagentStart`, `SubagentStop`, `Interrupt`.
@@ -623,6 +679,7 @@ See [CONFIG_GUIDE.md](CONFIG_GUIDE.md) for the full reference.
 | `log_agent_events` | false | Log raw agent transcript lines for debugging |
 | `notify_on` | approval, turn_complete, crashed, failed | Which attention reasons ring the bell |
 | `attention_on_idle` | false | Whether Claude's idle reminder raises attention |
+| `claude_status_line` | true | Wrap Claude's status line to read rate limits and the real context window |
 | `theme` | `auto` | Colour-capability tier: `auto` / `truecolor` / `ansi256` / `ansi16` |
 | `palette` | `peacock` | Colour preset: `peacock` / `io` / `hera` / `argus` |
 | `custom_shortcuts` | `[]` | Array of custom shell shortcuts |
@@ -858,6 +915,9 @@ without lifecycle hooks it is the only channel there is.
 | Contributes | context usage, model, title, failed turns | context usage, model, rate limits, title (from `session_index.jsonl`); state and subagents without hooks |
 | Measured flush latency | immediate | under 50ms |
 
+Claude's rate limits and observed context window come from its status line
+instead (see State Updates above); the transcript has neither.
+
 The two tailers have deliberately different jobs. For a Codex without
 lifecycle hooks, the rollout drives its state, since `notify` can only ever
 report "my turn ended". Where hooks report, the transcript only supplements:
@@ -922,6 +982,12 @@ on a tie - labelled by its length (`5h 12%`, `wk 40%`), or
 window merges independently, so an update naming only one never blanks the
 other.
 
+**Claude rate limits.** The status line's `five_hour` and `seven_day` windows
+map onto the same `primary` / `secondary` windows (300 and 10080 minutes), so
+the header shows Claude's limits exactly as it shows Codex's. Claude reports no
+"limit reached" flag there; a turn refused for it still arrives as a failed turn
+from the transcript.
+
 **Where reading starts.** A session that created its own transcript is read
 from the beginning: everything in the file describes what it has just been
 doing, including the opening seconds during which a Codex conversation is still
@@ -950,7 +1016,7 @@ providers, under `CLAUDE_CODE_DISABLE_1M_CONTEXT`, or when the account cannot
 pay for long context). So every window carries a `WindowSource`, weakest first:
 `Inferred` from the table, `Launch` from a `--model …[1m]` argument Panoptes
 spawned with, and `Observed` from the agent itself (Codex's
-`model_context_window`, or Claude's status line once it is fed in).
+`model_context_window`, or Claude's status line's `context_window_size`).
 `UsageSnapshot::merge` lets a window replace one from an equal or stronger
 source, and a weaker one only when the model has changed, since the stronger
 figure described the previous model.
@@ -1034,7 +1100,8 @@ interacting with one pays.
 Two clocks must agree. `last_engagement` moves when the agent changes state or
 the user types, and deliberately *not* on raw PTY output - a redrawn status line
 is rendering, not engagement, and Claude's once-a-minute idle notification is
-excluded for the same reason. `last_activity` does move on PTY output, and is
+excluded for the same reason. Neither moves on a status-line refresh, which
+Claude also runs on timers. `last_activity` does move on PTY output, and is
 the safety net: Codex reports nothing between the start of a turn and its end,
 so a working Codex session can sit in `Waiting` with a stale `last_engagement`
 while producing output the whole time. Requiring silence too means the worst
