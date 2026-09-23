@@ -133,6 +133,15 @@ pub enum AgentEvent {
     /// Fresh token and rate-limit figures
     Usage(UsageSnapshot),
 
+    /// The same figures, re-reported on the agent's own schedule
+    ///
+    /// Claude's status line reruns at startup, after turns, on a mode or
+    /// model switch, and on timers - when a rate-limit window resets, when the
+    /// prompt cache expires, every `refreshInterval` seconds. Most of those
+    /// fire while nobody is doing anything, so unlike [`AgentEvent::Usage`]
+    /// this must not count as activity or idle suspension would never fire.
+    UsageRefresh(UsageSnapshot),
+
     /// How many subagents this session appears to be running
     ///
     /// Codex subagents write their own separate rollout files, so a parent
@@ -162,9 +171,9 @@ pub enum AgentEvent {
 
 /// Token and rate-limit figures scraped from an agent's own records
 ///
-/// Every field is optional because the two agents report different subsets.
-/// Codex publishes rate limits; Claude publishes none at all, so its sessions
-/// show context usage and model only.
+/// Every field is optional because sources report different subsets. Codex's
+/// rollout carries rate limits but no model; a Claude transcript record names
+/// the model but carries no rate limits, which only its status line reports.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageSnapshot {
     /// Tokens consumed by the conversation so far
@@ -192,11 +201,11 @@ pub struct UsageSnapshot {
     #[serde(default)]
     pub model: Option<String>,
 
-    /// The short rate-limit window, five hours on current plans (Codex only)
+    /// The short rate-limit window, five hours on current plans
     #[serde(default)]
     pub primary: Option<RateLimitWindow>,
 
-    /// The long rate-limit window, a week on current plans (Codex only)
+    /// The long rate-limit window, a week on current plans
     ///
     /// Tracked separately because it is routinely the one that bites: a quiet
     /// morning can leave the five-hour window at 1% while the week sits at 40%.
@@ -446,7 +455,7 @@ fn short_model_name(model: &str) -> &str {
 }
 
 /// A model id without its `[1m]` context suffix, for telling models apart
-fn base_model_id(model: &str) -> &str {
+pub(crate) fn base_model_id(model: &str) -> &str {
     let stem_len = model.len().saturating_sub("[1m]".len());
     match model.get(stem_len..) {
         Some(suffix) if suffix.eq_ignore_ascii_case("[1m]") => &model[..stem_len],
