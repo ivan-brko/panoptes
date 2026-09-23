@@ -132,6 +132,79 @@ impl HookEvent {
     pub fn transcript_path(&self) -> Option<&std::path::Path> {
         self.str_field("transcript_path").map(std::path::Path::new)
     }
+
+    /// The error code of a `StopFailure`, e.g. `rate_limit`
+    ///
+    /// Claude's own enum, the same one it writes to the transcript's `error`
+    /// field - which is what lets both reports share
+    /// [`crate::transcript::claude::failure_reason`].
+    pub fn failure_code(&self) -> Option<&str> {
+        self.str_field("error")
+    }
+
+    /// Free-text detail accompanying a `StopFailure`'s error code
+    pub fn error_details(&self) -> Option<&str> {
+        self.str_field("error_details")
+    }
+
+    /// Why a `PermissionDenied` was denied, in the agent's words
+    pub fn denial_reason(&self) -> Option<&str> {
+        self.str_field("reason")
+    }
+
+    /// The subagent a `SubagentStart` / `SubagentStop` is about
+    ///
+    /// The same ID on both, which is what pairs them: subagents run
+    /// concurrently, so their ends arrive in any order.
+    pub fn agent_id(&self) -> Option<&str> {
+        self.str_field("agent_id")
+    }
+
+    /// The MCP server behind an `Elicitation` / `ElicitationResult`
+    pub fn mcp_server_name(&self) -> Option<&str> {
+        self.str_field("mcp_server_name")
+    }
+
+    /// The question an MCP server is asking, from an `Elicitation`
+    pub fn message(&self) -> Option<&str> {
+        self.str_field("message")
+    }
+
+    /// Background work still in flight, from a `Stop` / `SubagentStop`
+    ///
+    /// A snapshot, not a delta: Claude lists every running or pending
+    /// backgrounded shell, monitor, subagent and workflow each time. `None`
+    /// when the payload carries no list at all - an older Claude, or the
+    /// no-`jq` degraded path - which must read as "unknown", not "none".
+    pub fn background_tasks(&self) -> Option<&[serde_json::Value]> {
+        self.array_field("background_tasks")
+    }
+
+    /// How many of [`Self::background_tasks`] are subagents
+    pub fn background_subagents(&self) -> Option<usize> {
+        let tasks = self.background_tasks()?;
+        Some(
+            tasks
+                .iter()
+                .filter(|task| task.get("type").and_then(|t| t.as_str()) == Some("subagent"))
+                .count(),
+        )
+    }
+
+    /// Session-scoped scheduled prompts (`/loop`, `CronCreate`,
+    /// `ScheduleWakeup`) that will wake the session later, from a `Stop` /
+    /// `SubagentStop`
+    ///
+    /// Snapshot semantics, and `None` when absent, exactly as
+    /// [`Self::background_tasks`].
+    pub fn session_crons(&self) -> Option<&[serde_json::Value]> {
+        self.array_field("session_crons")
+    }
+
+    /// Read an array field out of the agent payload
+    fn array_field(&self, key: &str) -> Option<&[serde_json::Value]> {
+        self.payload.get(key)?.as_array().map(Vec::as_slice)
+    }
 }
 
 /// What a Claude `Notification` event is actually about
@@ -265,6 +338,20 @@ pub enum HookEventType {
     Notification,
     /// Permission request (Claude is waiting for user to approve/deny)
     PermissionRequest,
+    /// A turn died on an API error instead of finishing (fires in place of
+    /// `Stop`)
+    StopFailure,
+    /// A tool call was denied without a dialog - today, by auto mode's
+    /// classifier
+    PermissionDenied,
+    /// A subagent began running
+    SubagentStart,
+    /// A subagent finished
+    SubagentStop,
+    /// An MCP server is asking the user a structured question
+    Elicitation,
+    /// The user answered, declined or cancelled an MCP elicitation
+    ElicitationResult,
     /// Agent turn complete (from Codex CLI notify hook)
     AgentTurnComplete,
     /// Unknown event type
@@ -284,6 +371,12 @@ impl HookEventType {
             HookEventType::PostToolUseFailure => "PostToolUseFailure",
             HookEventType::Notification => "Notification",
             HookEventType::PermissionRequest => "PermissionRequest",
+            HookEventType::StopFailure => "StopFailure",
+            HookEventType::PermissionDenied => "PermissionDenied",
+            HookEventType::SubagentStart => "SubagentStart",
+            HookEventType::SubagentStop => "SubagentStop",
+            HookEventType::Elicitation => "Elicitation",
+            HookEventType::ElicitationResult => "ElicitationResult",
             HookEventType::AgentTurnComplete => "AgentTurnComplete",
             HookEventType::Unknown => "Unknown",
         }
@@ -308,6 +401,12 @@ impl From<&str> for HookEventType {
             "PostToolUseFailure" => HookEventType::PostToolUseFailure,
             "Notification" => HookEventType::Notification,
             "PermissionRequest" => HookEventType::PermissionRequest,
+            "StopFailure" => HookEventType::StopFailure,
+            "PermissionDenied" => HookEventType::PermissionDenied,
+            "SubagentStart" => HookEventType::SubagentStart,
+            "SubagentStop" => HookEventType::SubagentStop,
+            "Elicitation" => HookEventType::Elicitation,
+            "ElicitationResult" => HookEventType::ElicitationResult,
             "AgentTurnComplete" => HookEventType::AgentTurnComplete,
             _ => HookEventType::Unknown,
         }
@@ -509,6 +608,122 @@ mod tests {
         assert_eq!(e.last_assistant_message(), Some("Done."));
     }
 
+    // The payloads below follow the hook input schemas in Claude Code 2.1.280
+    // (the zod definitions in the shipped binary), base fields included.
+
+    #[test]
+    fn test_stop_failure_accessors() {
+        let e = event(
+            r#"{"session_id":"a","event":"StopFailure","timestamp":1,
+                "payload":{"session_id":"c","transcript_path":"/t.jsonl","cwd":"/w",
+                    "hook_event_name":"StopFailure","error":"rate_limit",
+                    "error_details":"429 Too Many Requests",
+                    "last_assistant_message":"You've hit your limit · resets 3pm"}}"#,
+        );
+        assert_eq!(e.event_type(), HookEventType::StopFailure);
+        assert_eq!(e.failure_code(), Some("rate_limit"));
+        assert_eq!(e.error_details(), Some("429 Too Many Requests"));
+        assert_eq!(
+            e.last_assistant_message(),
+            Some("You've hit your limit · resets 3pm")
+        );
+    }
+
+    #[test]
+    fn test_permission_denied_accessors() {
+        let e = event(
+            r#"{"session_id":"a","event":"PermissionDenied","timestamp":1,
+                "payload":{"session_id":"c","transcript_path":"/t.jsonl","cwd":"/w",
+                    "hook_event_name":"PermissionDenied","tool_name":"Bash",
+                    "tool_input":{"command":"rm -rf build"},"tool_use_id":"toolu_07",
+                    "reason":"Deleting files outside the task"}}"#,
+        );
+        assert_eq!(e.event_type(), HookEventType::PermissionDenied);
+        assert_eq!(e.tool_name(), Some("Bash"));
+        assert_eq!(e.tool_use_id(), Some("toolu_07"));
+        assert_eq!(e.denial_reason(), Some("Deleting files outside the task"));
+    }
+
+    #[test]
+    fn test_subagent_accessors_pair_start_and_stop() {
+        let start = event(
+            r#"{"session_id":"a","event":"SubagentStart","timestamp":1,
+                "payload":{"session_id":"c","transcript_path":"/t.jsonl","cwd":"/w",
+                    "hook_event_name":"SubagentStart","agent_id":"a1b2c3",
+                    "agent_type":"Explore"}}"#,
+        );
+        let stop = event(
+            r#"{"session_id":"a","event":"SubagentStop","timestamp":2,
+                "payload":{"session_id":"c","transcript_path":"/t.jsonl","cwd":"/w",
+                    "hook_event_name":"SubagentStop","stop_hook_active":false,
+                    "agent_id":"a1b2c3","agent_type":"Explore",
+                    "agent_transcript_path":"/t/subagents/agent-a1b2c3.jsonl",
+                    "last_assistant_message":"Found it.",
+                    "background_tasks":[],"session_crons":[]}}"#,
+        );
+        assert_eq!(start.event_type(), HookEventType::SubagentStart);
+        assert_eq!(stop.event_type(), HookEventType::SubagentStop);
+        assert_eq!(start.agent_id(), Some("a1b2c3"));
+        assert_eq!(stop.agent_id(), start.agent_id());
+        assert_eq!(stop.background_tasks().map(<[_]>::len), Some(0));
+    }
+
+    #[test]
+    fn test_stop_background_work_accessors() {
+        let e = event(
+            r#"{"session_id":"a","event":"Stop","timestamp":1,
+                "payload":{"session_id":"c","transcript_path":"/t.jsonl","cwd":"/w",
+                    "hook_event_name":"Stop","stop_hook_active":false,
+                    "last_assistant_message":"Started the dev server.",
+                    "background_tasks":[
+                        {"id":"b1","type":"shell","status":"running",
+                         "description":"npm run dev","command":"npm run dev"},
+                        {"id":"b2","type":"subagent","status":"running",
+                         "description":"Audit deps","agent_type":"general-purpose"},
+                        {"id":"b3","type":"monitor","status":"running",
+                         "description":"CI","server":"github","tool":"watch_run"}],
+                    "session_crons":[
+                        {"id":"k1","schedule":"*/5 * * * *","recurring":true,
+                         "prompt":"check the deploy"}]}}"#,
+        );
+        assert_eq!(e.background_tasks().map(<[_]>::len), Some(3));
+        assert_eq!(e.background_subagents(), Some(1));
+        assert_eq!(e.session_crons().map(<[_]>::len), Some(1));
+
+        // An older Claude, or the no-jq path, says nothing - which is not the
+        // same as saying "nothing is running"
+        let bare = event(
+            r#"{"session_id":"a","event":"Stop","timestamp":1,
+                "payload":{"stop_hook_active":false}}"#,
+        );
+        assert_eq!(bare.background_tasks(), None);
+        assert_eq!(bare.background_subagents(), None);
+        assert_eq!(bare.session_crons(), None);
+    }
+
+    #[test]
+    fn test_elicitation_accessors() {
+        let ask = event(
+            r#"{"session_id":"a","event":"Elicitation","timestamp":1,
+                "payload":{"session_id":"c","transcript_path":"/t.jsonl","cwd":"/w",
+                    "hook_event_name":"Elicitation","mcp_server_name":"linear",
+                    "message":"Which team should own this issue?","mode":"form",
+                    "elicitation_id":"el-1","requested_schema":{"type":"object"}}}"#,
+        );
+        let answer = event(
+            r#"{"session_id":"a","event":"ElicitationResult","timestamp":2,
+                "payload":{"session_id":"c","transcript_path":"/t.jsonl","cwd":"/w",
+                    "hook_event_name":"ElicitationResult","mcp_server_name":"linear",
+                    "elicitation_id":"el-1","mode":"form","action":"accept",
+                    "content":{"team":"Platform"}}}"#,
+        );
+        assert_eq!(ask.event_type(), HookEventType::Elicitation);
+        assert_eq!(answer.event_type(), HookEventType::ElicitationResult);
+        assert_eq!(ask.mcp_server_name(), Some("linear"));
+        assert_eq!(ask.message(), Some("Which team should own this issue?"));
+        assert_eq!(answer.mcp_server_name(), ask.mcp_server_name());
+    }
+
     #[test]
     fn test_empty_strings_read_as_absent() {
         // The no-jq path and Claude both emit "" rather than omitting keys in
@@ -534,6 +749,15 @@ mod tests {
             HookEventType::UserPromptSubmit
         );
         assert_eq!(HookEventType::from("SomethingElse"), HookEventType::Unknown);
+        // Real Claude events Panoptes deliberately does not model stay unknown
+        for unmodelled in [
+            "TaskCreated",
+            "TaskCompleted",
+            "CwdChanged",
+            "PostToolBatch",
+        ] {
+            assert_eq!(HookEventType::from(unmodelled), HookEventType::Unknown);
+        }
     }
 
     #[test]
@@ -561,6 +785,12 @@ mod tests {
             HookEventType::PostToolUseFailure,
             HookEventType::Notification,
             HookEventType::PermissionRequest,
+            HookEventType::StopFailure,
+            HookEventType::PermissionDenied,
+            HookEventType::SubagentStart,
+            HookEventType::SubagentStop,
+            HookEventType::Elicitation,
+            HookEventType::ElicitationResult,
             HookEventType::AgentTurnComplete,
         ] {
             let str_repr = event_type.as_str();
