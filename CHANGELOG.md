@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-23
+
+### Fixed
+- **Scrolling a fullscreen Claude Code session stops when the wheel does.** With Claude Code's fullscreen renderer (`"tui": "fullscreen"`) the wheel goes to Claude, which animates each scroll by repainting every few milliseconds — 300–700 KB of output per trackpad flick in a large window. Panoptes read that output on the UI thread, once per event-loop pass, out of a PTY that buffers only about 1 KB on macOS, so Claude's frames reached the screen seconds late: the view kept coasting for up to several seconds after the wheel stopped, and reversing direction bounced it back and forth. Every session's PTY is now drained continuously by its own reader thread into a queue capped at 1 MB, and the session on screen takes a whole burst in one pass. The view now stops within Claude's own ~0.15 s of smoothing. Backpressure is unchanged — a full queue still blocks the child — and a flooding session in the background costs the same CPU as before.
+- **A Codex `notify` hook of your own keeps receiving its event.** When Codex already had a `notify` hook, Panoptes chained its own in front of it with a command under which Codex's event JSON landed in `$0` and reached neither hook, so the user's hook still ran every turn but with no event. The chain now passes the event to both, runs the user's hook even if Panoptes' fails, and no longer starts a login shell on every turn. Chains written by earlier versions are repaired on the next Codex spawn when the original command can be recovered exactly, and otherwise fall back to the manual-merge helper. An apostrophe in the user's hook command is now quoted correctly too.
+- **The open session notifies you when the terminal is unfocused.** Notifications were suppressed for whichever session was on screen, even with you away in another app. A session now counts as watched only while it is on screen *and* the terminal has focus; terminals that do not report focus behave as before.
+
 ## [0.4.0] - 2026-07-27
 
 ### Added
@@ -254,7 +261,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Focus timer countdown accuracy with Alt+Tab detection
 - Escape key behavior (Shift+Escape forwards to PTY)
 
-[Unreleased]: https://github.com/ivan-brko/panoptes/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ivan-brko/panoptes/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/ivan-brko/panoptes/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ivan-brko/panoptes/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/ivan-brko/panoptes/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ivan-brko/panoptes/compare/v0.2.2...v0.3.0
