@@ -695,6 +695,7 @@ mod tests {
                 AgentEvent::Usage(UsageSnapshot {
                     total_tokens: Some(12_000),
                     context_window: Some(258_400),
+                    context_window_source: crate::agent::events::WindowSource::Observed,
                     model: Some("child-model".to_string()),
                     ..Default::default()
                 }),
