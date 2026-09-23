@@ -4,6 +4,7 @@
 //! Each agent type implements the `AgentAdapter` trait to provide
 //! consistent spawning and hook configuration.
 
+use crate::agent::events::UsageSnapshot;
 use crate::config::Config;
 use crate::session::{PtyHandle, SessionId};
 use anyhow::Result;
@@ -87,6 +88,15 @@ pub trait AgentAdapter: Send + Sync {
     /// `--session-id`). Agents that mint their own (Codex) return `None` and
     /// have it discovered later.
     fn agent_session_id(&self, spawn_config: &SpawnConfig) -> Option<String>;
+
+    /// Usage figures this spawn's own arguments already settle
+    ///
+    /// Seeded before the agent reports anything, and outranking what is later
+    /// guessed from its records. Claude is the one case: `--model x[1m]` fixes
+    /// a 1M window that its transcript, logging the bare model id, cannot show.
+    fn launch_usage(&self, _spawn_config: &SpawnConfig) -> Option<UsageSnapshot> {
+        None
+    }
 
     /// Spawn the agent in a PTY
     ///
