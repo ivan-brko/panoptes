@@ -117,7 +117,10 @@ impl ClaudeCodeAdapter {
     }
 
     /// Get the path to the shared hook script
-    fn hook_script_path(config: &Config) -> PathBuf {
+    ///
+    /// Shared with Codex, whose lifecycle hooks take the same payload on stdin
+    /// (see `agent/codex.rs`).
+    pub(crate) fn hook_script_path(config: &Config) -> PathBuf {
         config.hooks_dir.join(HOOK_SCRIPT_NAME)
     }
 
@@ -168,7 +171,7 @@ impl ClaudeCodeAdapter {
     /// first quote or newline in any field produced malformed JSON and the
     /// event was silently lost. `jq` already does this correctly, so the script
     /// hands it the whole document and lets Panoptes decide what it needs.
-    fn generate_hook_script(port: u16) -> String {
+    pub(crate) fn generate_hook_script(port: u16) -> String {
         format!(
             r#"#!/bin/bash
 # Panoptes hook script for Claude Code

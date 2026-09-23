@@ -110,7 +110,11 @@ pub fn translate_hook(event: &HookEvent) -> AgentEvent {
         // Approval attention does not record which server asked, so any
         // result resolves it.
         HookEventType::ElicitationResult => AgentEvent::ApprovalResolved { tool: None },
-        // Codex CLI's only hook: the agent is done and wants input
+        // Codex's report of a turn the user cut short, which it reports with
+        // nothing else
+        HookEventType::Interrupt => AgentEvent::TurnAborted,
+        // Codex's `notify` hook, for versions without lifecycle hooks: the
+        // agent is done and wants input
         HookEventType::AgentTurnComplete => AgentEvent::TurnCompleted { last_message: None },
         HookEventType::Unknown => AgentEvent::Ignored,
     }
@@ -144,6 +148,50 @@ pub fn background_snapshot(event: &HookEvent) -> Option<AgentEvent> {
         crons,
         subagents,
     })
+}
+
+/// Translate a Codex lifecycle hook into the canonical vocabulary
+///
+/// Codex's hooks share Claude's names and payloads, so this is
+/// [`translate_hook`] with one difference. Codex reports a subagent's own
+/// turn and tools under the *parent's* session, marked only by `agent_id`,
+/// and a Codex subagent routinely outlives the parent turn that spawned it:
+/// the parent's `Stop` fires while the child is still working. Letting the
+/// child's `UserPromptSubmit` or last `PostToolUse` move the session would
+/// drag a parent that has finished back into `Thinking`. The subagent count
+/// (`SubagentStart` / `SubagentStop`, mapped as for Claude) is what reports
+/// that work instead.
+///
+/// A subagent's `PermissionRequest` still counts: whoever asked, the user is
+/// the one who has to answer it.
+pub fn translate_codex_hook(event: &HookEvent) -> AgentEvent {
+    match event.event_type() {
+        HookEventType::UserPromptSubmit
+        | HookEventType::PreToolUse
+        | HookEventType::PostToolUse
+            if event.agent_id().is_some() =>
+        {
+            AgentEvent::Ignored
+        }
+        _ => translate_hook(event),
+    }
+}
+
+/// Whether a transcript-derived event may be applied to a session
+///
+/// Once an agent's lifecycle hooks are reporting (`hooks_live`, which only
+/// Codex sessions set), they own the session's state and the transcript
+/// contributes only what no hook carries: usage figures and the
+/// conversation's title. A Codex rollout and Codex's hooks describe the same
+/// turn, and two producers of the same transitions, each with its own
+/// latency, would fight over it. The rollout-recency subagent count is
+/// dropped with the rest: the hooks report subagents exactly, by ID.
+pub fn admits_transcript_event(info: &SessionInfo, event: &AgentEvent) -> bool {
+    !info.hooks_live
+        || matches!(
+            event,
+            AgentEvent::Usage(_) | AgentEvent::TitleChanged { .. }
+        )
 }
 
 /// Apply a canonical agent event to a session
@@ -1465,5 +1513,310 @@ mod tests {
             Some(3000.0 / 272_000.0 * 100.0)
         );
         assert!(info.in_flight.is_empty());
+    }
+
+    // Codex lifecycle hooks
+    //
+    // Payloads as Codex 0.156.1 delivered them on stdin in the PAN-44 spike,
+    // with paths and IDs redacted.
+
+    const CODEX_THREAD: &str = "019a0ce7-0000-7000-8000-000000000001";
+    const CODEX_SUBAGENT: &str = "019a0ce7-0000-7000-8000-0000000000aa";
+
+    fn codex_payload(event: &str) -> serde_json::Value {
+        let common = serde_json::json!({
+            "session_id": CODEX_THREAD,
+            "transcript_path": "/redacted/.codex/sessions/2026/09/23/rollout-x.jsonl",
+            "cwd": "/redacted/work",
+            "hook_event_name": event,
+            "model": "gpt-5.5",
+            "permission_mode": "default",
+        });
+        let specific = match event {
+            "SessionStart" => serde_json::json!({"source": "startup"}),
+            "UserPromptSubmit" => serde_json::json!({"turn_id": "t1", "prompt": "run-it"}),
+            "PreToolUse" => serde_json::json!({
+                "turn_id": "t1", "tool_name": "Bash",
+                "tool_input": {"command": "touch x"}, "tool_use_id": "call_1"
+            }),
+            "PermissionRequest" => serde_json::json!({
+                "turn_id": "t1", "tool_name": "Bash",
+                "tool_input": {"command": "touch x", "description": "why"}
+            }),
+            "PostToolUse" => serde_json::json!({
+                "turn_id": "t1", "tool_name": "Bash", "tool_input": {"command": "touch x"},
+                "tool_response": "", "tool_use_id": "call_1"
+            }),
+            "Stop" => serde_json::json!({
+                "turn_id": "t1", "stop_hook_active": false, "last_assistant_message": "done"
+            }),
+            "Interrupt" => serde_json::json!({"turn_id": "t1"}),
+            "SubagentStart" => serde_json::json!({
+                "turn_id": "t2", "agent_id": CODEX_SUBAGENT, "agent_type": "default"
+            }),
+            "SubagentStop" => serde_json::json!({
+                "turn_id": "t2", "agent_id": CODEX_SUBAGENT, "agent_type": "default",
+                "agent_transcript_path": null, "stop_hook_active": false,
+                "last_assistant_message": "done"
+            }),
+            "SessionEnd" => serde_json::json!({"reason": "other"}),
+            _ => serde_json::json!({}),
+        };
+        let mut payload = common;
+        for (key, value) in specific.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        payload
+    }
+
+    /// A subagent's own turn and tools, as Codex reports them: under the
+    /// parent's `session_id`, told apart only by `agent_id`
+    fn codex_subagent_payload(event: &str) -> serde_json::Value {
+        let mut payload = codex_payload(event);
+        payload["agent_id"] = CODEX_SUBAGENT.into();
+        payload["agent_type"] = "default".into();
+        payload
+    }
+
+    fn translate_codex(event: &str, payload: serde_json::Value) -> AgentEvent {
+        translate_codex_hook(&hook(uuid::Uuid::new_v4(), event, payload))
+    }
+
+    #[test]
+    fn test_codex_hook_translation() {
+        let cases = [
+            ("SessionStart", AgentEvent::SessionReset { title: None }),
+            ("UserPromptSubmit", AgentEvent::TurnStarted { title: None }),
+            (
+                "PreToolUse",
+                AgentEvent::ToolStarted {
+                    key: "call_1".to_string(),
+                    name: "Bash".to_string(),
+                },
+            ),
+            (
+                "PermissionRequest",
+                AgentEvent::ApprovalRequested {
+                    tool: Some("Bash".to_string()),
+                },
+            ),
+            (
+                "PostToolUse",
+                AgentEvent::ToolFinished {
+                    key: "call_1".to_string(),
+                },
+            ),
+            (
+                "Stop",
+                AgentEvent::TurnCompleted {
+                    last_message: Some("done".to_string()),
+                },
+            ),
+            ("Interrupt", AgentEvent::TurnAborted),
+            (
+                "SubagentStart",
+                AgentEvent::SubagentStarted {
+                    id: CODEX_SUBAGENT.to_string(),
+                },
+            ),
+            (
+                "SubagentStop",
+                AgentEvent::SubagentFinished {
+                    id: CODEX_SUBAGENT.to_string(),
+                },
+            ),
+            ("SessionEnd", AgentEvent::SessionEnding),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(
+                translate_codex(event, codex_payload(event)),
+                expected,
+                "{event}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_compaction_session_start_is_not_a_reset() {
+        let mut payload = codex_payload("SessionStart");
+        payload["source"] = "compact".into();
+        assert_eq!(
+            translate_codex("SessionStart", payload),
+            AgentEvent::ContextCompacted
+        );
+    }
+
+    #[test]
+    fn test_codex_subagent_turn_and_tools_do_not_move_the_parent() {
+        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse"] {
+            assert_eq!(
+                translate_codex(event, codex_subagent_payload(event)),
+                AgentEvent::Ignored,
+                "{event}"
+            );
+        }
+        // Whoever asks, the user is the one who has to answer
+        assert_eq!(
+            translate_codex(
+                "PermissionRequest",
+                codex_subagent_payload("PermissionRequest")
+            ),
+            AgentEvent::ApprovalRequested {
+                tool: Some("Bash".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn test_codex_permission_request_raises_approval() {
+        let config = Config::default();
+        let mut info = test_info();
+        info.session_type = crate::session::SessionType::OpenAICodex;
+
+        for event in ["UserPromptSubmit", "PreToolUse"] {
+            let event = hook(info.id, event, codex_payload(event));
+            apply(&mut info, translate_codex_hook(&event), Utc::now(), &config);
+        }
+        assert_eq!(info.state, SessionState::Executing);
+
+        let request = hook(
+            info.id,
+            "PermissionRequest",
+            codex_payload("PermissionRequest"),
+        );
+        let rang = apply(
+            &mut info,
+            translate_codex_hook(&request),
+            Utc::now(),
+            &config,
+        )
+        .rang;
+
+        assert!(rang, "a Codex approval must ring the bell");
+        assert_eq!(info.state, SessionState::AwaitingApproval);
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::Approval {
+                tool: Some("Bash".to_string())
+            })
+        );
+
+        // The approved command runs and finishes; the turn's end resolves it
+        for event in ["PostToolUse", "Stop"] {
+            let event = hook(info.id, event, codex_payload(event));
+            apply(&mut info, translate_codex_hook(&event), Utc::now(), &config);
+        }
+        assert_eq!(info.state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn test_codex_interrupt_ends_the_turn_quietly() {
+        let config = Config::default();
+        let mut info = test_info();
+        for event in ["UserPromptSubmit", "PreToolUse", "PermissionRequest"] {
+            let event = hook(info.id, event, codex_payload(event));
+            apply(&mut info, translate_codex_hook(&event), Utc::now(), &config);
+        }
+        info.attention = None; // the user saw the dialog and declined it
+
+        // Declining at the dialog aborts the turn: no PostToolUse, no Stop
+        let interrupt = hook(info.id, "Interrupt", codex_payload("Interrupt"));
+        let rang = apply(
+            &mut info,
+            translate_codex_hook(&interrupt),
+            Utc::now(),
+            &config,
+        )
+        .rang;
+
+        assert!(!rang, "the user did this themselves");
+        assert_eq!(info.state, SessionState::Waiting);
+        assert!(info.in_flight.is_empty());
+    }
+
+    #[test]
+    fn test_codex_subagents_are_counted_by_hooks() {
+        let config = Config::default();
+        let mut info = test_info();
+        let feed = |info: &mut SessionInfo, event: &str, payload: serde_json::Value| {
+            let event = hook(info.id, event, payload);
+            apply(info, translate_codex_hook(&event), Utc::now(), &config);
+        };
+
+        // The order Codex 0.156.1 actually produced: the parent's turn ends
+        // while its subagent is still working
+        feed(
+            &mut info,
+            "UserPromptSubmit",
+            codex_payload("UserPromptSubmit"),
+        );
+        feed(&mut info, "SubagentStart", codex_payload("SubagentStart"));
+        feed(&mut info, "Stop", codex_payload("Stop"));
+        feed(
+            &mut info,
+            "UserPromptSubmit",
+            codex_subagent_payload("UserPromptSubmit"),
+        );
+        feed(
+            &mut info,
+            "PreToolUse",
+            codex_subagent_payload("PreToolUse"),
+        );
+        feed(
+            &mut info,
+            "PostToolUse",
+            codex_subagent_payload("PostToolUse"),
+        );
+
+        assert_eq!(info.subagents, 1);
+        assert_eq!(
+            info.state,
+            SessionState::Waiting,
+            "the child's work must not reopen the parent's finished turn"
+        );
+
+        feed(&mut info, "SubagentStop", codex_payload("SubagentStop"));
+        assert_eq!(info.subagents, 0);
+
+        // A repeated stop cannot drive the count below zero
+        feed(&mut info, "SubagentStop", codex_payload("SubagentStop"));
+        assert_eq!(info.subagents, 0);
+        assert_eq!(info.state, SessionState::Waiting);
+    }
+
+    #[test]
+    fn test_hooks_live_admits_only_usage_and_titles_from_the_transcript() {
+        let mut info = test_info();
+        let title = AgentEvent::TitleChanged {
+            title: "Fix the flaky test".to_string(),
+        };
+        let events = [
+            AgentEvent::TurnStarted { title: None },
+            AgentEvent::ToolStarted {
+                key: "k".to_string(),
+                name: "exec_command".to_string(),
+            },
+            AgentEvent::TurnCompleted { last_message: None },
+            AgentEvent::Subagents { active: 2 },
+            AgentEvent::Usage(crate::agent::events::UsageSnapshot::default()),
+            title.clone(),
+        ];
+
+        // Without hooks the rollout is the state machine's only source
+        assert!(events.iter().all(|e| admits_transcript_event(&info, e)));
+
+        info.hooks_live = true;
+        let admitted: Vec<_> = events
+            .iter()
+            .filter(|e| admits_transcript_event(&info, e))
+            .collect();
+        // What no hook carries still gets through
+        assert_eq!(
+            admitted,
+            [
+                &AgentEvent::Usage(crate::agent::events::UsageSnapshot::default()),
+                &title
+            ]
+        );
     }
 }

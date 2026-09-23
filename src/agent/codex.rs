@@ -1,18 +1,24 @@
 //! OpenAI Codex CLI adapter implementation
 //!
 //! This module implements the `AgentAdapter` trait for OpenAI Codex CLI.
-//! It handles notify hook configuration and process spawning.
+//! It handles hook installation and process spawning.
 //!
-//! Codex CLI has limited hooks compared to Claude Code — only a `notify`
-//! config that fires on `agent-turn-complete` events. This gives us the
-//! critical "session needs attention" transition but no granular tool-use tracking.
+//! Codex 0.156.1 and later has Claude-style lifecycle hooks. Panoptes declares
+//! them for each spawn on the command line (`-c hooks.<Event>=...`), together
+//! with the trust Codex requires before it will run them, so nothing is
+//! written into the user's `CODEX_HOME` - see [`lifecycle_hook_args`].
+//! Older Codex versions get the `notify` hook in `config.toml` instead, which
+//! fires only on `agent-turn-complete`; there the rollout file supplies the
+//! rest of the session's state.
 
 use crate::config::Config;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::adapter::{AgentAdapter, SpawnConfig};
+use super::adapter::{AgentAdapter, SpawnConfig, SpawnResult};
+use super::claude::ClaudeCodeAdapter;
+use crate::session::PtyHandle;
 use crate::transcript::codex::{read_session_meta, rollout_files, RolloutKind};
 
 /// Notify hook script filename
@@ -129,6 +135,244 @@ pub fn rollout_path(codex_home: &Path, conversation_id: &str) -> Option<PathBuf>
         })
 }
 
+/// When a known Codex conversation's rollout was created
+///
+/// `None` while the file does not exist yet, or when it records no creation
+/// time.
+pub fn rollout_created_at(
+    codex_home: &Path,
+    conversation_id: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    read_session_meta(&rollout_path(codex_home, conversation_id)?)?.created_at
+}
+
+/// The first Codex whose lifecycle hooks Panoptes has verified end to end
+///
+/// What matters is not that hooks exist but that [`hook_trust_hash`] matches
+/// Codex's own hash. A Codex that hashes differently would show every
+/// Panoptes hook as "modified" and put its hook review screen in front of
+/// every spawn, so an older Codex keeps `notify` rather than risk that.
+const LIFECYCLE_HOOKS_MIN_VERSION: CodexVersion = CodexVersion(0, 156, 1);
+
+/// Subdirectory of the hooks directory holding one symlink per Codex event
+///
+/// Separate from Claude's symlinks (which share the directory's top level)
+/// so neither adapter's install can disturb the other's.
+const CODEX_HOOKS_SUBDIR: &str = "codex";
+
+/// Handler timeout Panoptes declares, in seconds
+///
+/// Declared rather than defaulted because it is part of the hash Codex trusts
+/// (see [`hook_trust_hash`]), and 3 is the most Codex allows for `SessionEnd`
+/// and `Interrupt`, so one value serves every event unchanged. The script
+/// returns in milliseconds; this only bounds a pathological hang.
+const LIFECYCLE_HOOK_TIMEOUT_SECS: u64 = 3;
+
+/// How Codex names hooks declared through `-c` when it keys their trust state
+///
+/// A fixed, synthetic path - Codex's own placeholder for the `-c` layer - not
+/// a file under `CODEX_HOME`. Neither the key nor the hash
+/// ([`hook_trust_hash`]) involves `CODEX_HOME` at all, so the same overrides
+/// stay trusted whichever home, real or a Panoptes-made shadow, Codex runs
+/// against.
+const SESSION_FLAGS_KEY_SOURCE: &str = "/<session-flags>/config.toml";
+
+/// The Codex hook events Panoptes registers, with the label Codex uses for
+/// each in trust keys and hashes
+///
+/// `Interrupt` has no Claude counterpart but is needed all the same: Codex
+/// reports a turn the user cut short with nothing else, and once the hooks
+/// own a session's state nothing else would end it.
+const LIFECYCLE_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session_start"),
+    ("SessionEnd", "session_end"),
+    ("UserPromptSubmit", "user_prompt_submit"),
+    ("PreToolUse", "pre_tool_use"),
+    ("PostToolUse", "post_tool_use"),
+    ("PermissionRequest", "permission_request"),
+    ("Stop", "stop"),
+    ("SubagentStart", "subagent_start"),
+    ("SubagentStop", "subagent_stop"),
+    ("Interrupt", "interrupt"),
+];
+
+/// How long a `codex --version` probe is believed
+///
+/// Long enough that spawning sessions does not keep paying for a process
+/// launch, short enough that upgrading Codex does not need a Panoptes restart.
+const VERSION_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A Codex release number, `major.minor.patch`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CodexVersion(u64, u64, u64);
+
+impl CodexVersion {
+    /// Read the version out of `codex --version` output (`codex-cli 0.156.1`)
+    ///
+    /// A pre-release suffix (`0.157.0-alpha.3`) is dropped: it is the release
+    /// it leads up to that decides what the build supports.
+    fn parse(output: &str) -> Option<Self> {
+        let word = output
+            .split_whitespace()
+            .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))?;
+        let core = word.split(['-', '+']).next()?;
+        let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+        let version = CodexVersion(parts.next()??, parts.next()??, parts.next()??);
+        Some(version)
+    }
+}
+
+/// Which mechanism a spawn reports its state through
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookInstall {
+    /// Lifecycle hooks declared on the command line; nothing written to disk
+    /// outside Panoptes' own hooks directory
+    Lifecycle,
+    /// The `notify` hook in `CODEX_HOME/config.toml`, plus the rollout
+    Notify,
+}
+
+impl HookInstall {
+    /// The mechanism a Codex of this version supports
+    ///
+    /// An unknown version gets `notify`: the worst it costs is the detail
+    /// hooks would have added, where guessing wrong the other way puts a
+    /// trust prompt in front of every spawn.
+    fn for_version(version: Option<CodexVersion>) -> Self {
+        match version {
+            Some(version) if version >= LIFECYCLE_HOOKS_MIN_VERSION => HookInstall::Lifecycle,
+            _ => HookInstall::Notify,
+        }
+    }
+}
+
+/// Run `<command> --version`
+fn probe_codex_version(command: &str) -> Option<CodexVersion> {
+    let output = std::process::Command::new(command)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    CodexVersion::parse(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The installed Codex's version, probed at most once per [`VERSION_PROBE_TTL`]
+fn cached_codex_version(command: &str) -> Option<CodexVersion> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    type Probe = (Instant, Option<CodexVersion>);
+    static CACHE: OnceLock<Mutex<Option<Probe>>> = OnceLock::new();
+
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((probed_at, version)) = *cached {
+        if probed_at.elapsed() < VERSION_PROBE_TTL {
+            return version;
+        }
+    }
+    let version = probe_codex_version(command);
+    match version {
+        Some(version) => tracing::debug!(?version, "Probed Codex version"),
+        None => tracing::warn!("Could not read the Codex version; falling back to the notify hook"),
+    }
+    *cached = Some((Instant::now(), version));
+    version
+}
+
+/// The command line Codex runs for one Panoptes hook
+///
+/// Codex hands the whole string to the user's shell, so the path is quoted.
+fn lifecycle_hook_command(hooks_dir: &Path, event: &str) -> String {
+    let script = hooks_dir
+        .join(CODEX_HOOKS_SUBDIR)
+        .join(format!("{event}.sh"));
+    CodexAdapter::shell_quote(&script.to_string_lossy())
+}
+
+/// The hash Codex computes for a hook, which it compares against the hash it
+/// was told to trust
+///
+/// A reproduction of Codex's `hook_hash`: SHA-256 over the canonical
+/// (sorted-key, compact) JSON of the normalized declaration,
+/// `{"event_name", "hooks": [<handler>]}`. `matcher` is absent because
+/// Panoptes declares none, and every optional handler field Panoptes leaves
+/// unset is omitted, as Codex omits it. The command *string* is hashed, not
+/// the script it names, so reinstalling the script never needs re-trusting.
+///
+/// Written out by hand rather than serialized, so the key order cannot
+/// depend on how `serde_json` happens to be built.
+fn hook_trust_hash(event_label: &str, command: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let identity = format!(
+        r#"{{"event_name":{},"hooks":[{{"async":false,"command":{},"timeout":{},"type":"command"}}]}}"#,
+        serde_json::Value::from(event_label),
+        serde_json::Value::from(command),
+        LIFECYCLE_HOOK_TIMEOUT_SECS,
+    );
+    let digest = Sha256::digest(identity.as_bytes());
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("sha256:{hex}")
+}
+
+/// A string as a TOML basic string, for a `-c` override value
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_string()).to_string()
+}
+
+/// The `-c` overrides that declare Panoptes' Codex hooks and trust them
+///
+/// One override per event declares a single command handler, then one more
+/// sets `hooks.state`, carrying the hash of each declaration as
+/// `trusted_hash`. Codex runs a hook only once its trusted hash matches what
+/// it computes itself, and otherwise stops at startup to ask the user to
+/// review it - on every spawn, since nothing here is saved.
+///
+/// This grants no trust beyond Panoptes' own hooks. Codex reads `hooks.state`
+/// only from the user's config and from these overrides (never from a
+/// project or plugin), and each key names a hook declared by the same
+/// overrides, by its exact command and timeout. Hooks in the user's or a
+/// project's `hooks.json` keep whatever trust they already had, and a new
+/// one still prompts. `--dangerously-bypass-hook-trust`, which would switch
+/// the check off for all of them, is deliberately not used.
+///
+/// Codex and the user's own hooks coexist: handlers from every layer run.
+pub(crate) fn lifecycle_hook_args(hooks_dir: &Path) -> Vec<String> {
+    let mut args = Vec::with_capacity(LIFECYCLE_EVENTS.len() * 2 + 2);
+    let mut trusted = Vec::with_capacity(LIFECYCLE_EVENTS.len());
+
+    for (event, label) in LIFECYCLE_EVENTS {
+        let command = lifecycle_hook_command(hooks_dir, event);
+        args.push("-c".to_string());
+        args.push(format!(
+            "hooks.{event}=[{{hooks=[{{type=\"command\",command={},timeout={}}}]}}]",
+            toml_string(&command),
+            LIFECYCLE_HOOK_TIMEOUT_SECS,
+        ));
+        // Codex keys a hook's state by source, event, and its position within
+        // that source: each event here has exactly one group of one handler
+        let key = format!("{SESSION_FLAGS_KEY_SOURCE}:{label}:0:0");
+        trusted.push(format!(
+            "{}={{trusted_hash={}}}",
+            toml_string(&key),
+            toml_string(&hook_trust_hash(label, &command)),
+        ));
+    }
+
+    // `hooks.state` is one inline table: the keys contain dots, which a
+    // dotted `-c` path would split on
+    args.push("-c".to_string());
+    args.push(format!("hooks.state={{{}}}", trusted.join(", ")));
+    args
+}
+
 /// What installing the Panoptes notify hook into a Codex config requires
 ///
 /// The pure outcome of [`CodexAdapter::plan_notify`], separated from the
@@ -162,6 +406,81 @@ impl CodexAdapter {
     /// Create a new Codex adapter with additional arguments
     pub fn with_args(args: Vec<String>) -> Self {
         Self { extra_args: args }
+    }
+
+    /// Install the scripts Codex's lifecycle hooks run
+    ///
+    /// Codex's hook payload is Claude's - JSON on stdin, `hook_event_name`,
+    /// `tool_name`, `tool_use_id` - so the Claude hook script serves both.
+    /// Each event gets a symlink named after it, since the script takes the
+    /// event name from its own basename.
+    ///
+    /// Touches only Panoptes' own hooks directory. A symlink already pointing
+    /// at the script is left alone.
+    fn install_lifecycle_hooks(config: &Config) -> Result<()> {
+        let script_path = ClaudeCodeAdapter::hook_script_path(config);
+        super::install_executable_script(
+            &script_path,
+            &ClaudeCodeAdapter::generate_hook_script(config.hook_port),
+        )
+        .context("Failed to install hook script")?;
+
+        let dir = config.hooks_dir.join(CODEX_HOOKS_SUBDIR);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create {}", dir.display()))?;
+
+        for (event, _) in LIFECYCLE_EVENTS {
+            let link = dir.join(format!("{event}.sh"));
+            if std::fs::read_link(&link).is_ok_and(|target| target == script_path) {
+                continue;
+            }
+            if link.exists() || link.is_symlink() {
+                std::fs::remove_file(&link)
+                    .with_context(|| format!("Failed to replace {}", link.display()))?;
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&script_path, &link)
+                .with_context(|| format!("Failed to create symlink for {event}"))?;
+        }
+        Ok(())
+    }
+
+    /// Install whichever hooks this Codex supports, returning the extra
+    /// arguments the spawn needs
+    ///
+    /// Lifecycle hooks travel on the command line; `notify` lives in
+    /// `config.toml` and needs none.
+    fn install_hooks(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<Vec<String>> {
+        let install = HookInstall::for_version(cached_codex_version(self.command()));
+        Self::install_hooks_as(install, config, spawn_config)
+    }
+
+    /// [`Self::install_hooks`], for a mechanism already chosen
+    fn install_hooks_as(
+        install: HookInstall,
+        config: &Config,
+        spawn_config: &SpawnConfig,
+    ) -> Result<Vec<String>> {
+        match install {
+            HookInstall::Lifecycle => {
+                Self::install_lifecycle_hooks(config)?;
+                Ok(lifecycle_hook_args(&config.hooks_dir))
+            }
+            HookInstall::Notify => {
+                let notify_script_path = Self::install_notify_script(config)?;
+                let codex_home = Self::resolve_codex_home(spawn_config);
+                Self::configure_codex_notify(&codex_home, &notify_script_path)?;
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// The full argument list: hook overrides first, as root options that
+    /// must precede a `resume` subcommand, then [`AgentAdapter::build_args`]
+    fn command_line(&self, hook_args: Vec<String>, spawn_config: &SpawnConfig) -> Vec<String> {
+        let mut args = hook_args;
+        args.extend(self.build_args(spawn_config));
+        args
     }
 
     /// Get the path to the notify hook script
@@ -609,12 +928,9 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn setup_hooks(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<Vec<PathBuf>> {
-        // Install the notify hook script
-        let notify_script_path = Self::install_notify_script(config)?;
-
-        // Determine CODEX_HOME and configure notify in config.toml
-        let codex_home = Self::resolve_codex_home(spawn_config);
-        Self::configure_codex_notify(&codex_home, &notify_script_path)?;
+        // Lifecycle hooks also need arguments, which only `spawn` can pass;
+        // this installs what is on disk
+        self.install_hooks(config, spawn_config)?;
 
         // TODO: Codex permission sharing
         // When Codex supports per-project permissions (similar to Claude's
@@ -622,9 +938,34 @@ impl AgentAdapter for CodexAdapter {
         // to worktree here. See check_claude_settings_for_copy() in
         // src/wizards/worktree/handlers.rs for the Claude implementation.
 
-        // Return the config.toml path for reference (we don't clean it up since
-        // the notify hook is harmless for non-Panoptes instances)
+        // Nothing to clean up: the notify hook is harmless for non-Panoptes
+        // instances, and lifecycle hooks exist only on this spawn's command line
         Ok(vec![])
+    }
+
+    /// Spawn Codex, with its lifecycle hooks on the command line when it has them
+    ///
+    /// Differs from the default only in where the hook arguments go: they are
+    /// root options, so they lead - ahead of a `resume` subcommand.
+    fn spawn(&self, config: &Config, spawn_config: &SpawnConfig) -> Result<SpawnResult> {
+        let hook_args = self.install_hooks(config, spawn_config)?;
+        let args = self.command_line(hook_args, spawn_config);
+        let env = self.generate_env(config, spawn_config);
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        let pty = PtyHandle::spawn(
+            self.command(),
+            &args_refs,
+            &spawn_config.working_dir,
+            env,
+            spawn_config.rows,
+            spawn_config.cols,
+        )?;
+
+        Ok(SpawnResult {
+            pty,
+            agent_session_id: self.agent_session_id(spawn_config),
+        })
     }
 
     /// Build Codex CLI args with Panoptes defaults.
@@ -659,8 +1000,9 @@ impl AgentAdapter for CodexAdapter {
         args
     }
 
-    /// Codex mints its own conversation ID; it is discovered from the rollout
-    /// after the fact (see [`discover_session_id`])
+    /// Codex mints its own conversation ID. Its `SessionStart` hook reports it;
+    /// without hooks it is discovered from the rollout (see
+    /// [`discover_session_id`])
     fn agent_session_id(&self, _spawn_config: &SpawnConfig) -> Option<String> {
         None
     }
@@ -1452,8 +1794,9 @@ notify = ["bash", "-lc", "'/test/codex-notify.sh' \"$@\"; 'echo' 'legacy-hook'"]
             resume: None,
         };
 
-        let adapter = CodexAdapter::new();
-        adapter.setup_hooks(&config, &spawn_config).unwrap();
+        // A Codex without lifecycle hooks; which one is installed on this
+        // machine must not decide what the test checks
+        CodexAdapter::install_hooks_as(HookInstall::Notify, &config, &spawn_config).unwrap();
 
         // Verify notify script exists
         let notify_script = config.hooks_dir.join(CODEX_NOTIFY_SCRIPT_NAME);
@@ -1838,6 +2181,235 @@ notify = ["bash", "-lc", "'/test/codex-notify.sh' \"$@\"; 'echo' 'legacy-hook'"]
             discover_session_id(home.path(), &link, an_hour_ago(), &nothing_claimed()).as_deref(),
             Some("via-symlink")
         );
+    }
+
+    // Lifecycle hooks (Codex 0.156.1+)
+
+    fn test_spawn_config() -> SpawnConfig {
+        SpawnConfig {
+            session_id: Uuid::new_v4(),
+            session_name: "test".to_string(),
+            working_dir: PathBuf::from("/tmp"),
+            initial_prompt: None,
+            rows: 24,
+            cols: 80,
+            claude_config_dir: None,
+            codex_home: None,
+            resume: None,
+        }
+    }
+
+    /// The Codex hooks directory the tests declare hooks under
+    fn hooks_dir() -> PathBuf {
+        PathBuf::from("/home/someone/.panoptes/hooks")
+    }
+
+    /// Parse the value half of a `-c key=value` override as Codex does:
+    /// as a TOML value
+    fn override_value(arg: &str) -> (String, toml::Value) {
+        let (key, value) = arg.split_once('=').expect("key=value");
+        let table: toml::Table = toml::from_str(&format!("v = {value}")).expect("valid TOML");
+        (key.to_string(), table["v"].clone())
+    }
+
+    #[test]
+    fn test_codex_version_parsing() {
+        assert_eq!(
+            CodexVersion::parse("codex-cli 0.156.1\n"),
+            Some(CodexVersion(0, 156, 1))
+        );
+        assert_eq!(
+            CodexVersion::parse("codex-cli 0.157.0-alpha.3"),
+            Some(CodexVersion(0, 157, 0))
+        );
+        assert_eq!(CodexVersion::parse("1.2.3"), Some(CodexVersion(1, 2, 3)));
+        assert_eq!(CodexVersion::parse("codex-cli"), None);
+        assert_eq!(CodexVersion::parse("codex-cli 0.156"), None);
+        assert_eq!(CodexVersion::parse(""), None);
+    }
+
+    #[test]
+    fn test_hook_install_is_gated_on_version() {
+        assert_eq!(
+            HookInstall::for_version(Some(CodexVersion(0, 156, 1))),
+            HookInstall::Lifecycle
+        );
+        assert_eq!(
+            HookInstall::for_version(Some(CodexVersion(0, 157, 0))),
+            HookInstall::Lifecycle
+        );
+        assert_eq!(
+            HookInstall::for_version(Some(CodexVersion(1, 0, 0))),
+            HookInstall::Lifecycle
+        );
+        // Older than the hash Panoptes has verified: the notify hook
+        assert_eq!(
+            HookInstall::for_version(Some(CodexVersion(0, 156, 0))),
+            HookInstall::Notify
+        );
+        assert_eq!(
+            HookInstall::for_version(Some(CodexVersion(0, 99, 9))),
+            HookInstall::Notify
+        );
+        // A Codex that would not say: never risk a trust prompt on every spawn
+        assert_eq!(HookInstall::for_version(None), HookInstall::Notify);
+    }
+
+    /// The hash must be Codex's own, or every spawn stops at Codex's hook
+    /// review screen. This value is the one Codex 0.156.1 accepted as
+    /// trusted for this exact declaration, with no review screen, in the
+    /// PAN-44 spike.
+    #[test]
+    fn test_hook_trust_hash_matches_codex() {
+        let command = "'/private/tmp/claude-501/-Users-ivan-Projects-panoptes/\
+                       77ac9f70-4050-4b87-9f15-e9aec9adb576/scratchpad/pan44/links/Stop.sh'";
+        assert_eq!(
+            hook_trust_hash("stop", command),
+            "sha256:9d7dae08b2a78807a6f1254194f193c335e5c63902f86627a3caa0873177394b"
+        );
+    }
+
+    #[test]
+    fn test_lifecycle_hook_args_declare_and_trust_every_event() {
+        let args = lifecycle_hook_args(&hooks_dir());
+
+        // Every value is its own `-c`
+        assert_eq!(args.len(), (LIFECYCLE_EVENTS.len() + 1) * 2);
+        for pair in args.chunks(2) {
+            assert_eq!(pair[0], "-c");
+        }
+        let overrides: Vec<(String, toml::Value)> = args
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|a| override_value(a))
+            .collect();
+
+        let (state_key, state) = overrides.last().unwrap();
+        assert_eq!(state_key, "hooks.state");
+        let state = state.as_table().unwrap();
+        assert_eq!(state.len(), LIFECYCLE_EVENTS.len());
+
+        for ((event, label), (key, value)) in LIFECYCLE_EVENTS.iter().zip(&overrides) {
+            assert_eq!(key, &format!("hooks.{event}"));
+
+            // One group, no matcher, one command handler
+            let groups = value.as_array().unwrap();
+            assert_eq!(groups.len(), 1);
+            let group = groups[0].as_table().unwrap();
+            assert!(group.get("matcher").is_none());
+            let handlers = group["hooks"].as_array().unwrap();
+            assert_eq!(handlers.len(), 1);
+            let handler = handlers[0].as_table().unwrap();
+            assert_eq!(handler["type"].as_str(), Some("command"));
+            assert_eq!(
+                handler["timeout"].as_integer(),
+                Some(LIFECYCLE_HOOK_TIMEOUT_SECS as i64)
+            );
+            // Codex runs the command through a shell: the path is quoted
+            let command = handler["command"].as_str().unwrap();
+            assert_eq!(
+                command,
+                format!("'/home/someone/.panoptes/hooks/codex/{event}.sh'")
+            );
+
+            // ...and trusted by exactly that declaration's hash
+            let trust_key = format!("/<session-flags>/config.toml:{label}:0:0");
+            assert_eq!(
+                state[&trust_key]["trusted_hash"].as_str(),
+                Some(hook_trust_hash(label, command).as_str()),
+                "{event} is not trusted by its own hash"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lifecycle_hook_args_are_stable_across_spawns() {
+        // Trust is keyed on the exact declaration, so two spawns must
+        // declare byte-identical hooks
+        assert_eq!(
+            lifecycle_hook_args(&hooks_dir()),
+            lifecycle_hook_args(&hooks_dir())
+        );
+    }
+
+    #[test]
+    fn test_lifecycle_hook_command_quotes_awkward_paths() {
+        let dir = PathBuf::from("/Users/Jane Doe/it's/hooks");
+        let command = lifecycle_hook_command(&dir, "Stop");
+        assert_eq!(command, r"'/Users/Jane Doe/it'\''s/hooks/codex/Stop.sh'");
+        // Still a valid `-c` value
+        let args = lifecycle_hook_args(&dir);
+        let (_, value) = override_value(&args[1]);
+        assert!(value.as_array().is_some());
+    }
+
+    #[test]
+    fn test_hook_args_lead_even_a_resume() {
+        let adapter = CodexAdapter::new();
+        let mut spawn_config = test_spawn_config();
+        spawn_config.resume = Some("0199-thread".to_string());
+        let hook_args = lifecycle_hook_args(&hooks_dir());
+        let hook_count = hook_args.len();
+
+        let args = adapter.command_line(hook_args, &spawn_config);
+
+        // `-c` is a root option; after `resume` it would belong to the
+        // subcommand's own parser
+        assert!(args[..hook_count].chunks(2).all(|pair| pair[0] == "-c"));
+        assert_eq!(args[hook_count], "resume");
+        assert_eq!(args.last().map(String::as_str), Some("0199-thread"));
+    }
+
+    #[test]
+    fn test_lifecycle_install_writes_nothing_into_codex_home() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config {
+            worktrees_dir: temp_dir.path().join("worktrees"),
+            hooks_dir: temp_dir.path().join("hooks"),
+            ..Config::default()
+        };
+        let codex_home = temp_dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        let user_config = "model = \"o3\"\nnotify = [\"my-hook\"]\n";
+        std::fs::write(codex_home.join("config.toml"), user_config).unwrap();
+        let user_hooks = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"mine"}]}]}}"#;
+        std::fs::write(codex_home.join("hooks.json"), user_hooks).unwrap();
+        let mut spawn_config = test_spawn_config();
+        spawn_config.codex_home = Some(codex_home.clone());
+
+        let args =
+            CodexAdapter::install_hooks_as(HookInstall::Lifecycle, &config, &spawn_config).unwrap();
+        assert_eq!(args, lifecycle_hook_args(&config.hooks_dir));
+
+        // The user's Codex files are exactly as they were, with no backups
+        let mut entries: Vec<_> = std::fs::read_dir(&codex_home)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, ["config.toml", "hooks.json"]);
+        assert_eq!(
+            std::fs::read_to_string(codex_home.join("config.toml")).unwrap(),
+            user_config
+        );
+        assert_eq!(
+            std::fs::read_to_string(codex_home.join("hooks.json")).unwrap(),
+            user_hooks
+        );
+
+        // Every declared command resolves to the shared hook script
+        let script = ClaudeCodeAdapter::hook_script_path(&config);
+        assert!(script.is_file());
+        for (event, _) in LIFECYCLE_EVENTS {
+            let link = config.hooks_dir.join("codex").join(format!("{event}.sh"));
+            assert_eq!(std::fs::read_link(&link).unwrap(), script, "{event}");
+        }
+
+        // Reinstalling is a no-op that yields the same declaration
+        let again =
+            CodexAdapter::install_hooks_as(HookInstall::Lifecycle, &config, &spawn_config).unwrap();
+        assert_eq!(again, args);
     }
 
     #[test]
