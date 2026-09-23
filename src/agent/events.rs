@@ -106,6 +106,19 @@ pub struct UsageSnapshot {
     #[serde(default)]
     pub context_window: Option<u64>,
 
+    /// How `context_window` was arrived at, which decides whether a later
+    /// figure may replace it
+    #[serde(default)]
+    pub context_window_source: WindowSource,
+
+    /// The model `context_window` was established for
+    ///
+    /// Kept apart from `model`, which any record may rename: Claude writes
+    /// `<synthetic>` records that name no real model, and one of those must not
+    /// read as a model switch that discards an observed window.
+    #[serde(default)]
+    pub context_window_model: Option<String>,
+
     /// Model currently serving the conversation
     #[serde(default)]
     pub model: Option<String>,
@@ -173,6 +186,23 @@ impl RateLimitWindow {
     }
 }
 
+/// Where a context window figure came from, weakest first
+///
+/// Claude's transcript names the model but never its window, and a 1M run of a
+/// model logs the same bare id as a 200k run of it, so a window read off the
+/// model name is a guess. A figure the agent reports itself is not, and must not
+/// be overwritten by the next guess that happens to arrive after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum WindowSource {
+    /// Looked up from the model name
+    #[default]
+    Inferred,
+    /// Implied by how Panoptes launched the agent, e.g. `--model opus[1m]`
+    Launch,
+    /// Reported by the agent itself for the running session
+    Observed,
+}
+
 impl UsageSnapshot {
     /// Whether this snapshot carries anything worth showing
     pub fn is_empty(&self) -> bool {
@@ -182,17 +212,30 @@ impl UsageSnapshot {
     /// Fold newer figures in, keeping known values the update does not mention
     ///
     /// Sources are partial and interleaved: a Claude assistant record names the
-    /// model and its token counts but never a context window, while a Codex
+    /// model and its token counts but no rate limit, while a Codex
     /// `token_count` carries limits but no model. Overwriting wholesale would
     /// make fields flicker between present and absent.
+    ///
+    /// The context window is the one field that is not simply last-writer-wins:
+    /// see [`Self::accepts_window_from`].
     pub fn merge(&mut self, newer: UsageSnapshot) {
         let newer_has_limits =
             newer.primary.is_some() || newer.secondary.is_some() || newer.limit_reached.is_some();
         if newer.total_tokens.is_some() {
             self.total_tokens = newer.total_tokens;
         }
+        // Decided before `model` is overwritten, since a model switch is one of
+        // the reasons to let a weaker figure through
         if newer.context_window.is_some() {
-            self.context_window = newer.context_window;
+            if self.accepts_window_from(&newer) {
+                self.context_window = newer.context_window;
+                self.context_window_source = newer.context_window_source;
+                self.context_window_model = newer.model.clone();
+            } else if self.context_window_model.is_none() {
+                // A launch window names no model; it belongs to the first one
+                // seen running under it, so a later switch away can be noticed
+                self.context_window_model = newer.model.clone();
+            }
         }
         if newer.model.is_some() {
             self.model = newer.model;
@@ -209,6 +252,26 @@ impl UsageSnapshot {
         // this like the other fields would leave "limit hit" up forever.
         if newer_has_limits {
             self.limit_reached = newer.limit_reached;
+        }
+    }
+
+    /// Whether `newer`'s context window may replace the one already held
+    ///
+    /// A figure from an equal or stronger [`WindowSource`] always may. A weaker
+    /// one - the transcript's guess arriving after the agent reported the real
+    /// window - may only when the model has changed underneath it, because the
+    /// stronger figure described the previous model and is stale now. `[1m]` is
+    /// ignored in that comparison: an id reported with it and the transcript's
+    /// bare id name the same model.
+    fn accepts_window_from(&self, newer: &UsageSnapshot) -> bool {
+        if self.context_window.is_none()
+            || newer.context_window_source >= self.context_window_source
+        {
+            return true;
+        }
+        match (&self.context_window_model, &newer.model) {
+            (Some(held), Some(incoming)) => base_model_id(held) != base_model_id(incoming),
+            _ => false,
         }
     }
 
@@ -310,6 +373,15 @@ fn short_model_name(model: &str) -> &str {
     match trimmed.rsplit_once('-') {
         Some((head, tail)) if tail.len() == 8 && tail.chars().all(|c| c.is_ascii_digit()) => head,
         _ => trimmed,
+    }
+}
+
+/// A model id without its `[1m]` context suffix, for telling models apart
+fn base_model_id(model: &str) -> &str {
+    let stem_len = model.len().saturating_sub("[1m]".len());
+    match model.get(stem_len..) {
+        Some(suffix) if suffix.eq_ignore_ascii_case("[1m]") => &model[..stem_len],
+        _ => model,
     }
 }
 
@@ -588,6 +660,115 @@ mod tests {
         assert_eq!(short_model_name("claude-opus-4-8-20260101"), "opus-4-8");
         assert_eq!(short_model_name("gpt-5-codex"), "gpt-5-codex");
         assert_eq!(short_model_name("o3"), "o3");
+    }
+
+    #[test]
+    fn test_short_model_name_current_ids() {
+        assert_eq!(short_model_name("claude-opus-5-5"), "opus-5-5");
+        assert_eq!(short_model_name("claude-fable-5-1"), "fable-5-1");
+        assert_eq!(short_model_name("claude-sonnet-5"), "sonnet-5");
+        assert_eq!(short_model_name("claude-haiku-4-5-20251001"), "haiku-4-5");
+    }
+
+    /// A transcript record: model named, window guessed from it
+    fn inferred(model: &str, window: u64) -> UsageSnapshot {
+        UsageSnapshot {
+            model: Some(model.to_string()),
+            context_window: Some(window),
+            context_window_source: WindowSource::Inferred,
+            ..Default::default()
+        }
+    }
+
+    /// The agent's own report of the running session's window
+    fn observed(model: &str, window: u64) -> UsageSnapshot {
+        UsageSnapshot {
+            model: Some(model.to_string()),
+            context_window: Some(window),
+            context_window_source: WindowSource::Observed,
+            ..Default::default()
+        }
+    }
+
+    /// A session's usage after taking in `first`, as `merge` would leave it
+    fn holding(first: UsageSnapshot) -> UsageSnapshot {
+        let mut usage = UsageSnapshot::default();
+        usage.merge(first);
+        usage
+    }
+
+    #[test]
+    fn test_observed_window_beats_inferred() {
+        // Observed first: the next transcript guess must not replace it. This
+        // is the real 200k-capped run of a model whose default is 1M.
+        let mut usage = holding(observed("claude-opus-5-5", 200_000));
+        usage.merge(inferred("claude-opus-5-5", 1_000_000));
+        assert_eq!(usage.context_window, Some(200_000));
+        assert_eq!(usage.context_window_source, WindowSource::Observed);
+
+        // Inferred first: the observed figure replaces the guess
+        let mut usage = holding(inferred("claude-opus-5-5", 1_000_000));
+        usage.merge(observed("claude-opus-5-5", 200_000));
+        assert_eq!(usage.context_window, Some(200_000));
+        assert_eq!(usage.context_window_source, WindowSource::Observed);
+
+        // A newer observation still replaces an older one
+        usage.merge(observed("claude-opus-5-5", 1_000_000));
+        assert_eq!(usage.context_window, Some(1_000_000));
+    }
+
+    #[test]
+    fn test_launch_window_survives_the_bare_transcript_id() {
+        // `--model claude-sonnet-4-6[1m]` seeds 1M with no model named; the
+        // transcript then logs the bare id and guesses 200k
+        let mut usage = holding(UsageSnapshot {
+            context_window: Some(1_000_000),
+            context_window_source: WindowSource::Launch,
+            ..Default::default()
+        });
+        usage.merge(inferred("claude-sonnet-4-6", 200_000));
+        assert_eq!(usage.context_window, Some(1_000_000));
+
+        // The same model again, even spelled with its suffix, changes nothing
+        usage.merge(inferred("claude-sonnet-4-6[1m]", 200_000));
+        assert_eq!(usage.context_window, Some(1_000_000));
+
+        // The launch window was taken as the first model's, so leaving that
+        // model lets the new one's guess through
+        usage.merge(inferred("claude-haiku-4-5-20251001", 200_000));
+        assert_eq!(usage.context_window, Some(200_000));
+        assert_eq!(usage.context_window_source, WindowSource::Inferred);
+    }
+
+    #[test]
+    fn test_model_switch_lets_the_new_models_guess_through() {
+        // `/model` mid-session: the observed window described the old model
+        let mut usage = holding(observed("claude-opus-5-5", 1_000_000));
+        usage.merge(inferred("claude-haiku-4-5-20251001", 200_000));
+        assert_eq!(usage.context_window, Some(200_000));
+        assert_eq!(usage.context_window_source, WindowSource::Inferred);
+        assert_eq!(usage.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    }
+
+    #[test]
+    fn test_synthetic_record_is_not_a_model_switch() {
+        let mut usage = holding(observed("claude-opus-5-5", 200_000));
+        // Claude's `<synthetic>` records name a model but carry no window
+        usage.merge(UsageSnapshot {
+            model: Some("<synthetic>".to_string()),
+            ..Default::default()
+        });
+        usage.merge(inferred("claude-opus-5-5", 1_000_000));
+        assert_eq!(usage.context_window, Some(200_000));
+        assert_eq!(usage.context_window_source, WindowSource::Observed);
+    }
+
+    #[test]
+    fn test_base_model_id() {
+        assert_eq!(base_model_id("claude-opus-5-5[1m]"), "claude-opus-5-5");
+        assert_eq!(base_model_id("claude-opus-5-5[1M]"), "claude-opus-5-5");
+        assert_eq!(base_model_id("claude-opus-5-5"), "claude-opus-5-5");
+        assert_eq!(base_model_id(""), "");
     }
 
     #[test]
