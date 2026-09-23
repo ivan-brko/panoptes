@@ -92,6 +92,20 @@ pub fn apply(
     now: DateTime<Utc>,
     config: &Config,
 ) -> Applied {
+    // A failed turn can be reported twice: by the transcript tailer, and -
+    // once it is subscribed to - by Claude's `StopFailure` hook. Whichever
+    // lands second must not ring again or re-flag a session the user has
+    // already looked at. `turn_failure` rather than `attention` is what marks
+    // it, because attention is cleared the moment the session is viewed and
+    // the duplicate can land after that. Only a new turn clears it, so a
+    // genuinely new failure is never mistaken for a repeat.
+    if matches!(event, AgentEvent::TurnFailed { .. })
+        && info.state == SessionState::Waiting
+        && info.turn_failure.is_some()
+    {
+        return Applied { rang: false };
+    }
+
     // Two events must not count as activity, or they would hold
     // `last_activity` permanently fresh and neither the idle badge nor the
     // suspend sweep would ever fire on the sessions they exist for:
@@ -131,6 +145,7 @@ pub fn apply(
                 info.adopt_agent_title(&title);
             }
             info.in_flight.clear();
+            info.turn_failure = None;
             clear_attention = true;
             // The agent is up but has not been asked anything yet
             Move::Authoritative(SessionState::Waiting)
@@ -161,6 +176,7 @@ pub fn apply(
             // flight from the previous turn is stale, and the user is
             // demonstrably present so nothing needs flagging for them.
             info.in_flight.clear();
+            info.turn_failure = None;
             clear_attention = true;
             Move::Authoritative(SessionState::Thinking)
         }
@@ -191,6 +207,8 @@ pub fn apply(
             // End of turn: whatever was still marked in flight never
             // reported back and is not running any more.
             info.in_flight.clear();
+            // A turn that finished cleanly is newer news than any failure
+            info.turn_failure = None;
             attention = Some(AttentionReason::TurnComplete);
             Move::Authoritative(SessionState::Waiting)
         }
@@ -200,6 +218,20 @@ pub fn apply(
             // flagging it for their attention would be telling them what
             // they just did.
             info.in_flight.clear();
+            Move::Authoritative(SessionState::Waiting)
+        }
+
+        AgentEvent::TurnFailed { reason } => {
+            // Claude's only report of this today is its transcript, which
+            // otherwise never drives state (see `transcript::claude`): a turn
+            // that dies on an API error fires `StopFailure` instead of `Stop`,
+            // so without this the session would sit in `Thinking` until the
+            // stall watchdog guessed at it. Like a finished turn, nothing is
+            // running any more and the agent is back at its prompt - but
+            // unlike an interrupt, nobody chose this, so it is flagged.
+            info.in_flight.clear();
+            info.turn_failure = Some(reason.clone().unwrap_or_else(|| "turn failed".to_string()));
+            attention = Some(AttentionReason::TurnFailed { reason });
             Move::Authoritative(SessionState::Waiting)
         }
 
@@ -696,6 +728,118 @@ mod tests {
             info.attention.is_none(),
             "the user interrupted it themselves; telling them about it is noise"
         );
+    }
+
+    #[test]
+    fn test_turn_failed_clears_tools_and_raises_attention() {
+        let config = Config::default();
+        let mut info = test_info();
+        let now = Utc::now();
+
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        let read = serde_json::json!({"tool_name": "Read", "tool_use_id": "t1"});
+        apply_hook(&mut info, "PreToolUse", read, &config);
+        assert_eq!(info.state, SessionState::Executing);
+
+        // The usage limit hits mid-turn. No Stop will follow, and the
+        // tool's PostToolUse never arrives.
+        let failed = AgentEvent::TurnFailed {
+            reason: Some("usage limit".to_string()),
+        };
+        assert!(
+            apply(&mut info, failed, now, &config).rang,
+            "a failed turn is bell-worthy"
+        );
+
+        assert_eq!(info.state, SessionState::Waiting);
+        assert!(info.in_flight.is_empty());
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::TurnFailed {
+                reason: Some("usage limit".to_string())
+            })
+        );
+        assert_eq!(info.turn_failure.as_deref(), Some("usage limit"));
+
+        // Looking at it clears the flag, not the record of what happened
+        info.attention = None;
+        assert_eq!(info.turn_failure.as_deref(), Some("usage limit"));
+
+        // The next prompt is a new turn, and the failure is history
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        assert_eq!(info.turn_failure, None);
+
+        // Gated like every other reason
+        let mut quiet = Config::default();
+        quiet.notify_on.failed = false;
+        let mut info = test_info();
+        assert!(
+            !apply(
+                &mut info,
+                AgentEvent::TurnFailed { reason: None },
+                now,
+                &quiet
+            )
+            .rang
+        );
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::TurnFailed { reason: None }),
+            "muting the bell still leaves the badge"
+        );
+        assert_eq!(info.turn_failure.as_deref(), Some("turn failed"));
+    }
+
+    #[test]
+    fn test_turn_failed_is_idempotent_after_stop_failure() {
+        let config = Config::default();
+        let mut info = test_info();
+        let now = Utc::now();
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+
+        // `StopFailure` arrives first - hooks are the lower-latency channel -
+        // and reports the failure in the same vocabulary
+        let failed = || AgentEvent::TurnFailed {
+            reason: Some("server error".to_string()),
+        };
+        assert!(apply(&mut info, failed(), now, &config).rang);
+        let entered = info.state_entered_at;
+
+        // The transcript's record of the same turn follows moments later
+        let later = now + chrono::Duration::seconds(1);
+        assert!(!apply(&mut info, failed(), later, &config).rang);
+        assert_eq!(info.state, SessionState::Waiting);
+        assert_eq!(info.state_entered_at, entered, "a repeat is a no-op");
+
+        // Even once the user has looked and cleared the flag, the repeat must
+        // not put it back
+        info.attention = None;
+        assert!(!apply(&mut info, failed(), later, &config).rang);
+        assert!(info.attention.is_none());
+
+        // But a new turn failing is new news
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        assert!(apply(&mut info, failed(), later, &config).rang);
     }
 
     #[test]

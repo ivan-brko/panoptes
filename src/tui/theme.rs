@@ -451,7 +451,7 @@ impl Theme {
         match reason {
             AttentionReason::TurnComplete => self.success,
             AttentionReason::Approval { .. } | AttentionReason::Stalled { .. } => self.warning,
-            AttentionReason::Crashed { .. } => self.danger,
+            AttentionReason::Crashed { .. } | AttentionReason::TurnFailed { .. } => self.danger,
         }
     }
 
@@ -846,6 +846,10 @@ mod tests {
             t.attention_color(&AttentionReason::Crashed {
                 reason: "signal 9".to_string()
             }),
+            t.danger
+        );
+        assert_eq!(
+            t.attention_color(&AttentionReason::TurnFailed { reason: None }),
             t.danger
         );
     }

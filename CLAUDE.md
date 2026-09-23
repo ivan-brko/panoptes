@@ -48,7 +48,7 @@ PTY Output → Session buffer → TUI render
 - `session/state_machine.rs` - Pure agent-event state machine (hook event → state transition)
 - `session/pty_reader.rs` - Per-PTY reader thread draining output into a byte-bounded queue
 - `hooks/` - HTTP server for agent callbacks
-- `transcript/` - Reads agent transcripts on disk (Codex state, usage for both)
+- `transcript/` - Reads agent transcripts on disk (Codex state, usage for both, Claude failed turns)
 - `input/` - Input handling by mode (normal, session, dialogs)
 - `input/normal/{projects,sessions,settings}_pane.rs` - One handler per pane, each routing on its own drill-down level
 - `input/agent_configs.rs` - Shared Claude/Codex config input handlers (parameterized by `AgentKind`)

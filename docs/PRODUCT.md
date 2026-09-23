@@ -109,7 +109,7 @@ Panoptes actively helps you manage your attention across sessions:
 - **Visual Badges** - Sessions that need attention display a coloured dot saying why:
   - Green dot (`●`) - The turn finished; the agent is waiting for your next prompt
   - Yellow dot (`●`) - Blocked on a permission dialog, or a tool that stopped reporting
-  - Red dot (`●`) - The agent process died
+  - Red cross (`✗`) - The agent process died, or a turn died on an API error (usage limit, expired login, overload); for a failed turn the row and header name the reason until the next prompt
 - **Needs Attention Section** - Pinned to the top of the Sessions pane, with a blinking count in the header that is visible from every pane
 - **Auto-Acknowledge** - Opening a session clears its attention flag, and nothing re-raises it until something new happens
 

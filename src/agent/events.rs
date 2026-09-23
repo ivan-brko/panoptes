@@ -47,6 +47,17 @@ pub enum AgentEvent {
     /// The turn was interrupted before it finished
     TurnAborted,
 
+    /// The turn died on an error before it finished - a usage limit, an
+    /// expired login, an overloaded API
+    ///
+    /// Unlike [`AgentEvent::TurnAborted`] nobody chose this, so it is worth
+    /// telling the user about. The agent is back at its prompt either way.
+    TurnFailed {
+        /// Short human label for why, e.g. "usage limit"; `None` when the
+        /// agent gave no reason
+        reason: Option<String>,
+    },
+
     /// The agent is blocked waiting for the user to approve something
     ApprovalRequested {
         /// The tool awaiting approval, when the agent names one

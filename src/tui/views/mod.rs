@@ -107,10 +107,18 @@ fn base_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
         // A finished turn nobody has come back to is worth aging visibly
         (_, SessionState::Waiting) => {
             let mins = now.signed_duration_since(info.last_activity).num_minutes();
-            if mins >= 1 {
+            let waiting = if mins >= 1 {
                 format!("Waiting - {}m", mins)
             } else {
                 "Waiting".to_string()
+            };
+            // A turn that died looks exactly like one that finished - same
+            // state, same idle prompt - so the reason rides along until the
+            // next turn starts. It outlives the attention badge on purpose:
+            // glancing at the session does not make the usage limit go away.
+            match info.failed_turn() {
+                Some(reason) => format!("{} ✗ {}", waiting, reason),
+                None => waiting,
             }
         }
         (_, state) => state.display_name().to_string(),
@@ -138,12 +146,15 @@ pub fn attention_badge(info: &SessionInfo, needs_attention: bool) -> (&'static s
 /// colour at all
 ///
 /// A full circle is a finished turn waiting on nobody but you; a half circle
-/// is a turn stopped partway, blocked on you; a cross is a process that died.
+/// is a turn stopped partway, blocked on you; a cross is something that went
+/// wrong - a process that died, or a turn that died on an API error. Those two
+/// share the cross because the badge's job is "something broke, go look"; the
+/// state beside it already says which, `Exited` or `Waiting`.
 fn attention_symbol(reason: &AttentionReason) -> &'static str {
     match reason {
         AttentionReason::TurnComplete => "● ",
         AttentionReason::Approval { .. } | AttentionReason::Stalled { .. } => "◐ ",
-        AttentionReason::Crashed { .. } => "✗ ",
+        AttentionReason::Crashed { .. } | AttentionReason::TurnFailed { .. } => "✗ ",
     }
 }
 
@@ -384,6 +395,34 @@ mod tests {
             reason: "signal 9".to_string(),
         });
         assert_eq!(attention_badge(&info, true).0, "✗ ");
+
+        info.attention = Some(AttentionReason::TurnFailed { reason: None });
+        assert_eq!(attention_badge(&info, true).0, "✗ ");
+    }
+
+    #[test]
+    fn test_waiting_state_names_a_failed_turn() {
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let now = Utc::now();
+        info.set_state_at(SessionState::Waiting, now);
+        info.last_activity = now;
+        assert_eq!(session_state_display(&info, now), "Waiting");
+
+        info.turn_failure = Some("usage limit".to_string());
+        assert_eq!(session_state_display(&info, now), "Waiting ✗ usage limit");
+
+        // Survives the badge being acknowledged
+        info.attention = None;
+        let later = now + chrono::Duration::minutes(3);
+        assert_eq!(
+            session_state_display(&info, later),
+            "Waiting - 3m ✗ usage limit"
+        );
     }
 
     #[test]

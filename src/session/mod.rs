@@ -301,6 +301,11 @@ pub enum AttentionReason {
         /// Exit code or signal description
         reason: String,
     },
+    /// The turn died on an API error; the agent is alive and back at its prompt
+    TurnFailed {
+        /// Short label such as "usage limit", when the agent gave one
+        reason: Option<String>,
+    },
 }
 
 impl AttentionReason {
@@ -314,6 +319,10 @@ impl AttentionReason {
                 format!("{} stalled {}m", tool, secs / 60)
             }
             AttentionReason::Crashed { reason } => format!("crashed: {}", reason),
+            AttentionReason::TurnFailed {
+                reason: Some(reason),
+            } => format!("failed: {}", reason),
+            AttentionReason::TurnFailed { reason: None } => "turn failed".to_string(),
         }
     }
 }
@@ -366,6 +375,15 @@ pub struct SessionInfo {
     /// The last thing the assistant said, from the most recent `Stop`
     #[serde(default)]
     pub last_message: Option<String>,
+    /// Why the most recent turn failed, while it is still the latest news
+    ///
+    /// A failure the agent gave no reason for is recorded as "turn failed".
+    /// Kept apart from `attention`, which is cleared the moment the user
+    /// looks, because the failure is still true after they have looked and
+    /// the row and header should keep saying so until the next turn starts.
+    /// Not persisted, like everything else describing a live turn.
+    #[serde(skip)]
+    pub turn_failure: Option<String>,
     /// Token and rate-limit figures read from the agent's own transcript
     ///
     /// Not persisted: it describes a live conversation, and stale numbers shown
@@ -480,6 +498,19 @@ impl SessionInfo {
     /// The conversation cursor to hand a relaunched agent, if any
     pub fn resume_cursor(&self) -> Option<String> {
         self.agent_session_id.clone()
+    }
+
+    /// Why the turn the session is sitting on failed, if it did
+    ///
+    /// Only while `Waiting`: a failure describes the prompt the agent fell back
+    /// to. Should the agent carry on regardless, it is no longer sitting there,
+    /// and the reason stops being worth showing even before a new prompt
+    /// formally clears it.
+    pub fn failed_turn(&self) -> Option<&str> {
+        match self.state {
+            SessionState::Waiting => self.turn_failure.as_deref(),
+            _ => None,
+        }
     }
 
     /// Check if this session needs attention
@@ -631,6 +662,7 @@ impl SessionInfo {
             attention: None,
             in_flight: HashMap::new(),
             last_message: None,
+            turn_failure: None,
             usage: crate::agent::events::UsageSnapshot::default(),
             subagents: 0,
             resumed_conversation: false,
