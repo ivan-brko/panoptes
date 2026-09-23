@@ -95,7 +95,7 @@ pub fn discover_session_id(
     // earliest unclaimed rollout created after this session started is its own.
     // Picking the newest would hand a session the rollout of a *later* session
     // started in the same directory.
-    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.sort_by_key(|a| a.0);
     candidates.into_iter().next().map(|(_, id)| id)
 }
 

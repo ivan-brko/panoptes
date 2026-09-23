@@ -98,11 +98,9 @@ fn handle_shortcuts_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.state.shortcut_error = None;
             app.state.input_mode = InputMode::AddingCustomShortcutKey;
         }
-        KeyCode::Char('d') => {
-            if count > 0 {
-                app.state.pending_delete_shortcut_index = Some(app.state.custom_shortcuts_selected);
-                app.state.input_mode = InputMode::ConfirmingCustomShortcutDelete;
-            }
+        KeyCode::Char('d') if count > 0 => {
+            app.state.pending_delete_shortcut_index = Some(app.state.custom_shortcuts_selected);
+            app.state.input_mode = InputMode::ConfirmingCustomShortcutDelete;
         }
         _ => {}
     }

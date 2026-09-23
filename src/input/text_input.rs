@@ -36,11 +36,9 @@ pub fn handle_creating_shell_session_key(app: &mut App, key: KeyEvent) -> Result
         KeyCode::Backspace => {
             app.state.session_draft.name.pop();
         }
-        KeyCode::Char(c) => {
-            // Enforce length limit for session names
-            if app.state.session_draft.name.len() < MAX_SESSION_NAME_LEN {
-                app.state.session_draft.name.push(c);
-            }
+        // Enforce length limit for session names
+        KeyCode::Char(c) if app.state.session_draft.name.len() < MAX_SESSION_NAME_LEN => {
+            app.state.session_draft.name.push(c);
         }
         _ => {}
     }
@@ -246,12 +244,10 @@ pub fn handle_adding_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.state.new_project_path.pop();
             update_path_completions(app);
         }
-        KeyCode::Char(c) => {
-            // Enforce length limit for project paths
-            if app.state.new_project_path.len() < MAX_PROJECT_PATH_LEN {
-                app.state.new_project_path.push(c);
-                update_path_completions(app);
-            }
+        // Enforce length limit for project paths
+        KeyCode::Char(c) if app.state.new_project_path.len() < MAX_PROJECT_PATH_LEN => {
+            app.state.new_project_path.push(c);
+            update_path_completions(app);
         }
         _ => {}
     }
@@ -334,11 +330,9 @@ pub fn handle_adding_project_name_key(app: &mut App, key: KeyEvent) -> Result<()
         KeyCode::Backspace => {
             app.state.new_project_name.pop();
         }
-        KeyCode::Char(c) => {
-            // Enforce length limit for project names
-            if app.state.new_project_name.len() < MAX_PROJECT_NAME_LEN {
-                app.state.new_project_name.push(c);
-            }
+        // Enforce length limit for project names
+        KeyCode::Char(c) if app.state.new_project_name.len() < MAX_PROJECT_NAME_LEN => {
+            app.state.new_project_name.push(c);
         }
         _ => {}
     }
@@ -375,11 +369,9 @@ pub fn handle_renaming_project_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Backspace => {
             app.state.new_project_name.pop();
         }
-        KeyCode::Char(c) => {
-            // Enforce length limit for project names (used for renaming)
-            if app.state.new_project_name.len() < MAX_PROJECT_NAME_LEN {
-                app.state.new_project_name.push(c);
-            }
+        // Enforce length limit for project names (used for renaming)
+        KeyCode::Char(c) if app.state.new_project_name.len() < MAX_PROJECT_NAME_LEN => {
+            app.state.new_project_name.push(c);
         }
         _ => {}
     }
@@ -428,12 +420,10 @@ pub fn handle_moving_to_folder_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.state.folder_error = None;
             update_folder_completions(app);
         }
-        KeyCode::Char(c) => {
-            if app.state.folder_input.len() < MAX_FOLDER_PATH_LEN {
-                app.state.folder_input.push(c);
-                app.state.folder_error = None;
-                update_folder_completions(app);
-            }
+        KeyCode::Char(c) if app.state.folder_input.len() < MAX_FOLDER_PATH_LEN => {
+            app.state.folder_input.push(c);
+            app.state.folder_error = None;
+            update_folder_completions(app);
         }
         _ => {}
     }
@@ -484,11 +474,9 @@ pub fn handle_renaming_folder_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.state.folder_input.pop();
             app.state.folder_error = None;
         }
-        KeyCode::Char(c) => {
-            if app.state.folder_input.len() < MAX_FOLDER_PATH_LEN {
-                app.state.folder_input.push(c);
-                app.state.folder_error = None;
-            }
+        KeyCode::Char(c) if app.state.folder_input.len() < MAX_FOLDER_PATH_LEN => {
+            app.state.folder_input.push(c);
+            app.state.folder_error = None;
         }
         _ => {}
     }

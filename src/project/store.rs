@@ -68,7 +68,7 @@ impl ProjectStore {
     /// Get all projects as a sorted vector (by name)
     pub fn projects_sorted(&self) -> Vec<&Project> {
         let mut projects: Vec<_> = self.projects.values().collect();
-        projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        projects.sort_by_key(|a| a.name.to_lowercase());
         projects
     }
 
