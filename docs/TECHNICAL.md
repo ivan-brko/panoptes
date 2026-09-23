@@ -655,6 +655,27 @@ mid-write, and decoding a chunk in isolation would corrupt a split character
 permanently. A file that shrinks is re-attached at its new end rather than read
 from a stale offset.
 
+**Claude's context window.** Claude's transcript names the model but never
+its window, so the window is looked up in `CONTEXT_WINDOWS`
+(`transcript/claude.rs`), a prefix table taken from the model catalogue
+compiled into Claude Code (2.1.280, read 2026-09-23). Opus 4.7 and later,
+Sonnet 5, Fable 5 and Mythos 5 run at 1M by default; older Opus and Sonnet,
+Haiku 4.5 and the 3.x models run at 200k unless launched with a `[1m]` suffix.
+An id the table does not know gets no window, and the header shows a raw token
+count rather than a percentage of an invented number.
+
+The table can only guess, because the transcript logs the bare id whatever the
+window: `claude-opus-5-5[1m]` is logged as `claude-opus-5-5`, and so is a
+native-1M model that Claude Code has capped at 200k (on most third-party
+providers, under `CLAUDE_CODE_DISABLE_1M_CONTEXT`, or when the account cannot
+pay for long context). So every window carries a `WindowSource`, weakest first:
+`Inferred` from the table, `Launch` from a `--model …[1m]` argument Panoptes
+spawned with, and `Observed` from the agent itself (Codex's
+`model_context_window`, or Claude's status line once it is fed in).
+`UsageSnapshot::merge` lets a window replace one from an equal or stronger
+source, and a weaker one only when the model has changed, since the stronger
+figure described the previous model.
+
 **Threading.** The watcher runs on its own OS thread and is drained with
 `try_recv` each tick, the same shape as hook events. The reads are incremental,
 but a burst of tool output can append a lot at once and parsing that on the
