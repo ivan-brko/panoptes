@@ -1,8 +1,10 @@
-//! Git work that runs off the event-loop thread
+//! Slow work that runs off the event-loop thread
 //!
-//! Fetching remotes and creating or removing a worktree can take seconds. Run
-//! on the event loop they freeze the whole TUI; run here they leave it live,
-//! rendering an animated overlay, and - for fetches - cancellable with Esc.
+//! Fetching remotes and creating or removing a worktree can take seconds, and
+//! so can searching the agents' transcript directories for conversations to
+//! import. Run on the event loop they freeze the whole TUI; run here they
+//! leave it live, rendering an animated overlay, and - for fetches and
+//! conversation scans - cancellable with Esc.
 //!
 //! A job is a [`GitTask`] (what the worker thread does, knowing nothing about
 //! the app) plus a [`JobFollowUp`] (what the app does with the result once it
@@ -18,7 +20,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::git::{BranchRefInfo, FetchOutcome, GitOps};
-use crate::project::{Branch, ProjectId};
+use crate::project::{Branch, BranchId, ProjectId};
+use crate::transcript::scan::{ScanOutcome, ScanRequest};
 
 /// The git work itself - self-contained, so it can run on a worker thread
 pub(crate) enum GitTask {
@@ -43,6 +46,11 @@ pub(crate) enum GitTask {
         repo_path: PathBuf,
         branch_name: String,
     },
+    /// Search the agents' transcripts for conversations to import
+    ///
+    /// Not git work, but the same shape of problem: bounded, yet slow enough
+    /// on a cold disk to be felt, and something a user may want to abandon.
+    ScanConversations { request: Box<ScanRequest> },
 }
 
 /// What the app does with a finished job
@@ -66,6 +74,11 @@ pub(crate) enum JobFollowUp {
     },
     /// Finish deleting the branch whose worktree was just removed
     FinishBranchDelete { branch: Box<Branch> },
+    /// Offer the conversations found for this branch
+    OpenConversationImport {
+        project_id: ProjectId,
+        branch_id: BranchId,
+    },
 }
 
 /// What a finished job produced
@@ -77,6 +90,8 @@ pub(crate) enum JobOutput {
     },
     /// An operation with nothing to return but success or failure
     Completed(Result<()>),
+    /// Conversations found on disk
+    Conversations(ScanOutcome),
 }
 
 /// A finished job, as it comes back over the channel
@@ -112,8 +127,9 @@ impl BackgroundJob {
 
     /// Ask the running job to stop
     ///
-    /// Only fetches honour this; other tasks run to completion (interrupting a
-    /// half-created worktree would leave the repo in a worse state).
+    /// Fetches and conversation scans honour this; other tasks run to
+    /// completion (interrupting a half-created worktree would leave the repo
+    /// in a worse state).
     pub(crate) fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
@@ -128,7 +144,7 @@ impl BackgroundJob {
             Ok(result) => JobPoll::Finished(Some(result)),
             Err(TryRecvError::Empty) => JobPoll::Running,
             Err(TryRecvError::Disconnected) => {
-                tracing::error!("Background git job ended without a result");
+                tracing::error!("Background job ended without a result");
                 JobPoll::Finished(None)
             }
         }
@@ -180,6 +196,9 @@ fn run_task(task: GitTask, cancel: &AtomicBool) -> JobOutput {
             crate::git::worktree::remove_worktree(git.repository(), &branch_name, true)
                 .context("Failed to remove worktree")
         })()),
+        GitTask::ScanConversations { request } => {
+            JobOutput::Conversations(crate::transcript::scan::scan(&request, cancel))
+        }
     }
 }
 
@@ -243,6 +262,42 @@ mod tests {
         match result.output {
             JobOutput::Completed(outcome) => assert!(outcome.is_err()),
             _ => panic!("expected a Completed output"),
+        }
+    }
+
+    #[test]
+    fn conversation_scan_runs_off_thread_and_reports_back() {
+        use crate::transcript::scan::{ScanBudget, ScanRequest};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let job = BackgroundJob::spawn(
+            GitTask::ScanConversations {
+                request: Box::new(ScanRequest {
+                    working_dir: dir.path().to_path_buf(),
+                    claude_accounts: Vec::new(),
+                    codex_accounts: Vec::new(),
+                    claimed: HashSet::new(),
+                    budget: ScanBudget::default(),
+                }),
+            },
+            JobFollowUp::OpenConversationImport {
+                project_id: uuid::Uuid::new_v4(),
+                branch_id: uuid::Uuid::new_v4(),
+            },
+        );
+
+        let result = loop {
+            match job.poll() {
+                JobPoll::Running => std::thread::sleep(std::time::Duration::from_millis(5)),
+                JobPoll::Finished(result) => break result,
+            }
+        };
+        match result.expect("worker should report a result").output {
+            JobOutput::Conversations(outcome) => {
+                assert!(outcome.conversations.is_empty());
+                assert!(!outcome.cancelled);
+            }
+            _ => panic!("expected a Conversations output"),
         }
     }
 

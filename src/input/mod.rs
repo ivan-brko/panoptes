@@ -3,6 +3,7 @@
 //! Handles keyboard and mouse input dispatching based on current mode and view.
 
 pub mod agent_configs;
+pub mod conversation_import;
 pub mod dialogs;
 pub mod dispatcher;
 pub mod normal;

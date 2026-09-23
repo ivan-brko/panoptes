@@ -11,8 +11,10 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use crate::app::{AppState, FolderMoveTarget};
 use crate::project::{folder_path_key, MAX_FOLDER_DEPTH};
+use crate::transcript::scan::FoundConversation;
+use crate::transcript::TranscriptKind;
 use crate::tui::theme::theme;
-use crate::tui::views::visible_window;
+use crate::tui::views::{truncate_path, truncate_string, visible_window};
 use crate::tui::widgets::dialog::{centered_rect, DialogSize};
 use crate::tui::widgets::selection::{selection_prefix, selection_style_with_accent};
 
@@ -197,6 +199,171 @@ pub fn render_folder_move_dialog(frame: &mut Frame, area: Rect, state: &AppState
     render_prompt_overlay(frame, area, " Move to Folder ", lines, title, rows);
 }
 
+/// How many conversations the import picker shows at once
+const MAX_IMPORT_ROWS: usize = 12;
+
+/// Width of the import picker: titles are prose, so it is given room
+const IMPORT_WIDTH: DialogSize = DialogSize::Percent {
+    pct: 80,
+    min: 40,
+    max: 110,
+};
+
+/// The fewest title characters a picker row keeps before it drops a field
+const MIN_IMPORT_TITLE: usize = 16;
+
+/// The conversation import picker
+///
+/// A list, so an overlay (see the module doc). One row per conversation:
+/// agent badge, title, then how long ago it was used and the account it
+/// belongs to. The row drops the account, then the time, whole as the
+/// overlay narrows, rather than squeezing the title to nothing - the badge
+/// and title are what the choice is made on.
+pub fn render_conversation_import(frame: &mut Frame, area: Rect, state: &AppState) {
+    let Some(import) = &state.conversation_import else {
+        return;
+    };
+    let t = theme();
+    let total = import.conversations.len();
+    let (start, end) = visible_window(total, import.selected, MAX_IMPORT_ROWS);
+
+    // Rows, plus the heading and its gap, the warning if any, and the border
+    let extra_lines = 2 + u16::from(import.truncated);
+    let overlay = centered_rect(
+        area,
+        IMPORT_WIDTH,
+        DialogSize::Fixed((end - start) as u16 + extra_lines + 2),
+    );
+    let inner_width = overlay.width.saturating_sub(2) as usize;
+    let now = chrono::Utc::now();
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            // The path last, so a long one loses its start rather than the
+            // part that tells worktrees apart
+            truncate_path(
+                &format!("Newest first, started in {}", import.working_dir.display()),
+                inner_width,
+            ),
+            t.muted_style(),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(
+        import.conversations[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, conversation)| {
+                import_row(conversation, start + i == import.selected, inner_width, now)
+            }),
+    );
+    if import.truncated {
+        lines.push(Line::from(Span::styled(
+            truncate_string(
+                "Search stopped early: older conversations may not be listed",
+                inner_width,
+            ),
+            Style::default().fg(t.warning),
+        )));
+    }
+
+    let title = if total > MAX_IMPORT_ROWS {
+        format!(
+            " Import Conversation ({}/{}) ↑↓ ",
+            import.selected + 1,
+            total
+        )
+    } else {
+        format!(" Import Conversation ({}) ", total)
+    };
+
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(t.border_focus))
+                .title(title),
+        ),
+        overlay,
+    );
+}
+
+/// One picker row, fitted to `width` columns
+fn import_row(
+    conversation: &FoundConversation,
+    selected: bool,
+    width: usize,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Line<'static> {
+    let t = theme();
+    let prefix = selection_prefix(selected);
+    let badge = match conversation.kind {
+        TranscriptKind::Claude => "[CC] ",
+        TranscriptKind::Codex => "[CX] ",
+    };
+    let title = conversation
+        .title
+        .clone()
+        .unwrap_or_else(|| "(no prompt)".to_string());
+    let (time, account) = import_row_fields(conversation, now);
+
+    // Right-hand fields, most expendable first to go
+    let fixed = prefix.chars().count() + badge.chars().count();
+    let mut trailer: Vec<String> = vec![time, account];
+    let trailer_len = |fields: &[String]| -> usize {
+        fields.iter().map(|f| f.chars().count() + 2).sum::<usize>()
+    };
+    while !trailer.is_empty()
+        && fixed + MIN_IMPORT_TITLE.min(title.chars().count()) + trailer_len(&trailer) > width
+    {
+        trailer.pop();
+    }
+
+    let title_room = width.saturating_sub(fixed + trailer_len(&trailer));
+    let title = truncate_string(&title, title_room);
+    let pad = title_room.saturating_sub(title.chars().count());
+
+    let mut spans = vec![
+        Span::raw(prefix),
+        Span::styled(badge, t.muted_style()),
+        Span::styled(title, selection_style_with_accent(selected, t)),
+        Span::raw(" ".repeat(pad)),
+    ];
+    for field in trailer {
+        spans.push(Span::styled(format!("  {}", field), t.muted_style()));
+    }
+    Line::from(spans)
+}
+
+/// The time and account columns of a picker row
+fn import_row_fields(
+    conversation: &FoundConversation,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (String, String) {
+    let account = conversation
+        .account_name
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    (relative_time(conversation.last_active, now), account)
+}
+
+/// How long ago, as briefly as a column allows
+fn relative_time(
+    then: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let secs = (now - then).num_seconds().max(0);
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3_599 => format!("{}m ago", secs / 60),
+        3_600..=86_399 => format!("{}h ago", secs / 3_600),
+        86_400..=604_799 => format!("{}d ago", secs / 86_400),
+        604_800..=2_419_199 => format!("{}w ago", secs / 604_800),
+        _ => then.format("%Y-%m-%d").to_string(),
+    }
+}
+
 /// The folder-removal confirmation
 ///
 /// Deliberately not the shared delete dialog: dissolving a folder deletes
@@ -336,8 +503,150 @@ mod tests {
                 render_to_lines(width, height, |frame| {
                     render_folder_remove_confirmation(frame, frame.size(), &state, &store)
                 });
+                let import = import_state(3, true);
+                render_to_lines(width, height, |frame| {
+                    render_conversation_import(frame, frame.size(), &import)
+                });
             }
         }
+    }
+
+    fn import_state(count: usize, truncated: bool) -> AppState {
+        use crate::app::ConversationImport;
+        let now = chrono::Utc::now();
+        let conversations = (0..count)
+            .map(|i| FoundConversation {
+                kind: if i % 2 == 0 {
+                    TranscriptKind::Claude
+                } else {
+                    TranscriptKind::Codex
+                },
+                id: format!("conv-{i}"),
+                title: Some(format!("Conversation number {i} about the header layout")),
+                last_active: now - chrono::Duration::hours(i as i64 + 1),
+                config_id: None,
+                account_name: (i == 1).then(|| "work".to_string()),
+                path: PathBuf::from("/tmp/x.jsonl"),
+            })
+            .collect();
+        AppState {
+            input_mode: InputMode::ImportingConversation,
+            conversation_import: Some(ConversationImport {
+                project_id: uuid::Uuid::new_v4(),
+                branch_id: uuid::Uuid::new_v4(),
+                working_dir: PathBuf::from("/home/me/panoptes"),
+                conversations,
+                selected: 0,
+                truncated,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_import_picker_is_an_overlay_listing_each_conversation() {
+        let state = import_state(2, false);
+        let lines = render_to_lines(120, 24, |frame| {
+            render_conversation_import(frame, frame.size(), &state)
+        });
+
+        assert!(
+            contains_line(&lines, "Import Conversation (2)"),
+            "{lines:?}"
+        );
+        assert!(contains_line(&lines, "/home/me/panoptes"), "{lines:?}");
+        let first = lines
+            .iter()
+            .find(|l| l.contains("number 0"))
+            .expect("first row");
+        assert!(first.contains("▶ [CC] Conversation number 0"), "{first:?}");
+        assert!(
+            first.contains("1h ago") && first.contains("default"),
+            "{first:?}"
+        );
+        let second = lines.iter().find(|l| l.contains("number 1")).unwrap();
+        assert!(
+            second.contains("[CX]") && second.contains("work"),
+            "{second:?}"
+        );
+        // Centred overlay: the top row of the terminal stays empty
+        assert!(lines[0].is_empty(), "{lines:?}");
+        assert!(!contains_line(&lines, "stopped early"), "{lines:?}");
+    }
+
+    #[test]
+    fn test_import_picker_says_when_the_search_stopped_early() {
+        let state = import_state(1, true);
+        let lines = render_to_lines(120, 24, |frame| {
+            render_conversation_import(frame, frame.size(), &state)
+        });
+        assert!(contains_line(&lines, "Search stopped early"), "{lines:?}");
+    }
+
+    /// Narrowing drops the account, then the time, whole - never half a field
+    #[test]
+    fn test_import_rows_drop_fields_whole_as_they_narrow() {
+        let state = import_state(1, false);
+        let conversation = &state.conversation_import.as_ref().unwrap().conversations[0];
+        let now = chrono::Utc::now();
+        let text = |width: usize| -> String {
+            import_row(conversation, false, width, now)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+
+        let wide = text(100);
+        assert!(
+            wide.contains("1h ago") && wide.contains("default"),
+            "{wide:?}"
+        );
+        let middle = text(38);
+        assert!(
+            middle.contains("1h ago") && !middle.contains("defa"),
+            "{middle:?}"
+        );
+        let narrow = text(28);
+        assert!(
+            !narrow.contains("ago") && !narrow.contains("defa"),
+            "{narrow:?}"
+        );
+        assert!(narrow.starts_with("  [CC] Conversation"), "{narrow:?}");
+        for width in [100, 38, 28, 10] {
+            assert!(text(width).chars().count() <= width.max(7), "{width}");
+        }
+    }
+
+    #[test]
+    fn test_import_picker_scrolls_a_long_list() {
+        let mut state = import_state(30, false);
+        state.conversation_import.as_mut().unwrap().selected = 20;
+        let lines = render_to_lines(120, 30, |frame| {
+            render_conversation_import(frame, frame.size(), &state)
+        });
+        assert!(
+            contains_line(&lines, "Import Conversation (21/30)"),
+            "{lines:?}"
+        );
+        assert!(
+            contains_line(&lines, "▶ [CC] Conversation number 20"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn test_relative_time_reads_briefly() {
+        let now = chrono::Utc::now();
+        let ago = |secs: i64| relative_time(now - chrono::Duration::seconds(secs), now);
+        assert_eq!(ago(5), "just now");
+        assert_eq!(ago(300), "5m ago");
+        assert_eq!(ago(3 * 3_600), "3h ago");
+        assert_eq!(ago(2 * 86_400), "2d ago");
+        assert_eq!(ago(15 * 86_400), "2w ago");
+        assert_eq!(ago(90 * 86_400).len(), "2026-01-01".len());
+        // A clock skewed into the future is not "in 3m"
+        assert_eq!(ago(-180), "just now");
     }
 
     #[test]

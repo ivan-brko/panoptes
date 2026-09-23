@@ -305,7 +305,9 @@ background session is slowed, never stalled.
 
 ### Background Git Work
 Git operations that can take seconds (`git fetch --all`, creating or removing a
-worktree) never run on the event-loop thread:
+worktree) never run on the event-loop thread - nor does the one non-git job
+that shares the machinery, the conversation import scan (see *Importing
+conversations* under Session Recovery):
 
 1. The flow that needs one calls `App::spawn_git_job` with a `GitTask` (the git
    work, self-contained enough to move to a worker thread) and a `JobFollowUp`
@@ -316,10 +318,13 @@ worktree) never run on the event-loop thread:
    so nothing acts on state the job is about to replace
 4. `App::tick_background_job` polls the channel each pass and applies the
    follow-up: opening the worktree wizard, opening the default-base selector,
-   registering a created worktree, or finishing a worktree delete
+   registering a created worktree, finishing a worktree delete, or opening the
+   conversation import picker
 
 Fetches are cancellable: `Esc` kills the `git fetch` child process and the flow
 continues with the refs already on disk (the same fallback as a failed fetch).
+So is the conversation scan, which checks the flag between files and opens
+nothing once cancelled.
 Worktree create/remove are not - interrupting one halfway would leave the repo
 in a worse state than it started.
 
@@ -572,7 +577,7 @@ command = "code . &"
 - Creates shell session using `SessionManager::create_shell_session_with_command()`
 
 **Key validation:**
-- Reserved keys are rejected (q, n, s, d, 0-9)
+- Reserved keys are rejected (q, n, s, d, i, 0-9)
 - Duplicate keys are rejected
 - Validation occurs in `config::is_reserved_key()` and `Config::add_shortcut()`
 
@@ -641,6 +646,60 @@ inertly - nothing is spawned until the user opens it. A record whose working
 directory has been deleted, which never recorded a conversation ID, or whose
 conversation transcript is missing, is still listed but shows why it cannot be
 brought back.
+
+#### Importing conversations
+
+A conversation started by running `claude` or `codex` by hand has a transcript
+but no record, so Panoptes cannot resume it - until it is imported. `i` at a
+branch searches for conversations started in that branch's working directory
+(`transcript::scan`) and lists them in a centred overlay; `Enter` adopts one
+through `SessionManager::adopt_external_conversation`, which builds a
+`SessionInfo` exactly as a recovered one looks - `Resumable`, with the session
+type, working directory, project and branch, account config id and name, and
+the agent's conversation ID - and puts it in `recovered` and the store. From
+there every existing resume path takes it unchanged: nothing spawns until it is
+opened, and opening it runs `claude --resume <id>` / `codex resume <id>` under
+the account it was found in. Its name is the agent's title, else the first
+prompt, and is marked `auto_named`, so later agent retitles keep replacing it.
+
+What is searched is every Claude and Codex profile, then the default account
+of each (`$CLAUDE_CONFIG_DIR` or `~/.claude`, and `~/.codex`); a directory
+listed twice is searched once, credited to the profile.
+
+- **Claude** transcripts are filed by directory, so the slug of the working
+  directory names the one folder to list (both the path as stored and its
+  resolved form, since Claude files under the resolved one). Claude shortens a
+  slug over 200 characters and appends a hash, so a longer path is matched by
+  prefix. Each file's first 64 KB is read for the `cwd` its records carry (the
+  slug is lossy, so this is the real check), the latest `ai-title`, and the
+  first prompt a user typed - skipping injected records such as slash-command
+  wrappers. A file with no exchange at all is skipped: resuming it fails.
+- **Codex** rollouts are filed by date, every directory mixed together, so
+  `sessions/YYYY/MM/DD` is walked newest day first, one day listed at a time.
+  Each rollout gets an 8 KB probe; its header line is ~22 KB, but the `cwd`
+  comes before the long base instructions, so most rollouts are ruled out on
+  the probe alone. A match is read on to the end of the header line (up to
+  256 KB) and classified: only `RolloutKind::Session` qualifies - subagent and
+  system rollouts are not conversations the user had. The title is the
+  thread's `session_index.jsonl` name (the index's last 1 MB, read once per
+  `CODEX_HOME` that has a match), else the first `user_message`.
+
+Candidates from every account are examined in one stream ordered by mtime, so
+a budget that runs out costs the oldest conversations rather than one agent's
+entirely. The budget (`ScanBudget`) is 500 files opened, 8 MB read, and 50
+results; whichever runs out first stops the scan, and the picker says so.
+Every read goes through one meter that charges its bytes and never reads past
+what is left. Conversation IDs already owned by a session
+(`claimed_agent_session_ids`) are never offered, and are ruled out from the
+file name before anything is opened. Partial lines, unknown record types and
+unreadable files are logged at debug and skipped.
+
+The scan runs on a worker thread as a background job, behind the cancellable
+loading overlay, so a cold disk cannot freeze the UI.
+
+Only conversations whose working directory is a branch Panoptes knows are
+reachable this way; a global browser, and offering to add a project for an
+unknown directory, are out of scope.
 
 #### Following Claude across conversations
 

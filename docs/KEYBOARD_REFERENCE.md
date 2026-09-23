@@ -105,9 +105,24 @@ shortcut that opened this list before it became a row of the branch list.
 | `Enter` | Open selected session (resumes it if `[Resumable]`); on the back row, back to the branch list |
 | `n` | Create new AI session (Claude Code or Codex) |
 | `s` | Create new shell session |
+| `i` | Import a Claude or Codex conversation started in this branch's directory outside Panoptes |
 | `d` | Delete selected session (prompts for confirmation) |
 | `Esc` | Back to the branch list |
 | any other key | Run a matching custom shortcut, if one is bound |
+
+### Import Conversation (overlay)
+
+Opened by `i` at a branch, once the search behind the loading overlay (`Esc`
+cancels it) has found something. Lists the conversations newest first, with
+the agent (`[CC]` / `[CX]`), the agent's title or the first prompt, how long
+ago it was last used, and the account it belongs to. Conversations already
+owned by a Panoptes session are not listed.
+
+| Key | Action |
+|-----|--------|
+| `Up` / `Down` | Select a conversation |
+| `Enter` | Import it as a `[Resumable]` session on the branch (nothing starts until you open it) |
+| `Esc` | Close without importing |
 
 ## Pane 2 — Sessions
 
@@ -282,7 +297,7 @@ When prompted to confirm an action:
 
 ## Reserved Keys
 
-Custom shortcuts cannot be bound to `q`, `n`, `s`, `d` or the digits `0-9`:
+Custom shortcuts cannot be bound to `q`, `n`, `s`, `d`, `i` or the digits `0-9`:
 those are built-in where custom shortcuts fire, so a shortcut on one could never
 run. `Space`, `Esc`, `Enter`, `Tab` and the arrow keys are not characters and
 cannot be bound at all.

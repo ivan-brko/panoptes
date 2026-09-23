@@ -76,6 +76,8 @@ pub enum InputMode {
     ConfirmingCodexConfigDelete,
     /// Selecting Codex config for session creation or project default
     SelectingCodexConfig,
+    /// Picking a conversation found on disk to import into a branch
+    ImportingConversation,
 }
 
 impl InputMode {
@@ -84,7 +86,7 @@ impl InputMode {
     /// Keep in sync with the enum; `test_all_lists_every_mode_once` fails if
     /// an entry is duplicated, and the dispatcher's routing-table test fails
     /// to compile if a new variant is missing from its match.
-    pub const ALL: [InputMode; 35] = [
+    pub const ALL: [InputMode; 36] = [
         InputMode::Normal,
         InputMode::Session,
         InputMode::CreatingSession,
@@ -120,6 +122,7 @@ impl InputMode {
         InputMode::AddingCodexConfigPath,
         InputMode::ConfirmingCodexConfigDelete,
         InputMode::SelectingCodexConfig,
+        InputMode::ImportingConversation,
     ];
 }
 

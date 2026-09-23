@@ -157,6 +157,9 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::ConfirmingFolderRemove => {
             super::dialogs::handle_confirming_folder_remove_key(app, key)
         }
+        InputMode::ImportingConversation => {
+            super::conversation_import::handle_importing_conversation_key(app, key)
+        }
     }
 }
 
@@ -353,6 +356,11 @@ fn validate_mode_focus_consistency(state: &mut AppState) {
         | InputMode::CreatingSession
         | InputMode::CreatingCodexSession
         | InputMode::CreatingShellSession => {
+            on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::Branch(_, _))
+        }
+
+        // The import picker is opened from a branch, and adopts into it
+        InputMode::ImportingConversation => {
             on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::Branch(_, _))
         }
 

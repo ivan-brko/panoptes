@@ -167,7 +167,15 @@ pub fn read_session_meta(path: &Path) -> Option<RolloutMeta> {
         .read_line(&mut first_line)
         .ok()?;
 
-    meta_from_record(&serde_json::from_str(&first_line).ok()?)
+    meta_from_line(&first_line)
+}
+
+/// Interpret one line as a `session_meta` header, or `None` for anything else
+///
+/// For a caller that has already read the line itself - the conversation
+/// scanner reads bounded prefixes, and must not reopen the file for this.
+pub fn meta_from_line(line: &str) -> Option<RolloutMeta> {
+    meta_from_record(&serde_json::from_str(line).ok()?)
 }
 
 /// Interpret a `session_meta` record, or `None` for any other record

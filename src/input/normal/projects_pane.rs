@@ -23,6 +23,12 @@ use crate::input::agent_configs::{open_config_selector, AgentKind};
 use crate::project::{self, BranchId, ProjectId, RowRef};
 use crate::tui::views::pane_projects::PROJECT_SETTINGS_ROWS;
 
+/// Opens the conversation import picker at a branch level
+///
+/// Reserved (`config::RESERVED_KEYS`): the branch level is where custom
+/// shortcuts fire, and the built-in arm would silently shadow one bound here.
+pub const IMPORT_CONVERSATION_KEY: char = 'i';
+
 /// Handle a normal-mode key while pane 1 has focus
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     if key.kind != KeyEventKind::Press {
@@ -389,6 +395,10 @@ fn handle_branch_key(
                 app.state.input_mode = InputMode::ConfirmingSessionDelete;
             }
         }
+        // Ahead of the custom-shortcut arm below, which would otherwise claim it
+        KeyCode::Char(IMPORT_CONVERSATION_KEY) => {
+            app.start_conversation_import(project_id, branch_id);
+        }
         KeyCode::Char(c) => {
             if let Some(shortcut) = app.config.get_shortcut(c).cloned() {
                 if let Some(branch) = app.project_store.get_branch(branch_id) {
@@ -496,6 +506,28 @@ mod tests {
             true,
         ));
         (store, project_id)
+    }
+
+    /// `i` fires where custom shortcuts do, so it must be reserved: a shortcut
+    /// bound to it would never run, and is dropped at startup instead
+    #[test]
+    fn test_the_import_key_is_reserved_against_custom_shortcuts() {
+        assert!(crate::config::is_reserved_key(IMPORT_CONVERSATION_KEY));
+
+        let mut config = crate::config::Config::default();
+        config
+            .custom_shortcuts
+            .push(crate::config::CustomShortcut::new(
+                IMPORT_CONVERSATION_KEY,
+                "IntelliJ".into(),
+                "idea .".into(),
+                false,
+            ));
+        let warning = config
+            .drop_reserved_shortcuts()
+            .expect("a shortcut on the import key must be dropped, and said so");
+        assert!(warning.contains("IntelliJ"), "{warning}");
+        assert!(config.custom_shortcuts.is_empty());
     }
 
     /// The last row of the branch list is what `,` used to be

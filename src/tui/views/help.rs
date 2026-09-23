@@ -223,6 +223,7 @@ fn branch_shortcuts() -> Vec<Line<'static>> {
             shortcut_line("Enter", "Open session (resumes if [Resumable])"),
             shortcut_line("n", "New AI session (Claude/Codex)"),
             shortcut_line("s", "New shell session"),
+            shortcut_line("i", "Import a conversation started outside Panoptes"),
             shortcut_line("d", "Delete session (or discard a resumable one)"),
             shortcut_line("<key>", "Run a custom shortcut"),
         ],
@@ -444,6 +445,21 @@ mod tests {
             let lines = render(&state);
             assert!(contains_line(&lines, title), "{title}: {lines:?}");
         }
+    }
+
+    /// The branch level's help names the import key, alongside the footer
+    /// and `RESERVED_KEYS` (the three places a new key must go)
+    #[test]
+    fn test_branch_help_lists_the_import_key() {
+        let state = AppState {
+            projects_nav: ProjectsNav::Branch(Uuid::new_v4(), Uuid::new_v4()),
+            ..Default::default()
+        };
+        let lines = render(&state);
+        assert!(
+            contains_line(&lines, "Import a conversation started outside Panoptes"),
+            "{lines:?}"
+        );
     }
 
     #[test]

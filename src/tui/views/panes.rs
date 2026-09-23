@@ -301,6 +301,7 @@ fn prompt_footer(state: &AppState) -> Option<&'static str> {
         InputMode::SelectingDefaultBase => {
             "Type: filter | ↑↓: navigate | Enter: set default | Esc: cancel"
         }
+        InputMode::ImportingConversation => "↑↓: navigate | Enter: import | Esc: cancel",
         InputMode::SelectingClaudeConfig | InputMode::SelectingCodexConfig => {
             if state.setting_project_default_config.is_some() {
                 "↑↓: navigate | Enter: select | Esc: cancel"
@@ -341,7 +342,7 @@ fn projects_footer(state: &AppState, project_store: &ProjectStore, config: &Conf
         ProjectsNav::Branch(_, _) => {
             let shortcuts = format_custom_shortcuts_hint(&config.custom_shortcuts);
             format!(
-                "↑↓/Enter | n: new AI | s: shell | d: delete | {}Esc: back",
+                "↑↓/Enter | n: new AI | s: shell | i: import | d: delete | {}Esc: back",
                 shortcuts
             )
         }
@@ -698,6 +699,41 @@ mod tests {
 
         let lines = render(160, &state, &f);
         assert!(contains_line(&lines, "Esc: back"), "{lines:?}");
+    }
+
+    /// The import key is advertised where it works, the branch level, and the
+    /// picker it opens owns the footer while it is up
+    #[test]
+    fn test_the_branch_footer_offers_import_and_the_picker_has_its_own() {
+        let f = fixture();
+        let project_id = f.project_store.projects().next().unwrap().id;
+        let branch_nav = ProjectsNav::Branch(project_id, uuid::Uuid::new_v4());
+
+        let state = AppState {
+            projects_nav: branch_nav,
+            ..Default::default()
+        };
+        let footer = projects_footer(&state, &f.project_store, &f.config);
+        assert!(footer.contains("i: import"), "{footer:?}");
+
+        for nav in [ProjectsNav::Overview, ProjectsNav::Project(project_id)] {
+            let state = AppState {
+                projects_nav: nav,
+                ..Default::default()
+            };
+            let footer = projects_footer(&state, &f.project_store, &f.config);
+            assert!(!footer.contains("import"), "{nav:?}: {footer:?}");
+        }
+
+        let state = AppState {
+            projects_nav: branch_nav,
+            input_mode: InputMode::ImportingConversation,
+            ..Default::default()
+        };
+        assert_eq!(
+            prompt_footer(&state),
+            Some("↑↓: navigate | Enter: import | Esc: cancel")
+        );
     }
 
     /// Pane 1 has no numbered rows, so it must not offer `1-9`. Pane 2 still
