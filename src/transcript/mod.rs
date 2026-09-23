@@ -20,6 +20,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod scan;
 pub mod session_index;
 pub mod watcher;
 
