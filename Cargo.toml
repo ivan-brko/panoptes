@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "panoptes-cc"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Terminal-based dashboard for managing multiple AI coding agent sessions (Claude Code, OpenAI Codex CLI)"
 license = "MIT"

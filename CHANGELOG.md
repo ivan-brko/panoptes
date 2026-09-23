@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-23
+
+### Added
+- **Import conversations started outside Panoptes.** Press `i` in a branch view to list the Claude Code and Codex conversations that were run directly in that branch's working directory - newest first, with the agent's own title, age and account - and adopt one as a resumable session. The scan runs in the background with budgets on files and bytes read, skips conversations Panoptes already owns and Codex subagent and system threads, and spawns nothing until the session is opened. `i` is now a reserved key; a custom shortcut on it is dropped at startup with a notice.
+- **Codex lifecycle hooks (Codex 0.156.1+).** Codex sessions now get a real `Needs approval` state, their conversation ID within a fraction of a second of the first turn (it used to take ~15s of rollout matching), and subagent counts from hooks. The hooks are declared for each spawn with `-c` overrides, trusted by hash for Panoptes' own hooks only, so Codex's hook-review screen never appears and nothing is written into `CODEX_HOME`; your own and your projects' hooks keep their normal review. Older Codex versions keep the `notify` hook. One known gap: Codex fires no hook for a turn that fails on an API error, so such a session shows `Thinking` until the next prompt.
+- **Claude rate limits and the real context window, from Claude's status line.** Panoptes installs a `statusLine` command that forwards Claude's own status data, so Claude sessions show their 5h and weekly limits in the header exactly like Codex, and `ctx %` uses the window Claude reports. Your own status line is wrapped, never replaced; if you have none, the row shows a compact line (`5h 21% (resets 17:00) · wk 11% · $0.14`). Opt out with `claude_status_line = false`.
+- **Agent-generated titles.** Sessions adopt the title Claude (`ai-title` records) or Codex (`session_index.jsonl`) gives the conversation, and follow it as it is refined. A name you typed is never replaced, and an adopted title is saved immediately.
+- **Failed turns are named.** A Claude turn that dies on an API error - auth, usage limit, overload, prompt too long - moves the session to `Waiting` with a `✗` badge and the reason (`[Waiting ✗ usage limit]`) instead of sitting in `Thinking` until the stall timeout. Reported by Claude's `StopFailure` hook and its transcript, deduplicated. Rings under the new `notify_on.failed` key (default on).
+- **More of Claude's hook events.** Auto-mode permission denials clear a stale approval state, Claude subagents are counted from `SubagentStart`/`SubagentStop`, and an MCP elicitation raises attention until it is answered.
+- **Shared Codex history across accounts (opt-in).** With `codex_shared_history = true`, every Codex account runs from a Panoptes-managed shadow home whose history, writer locks, titles, skills, plugins and `config.toml` link into one shared home (`~/.codex`, or `codex_shared_home`), so a conversation started under one account can be resumed under another. Credentials stay per account (`auth.json` is a link to the account's own file, never a copy), shadows heal themselves on every spawn, and turning the flag off is a full undo. `panoptes merge-codex-history` copies older history in. Whether OpenAI accepts one account's encrypted reasoning on another's request is unverified - check with one turn before relying on it.
+
+### Changed
+- **Idle suspension never kills work in progress.** A session with running subagents, background tasks (shells, monitors, background agents) or session-scoped scheduled prompts such as `/loop` is no longer suspended, whichever agent it runs. Neither is a session whose conversation has no transcript yet, since it could not be resumed.
+- **Sessions whose transcript is gone are listed as unavailable** ("conversation transcript is missing") instead of failing when resumed.
+- The default Claude account's config directory honours an inherited `CLAUDE_CONFIG_DIR`, matching where the spawned Claude actually writes.
+
+### Fixed
+- **Codex rate limits read correctly.** Codex 0.156 writes reset times as epoch seconds, the plan at the top level, a separate weekly window, and model-specific allowances under their own `limit_id` - all of which were misread, so the header showed the five-hour figure while the week was the one about to bite. The header now shows the more constraining window (`5h 12%` / `wk 40%`), or `limit hit · resets in 3h 20m`.
+- **Claude's context window is right for current models.** Opus 5.x, Sonnet 5 and Fable run at 1M by default but log a bare model ID, so `ctx %` read about 5× too high (and Fable showed none). A window the agent reports now outranks the model-name table.
+- **Panoptes follows Claude across `/clear`, in-app `/resume` and `/branch`.** It kept the old conversation, so usage froze and a wake or restart resumed the conversation from before the `/clear`, silently dropping everything since.
+- **Claude transcript noise.** Subagent (sidechain), meta, compaction-summary and `<synthetic>` records no longer leak their model or usage into the session header.
+- **Codex system threads are not subagents.** Codex's approval guardian was counted as a subagent of the session it reviews - showing work that was not running and blocking suspension. Forked Codex rollouts no longer replay their parent's copied history as live.
+
 ## [0.4.1] - 2026-09-23
 
 ### Fixed
@@ -261,7 +284,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Focus timer countdown accuracy with Alt+Tab detection
 - Escape key behavior (Shift+Escape forwards to PTY)
 
-[Unreleased]: https://github.com/ivan-brko/panoptes/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/ivan-brko/panoptes/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ivan-brko/panoptes/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/ivan-brko/panoptes/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ivan-brko/panoptes/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/ivan-brko/panoptes/compare/v0.3.0...v0.3.1
