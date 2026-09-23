@@ -6,6 +6,7 @@
 pub mod manager;
 pub mod proxy;
 pub mod pty;
+mod pty_reader;
 pub mod state_machine;
 pub mod store;
 pub mod vterm;
@@ -935,12 +936,13 @@ pub struct Session {
 /// What one [`Session::poll_output`] call did
 ///
 /// Reading and *showing* are separate answers, because a held session keeps
-/// draining its PTY while its screen stands still. Callers that want to know
+/// taking its output while its screen stands still. Callers that want to know
 /// whether there is more to read look at `Idle`; callers that want to know
 /// whether the screen moved look at `Ingested`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PollOutcome {
-    /// Nothing was read, and nothing was left over to flush
+    /// Nothing was read, and nothing was left over to flush - or the next
+    /// read did not fit the pass's budget
     Idle,
     /// Bytes were read and held back; the screen is unchanged
     Held,
@@ -986,11 +988,22 @@ impl Session {
         }
     }
 
-    /// Poll PTY for new output and process through virtual terminal
-    /// Returns true if any output was read
+    /// Take one read of PTY output and process it through the virtual terminal
     pub fn poll_output(&mut self) -> PollOutcome {
-        match self.pty.try_read() {
+        let mut unlimited = usize::MAX;
+        self.poll_output_within(&mut unlimited)
+    }
+
+    /// [`Session::poll_output`], taking a read only if it fits in `budget`
+    ///
+    /// The read's length is subtracted from `budget`. A read that does not
+    /// fit stays queued, and the call reports `Idle` without treating the
+    /// stream as quiet: output is waiting, just not for this pass
+    /// ([`Session::has_pending_output`] tells the two apart).
+    pub fn poll_output_within(&mut self, budget: &mut usize) -> PollOutcome {
+        match self.pty.try_recv_within(*budget) {
             Ok(Some(bytes)) => {
+                *budget -= bytes.len();
                 // Held back, not left unread: the screen has to stand still
                 // for the length of a drag, but the child must not be made to
                 // stand still with it. Everything below - mode scanning,
@@ -1011,8 +1024,10 @@ impl Session {
             }
             Ok(None) => {
                 // The stream is quiet: release anything the frame gate was
-                // holding for a frame end that is not coming.
-                if self.output_hold {
+                // holding for a frame end that is not coming. Unless it is
+                // not quiet at all, and this pass is merely out of budget -
+                // the frame end may be in the very next read.
+                if self.output_hold || self.pty.has_pending_output() {
                     return PollOutcome::Idle;
                 }
                 let stale = self.frame_gate.flush_stale();
@@ -1037,6 +1052,11 @@ impl Session {
                 PollOutcome::Idle
             }
         }
+    }
+
+    /// Whether the PTY's reader has output queued that has not been taken
+    pub fn has_pending_output(&self) -> bool {
+        self.pty.has_pending_output()
     }
 
     /// Everything one PTY read does once it is allowed to reach the terminal
@@ -2174,6 +2194,58 @@ mod tests {
             }
         }
         ingested
+    }
+
+    /// A failed read ends the session exactly as it did when the UI thread
+    /// read the PTY itself: `Exited`, with the same reason - but only after
+    /// everything read before the failure has reached the screen
+    #[test]
+    fn test_reader_error_maps_to_exited() {
+        use std::collections::HashMap;
+
+        let mut pty = PtyHandle::spawn(
+            "sleep",
+            &["30"],
+            &std::path::PathBuf::from("/tmp"),
+            HashMap::new(),
+            24,
+            80,
+        )
+        .expect("failed to spawn PTY");
+        pty.replace_reader(
+            pty_reader::PtyReader::scripted(
+                vec![b"last words".to_vec()],
+                std::io::Error::from_raw_os_error(libc::EIO),
+            )
+            .unwrap(),
+        );
+        let info = SessionInfo::new(
+            "doomed".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let mut session = Session::new(info, pty, 24, 80);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while session.info.state != SessionState::Exited {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a read error never ended the session"
+            );
+            session.poll_output();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert_eq!(
+            session.info.exit_reason.as_deref(),
+            Some("PTY read error: Failed to read from PTY")
+        );
+        let screen = session.vterm.visible_lines(24);
+        assert!(
+            screen.iter().any(|line| line.contains("last words")),
+            "output read before the error must not be lost: {screen:?}"
+        );
     }
 
     /// The whole point of holding rather than skipping: the screen stands

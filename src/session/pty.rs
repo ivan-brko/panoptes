@@ -5,8 +5,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use ratatui::prelude::Rect;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
+
+use super::pty_reader::PtyReader;
 
 /// Information about a process exit
 #[derive(Debug, Clone)]
@@ -89,7 +91,8 @@ pub struct PtyHandle {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
-    reader: Box<dyn Read + Send>,
+    /// The child's output, drained continuously on its own thread
+    reader: PtyReader,
 }
 
 impl PtyHandle {
@@ -137,12 +140,6 @@ impl PtyHandle {
             .spawn_command(cmd_builder)
             .context("Failed to spawn command in PTY")?;
 
-        // Get reader and writer from master
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .context("Failed to clone PTY reader")?;
-
         let writer = pair
             .master
             .take_writer()
@@ -158,6 +155,33 @@ impl PtyHandle {
                 }
             }
         }
+
+        // Named after the child, so a thread dump says whose output it is
+        let reader_name = match child.process_id() {
+            Some(pid) => format!("pty-reader-{}", pid),
+            None => "pty-reader".to_string(),
+        };
+        #[cfg(unix)]
+        let reader = pair
+            .master
+            .as_raw_fd()
+            .context("PTY master has no file descriptor")
+            .and_then(|fd| PtyReader::spawn(fd, reader_name));
+        #[cfg(not(unix))]
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .context("Failed to clone PTY reader")
+            .and_then(|reader| PtyReader::spawn(reader, reader_name));
+        // Nobody would ever read or reap a child whose output has no reader
+        let reader = match reader {
+            Ok(reader) => reader,
+            Err(e) => {
+                let mut child = child;
+                let _ = child.kill();
+                return Err(e);
+            }
+        };
 
         Ok(Self {
             master: pair.master,
@@ -225,18 +249,43 @@ impl PtyHandle {
         Ok(())
     }
 
-    /// Try to read available data from the PTY without blocking
+    /// Take the next read of the child's output, without blocking
     ///
-    /// Returns `Ok(None)` if no data is available, `Ok(Some(data))` if data was read
-    pub fn try_read(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut buf = [0u8; 4096];
+    /// Returns `Ok(None)` if no data is waiting (or the stream hit EOF),
+    /// `Ok(Some(data))` for one read's worth, and an error once the PTY
+    /// failed - typically because the child is gone - after everything read
+    /// before the failure has been taken.
+    pub fn try_recv(&mut self) -> Result<Option<Vec<u8>>> {
+        self.reader.try_recv_within(usize::MAX)
+    }
 
-        match self.reader.read(&mut buf) {
-            Ok(0) => Ok(None), // EOF
-            Ok(n) => Ok(Some(buf[..n].to_vec())),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) => Err(e).context("Failed to read from PTY"),
-        }
+    /// Like [`PtyHandle::try_recv`], but leaves a read bigger than `budget`
+    /// queued: `Ok(None)` with [`PtyHandle::has_pending_output`] still true
+    pub fn try_recv_within(&mut self, budget: usize) -> Result<Option<Vec<u8>>> {
+        self.reader.try_recv_within(budget)
+    }
+
+    /// Whether output has been read from the PTY and not yet taken
+    pub fn has_pending_output(&self) -> bool {
+        self.reader.has_pending()
+    }
+
+    /// How many bytes of output are waiting to be taken
+    #[cfg(test)]
+    pub(crate) fn queued_output_len(&self) -> usize {
+        self.reader.queued_bytes()
+    }
+
+    /// Swap in a different reader, for a test that scripts the output
+    #[cfg(test)]
+    pub(crate) fn replace_reader(&mut self, reader: PtyReader) {
+        self.reader = reader;
+    }
+
+    /// The reader thread, so a test can watch it end
+    #[cfg(test)]
+    pub(crate) fn take_reader_thread(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        self.reader.take_thread()
     }
 
     /// Resize the PTY
@@ -721,7 +770,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut output = Vec::new();
         while std::time::Instant::now() < deadline {
-            if let Ok(Some(data)) = pty.try_read() {
+            if let Ok(Some(data)) = pty.try_recv() {
                 output.extend(data);
             }
             if String::from_utf8_lossy(&output).contains(needle) {
@@ -938,7 +987,7 @@ mod tests {
         let mut busy = false;
         while std::time::Instant::now() < deadline {
             // Keep draining output so the PTY buffer cannot fill
-            let _ = pty.try_read();
+            let _ = pty.try_recv();
             if pty.is_foreground_busy() {
                 busy = true;
                 break;
