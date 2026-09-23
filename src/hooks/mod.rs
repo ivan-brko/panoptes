@@ -111,6 +111,27 @@ impl HookEvent {
     pub fn last_assistant_message(&self) -> Option<&str> {
         self.str_field("last_assistant_message")
     }
+
+    /// The agent's own conversation ID, from the payload
+    ///
+    /// This is the payload's `session_id`, *not* [`HookEvent::session_id`]:
+    /// that envelope field is the Panoptes session the event is routed to, and
+    /// never changes. This one is Claude's conversation UUID, which does change
+    /// inside a live process - `/clear`, an in-TUI `/resume` and `/branch` each
+    /// move the process onto a different conversation and announce it through
+    /// `SessionStart`.
+    pub fn agent_conversation_id(&self) -> Option<&str> {
+        self.str_field("session_id")
+    }
+
+    /// Where the agent is writing this conversation's transcript
+    ///
+    /// Claude reports the path it actually uses, which is worth preferring to
+    /// one derived from the working directory: Claude resolves and slugs the
+    /// directory itself, and the two need not agree.
+    pub fn transcript_path(&self) -> Option<&std::path::Path> {
+        self.str_field("transcript_path").map(std::path::Path::new)
+    }
 }
 
 /// What a Claude `Notification` event is actually about
@@ -449,6 +470,34 @@ mod tests {
         // The no-jq degraded path delivers no payload at all
         let bare = event(r#"{"session_id":"a","event":"SessionStart","timestamp":1}"#);
         assert_eq!(bare.session_start_source(), None);
+    }
+
+    #[test]
+    fn test_conversation_accessors_read_the_payload_not_the_envelope() {
+        // Shape captured from Claude Code 2.1.280 after `/clear`
+        let e = event(
+            r#"{"session_id":"panoptes-session","event":"SessionStart","timestamp":1,
+                "payload":{"session_id":"b8be72f6-b45c-41de-83d6-c1f76e30d1dd",
+                    "transcript_path":"/home/u/.claude/projects/-w/b8be72f6-b45c-41de-83d6-c1f76e30d1dd.jsonl",
+                    "cwd":"/w","hook_event_name":"SessionStart","source":"clear"}}"#,
+        );
+        assert_eq!(e.session_id, "panoptes-session");
+        assert_eq!(
+            e.agent_conversation_id(),
+            Some("b8be72f6-b45c-41de-83d6-c1f76e30d1dd")
+        );
+        assert_eq!(
+            e.transcript_path(),
+            Some(std::path::Path::new(
+                "/home/u/.claude/projects/-w/b8be72f6-b45c-41de-83d6-c1f76e30d1dd.jsonl"
+            ))
+        );
+
+        // The legacy flat shape has no payload, so no conversation ID - the
+        // envelope's Panoptes ID must never be mistaken for one
+        let flat = event(r#"{"session_id":"abc","event":"SessionStart","timestamp":1}"#);
+        assert_eq!(flat.agent_conversation_id(), None);
+        assert_eq!(flat.transcript_path(), None);
     }
 
     #[test]
