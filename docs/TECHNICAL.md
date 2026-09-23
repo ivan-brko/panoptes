@@ -681,8 +681,10 @@ every Codex home:
   check, conversation-ID discovery, the transcript watcher (rollout, subagent
   scan) and thread titles (`session_index.jsonl`) all read the shared home,
   canonicalised so two accounts key the watcher's per-directory caches by one
-  path. Off, it returns each account's own home unchanged. An importer of
-  existing conversations should ask it too.
+  path. Off, it returns each account's own home unchanged. The conversation
+  importer (`import_scan_accounts`) asks it too: with shared history it
+  searches the shared tree once, crediting finds to the account that lives
+  in the shared home, else the default Codex profile.
 - **Spawning** (`prepare_spawn`, called in `spawn_and_register`, the tail of
   create, resume and wake): an account whose home is the shared home runs
   there directly; any other runs from its shadow,

@@ -248,9 +248,17 @@ fn account_dirs(
 /// scan keeps the first spelling of a directory, so listing profiles first is
 /// what makes such a conversation import under the profile's name rather than
 /// as "default". A profile without a directory of its own *is* the default.
+///
+/// Codex directories come from the one resolver. With shared history every
+/// account reads the same tree, so it is searched once, credited to the
+/// account that lives in the shared home if there is one (its conversations
+/// were always there), else the default Codex profile - any account can
+/// resume any conversation in it, so the credit only picks whose login a
+/// resume starts with.
 fn import_scan_accounts(
     claude_config_store: &ClaudeConfigStore,
     codex_config_store: &CodexConfigStore,
+    codex_homes: &crate::codex_config::CodexHomes,
 ) -> (
     Vec<crate::transcript::scan::ScanAccount>,
     Vec<crate::transcript::scan::ScanAccount>,
@@ -275,17 +283,31 @@ fn import_scan_accounts(
         name: None,
     });
 
+    if codex_homes.enabled() {
+        let credited = codex_config_store
+            .configs_sorted()
+            .into_iter()
+            .find(|config| codex_homes.is_direct(config.codex_home.as_deref()))
+            .or_else(|| codex_config_store.get_default());
+        let shared = ScanAccount {
+            dir: codex_homes.data_home(None),
+            config_id: credited.map(|config| config.id),
+            name: credited.map(|config| config.name.clone()),
+        };
+        return (claude, vec![shared]);
+    }
+
     let mut codex: Vec<ScanAccount> = codex_config_store
         .configs_sorted()
         .into_iter()
         .map(|config| ScanAccount {
-            dir: config.codex_home.clone().unwrap_or_else(default_codex_home),
+            dir: codex_homes.data_home(config.codex_home.as_deref()),
             config_id: Some(config.id),
             name: Some(config.name.clone()),
         })
         .collect();
     codex.push(ScanAccount {
-        dir: default_codex_home(),
+        dir: codex_homes.data_home(None),
         config_id: None,
         name: None,
     });
@@ -2402,8 +2424,11 @@ impl App {
         let Some(branch) = self.project_store.get_branch(branch_id) else {
             return;
         };
-        let (claude_accounts, codex_accounts) =
-            import_scan_accounts(&self.claude_config_store, &self.codex_config_store);
+        let (claude_accounts, codex_accounts) = import_scan_accounts(
+            &self.claude_config_store,
+            &self.codex_config_store,
+            self.sessions.codex_homes(),
+        );
         let request = crate::transcript::scan::ScanRequest {
             working_dir: branch.working_dir.clone(),
             claude_accounts,
@@ -3340,6 +3365,7 @@ fn mouse_debug_enabled_from_env() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transcript::default_codex_home;
     use std::path::Path;
     use uuid::Uuid;
 
@@ -3361,7 +3387,13 @@ mod tests {
         claude.add(personal);
         let codex = CodexConfigStore::with_path(temp_dir.path().join("codex.json"));
 
-        let (claude_accounts, codex_accounts) = import_scan_accounts(&claude, &codex);
+        let homes = crate::codex_config::CodexHomes::new(
+            false,
+            default_codex_home(),
+            temp_dir.path().join("codex-homes"),
+            default_codex_home(),
+        );
+        let (claude_accounts, codex_accounts) = import_scan_accounts(&claude, &codex, &homes);
 
         let described: Vec<(PathBuf, Option<Uuid>)> = claude_accounts
             .iter()
@@ -3378,6 +3410,101 @@ mod tests {
         assert_eq!(codex_accounts.len(), 1);
         assert_eq!(codex_accounts[0].dir, default_codex_home());
         assert_eq!(codex_accounts[0].config_id, None);
+    }
+
+    /// With shared Codex history, two accounts' conversations are one tree:
+    /// each is found once, credited to the account living in the shared home
+    #[test]
+    fn test_import_with_shared_codex_history_finds_each_conversation_once() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(temp_dir.path()).unwrap();
+        let shared = root.join("shared");
+        let cwd = root.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let claude = ClaudeConfigStore::with_path(root.join("claude.json"));
+        let mut codex = CodexConfigStore::with_path(root.join("codex.json"));
+        let mut homes_by_name = Vec::new();
+        for name in ["alpha", "beta"] {
+            let home = root.join(name);
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join("auth.json"), r#"{"OPENAI_API_KEY":"sk-fake"}"#).unwrap();
+            let config =
+                crate::codex_config::CodexConfig::new(name.to_string(), Some(home.clone()));
+            homes_by_name.push((config.id, home));
+            codex.add(config);
+        }
+        // The account whose home *is* the shared one
+        let main = crate::codex_config::CodexConfig::new("main".to_string(), Some(shared.clone()));
+        let main_id = main.id;
+        codex.add(main);
+        let homes = crate::codex_config::CodexHomes::new(
+            true,
+            shared.clone(),
+            root.join("codex-homes"),
+            root.join("default-home"),
+        );
+
+        // Each account's Codex writes through its own shadow
+        for (i, (id, home)) in homes_by_name.iter().enumerate() {
+            let shadow = homes.prepare_spawn(Some(*id), Some(home)).unwrap().unwrap();
+            let conversation = format!("019aa0c9-0000-7000-8000-00000000000{i}");
+            let day = shadow.join("sessions/2026/09/23");
+            std::fs::create_dir_all(&day).unwrap();
+            std::fs::write(
+                day.join(format!("rollout-2026-09-23T10-00-00-{conversation}.jsonl")),
+                format!(
+                    r#"{{"timestamp":"2026-09-23T10:00:00.000Z","type":"session_meta","payload":{{"id":"{conversation}","timestamp":"2026-09-23T10:00:00.000Z","cwd":"{}","originator":"codex-tui","source":"cli"}}}}"#,
+                    cwd.display()
+                ) + "\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            shared.join("session_index.jsonl"),
+            r#"{"id":"019aa0c9-0000-7000-8000-000000000001","thread_name":"Named in beta"}"#
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+
+        let (claude_accounts, codex_accounts) = import_scan_accounts(&claude, &codex, &homes);
+        assert_eq!(codex_accounts.len(), 1, "one shared tree, searched once");
+        let outcome = crate::transcript::scan::scan(
+            &crate::transcript::scan::ScanRequest {
+                working_dir: cwd.clone(),
+                claude_accounts,
+                codex_accounts,
+                claimed: Default::default(),
+                budget: crate::transcript::scan::ScanBudget::default(),
+            },
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+
+        let mut found: Vec<(&str, Option<Uuid>, Option<&str>)> = outcome
+            .conversations
+            .iter()
+            .filter(|c| c.kind == TranscriptKind::Codex)
+            .map(|c| (c.id.as_str(), c.config_id, c.title.as_deref()))
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                ("019aa0c9-0000-7000-8000-000000000000", Some(main_id), None),
+                (
+                    "019aa0c9-0000-7000-8000-000000000001",
+                    Some(main_id),
+                    Some("Named in beta")
+                ),
+            ]
+        );
+
+        // No account in the shared home: the default profile gets the credit
+        codex.remove(main_id);
+        let (_, codex_accounts) = import_scan_accounts(&claude, &codex, &homes);
+        assert_eq!(codex_accounts[0].dir, shared);
+        assert_eq!(codex_accounts[0].config_id, codex.get_default_id());
+        assert!(codex_accounts[0].config_id.is_some());
     }
 
     /// A live Claude session that was itself resumed, on conversation `a`

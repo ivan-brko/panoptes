@@ -43,7 +43,7 @@ pub const NOTIFICATION_ROWS: [&str; 7] = [
 /// Split from their values the way [`NOTIFICATION_ROWS`] is: the input handler
 /// needs the row count to move a cursor through them, and has no business
 /// building the paths and the hook's health to get it.
-pub const ABOUT_ROWS: [&str; 11] = [
+pub const ABOUT_ROWS: [&str; 12] = [
     "Version",
     "Hook server",
     "config.toml",
@@ -404,7 +404,7 @@ fn checkbox(on: bool) -> String {
 }
 
 /// The value each About row shows, in list order
-fn about_values(ctx: &SettingsPaneContext) -> [String; 11] {
+fn about_values(ctx: &SettingsPaneContext) -> [String; 12] {
     let config = ctx.config;
     [
         env!("CARGO_PKG_VERSION").to_string(),
