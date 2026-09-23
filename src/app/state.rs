@@ -410,6 +410,10 @@ pub struct AppState {
     /// Startup notice (e.g. corrupt-file backups) shown as a persistent,
     /// dismissable overlay until the user presses a key
     pub startup_notice: Option<String>,
+    /// What the startup check of the Codex shadow homes found wrong, if
+    /// shared history is on (a divergent `config.toml`, a real directory
+    /// where a link belongs); counted under About, detailed in the log
+    pub codex_history_warnings: Vec<String>,
     /// Timestamp of last resize event (for debouncing)
     pub last_resize: Option<Instant>,
     /// Whether a resize is pending (debounced)

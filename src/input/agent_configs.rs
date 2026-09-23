@@ -406,13 +406,24 @@ pub fn handle_confirming_config_delete_key(
             kind,
             key,
         ),
-        AgentKind::Codex => confirming_config_delete_key(
-            &mut app.state,
-            &mut app.codex_config_store,
-            &mut app.project_store,
-            kind,
-            key,
-        ),
+        AgentKind::Codex => {
+            let pending = app.state.pending_delete_agent_config;
+            confirming_config_delete_key(
+                &mut app.state,
+                &mut app.codex_config_store,
+                &mut app.project_store,
+                kind,
+                key,
+            )?;
+            // A removed account's shadow home keeps its links - the shared
+            // state database refers to rollouts through it - but not its login
+            if let Some(id) = pending {
+                if app.codex_config_store.get(id).is_none() {
+                    app.sessions.codex_homes().forget_account(id);
+                }
+            }
+            Ok(())
+        }
     }
 }
 

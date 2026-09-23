@@ -44,7 +44,7 @@ use crate::logging::LogFileInfo;
 use crate::project::{BranchId, ProjectId, ProjectStore};
 use crate::session::{mouse_event_to_bytes, SessionId, SessionInfo, SessionManager, SessionType};
 use crate::transcript::{
-    default_claude_config_dir, default_codex_home, TranscriptKind, TranscriptWatcher, WatchTarget,
+    default_claude_config_dir, TranscriptKind, TranscriptWatcher, WatchTarget,
 };
 use crate::tui::frame::{FrameConfig, FrameLayout};
 use crate::tui::marquee::Marquee;
@@ -297,7 +297,9 @@ fn import_scan_accounts(
 ///
 /// Kept apart from `App` so the choice can be tested without one. Does no
 /// filesystem work for Claude; for Codex it has to find the rollout, whose
-/// name embeds a timestamp as well as the ID.
+/// name embeds a timestamp as well as the ID. `codex_home` is where the
+/// account's conversations are read from - with shared history, the shared
+/// home ([`crate::codex_config::CodexHomes::data_home`]).
 fn watch_target_for(
     info: &SessionInfo,
     claude_config_dir: &std::path::Path,
@@ -415,6 +417,16 @@ impl App {
             account_dirs(&claude_config_store, &codex_config_store, info)
         });
 
+        // With shared Codex history, bring every account's shadow home up to
+        // date now, so a divergent config.toml or a real directory in a
+        // link's place is reported before a session trips on it. Logged in
+        // full; counted under About. Each spawn heals its own shadow again.
+        let codex_history_warnings = sessions.codex_homes().heal_all(
+            codex_config_store
+                .configs()
+                .map(|c| (c.id, c.name.as_str(), c.codex_home.as_deref())),
+        );
+
         // Start reading agent transcripts. Runs on its own thread: the reads
         // are incremental, but a burst of tool output can append a lot at once
         // and parsing that on the render thread would show as a stutter.
@@ -437,6 +449,7 @@ impl App {
         if !startup_warnings.is_empty() {
             state.startup_notice = Some(startup_warnings.join("\n"));
         }
+        state.codex_history_warnings = codex_history_warnings;
 
         if mouse_debug_enabled {
             tracing::info!(
@@ -2157,13 +2170,19 @@ impl App {
         let mut claimed = self.sessions.claimed_agent_session_ids();
 
         for (session_id, working_dir, created_at) in pending {
-            let codex_home = self
+            let account_home = self
                 .sessions
                 .get(session_id)
                 .and_then(|session| session.info.codex_config_id)
                 .and_then(|id| self.codex_config_store.get(id))
-                .and_then(|config| config.codex_home.clone())
-                .unwrap_or_else(default_codex_home);
+                .and_then(|config| config.codex_home.clone());
+            // With shared history every account's rollouts land in one tree,
+            // and only `claimed` - global, across accounts - tells two
+            // sessions started in one directory apart
+            let codex_home = self
+                .sessions
+                .codex_homes()
+                .data_home(account_home.as_deref());
 
             if let Some(agent_session_id) = crate::agent::codex::discover_session_id(
                 &codex_home,
@@ -2254,7 +2273,7 @@ impl App {
         watch_target_for(
             info,
             &claude_config_dir.unwrap_or_else(default_claude_config_dir),
-            &codex_home.unwrap_or_else(default_codex_home),
+            &self.sessions.codex_homes().data_home(codex_home.as_deref()),
         )
     }
 
