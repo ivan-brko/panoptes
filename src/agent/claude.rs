@@ -1095,8 +1095,11 @@ mod tests {
         drop(child.stdin.take());
         child.wait().unwrap();
 
-        // curl is backgrounded, so the script exits before it has written
-        for _ in 0..200 {
+        // curl is backgrounded, so the script exits before it has written.
+        // The wait returns as soon as the capture appears; the ceiling is
+        // generous because the full suite spawns many processes in parallel,
+        // and a busy machine can take seconds to start one more
+        for _ in 0..1_000 {
             if let Ok(body) = std::fs::read_to_string(&capture) {
                 if !body.is_empty() {
                     return body;
