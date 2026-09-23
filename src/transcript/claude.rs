@@ -63,19 +63,55 @@ pub fn parse_line(line: &str) -> Option<AgentEvent> {
     Some(AgentEvent::Usage(snapshot))
 }
 
+/// Context window Claude Code gives each model by default, by id prefix
+///
+/// Source: the model catalogue compiled into Claude Code 2.1.280 (each entry's
+/// `context:{window:..}`), read 2026-09-23. A new model is one row here.
+///
+/// The first matching row wins, so a version must come before any shorter
+/// prefix it extends - `claude-opus-4-8` before `claude-opus-4`. Rows for the
+/// 1M models are what Claude Code runs on Anthropic's own API; it drops them to
+/// 200k on most third-party providers, with `CLAUDE_CODE_DISABLE_1M_CONTEXT`,
+/// or when the account cannot pay for long context. The transcript shows none
+/// of that, which is why a reported window outranks this table - see
+/// [`crate::agent::events::WindowSource`].
+const CONTEXT_WINDOWS: &[(&str, u64)] = &[
+    ("claude-fable-5", 1_000_000),
+    ("claude-mythos-5", 1_000_000),
+    ("claude-opus-5", 1_000_000),
+    ("claude-opus-4-8", 1_000_000),
+    ("claude-opus-4-7", 1_000_000),
+    ("claude-opus-4", 200_000),
+    ("claude-sonnet-5", 1_000_000),
+    ("claude-sonnet-4", 200_000),
+    ("claude-haiku-4", 200_000),
+    ("claude-3", 200_000),
+];
+
 /// Best-known context window for a Claude model
 ///
-/// Claude does not publish this in the transcript. Returning `None` for an
-/// unrecognised model is deliberate: the usage display then falls back to a raw
-/// token count rather than showing a percentage of a number we invented.
+/// Claude does not publish this in the transcript, so it is looked up in
+/// [`CONTEXT_WINDOWS`]. Returning `None` for an unrecognised model is
+/// deliberate: the usage display then falls back to a raw token count rather
+/// than showing a percentage of a number we invented.
 fn context_window_for(model: &str) -> Option<u64> {
+    let model = model.to_ascii_lowercase();
     if model.contains("[1m]") || model.contains("-1m") {
         return Some(1_000_000);
     }
-    if model.contains("haiku") || model.contains("sonnet") || model.contains("opus") {
-        return Some(200_000);
-    }
-    None
+    // Provider spellings wrap the same id: `us.anthropic.claude-opus-4-8-v1:0`
+    let id = model
+        .find("claude-")
+        .map_or(model.as_str(), |at| &model[at..]);
+    CONTEXT_WINDOWS
+        .iter()
+        .find(|(prefix, _)| {
+            // A whole id segment, so `claude-opus-4` does not claim a future
+            // `claude-opus-40`
+            id.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '@', '[']))
+        })
+        .map(|(_, window)| *window)
 }
 
 /// The directory name Claude derives from a working directory
@@ -119,7 +155,7 @@ mod tests {
         };
         // Cache reads are context: cheap to send, but still occupying the window
         assert_eq!(usage.total_tokens, Some(50_500));
-        assert_eq!(usage.context_window, Some(200_000));
+        assert_eq!(usage.context_window, Some(1_000_000));
         assert_eq!(usage.model.as_deref(), Some("claude-opus-4-8"));
         // Claude publishes no rate limits anywhere
         assert_eq!(usage.primary, None);
@@ -144,6 +180,52 @@ mod tests {
         };
         assert_eq!(usage.total_tokens, Some(10));
         assert_eq!(usage.context_window, None);
+    }
+
+    #[test]
+    fn test_context_window_for_current_models() {
+        for (model, window) in [
+            // Current models run at 1M natively, and the transcript logs them
+            // without any suffix
+            ("claude-opus-5-5", 1_000_000),
+            ("claude-opus-5", 1_000_000),
+            ("claude-opus-4-8", 1_000_000),
+            ("claude-opus-4-7", 1_000_000),
+            ("claude-sonnet-5", 1_000_000),
+            ("claude-fable-5-1", 1_000_000),
+            ("claude-fable-5", 1_000_000),
+            ("claude-mythos-5-1", 1_000_000),
+            // Older ones are 200k unless launched with `[1m]`
+            ("claude-opus-4-6", 200_000),
+            ("claude-opus-4-1-20250805", 200_000),
+            ("claude-opus-4-20250514", 200_000),
+            ("claude-sonnet-4-6", 200_000),
+            ("claude-sonnet-4-5-20250929", 200_000),
+            ("claude-haiku-4-5-20251001", 200_000),
+            ("claude-3-7-sonnet-20250219", 200_000),
+            ("claude-sonnet-4-6[1m]", 1_000_000),
+            ("claude-opus-4-6[1M]", 1_000_000),
+            // Provider spellings of the same ids
+            ("us.anthropic.claude-opus-4-8-v1:0", 1_000_000),
+            ("claude-opus-4-5@20251101", 200_000),
+        ] {
+            assert_eq!(context_window_for(model), Some(window), "for {model:?}");
+        }
+    }
+
+    #[test]
+    fn test_context_window_unknown_family_is_none() {
+        for model in [
+            "some-future-model",
+            "<synthetic>",
+            "gpt-5-codex",
+            // A version the table does not list is not guessed at either
+            "claude-opus-40",
+            "claude-opus-6",
+            "",
+        ] {
+            assert_eq!(context_window_for(model), None, "for {model:?}");
+        }
     }
 
     #[test]
