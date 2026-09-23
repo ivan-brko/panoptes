@@ -122,7 +122,8 @@ mod tests {
         assert_eq!(usage.context_window, Some(200_000));
         assert_eq!(usage.model.as_deref(), Some("claude-opus-4-8"));
         // Claude publishes no rate limits anywhere
-        assert_eq!(usage.rate_limit_used_percent, None);
+        assert_eq!(usage.primary, None);
+        assert_eq!(usage.secondary, None);
         assert_eq!(usage.plan, None);
     }
 

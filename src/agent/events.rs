@@ -10,6 +10,7 @@
 //! translates into it, so there is one place that decides what an event *means*
 //! and several small places that decide what an event *is*.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::hooks::NotificationKind;
@@ -109,17 +110,67 @@ pub struct UsageSnapshot {
     #[serde(default)]
     pub model: Option<String>,
 
-    /// Percentage of the plan's rate limit consumed (Codex only)
+    /// The short rate-limit window, five hours on current plans (Codex only)
     #[serde(default)]
-    pub rate_limit_used_percent: Option<f64>,
+    pub primary: Option<RateLimitWindow>,
 
-    /// When the rate-limit window resets, as the agent reported it (Codex only)
+    /// The long rate-limit window, a week on current plans (Codex only)
+    ///
+    /// Tracked separately because it is routinely the one that bites: a quiet
+    /// morning can leave the five-hour window at 1% while the week sits at 40%.
     #[serde(default)]
-    pub rate_limit_resets_at: Option<String>,
+    pub secondary: Option<RateLimitWindow>,
 
     /// Plan name backing the rate limit (Codex only)
     #[serde(default)]
     pub plan: Option<String>,
+
+    /// Why the agent has stopped accepting turns, when it has (Codex only)
+    ///
+    /// The agent's own reason string, e.g. `workspace_member_credits_depleted`.
+    /// Only its presence is shown; the wording is Codex's and may change.
+    #[serde(default)]
+    pub limit_reached: Option<String>,
+}
+
+/// One rate-limit window as the agent reported it
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RateLimitWindow {
+    /// Share of the window's allowance consumed, 0-100
+    #[serde(default)]
+    pub used_percent: f64,
+
+    /// How long the window is; decides its label (`5h`, `wk`)
+    #[serde(default)]
+    pub window_minutes: Option<u64>,
+
+    /// When the window's allowance is restored
+    #[serde(default)]
+    pub resets_at: Option<DateTime<Utc>>,
+}
+
+impl RateLimitWindow {
+    /// Fold a newer reading of the same window in, keeping what it omits
+    fn merge(&mut self, newer: RateLimitWindow) {
+        self.used_percent = newer.used_percent;
+        if newer.window_minutes.is_some() {
+            self.window_minutes = newer.window_minutes;
+        }
+        if newer.resets_at.is_some() {
+            self.resets_at = newer.resets_at;
+        }
+    }
+
+    /// Short name for the window's length: `5h`, `wk`, or `limit` when unknown
+    fn label(&self) -> String {
+        match self.window_minutes {
+            None | Some(0) => "limit".to_string(),
+            Some(10_080) => "wk".to_string(),
+            Some(m) if m % 1_440 == 0 => format!("{}d", m / 1_440),
+            Some(m) if m % 60 == 0 => format!("{}h", m / 60),
+            Some(m) => format!("{}m", m),
+        }
+    }
 }
 
 impl UsageSnapshot {
@@ -135,6 +186,8 @@ impl UsageSnapshot {
     /// `token_count` carries limits but no model. Overwriting wholesale would
     /// make fields flicker between present and absent.
     pub fn merge(&mut self, newer: UsageSnapshot) {
+        let newer_has_limits =
+            newer.primary.is_some() || newer.secondary.is_some() || newer.limit_reached.is_some();
         if newer.total_tokens.is_some() {
             self.total_tokens = newer.total_tokens;
         }
@@ -144,14 +197,18 @@ impl UsageSnapshot {
         if newer.model.is_some() {
             self.model = newer.model;
         }
-        if newer.rate_limit_used_percent.is_some() {
-            self.rate_limit_used_percent = newer.rate_limit_used_percent;
-        }
-        if newer.rate_limit_resets_at.is_some() {
-            self.rate_limit_resets_at = newer.rate_limit_resets_at;
-        }
+        // Each window stands alone: an update that only mentions the five-hour
+        // window says nothing about the week
+        merge_window(&mut self.primary, newer.primary);
+        merge_window(&mut self.secondary, newer.secondary);
         if newer.plan.is_some() {
             self.plan = newer.plan;
+        }
+        // A record carrying rate limits is authoritative about whether the limit
+        // is hit, and Codex writes an explicit null once it is lifted. Merging
+        // this like the other fields would leave "limit hit" up forever.
+        if newer_has_limits {
+            self.limit_reached = newer.limit_reached;
         }
     }
 
@@ -167,10 +224,15 @@ impl UsageSnapshot {
 
     /// Compact description for the session header, or `None` if nothing is known
     ///
-    /// Reads like `opus-4.8 · ctx 34% · limit 12%`. Rate limit is omitted rather
+    /// Reads like `gpt-5.5 · ctx 34% · wk 40%`. Rate limit is omitted rather
     /// than shown as zero when the agent does not report one, because "we do not
     /// know" and "you have used none of it" are different claims.
     pub fn summary(&self) -> Option<String> {
+        self.summary_at(Utc::now())
+    }
+
+    /// [`Self::summary`] against a given clock, so the reset countdown is testable
+    pub fn summary_at(&self, now: DateTime<Utc>) -> Option<String> {
         let mut parts = Vec::new();
 
         if let Some(model) = &self.model {
@@ -181,11 +243,61 @@ impl UsageSnapshot {
         } else if let Some(total) = self.total_tokens {
             parts.push(format!("{} tok", format_thousands(total)));
         }
-        if let Some(pct) = self.rate_limit_used_percent {
-            parts.push(format!("limit {:.0}%", pct));
+        let binding = self.binding_window();
+        if self.limit_reached.is_some() {
+            // Blocked outright - how full the window is no longer matters, only
+            // when it lets the user back in
+            match binding.and_then(|w| w.resets_at) {
+                Some(at) => parts.push(format!("limit hit · resets {}", format_reset(at, now))),
+                None => parts.push("limit hit".to_string()),
+            }
+        } else if let Some(window) = binding {
+            parts.push(format!("{} {:.0}%", window.label(), window.used_percent));
         }
 
         (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+
+    /// The window closest to stopping the user, which is the one worth showing
+    ///
+    /// Higher usage wins; on a tie the longer window does, since it takes
+    /// longer to recover from.
+    fn binding_window(&self) -> Option<&RateLimitWindow> {
+        match (&self.primary, &self.secondary) {
+            (Some(a), Some(b)) => {
+                let a_key = (a.used_percent, a.window_minutes.unwrap_or(0));
+                let b_key = (b.used_percent, b.window_minutes.unwrap_or(0));
+                Some(if b_key > a_key { b } else { a })
+            }
+            (a, b) => a.as_ref().or(b.as_ref()),
+        }
+    }
+}
+
+/// Fold a newer reading of one window into what is known of it
+fn merge_window(current: &mut Option<RateLimitWindow>, newer: Option<RateLimitWindow>) {
+    match (current.as_mut(), newer) {
+        (Some(known), Some(newer)) => known.merge(newer),
+        (None, Some(newer)) => *current = Some(newer),
+        (_, None) => {}
+    }
+}
+
+/// Render the time until `at` as `in 3h 20m` / `in 2d 4h` / `in 45m`
+///
+/// Minutes are rounded up so a reset under a minute away still reads as
+/// pending rather than `in 0m`; a reset already past reads as `now`.
+fn format_reset(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let seconds = (at - now).num_seconds();
+    if seconds <= 0 {
+        return "now".to_string();
+    }
+    let minutes = (seconds + 59) / 60;
+    let (days, hours, mins) = (minutes / 1_440, minutes % 1_440 / 60, minutes % 60);
+    match (days, hours) {
+        (0, 0) => format!("in {}m", mins),
+        (0, _) => format!("in {}h {}m", hours, mins),
+        _ => format!("in {}d {}h", days, hours),
     }
 }
 
@@ -288,13 +400,20 @@ mod tests {
             model: Some("gpt-5-codex".to_string()),
             total_tokens: Some(68_000),
             context_window: Some(200_000),
-            rate_limit_used_percent: Some(12.4),
+            primary: Some(window(12.4, Some(300), None)),
             ..Default::default()
         };
         assert_eq!(
             codex.summary().as_deref(),
-            Some("gpt-5-codex · ctx 34% · limit 12%")
+            Some("gpt-5-codex · ctx 34% · 5h 12%")
         );
+
+        // A window of unknown length still shows, under a generic label
+        let unlabelled = UsageSnapshot {
+            primary: Some(window(12.4, None, None)),
+            ..Default::default()
+        };
+        assert_eq!(unlabelled.summary().as_deref(), Some("limit 12%"));
 
         // Claude publishes no rate limit at all, so none is shown - as opposed
         // to showing 0%, which would claim something we do not know
@@ -307,6 +426,152 @@ mod tests {
         assert_eq!(claude.summary().as_deref(), Some("opus-4-8 · ctx 10%"));
 
         assert_eq!(UsageSnapshot::default().summary(), None);
+    }
+
+    fn window(
+        used: f64,
+        minutes: Option<u64>,
+        resets_at: Option<DateTime<Utc>>,
+    ) -> RateLimitWindow {
+        RateLimitWindow {
+            used_percent: used,
+            window_minutes: minutes,
+            resets_at,
+        }
+    }
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).expect("valid timestamp")
+    }
+
+    #[test]
+    fn test_merge_keeps_secondary_when_update_has_only_primary() {
+        let mut usage = UsageSnapshot {
+            primary: Some(window(1.0, Some(300), Some(at(1_000)))),
+            secondary: Some(window(40.0, Some(10_080), Some(at(9_000)))),
+            ..Default::default()
+        };
+
+        usage.merge(UsageSnapshot {
+            primary: Some(window(5.0, Some(300), None)),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            usage.secondary,
+            Some(window(40.0, Some(10_080), Some(at(9_000))))
+        );
+        // Within a window, too, a field the update omits is kept
+        assert_eq!(usage.primary, Some(window(5.0, Some(300), Some(at(1_000)))));
+    }
+
+    #[test]
+    fn test_merge_clears_limit_reached_once_lifted() {
+        let mut usage = UsageSnapshot {
+            primary: Some(window(100.0, Some(300), None)),
+            limit_reached: Some("workspace_member_credits_depleted".to_string()),
+            ..Default::default()
+        };
+
+        // A token-only update knows nothing about limits, so leaves it alone
+        usage.merge(UsageSnapshot {
+            total_tokens: Some(10),
+            ..Default::default()
+        });
+        assert!(usage.limit_reached.is_some());
+
+        // A rate-limit reading without a reason means the block has lifted
+        usage.merge(UsageSnapshot {
+            primary: Some(window(2.0, Some(300), None)),
+            ..Default::default()
+        });
+        assert_eq!(usage.limit_reached, None);
+    }
+
+    #[test]
+    fn test_summary_shows_most_constraining_window() {
+        // The week is the binding constraint even though the 5h window is fresher
+        let usage = UsageSnapshot {
+            primary: Some(window(1.0, Some(300), None)),
+            secondary: Some(window(40.0, Some(10_080), None)),
+            ..Default::default()
+        };
+        assert_eq!(usage.summary().as_deref(), Some("wk 40%"));
+
+        let usage = UsageSnapshot {
+            primary: Some(window(85.0, Some(300), None)),
+            secondary: Some(window(26.0, Some(10_080), None)),
+            ..Default::default()
+        };
+        assert_eq!(usage.summary().as_deref(), Some("5h 85%"));
+
+        // A tie goes to the longer window, which takes longer to recover
+        let usage = UsageSnapshot {
+            primary: Some(window(30.0, Some(300), None)),
+            secondary: Some(window(30.0, Some(10_080), None)),
+            ..Default::default()
+        };
+        assert_eq!(usage.summary().as_deref(), Some("wk 30%"));
+
+        // Either window alone is shown
+        let usage = UsageSnapshot {
+            secondary: Some(window(7.0, Some(10_080), None)),
+            ..Default::default()
+        };
+        assert_eq!(usage.summary().as_deref(), Some("wk 7%"));
+    }
+
+    #[test]
+    fn test_summary_limit_reached_shows_reset_countdown() {
+        let now = at(1_000_000);
+        let usage = UsageSnapshot {
+            model: Some("gpt-5.5".to_string()),
+            primary: Some(window(
+                100.0,
+                Some(300),
+                Some(now + chrono::Duration::minutes(200)),
+            )),
+            secondary: Some(window(
+                60.0,
+                Some(10_080),
+                Some(now + chrono::Duration::days(3)),
+            )),
+            limit_reached: Some("workspace_member_credits_depleted".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            usage.summary_at(now).as_deref(),
+            Some("gpt-5.5 · limit hit · resets in 3h 20m")
+        );
+
+        // Without a reset time the block is still shown, just without a countdown
+        let usage = UsageSnapshot {
+            primary: Some(window(100.0, Some(300), None)),
+            limit_reached: Some("x".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(usage.summary_at(now).as_deref(), Some("limit hit"));
+    }
+
+    #[test]
+    fn test_format_reset() {
+        let now = at(1_000_000);
+        let later = |secs| now + chrono::Duration::seconds(secs);
+        assert_eq!(format_reset(later(200 * 60), now), "in 3h 20m");
+        assert_eq!(format_reset(later(45 * 60), now), "in 45m");
+        assert_eq!(format_reset(later(30), now), "in 1m");
+        assert_eq!(format_reset(later((2 * 24 + 4) * 3_600), now), "in 2d 4h");
+        assert_eq!(format_reset(later(0), now), "now");
+        assert_eq!(format_reset(later(-60), now), "now");
+    }
+
+    #[test]
+    fn test_window_label() {
+        assert_eq!(window(0.0, Some(300), None).label(), "5h");
+        assert_eq!(window(0.0, Some(10_080), None).label(), "wk");
+        assert_eq!(window(0.0, Some(1_440), None).label(), "1d");
+        assert_eq!(window(0.0, Some(90), None).label(), "90m");
+        assert_eq!(window(0.0, None, None).label(), "limit");
     }
 
     #[test]

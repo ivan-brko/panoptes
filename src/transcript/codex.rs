@@ -18,9 +18,10 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::agent::events::{AgentEvent, UsageSnapshot};
+use crate::agent::events::{AgentEvent, RateLimitWindow, UsageSnapshot};
 
 /// The `session_meta` header of a Codex rollout file
 ///
@@ -216,26 +217,70 @@ fn parse_token_count(payload: &Value) -> UsageSnapshot {
         .and_then(|i| i.get("model_context_window"))
         .and_then(Value::as_u64);
 
-    let primary = payload.get("rate_limits").and_then(|r| r.get("primary"));
-
-    UsageSnapshot {
+    let mut snapshot = UsageSnapshot {
         total_tokens: total,
         context_window: window,
         model: info
             .and_then(|i| i.get("model"))
             .and_then(Value::as_str)
             .map(str::to_string),
-        rate_limit_used_percent: primary
-            .and_then(|p| p.get("used_percent"))
-            .and_then(Value::as_f64),
-        rate_limit_resets_at: primary
-            .and_then(|p| p.get("resets_at"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        plan: primary
-            .and_then(|p| p.get("plan_type"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        ..Default::default()
+    };
+
+    let Some(limits) = payload.get("rate_limits").filter(|r| r.is_object()) else {
+        return snapshot;
+    };
+    // Codex reports several allowances through the same record: `codex` is the
+    // account's main one, while model-specific ids (the Spark model writes
+    // `codex_bengalfox`) describe a separate pool, often at 0%. Taking those
+    // would overwrite the real figure with an unrelated one. Older versions
+    // write no id at all, and then the record can only be the main allowance.
+    if limits
+        .get("limit_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id != "codex")
+    {
+        return snapshot;
+    }
+
+    let primary = limits.get("primary");
+    snapshot.primary = primary.and_then(parse_rate_limit_window);
+    snapshot.secondary = limits.get("secondary").and_then(parse_rate_limit_window);
+    // Current versions name the plan beside the windows; older ones put it
+    // inside the primary window
+    snapshot.plan = limits
+        .get("plan_type")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            primary
+                .and_then(|p| p.get("plan_type"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string);
+    snapshot.limit_reached = limits
+        .get("rate_limit_reached_type")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    snapshot
+}
+
+/// Read one window of a `rate_limits` block; `None` if it has no usage figure
+fn parse_rate_limit_window(window: &Value) -> Option<RateLimitWindow> {
+    Some(RateLimitWindow {
+        used_percent: window.get("used_percent").and_then(Value::as_f64)?,
+        window_minutes: window.get("window_minutes").and_then(Value::as_u64),
+        resets_at: window.get("resets_at").and_then(parse_resets_at),
+    })
+}
+
+/// A reset time as Codex writes it: epoch seconds now, RFC 3339 in older versions
+fn parse_resets_at(value: &Value) -> Option<DateTime<Utc>> {
+    match value {
+        Value::Number(n) => DateTime::from_timestamp(n.as_i64()?, 0),
+        Value::String(s) => DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|t| t.with_timezone(&Utc)),
+        _ => None,
     }
 }
 
@@ -268,6 +313,7 @@ fn parent_conversation_id(payload: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn test_turn_lifecycle() {
@@ -364,7 +410,10 @@ mod tests {
     }
 
     #[test]
-    fn test_token_count() {
+    fn test_token_count_accepts_legacy_string_resets_at() {
+        // The shape Codex wrote before 0.156: a string reset time and the plan
+        // inside the primary window. Formerly `test_token_count`, now also
+        // checking the reset time it used to drop.
         let line = r#"{"type":"event_msg","payload":{"type":"token_count",
             "info":{"model":"gpt-5-codex","model_context_window":272000,
                     "total_token_usage":{"total_tokens":48000}},
@@ -377,8 +426,94 @@ mod tests {
         assert_eq!(usage.total_tokens, Some(48_000));
         assert_eq!(usage.context_window, Some(272_000));
         assert_eq!(usage.model.as_deref(), Some("gpt-5-codex"));
-        assert_eq!(usage.rate_limit_used_percent, Some(12.5));
+        let primary = usage.primary.expect("primary window");
+        assert_eq!(primary.used_percent, 12.5);
+        assert_eq!(primary.window_minutes, Some(300));
+        assert_eq!(
+            primary.resets_at,
+            Some(Utc.with_ymd_and_hms(2026, 7, 22, 18, 0, 0).unwrap())
+        );
+        assert_eq!(usage.secondary, None);
         assert_eq!(usage.plan.as_deref(), Some("pro"));
+    }
+
+    #[test]
+    fn test_token_count_reads_current_rate_limit_shape() {
+        // The shape a Codex 0.156.1 rollout writes, plan name filled in
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count",
+            "info":{"total_token_usage":{"total_tokens":48000},"model_context_window":258400},
+            "rate_limits":{
+              "limit_id": "codex", "limit_name": null,
+              "primary":   {"used_percent": 1.0,  "window_minutes": 300,   "resets_at": 1790167277},
+              "secondary": {"used_percent": 40.0, "window_minutes": 10080, "resets_at": 1790602271},
+              "credits": {"has_credits": false, "unlimited": false, "balance": "0"},
+              "plan_type": "plus", "rate_limit_reached_type": null
+            }}}"#;
+
+        let Some(AgentEvent::Usage(usage)) = parse_line(line) else {
+            panic!("expected a usage event");
+        };
+        assert_eq!(
+            usage.primary,
+            Some(RateLimitWindow {
+                used_percent: 1.0,
+                window_minutes: Some(300),
+                resets_at: DateTime::from_timestamp(1_790_167_277, 0),
+            })
+        );
+        assert_eq!(
+            usage.secondary,
+            Some(RateLimitWindow {
+                used_percent: 40.0,
+                window_minutes: Some(10_080),
+                resets_at: DateTime::from_timestamp(1_790_602_271, 0),
+            })
+        );
+        assert_eq!(usage.plan.as_deref(), Some("plus"));
+        assert_eq!(usage.limit_reached, None);
+    }
+
+    #[test]
+    fn test_token_count_ignores_non_codex_limit_id() {
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count",
+            "info":{"model":"gpt-5.3-codex-spark","model_context_window":128000,
+                    "total_token_usage":{"total_tokens":9000}},
+            "rate_limits":{"limit_id":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark",
+              "primary":{"used_percent":0.0,"window_minutes":300,"resets_at":1790167277},
+              "secondary":{"used_percent":0.0,"window_minutes":10080,"resets_at":1790602271},
+              "credits":{"has_credits":false,"unlimited":false,"balance":null},
+              "plan_type":"plus","rate_limit_reached_type":"rate_limit_exceeded"}}}"#;
+
+        let Some(AgentEvent::Usage(usage)) = parse_line(line) else {
+            panic!("expected a usage event");
+        };
+        // The conversation's own figures are still this conversation's
+        assert_eq!(usage.total_tokens, Some(9_000));
+        assert_eq!(usage.context_window, Some(128_000));
+        assert_eq!(usage.model.as_deref(), Some("gpt-5.3-codex-spark"));
+        // But the limits describe another allowance entirely
+        assert_eq!(usage.primary, None);
+        assert_eq!(usage.secondary, None);
+        assert_eq!(usage.plan, None);
+        assert_eq!(usage.limit_reached, None);
+    }
+
+    #[test]
+    fn test_token_count_reads_limit_reached() {
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":null,
+            "rate_limits":{"limit_id":"codex",
+              "primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1790167277},
+              "plan_type":"business",
+              "rate_limit_reached_type":"workspace_member_credits_depleted"}}}"#;
+
+        let Some(AgentEvent::Usage(usage)) = parse_line(line) else {
+            panic!("expected a usage event");
+        };
+        assert_eq!(
+            usage.limit_reached.as_deref(),
+            Some("workspace_member_credits_depleted")
+        );
+        assert_eq!(usage.primary.map(|p| p.used_percent), Some(100.0));
     }
 
     #[test]
