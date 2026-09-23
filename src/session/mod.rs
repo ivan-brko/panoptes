@@ -392,17 +392,19 @@ pub struct SessionInfo {
     pub usage: crate::agent::events::UsageSnapshot,
     /// Subagents this session appears to be running
     ///
-    /// Fed differently per agent, and never by both for one session. Codex
-    /// subagents write their own separate rollout files and would otherwise
-    /// leave the parent looking idle, so the transcript watcher infers a
-    /// count from recent writes. Claude reports its own through the
+    /// Fed from one of two places, never both for one session. Claude, and a
+    /// Codex whose lifecycle hooks are live, report their own through the
     /// `SubagentStart` / `SubagentStop` hooks, tracked by ID in
-    /// `subagent_ids`, and this is kept equal to that set's size. The watcher
-    /// only counts for sessions with a Codex home, so a Claude session never
-    /// receives its figure.
+    /// `subagent_ids`, and this is kept equal to that set's size. An older
+    /// Codex's subagents write their own separate rollout files and would
+    /// otherwise leave the parent looking idle, so the transcript watcher
+    /// infers a count from recent writes. The watcher only counts for
+    /// sessions with a Codex home, so a Claude session never receives its
+    /// figure, and its figure is not admitted once a Codex session's hooks
+    /// are live (see `hooks_live`).
     #[serde(skip)]
     pub subagents: usize,
-    /// The Claude subagents behind `subagents`, by the agent's own ID
+    /// The hook-reported subagents behind `subagents`, by the agent's own ID
     ///
     /// A set rather than a counter because subagents run concurrently and
     /// their hooks are delivered in the background, so a stop can overtake a
@@ -658,9 +660,11 @@ impl SessionInfo {
     /// Drop every hook-reported subagent
     ///
     /// Touches `subagents` only when this session's count came from hooks.
-    /// A Codex count belongs to the transcript watcher, which only re-sends
-    /// it when it changes; zeroing it here would hide live subagents until
-    /// one of them happened to finish.
+    /// A count from the transcript watcher (a Codex without lifecycle hooks)
+    /// belongs to the watcher, which only re-sends it when it changes;
+    /// zeroing it here would hide live subagents until one of them happened
+    /// to finish. Once a Codex session's hooks are live the count is theirs
+    /// and this clears it like Claude's.
     pub fn forget_subagent_ids(&mut self) {
         if !self.subagent_ids.is_empty() {
             self.subagent_ids.clear();
