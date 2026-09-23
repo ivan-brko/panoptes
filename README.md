@@ -101,6 +101,7 @@ other two shrink but stay in view.
 |-----|--------|
 | `n` | Add new project / New worktree / New session (context-dependent) |
 | `s` | New shell session (at a branch) |
+| `i` | Import a Claude/Codex conversation started outside Panoptes (at a branch) |
 | `d` | Delete selected item (ungroups a folder when one is selected) |
 | `m` | Move a project or folder into a folder (in the tree) |
 | `r` | Rename folder (in the tree) |

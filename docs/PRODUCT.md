@@ -81,7 +81,7 @@ Sessions display their current state in real-time:
 - **Waiting** - Agent is waiting for your input
 - **Suspended** - Session process was suspended after inactivity (wakes on interaction)
 - **Exited** - Session has ended
-- **Resumable** - Session recovered from a previous run and can be resumed
+- **Resumable** - Session recovered from a previous run (or imported from a conversation started outside Panoptes) and can be resumed
 
 Shell sessions show simplified states:
 - **Running** - A command is executing in the foreground
@@ -245,4 +245,4 @@ The current version includes:
 - Project and branch persistence
 - Path autocomplete when adding projects
 
-Agent sessions are persisted to `sessions.json` and recovered across restarts - a recovered session shows as "Resumable" and can be resumed. Shell sessions are not: a shell has no conversation to reattach to, and everything that made it worth keeping - its scrollback, its environment, whatever it was running - dies with the terminal. Quitting warns you when live shells are about to be killed. Projects and branches are persisted as well.
+Agent sessions are persisted to `sessions.json` and recovered across restarts - a recovered session shows as "Resumable" and can be resumed. Conversations you started by running `claude` or `codex` yourself can be brought in too: press `i` at a branch to list the ones started in its directory (newest first, with the agent, title, age and account), and `Enter` imports one as a Resumable session - it resumes under the same account the first time you open it. Shell sessions are not: a shell has no conversation to reattach to, and everything that made it worth keeping - its scrollback, its environment, whatever it was running - dies with the terminal. Quitting warns you when live shells are about to be killed. Projects and branches are persisted as well.
