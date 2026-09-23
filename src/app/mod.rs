@@ -162,6 +162,15 @@ const TRANSCRIPT_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 /// first or second scan and then stops costing anything.
 const CODEX_ID_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long a new rollout is left for a Codex `SessionStart` hook to claim
+/// before it is matched to a session by guesswork
+///
+/// The hook names the conversation outright and arrives within a fraction of
+/// a second of the rollout being created, so a matching rollout younger than
+/// this is left alone. Guessing only takes over when no hook came - a Codex
+/// without lifecycle hooks, or hooks switched off in its config.
+const CODEX_HOOK_GRACE: chrono::Duration = chrono::Duration::seconds(5);
+
 /// The colour preset the UI should be wearing, given where the user is
 ///
 /// The picker's highlight is worn only while the picker is the focused pane's
@@ -605,9 +614,10 @@ impl App {
             // Give Codex sessions a resumable pointer as soon as their rollout
             // file appears; no-ops once every session has one
             self.resolve_pending_codex_session_ids();
-            // Follow each session's transcript. For Codex this is the only
-            // source of state at all; for Claude it adds usage figures the
-            // hooks do not carry.
+            // Follow each session's transcript. For Claude, and for a Codex
+            // whose lifecycle hooks are reporting, it adds usage figures the
+            // hooks do not carry; for an older Codex it is the only source of
+            // state at all.
             self.sync_transcript_watchers();
             dirty |= self.process_transcript_events();
             dirty |= self.tick_state_timeouts();
@@ -2118,10 +2128,12 @@ impl App {
 
     /// Resolve conversation IDs for Codex sessions that do not have one yet
     ///
-    /// Codex offers no flag to dictate its session ID, so unlike Claude Code it
-    /// has to be discovered from the rollout file it writes shortly after
-    /// starting. Until that resolves, the session has no pointer and would not
-    /// be resumable after a crash.
+    /// Codex offers no flag to dictate its session ID. Where it has lifecycle
+    /// hooks, its `SessionStart` hook reports the ID as the first turn begins
+    /// (see `SessionManager::handle_hook_event`). This is the fallback for
+    /// when no hook does: the ID is discovered from the rollout file Codex
+    /// writes. Until either resolves, the session has no pointer and would
+    /// not be resumable after a crash.
     ///
     /// Throttled, and does no filesystem work at all once every Codex session
     /// has an ID - which is the steady state within seconds of starting one.
@@ -2159,6 +2171,15 @@ impl App {
                 created_at,
                 &claimed,
             ) {
+                // Give the session's own `SessionStart` hook the first say.
+                // Guessing is what goes wrong when several sessions share a
+                // directory; the hook cannot.
+                let rollout_age =
+                    crate::agent::codex::rollout_created_at(&codex_home, &agent_session_id)
+                        .map(|created| chrono::Utc::now().signed_duration_since(created));
+                if rollout_age.is_some_and(|age| age < CODEX_HOOK_GRACE) {
+                    continue;
+                }
                 claimed.insert(agent_session_id.clone());
                 if self
                     .sessions
@@ -2245,7 +2266,7 @@ impl App {
         }
 
         for (session_id, event) in events {
-            if let Some(session_id) = self.sessions.apply_agent_event(session_id, event) {
+            if let Some(session_id) = self.sessions.apply_transcript_event(session_id, event) {
                 self.notify_session_needs_attention(session_id);
             }
         }
