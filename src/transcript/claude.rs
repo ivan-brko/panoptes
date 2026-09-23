@@ -3,10 +3,25 @@
 //! Claude writes `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-uuid>.jsonl`
 //! as the conversation happens.
 //!
-//! **This tailer contributes usage figures only, never state.** Claude's hooks
-//! already report state, they arrive sooner, and two producers writing the same
-//! field would fight over it. The transcript is read for the one thing hooks do
-//! not carry: how full the context window is and which model is answering.
+//! **This tailer contributes usage figures, plus one state change: a failed
+//! turn.** Claude's hooks report everything else, they arrive sooner, and two
+//! producers writing the same field would fight over it. The transcript is
+//! read for what hooks do not carry: how full the context window is, which
+//! model is answering - and whether the turn died on an API error.
+//!
+//! That last one breaks the rule deliberately. A turn that dies on an API
+//! error (usage limit, expired login, overload) fires Claude's `StopFailure`
+//! hook *instead of* `Stop`, and Panoptes does not subscribe to `StopFailure`
+//! yet. Without this the session would sit in `Thinking` until the stall
+//! watchdog flagged it, with no reason given. The state machine ignores a
+//! repeat, so once the hook is wired up the two cannot double-fire.
+//!
+//! Not every record describes the live conversation. Subagent (sidechain)
+//! messages carry the subagent's model and context; meta records and
+//! compaction summaries are injected, not exchanged; and a `<synthetic>`
+//! assistant record is a placeholder Claude writes locally, with zeroed usage.
+//! All of them are skipped, or the header would flash a subagent's model or a
+//! near-empty context over the real session.
 //!
 //! There is no rate-limit data anywhere in a Claude transcript, so those fields
 //! stay empty for Claude sessions rather than being guessed at.
@@ -15,14 +30,44 @@ use serde_json::Value;
 
 use crate::agent::events::{AgentEvent, UsageSnapshot};
 
-/// Translate one transcript line into a usage event
+/// The model name Claude stamps on records it wrote itself, not the API
+const SYNTHETIC_MODEL: &str = "<synthetic>";
+
+/// Translate one transcript line into an event
 ///
-/// Returns `None` for everything that is not an assistant message carrying
-/// usage - which is most of the file. Never fails: the transcript belongs to
-/// another process and may be read mid-write.
+/// Returns `None` for everything that is neither an assistant message carrying
+/// usage nor a failed turn - which is most of the file. Never fails: the
+/// transcript belongs to another process and may be read mid-write.
 pub fn parse_line(line: &str) -> Option<AgentEvent> {
     let record: Value = serde_json::from_str(line).ok()?;
+
+    // A subagent's records share this file but describe its own conversation:
+    // its model, its context window, its failures. None of that is the
+    // session's, so the check comes before anything is read out of it.
+    if flag(&record, "isSidechain") {
+        return None;
+    }
+
+    // Checked before the synthetic-model filter below, because a failed turn
+    // is itself a synthetic record: Claude writes the error locally, with
+    // `"model": "<synthetic>"` and zeroed usage.
+    if flag(&record, "isApiErrorMessage") {
+        let code = record.get("error").and_then(Value::as_str);
+        tracing::debug!(code = ?code, "Claude transcript reports a failed turn");
+        return Some(AgentEvent::TurnFailed {
+            reason: failure_reason(code, error_text(&record)),
+        });
+    }
+
+    if flag(&record, "isMeta") || flag(&record, "isCompactSummary") {
+        return None;
+    }
+
     let message = record.get("message")?;
+    let model = message.get("model").and_then(Value::as_str);
+    if model == Some(SYNTHETIC_MODEL) {
+        return None;
+    }
 
     // Only assistant messages carry usage. A user record has no counts, and a
     // summary or system record has no `message` at all.
@@ -46,14 +91,8 @@ pub fn parse_line(line: &str) -> Option<AgentEvent> {
         // Claude never states its context window in the transcript, so it is
         // inferred from the model name rather than left unknown - a bare token
         // count is far less useful than a percentage.
-        context_window: message
-            .get("model")
-            .and_then(Value::as_str)
-            .and_then(context_window_for),
-        model: message
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        context_window: model.and_then(context_window_for),
+        model: model.map(str::to_string),
         ..Default::default()
     };
 
@@ -87,6 +126,70 @@ const CONTEXT_WINDOWS: &[(&str, u64)] = &[
     ("claude-haiku-4", 200_000),
     ("claude-3", 200_000),
 ];
+
+/// Whether a top-level boolean flag is set on a record
+fn flag(record: &Value, name: &str) -> bool {
+    record.get(name).and_then(Value::as_bool) == Some(true)
+}
+
+/// The text Claude showed the user for a failed turn
+fn error_text(record: &Value) -> Option<&str> {
+    record
+        .get("message")?
+        .get("content")?
+        .as_array()?
+        .iter()
+        .find_map(|block| block.get("text").and_then(Value::as_str))
+}
+
+/// A short human label for why a Claude turn failed
+///
+/// `code` is the record's `error` field - the same enum Claude's `StopFailure`
+/// hook reports as its `error`, so the hook can share this. The codes, as of
+/// Claude Code 2.1.280 (the `error` enum in the binary, which is also the
+/// `StopFailure` matcher list; the ones marked * also appear in local
+/// transcripts):
+///
+/// - `authentication_failed`*, `oauth_org_not_allowed`, `account_on_hold`,
+///   `verification_required`, `cloud_credential_error`: the account cannot
+///   make the request
+/// - `rate_limit`*: a usage limit - the five-hour or weekly session limit
+///   ("You've hit your session limit · resets 8:10pm"), or a 429
+/// - `billing_error`: out of credits
+/// - `overloaded`, `server_error`*: the API failed, including "Connection to
+///   the API was lost" and "Your computer went to sleep mid-response"
+/// - `invalid_request`*: the request itself was refused. Prompt-too-long is
+///   one of these, told apart only by its text ("Prompt is too long"); there
+///   is no `prompt_too_long` code
+/// - `model_not_found`, `max_output_tokens`
+/// - `unknown`*: everything else, including "API Error: Overloaded" from older
+///   versions
+///
+/// An unrecognised code is kept as it is rather than dropped: a raw code says
+/// more than a generic "turn failed". Returns `None` only when the record
+/// carries no code at all.
+pub fn failure_reason(code: Option<&str>, text: Option<&str>) -> Option<String> {
+    let code = code?;
+    let label = match code {
+        "authentication_failed"
+        | "oauth_org_not_allowed"
+        | "verification_required"
+        | "cloud_credential_error" => "auth failed",
+        "account_on_hold" => "account on hold",
+        "rate_limit" => "usage limit",
+        "billing_error" => "out of credits",
+        "overloaded" | "server_error" => "server error",
+        "invalid_request" if text.is_some_and(|t| t.starts_with("Prompt is too long")) => {
+            "prompt too long"
+        }
+        "invalid_request" => "invalid request",
+        "model_not_found" => "model not found",
+        "max_output_tokens" => "output limit",
+        "unknown" => "api error",
+        other => return Some(other.to_string()),
+    };
+    Some(label.to_string())
+}
 
 /// Best-known context window for a Claude model
 ///
@@ -241,6 +344,114 @@ mod tests {
         ] {
             assert_eq!(parse_line(line), None, "for {line:?}");
         }
+    }
+
+    /// A real failed turn, copied from a local Claude Code 2.1.x transcript
+    /// with its ids, paths and branch redacted. Note the `<synthetic>` model
+    /// and zeroed usage: it must be read as a failure, not skipped as noise.
+    const RATE_LIMIT_RECORD: &str = r#"{"parentUuid":"00000000-0000-0000-0000-000000000001","isSidechain":false,"type":"assistant","uuid":"00000000-0000-0000-0000-000000000002","timestamp":"2026-08-28T17:59:57.050Z","message":{"diagnostics":null,"id":"00000000-0000-0000-0000-000000000003","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null},"content":[{"type":"text","text":"You've hit your session limit · resets 8:10pm (Europe/Zagreb)"}],"context_management":null},"requestId":"req_redacted","quotaLimits":{"status":"rejected","resetsAt":1787940600,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false},"error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429,"userType":"external","entrypoint":"cli","cwd":"/redacted","sessionId":"00000000-0000-0000-0000-000000000004","version":"2.1.267","gitBranch":"redacted"}"#;
+
+    #[test]
+    fn test_skips_sidechain_meta_compact_and_synthetic() {
+        let usage = r#""usage":{"input_tokens":100,"output_tokens":50}"#;
+        for line in [
+            // A subagent's turn: its model and context, not the session's
+            format!(
+                r#"{{"type":"assistant","isSidechain":true,"message":{{"model":"claude-haiku-4-5",{usage}}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","isMeta":true,"message":{{"model":"claude-opus-4-8",{usage}}}}}"#
+            ),
+            format!(
+                r#"{{"type":"user","isCompactSummary":true,"message":{{"model":"claude-opus-4-8",{usage}}}}}"#
+            ),
+            // A local placeholder: there was no model, so there is no context
+            format!(r#"{{"type":"assistant","message":{{"model":"<synthetic>",{usage}}}}}"#),
+        ] {
+            assert_eq!(parse_line(&line), None, "for {line}");
+        }
+
+        // The flags are only honoured when set: an explicit `false` is the
+        // normal main-conversation record
+        let normal = format!(
+            r#"{{"type":"assistant","isSidechain":false,"isMeta":false,"message":{{"model":"claude-opus-4-8",{usage}}}}}"#
+        );
+        let Some(AgentEvent::Usage(usage)) = parse_line(&normal) else {
+            panic!("a normal assistant record must still report usage");
+        };
+        assert_eq!(usage.total_tokens, Some(150));
+        assert_eq!(usage.model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn test_api_error_record_is_turn_failed() {
+        assert_eq!(
+            parse_line(RATE_LIMIT_RECORD),
+            Some(AgentEvent::TurnFailed {
+                reason: Some("usage limit".to_string())
+            })
+        );
+
+        // The other shapes seen on disk, trimmed to the fields that matter
+        let auth = r#"{"isSidechain":false,"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"error":"authentication_failed","isApiErrorMessage":true}"#;
+        assert_eq!(
+            parse_line(auth),
+            Some(AgentEvent::TurnFailed {
+                reason: Some("auth failed".to_string())
+            })
+        );
+        let too_long = r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Prompt is too long"}]},"error":"invalid_request","isApiErrorMessage":true}"#;
+        assert_eq!(
+            parse_line(too_long),
+            Some(AgentEvent::TurnFailed {
+                reason: Some("prompt too long".to_string())
+            })
+        );
+
+        // A code this was written before still names itself; no code at all
+        // is still a failure, just an unexplained one
+        let novel = r#"{"type":"assistant","error":"some_new_code","isApiErrorMessage":true}"#;
+        assert_eq!(
+            parse_line(novel),
+            Some(AgentEvent::TurnFailed {
+                reason: Some("some_new_code".to_string())
+            })
+        );
+        let bare = r#"{"type":"assistant","isApiErrorMessage":true}"#;
+        assert_eq!(
+            parse_line(bare),
+            Some(AgentEvent::TurnFailed { reason: None })
+        );
+    }
+
+    #[test]
+    fn test_sidechain_api_error_is_ignored() {
+        // A subagent hitting a limit is the subagent's failure; the parent
+        // turn carries on (or fails with its own top-level record)
+        let sidechain =
+            RATE_LIMIT_RECORD.replace(r#""isSidechain":false"#, r#""isSidechain":true"#);
+        assert_ne!(sidechain, RATE_LIMIT_RECORD);
+        assert_eq!(parse_line(&sidechain), None);
+    }
+
+    #[test]
+    fn test_failure_reason_labels() {
+        for (code, label) in [
+            ("authentication_failed", "auth failed"),
+            ("rate_limit", "usage limit"),
+            ("server_error", "server error"),
+            ("overloaded", "server error"),
+            ("billing_error", "out of credits"),
+            ("invalid_request", "invalid request"),
+            ("unknown", "api error"),
+        ] {
+            assert_eq!(
+                failure_reason(Some(code), None).as_deref(),
+                Some(label),
+                "for {code}"
+            );
+        }
+        assert_eq!(failure_reason(None, Some("anything")), None);
     }
 
     #[test]

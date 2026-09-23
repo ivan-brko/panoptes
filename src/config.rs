@@ -389,6 +389,14 @@ pub struct NotifyOn {
     /// A session's process died unexpectedly
     #[serde(default = "default_true")]
     pub crashed: bool,
+
+    /// A turn died on an API error (usage limit, expired login, overload)
+    ///
+    /// Its own key rather than folded into `crashed`: the process is alive and
+    /// the fix is usually to wait or log in, not to restart anything, so
+    /// someone may well want one and not the other.
+    #[serde(default = "default_true")]
+    pub failed: bool,
 }
 
 impl Default for NotifyOn {
@@ -398,6 +406,7 @@ impl Default for NotifyOn {
             turn_complete: true,
             stalled: false,
             crashed: true,
+            failed: true,
         }
     }
 }
@@ -411,6 +420,7 @@ impl NotifyOn {
             AttentionReason::TurnComplete => self.turn_complete,
             AttentionReason::Stalled { .. } => self.stalled,
             AttentionReason::Crashed { .. } => self.crashed,
+            AttentionReason::TurnFailed { .. } => self.failed,
         }
     }
 }
@@ -667,6 +677,26 @@ mod tests {
     }
 
     #[test]
+    fn test_notify_on_failed_round_trips() {
+        let mut original = Config::default();
+        assert!(original.notify_on.failed, "failed turns ring by default");
+        original.notify_on.failed = false;
+
+        let text = toml::to_string_pretty(&original).expect("config must serialise");
+        assert!(text.contains("failed = false"), "{text}");
+        let parsed: Config = toml::from_str(&text).expect("config must round trip");
+        assert!(!parsed.notify_on.failed);
+        // Its neighbours are untouched
+        assert!(parsed.notify_on.crashed);
+
+        // A `[notify_on]` table written before the key existed keeps the default
+        let older = "approval = true\ncrashed = false\n";
+        let parsed: NotifyOn = toml::from_str(older).expect("older table must load");
+        assert!(parsed.failed);
+        assert!(!parsed.crashed);
+    }
+
+    #[test]
     fn test_config_written_before_notify_settings_still_loads() {
         // A config file from before these options existed must keep working
         let legacy = r#"
@@ -686,6 +716,7 @@ notification_method = "title"
         assert!(parsed.notify_on.turn_complete);
         assert!(!parsed.notify_on.stalled);
         assert!(parsed.notify_on.crashed);
+        assert!(parsed.notify_on.failed);
         assert!(!parsed.attention_on_idle);
     }
 

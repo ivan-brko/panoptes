@@ -12,6 +12,8 @@
 //!   with Claude, which until now could only ever report "my turn ended".
 //! - **Claude**: the transcript only supplements. Hooks keep owning state -
 //!   they are lower latency, and two producers writing the same field fight.
+//!   The one exception is a turn that died on an API error, which no hook
+//!   Panoptes subscribes to reports (see [`claude`]).
 //!
 //! Measured flush latency is under 50ms for Codex and effectively immediate for
 //! Claude, so both are fast enough to drive a live display.
@@ -45,7 +47,7 @@ const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
 pub enum TranscriptKind {
     /// Codex rollout - drives session state
     Codex,
-    /// Claude Code transcript - contributes usage only
+    /// Claude Code transcript - contributes usage, and failed turns
     Claude,
 }
 
