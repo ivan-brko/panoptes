@@ -307,6 +307,95 @@ impl SessionManager {
         true
     }
 
+    /// Take in a conversation Panoptes did not start, as a resumable session
+    ///
+    /// The conversation was found on disk by the import scan
+    /// (`transcript::scan`): the user ran the agent by hand in this branch's
+    /// directory. It joins exactly where a session inherited from a previous
+    /// run sits - `recovered`, and the store - so every existing resume path
+    /// takes it from here unchanged, and nothing spawns until it is opened.
+    ///
+    /// The name is the agent's title (or the first prompt), marked
+    /// `auto_named` so the agent's later retitles keep replacing it just as
+    /// they would for a session Panoptes started.
+    ///
+    /// Refuses a conversation some session already owns: the scan filtered
+    /// those out, but its list may be stale by the time the user picks one.
+    pub fn adopt_external_conversation(
+        &mut self,
+        conversation: &crate::transcript::scan::FoundConversation,
+        working_dir: PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Result<SessionId> {
+        use crate::transcript::TranscriptKind;
+
+        if self.claimed_agent_session_ids().contains(&conversation.id) {
+            return Err(anyhow!(
+                "That conversation already belongs to a Panoptes session"
+            ));
+        }
+
+        let name = conversation
+            .title
+            .as_deref()
+            .map(|title| {
+                title
+                    .chars()
+                    .take(crate::app::MAX_SESSION_NAME_LEN)
+                    .collect()
+            })
+            .unwrap_or_else(|| "Imported conversation".to_string());
+
+        let mut info = match conversation.kind {
+            TranscriptKind::Claude => SessionInfo::with_claude_config(
+                name,
+                working_dir,
+                project_id,
+                branch_id,
+                conversation.config_id,
+                conversation.account_name.clone(),
+            ),
+            TranscriptKind::Codex => SessionInfo::with_codex_config(
+                name,
+                working_dir,
+                project_id,
+                branch_id,
+                conversation.config_id,
+                conversation.account_name.clone(),
+            ),
+        };
+        info.state = SessionState::Resumable;
+        info.auto_named = true;
+        info.agent_session_id = Some(conversation.id.clone());
+        // The file Claude actually wrote, over our reconstruction of its
+        // naming: a long working directory's project folder carries a hash we
+        // cannot derive. Codex rollouts are always found by ID.
+        if conversation.kind == TranscriptKind::Claude {
+            info.agent_transcript_path = Some(conversation.path.clone());
+        }
+        // Sorts it among the other resumable sessions by when it was last
+        // used, not by when it was imported
+        info.last_activity = conversation.last_active;
+
+        let session_id = info.id;
+        self.store.upsert(info.clone());
+        if let Err(e) = self.store.save() {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to persist imported conversation; it will not survive a restart"
+            );
+        }
+        self.recovered.insert(session_id, info);
+        tracing::info!(
+            session_id = %session_id,
+            conversation_id = %conversation.id,
+            "Imported an existing conversation as a resumable session"
+        );
+        Ok(session_id)
+    }
+
     /// All sessions in navigation order, live first then recoverable
     ///
     /// Live sessions keep their existing order so navigation is unchanged for
@@ -4274,5 +4363,193 @@ mod tests {
                 "an already-exited session must not be reaped again"
             );
         }
+    }
+
+    /// A conversation the import scan found, with its transcript on disk
+    /// under an account directory inside `dir`
+    fn external_conversation(
+        dir: &TempDir,
+        kind: crate::transcript::TranscriptKind,
+        config_id: Option<Uuid>,
+    ) -> (crate::transcript::scan::FoundConversation, PathBuf) {
+        use crate::transcript::TranscriptKind;
+
+        let id = Uuid::new_v4().to_string();
+        let (path, account_dir) = match kind {
+            TranscriptKind::Claude => {
+                write_claude_transcript(&claude_home(dir), dir.path(), &id);
+                (
+                    crate::transcript::claude::transcript_path(&claude_home(dir), dir.path(), &id),
+                    claude_home(dir),
+                )
+            }
+            TranscriptKind::Codex => {
+                let codex_home = dir.path().join("codex-home");
+                let day = codex_home.join("sessions/2026/09/23");
+                std::fs::create_dir_all(&day).unwrap();
+                let path = day.join(format!("rollout-2026-09-23T10-00-00-{id}.jsonl"));
+                std::fs::write(
+                    &path,
+                    format!(
+                        r#"{{"type":"session_meta","payload":{{"id":"{id}","timestamp":"2026-09-23T10:00:00Z","cwd":"{}","source":"cli"}}}}"#,
+                        dir.path().display()
+                    ) + "\n",
+                )
+                .unwrap();
+                (path, codex_home)
+            }
+        };
+        let conversation = crate::transcript::scan::FoundConversation {
+            kind,
+            id,
+            title: Some("Fix the header".to_string()),
+            last_active: Utc::now() - chrono::Duration::hours(3),
+            config_id,
+            account_name: config_id.map(|_| "work".to_string()),
+            path,
+        };
+        (conversation, account_dir)
+    }
+
+    #[test]
+    fn test_adopt_external_conversation_is_resumable() {
+        use crate::agent::adapter::AgentAdapter;
+        use crate::transcript::TranscriptKind;
+
+        for kind in [TranscriptKind::Claude, TranscriptKind::Codex] {
+            let temp_dir = TempDir::new().unwrap();
+            let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+            let config_id = Uuid::new_v4();
+            let (conversation, account_dir) =
+                external_conversation(&temp_dir, kind, Some(config_id));
+            let (project_id, branch_id) = (Uuid::new_v4(), Uuid::new_v4());
+
+            let session_id = manager
+                .adopt_external_conversation(
+                    &conversation,
+                    temp_dir.path().to_path_buf(),
+                    project_id,
+                    branch_id,
+                )
+                .unwrap();
+
+            // Adopted exactly as a session from a previous run would sit:
+            // recovered, persisted, and not running
+            assert!(manager.is_empty(), "{kind:?}: nothing may spawn yet");
+            assert!(manager.store().get(session_id).is_some());
+            let info = manager.get_recovered(session_id).unwrap().clone();
+            assert_eq!(info.state, SessionState::Resumable);
+            assert_eq!(info.name, "Fix the header");
+            assert!(info.auto_named, "agent retitles must keep applying");
+            assert_eq!((info.project_id, info.branch_id), (project_id, branch_id));
+            assert_eq!(
+                info.agent_session_id.as_deref(),
+                Some(conversation.id.as_str())
+            );
+            assert_eq!(info.last_activity, conversation.last_active);
+            assert_eq!(info.account_name(), Some("work"));
+            let (claude_dir, codex_home) = match kind {
+                TranscriptKind::Claude => {
+                    assert_eq!(info.session_type, SessionType::ClaudeCode);
+                    assert_eq!(info.claude_config_id, Some(config_id));
+                    (Some(account_dir), None)
+                }
+                TranscriptKind::Codex => {
+                    assert_eq!(info.session_type, SessionType::OpenAICodex);
+                    assert_eq!(info.codex_config_id, Some(config_id));
+                    (None, Some(account_dir))
+                }
+            };
+
+            assert_eq!(info.resume_blocker(), None, "{kind:?}");
+            assert!(
+                info.conversation_transcript_exists(claude_dir.as_deref(), codex_home.as_deref())
+            );
+
+            // The cursor a resume hands the agent reattaches to that exact
+            // conversation, through each agent's own resume syntax
+            let spawn_config = SpawnConfig {
+                session_id,
+                session_name: info.name.clone(),
+                working_dir: info.working_dir.clone(),
+                initial_prompt: None,
+                rows: 24,
+                cols: 80,
+                claude_config_dir: claude_dir.clone(),
+                codex_home: codex_home.clone(),
+                resume: info.resume_cursor(),
+            };
+            let id = conversation.id.clone();
+            match kind {
+                TranscriptKind::Claude => {
+                    let args =
+                        crate::agent::claude::ClaudeCodeAdapter::new().build_args(&spawn_config);
+                    assert!(
+                        args.windows(2)
+                            .any(|pair| pair == ["--resume".to_string(), id.clone()]),
+                        "{args:?}"
+                    );
+                    assert!(!args.contains(&"--session-id".to_string()), "{args:?}");
+                }
+                TranscriptKind::Codex => {
+                    let args = crate::agent::codex::CodexAdapter::new().build_args(&spawn_config);
+                    assert_eq!(args.first().map(String::as_str), Some("resume"), "{args:?}");
+                    assert!(args.contains(&id), "{args:?}");
+                }
+            }
+
+            // And the existing resume path takes it from here, unchanged
+            manager.spawn_as_shell = true;
+            manager
+                .resume_session(session_id, 24, 80, claude_dir, codex_home)
+                .unwrap();
+            assert_eq!(manager.recovered_count(), 0);
+            assert!(manager.get(session_id).is_some());
+            manager.shutdown_all();
+        }
+    }
+
+    #[test]
+    fn test_adopting_a_conversation_twice_is_refused() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (conversation, _) =
+            external_conversation(&temp_dir, crate::transcript::TranscriptKind::Claude, None);
+        let adopt = |manager: &mut SessionManager| {
+            manager.adopt_external_conversation(
+                &conversation,
+                temp_dir.path().to_path_buf(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+            )
+        };
+
+        adopt(&mut manager).unwrap();
+        assert!(
+            adopt(&mut manager).is_err(),
+            "one conversation, one session"
+        );
+        assert_eq!(manager.recovered_count(), 1);
+    }
+
+    #[test]
+    fn test_an_untitled_conversation_still_gets_a_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (mut conversation, _) =
+            external_conversation(&temp_dir, crate::transcript::TranscriptKind::Codex, None);
+        conversation.title = None;
+
+        let session_id = manager
+            .adopt_external_conversation(
+                &conversation,
+                temp_dir.path().to_path_buf(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+            )
+            .unwrap();
+        let info = manager.get_recovered(session_id).unwrap();
+        assert_eq!(info.name, "Imported conversation");
+        assert_eq!(info.account_name(), None, "found under the default account");
     }
 }
