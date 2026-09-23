@@ -18,6 +18,7 @@ use crate::agent::events::AgentEvent;
 use crate::session::SessionId;
 
 use super::codex::RolloutKind;
+use super::session_index::{self, SessionIndex};
 use super::{Tailer, TranscriptKind};
 
 /// How often to check followed files for new content
@@ -58,6 +59,15 @@ pub struct WatchTarget {
     /// to a conversation that predates the session, whose history must not
     /// replay as if it were happening now.
     pub from_start: bool,
+}
+
+impl WatchTarget {
+    /// The Codex thread-name index this session's title comes from, and the
+    /// thread ID to look for in it
+    fn session_index(&self) -> Option<(PathBuf, &str)> {
+        let path = session_index::index_path(self.codex_sessions_dir.as_deref()?)?;
+        Some((path, self.conversation_id.as_deref()?))
+    }
 }
 
 /// Instructions to the watcher thread
@@ -132,6 +142,9 @@ struct Watched {
     target: WatchTarget,
     tailer: Tailer,
     subagents: usize,
+    /// The last title sent for this session from a Codex thread-name index,
+    /// so an unchanged name is not re-sent
+    title: Option<String>,
 }
 
 /// Everything the watcher thread owns
@@ -139,6 +152,11 @@ struct Watched {
 struct WatcherState {
     watched: HashMap<SessionId, Watched>,
     debug_log_dir: Option<PathBuf>,
+    /// One follower per Codex thread-name index in use, keyed by its path
+    ///
+    /// The file is shared by every session under a `CODEX_HOME`, so it is
+    /// read once per poll per home rather than once per session.
+    session_indexes: HashMap<PathBuf, SessionIndex>,
 }
 
 impl WatcherState {
@@ -157,14 +175,87 @@ impl WatcherState {
             tailer
         };
 
+        let title = self.seed_title(&target, events);
+
         self.watched.insert(
             target.session_id,
             Watched {
                 target,
                 tailer,
                 subagents: 0,
+                title,
             },
         );
+    }
+
+    /// Send a Codex session its current thread name, if it has one yet
+    ///
+    /// The name may predate the attach by days, and the shared follower only
+    /// reports what is appended from now on, so the whole index is searched
+    /// once here. The follower is started *before* the search: a rename landing
+    /// in between is then seen twice rather than not at all, and the second
+    /// sighting is dropped as unchanged.
+    fn seed_title(
+        &mut self,
+        target: &WatchTarget,
+        events: &Sender<(SessionId, AgentEvent)>,
+    ) -> Option<String> {
+        let (path, thread_id) = target.session_index()?;
+        self.session_indexes
+            .entry(path.clone())
+            .or_insert_with_key(|path| SessionIndex::at_end(path.clone()));
+
+        let title = session_index::latest_name(&path, thread_id)?;
+        let _ = events.send((
+            target.session_id,
+            AgentEvent::TitleChanged {
+                title: title.clone(),
+            },
+        ));
+        Some(title)
+    }
+
+    /// Pass on Codex thread renames
+    ///
+    /// Each index is read once, however many sessions share it, and each
+    /// session is sent only a name for its own thread that differs from the
+    /// last one it was sent.
+    fn poll_titles(&mut self, events: &Sender<(SessionId, AgentEvent)>) {
+        // Stop following an index once no session needs it
+        let in_use: std::collections::HashSet<PathBuf> = self
+            .watched
+            .values()
+            .filter_map(|w| Some(w.target.session_index()?.0))
+            .collect();
+        self.session_indexes.retain(|path, _| in_use.contains(path));
+
+        for (path, index) in &mut self.session_indexes {
+            let names = index.read_new();
+            if names.is_empty() {
+                continue;
+            }
+            for watched in self.watched.values_mut() {
+                let Some((own_path, thread_id)) = watched.target.session_index() else {
+                    continue;
+                };
+                if own_path != *path {
+                    continue;
+                }
+                let Some(name) = names.get(thread_id) else {
+                    continue;
+                };
+                if watched.title.as_ref() == Some(name) {
+                    continue;
+                }
+                watched.title = Some(name.clone());
+                let _ = events.send((
+                    watched.target.session_id,
+                    AgentEvent::TitleChanged {
+                        title: name.clone(),
+                    },
+                ));
+            }
+        }
     }
 
     fn poll(&mut self, events: &Sender<(SessionId, AgentEvent)>) {
@@ -322,6 +413,7 @@ fn run(commands: Receiver<Command>, events: Sender<(SessionId, AgentEvent)>) {
         }
 
         state.poll(&events);
+        state.poll_titles(&events);
 
         if last_subagent_scan.elapsed() >= SUBAGENT_SCAN_INTERVAL {
             state.scan_subagents(&events);
@@ -465,6 +557,96 @@ mod tests {
         }
         assert_eq!(counts.get(&session_a), Some(&1));
         assert_eq!(counts.get(&session_b), Some(&1));
+    }
+
+    /// Every title sent, per session, in order
+    fn titles(rx: &Receiver<(SessionId, AgentEvent)>) -> HashMap<SessionId, Vec<String>> {
+        let mut out: HashMap<SessionId, Vec<String>> = HashMap::new();
+        while let Ok((id, event)) = rx.try_recv() {
+            if let AgentEvent::TitleChanged { title } = event {
+                out.entry(id).or_default().push(title);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_sessions_sharing_a_codex_home_get_their_own_titles() {
+        let home = TempDir::new().unwrap();
+        let sessions_dir = home.path().join("sessions");
+        let index = home.path().join("session_index.jsonl");
+        std::fs::write(
+            &index,
+            "{\"id\":\"thread-a\",\"thread_name\":\"Old A\",\"updated_at\":\"2026-09-23T10:00:00Z\"}\n\
+             {\"id\":\"thread-a\",\"thread_name\":\"Named A\",\"updated_at\":\"2026-09-23T10:05:00Z\"}\n\
+             {\"id\":\"thread-z\",\"thread_name\":\"Not ours\",\"updated_at\":\"2026-09-23T10:06:00Z\"}\n",
+        )
+        .unwrap();
+
+        let mut state = WatcherState::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let session_a = uuid::Uuid::new_v4();
+        let session_b = uuid::Uuid::new_v4();
+        for (session_id, thread) in [(session_a, "thread-a"), (session_b, "thread-b")] {
+            state.watch(
+                WatchTarget {
+                    session_id,
+                    kind: TranscriptKind::Codex,
+                    path: home.path().join(format!("{thread}.jsonl")),
+                    codex_sessions_dir: Some(sessions_dir.clone()),
+                    conversation_id: Some(thread.to_string()),
+                    from_start: false,
+                },
+                &tx,
+            );
+        }
+
+        // Attaching seeds a name that predates it; b has none yet
+        let seeded = titles(&rx);
+        assert_eq!(seeded.get(&session_a), Some(&vec!["Named A".to_string()]));
+        assert_eq!(seeded.get(&session_b), None);
+        assert_eq!(state.session_indexes.len(), 1, "one follower per home");
+
+        // Nothing new: nothing sent, the seed is not repeated
+        state.poll_titles(&tx);
+        assert!(titles(&rx).is_empty());
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&index)
+            .unwrap()
+            .write_all(
+                b"{\"id\":\"thread-b\",\"thread_name\":\"Named B\",\"updated_at\":\"2026-09-23T11:00:00Z\"}\n\
+                  {\"id\":\"thread-a\",\"thread_name\":\"Renamed A\",\"updated_at\":\"2026-09-23T11:01:00Z\"}\n\
+                  {\"id\":\"thread-z\",\"thread_name\":\"Still not ours\",\"updated_at\":\"2026-09-23T11:02:00Z\"}\n",
+            )
+            .unwrap();
+        state.poll_titles(&tx);
+
+        let renamed = titles(&rx);
+        assert_eq!(
+            renamed.get(&session_a),
+            Some(&vec!["Renamed A".to_string()])
+        );
+        assert_eq!(renamed.get(&session_b), Some(&vec!["Named B".to_string()]));
+        assert_eq!(renamed.len(), 2, "an unwatched thread reaches nobody");
+
+        // Once no session uses the index, it is no longer followed
+        state.watched.clear();
+        state.poll_titles(&tx);
+        assert!(state.session_indexes.is_empty());
+    }
+
+    #[test]
+    fn test_claude_targets_do_not_follow_a_session_index() {
+        let dir = TempDir::new().unwrap();
+        let mut state = WatcherState::default();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut claude = target(uuid::Uuid::new_v4(), dir.path().join("t.jsonl"), true);
+        claude.kind = TranscriptKind::Claude;
+        state.watch(claude, &tx);
+        state.poll_titles(&tx);
+        assert!(state.session_indexes.is_empty());
     }
 
     /// A minimal target for driving `WatcherState` directly

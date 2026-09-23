@@ -98,6 +98,18 @@ pub enum AgentEvent {
         active: usize,
     },
 
+    /// The agent renamed the conversation
+    ///
+    /// Claude writes `ai-title` records into its transcript; Codex keeps its
+    /// thread names in `$CODEX_HOME/session_index.jsonl`. Both revise the
+    /// title as the conversation evolves, so the latest one wins. It names the
+    /// conversation rather than reporting anything the agent did, so it is not
+    /// activity.
+    TitleChanged {
+        /// The agent's title, as it wrote it
+        title: String,
+    },
+
     /// Recognised but deliberately not modelled
     Ignored,
 }

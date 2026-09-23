@@ -106,16 +106,19 @@ pub fn apply(
         return Applied { rang: false };
     }
 
-    // Two events must not count as activity, or they would hold
+    // These events must not count as activity, or they would hold
     // `last_activity` permanently fresh and neither the idle badge nor the
     // suspend sweep would ever fire on the sessions they exist for:
     //
     // - `IdleReminder` is the agent reporting that nothing has happened.
     // - `Subagents` is Panoptes' own periodic observation, not the agent
     //   doing anything.
+    // - `TitleChanged` renames the conversation; Codex can rewrite a thread's
+    //   name while nothing else is happening, and a seeded title arrives on
+    //   attach, long after the conversation last did anything.
     let is_activity = !matches!(
         event,
-        AgentEvent::IdleReminder | AgentEvent::Subagents { .. }
+        AgentEvent::IdleReminder | AgentEvent::Subagents { .. } | AgentEvent::TitleChanged { .. }
     );
     if is_activity {
         info.last_activity = now;
@@ -254,6 +257,13 @@ pub fn apply(
 
         AgentEvent::Subagents { active } => {
             info.subagents = active;
+            Move::Unchanged
+        }
+
+        AgentEvent::TitleChanged { title } => {
+            // Only ever replaces a name Panoptes generated; see
+            // `SessionInfo::adopt_agent_title`
+            info.adopt_agent_title(&title);
             Move::Unchanged
         }
 
@@ -605,6 +615,58 @@ mod tests {
         info.auto_named = true;
         apply_hook(&mut info, "SessionStart", titled, &config);
         assert_eq!(info.name, "Fixing the login bug");
+    }
+
+    #[test]
+    fn test_title_changed_is_not_activity() {
+        let config = Config::default();
+        let mut info = test_info();
+        info.auto_named = true;
+        info.set_state_at(SessionState::Waiting, Utc::now());
+        let long_ago = Utc::now() - chrono::Duration::hours(3);
+        info.last_activity = long_ago;
+
+        let title = AgentEvent::TitleChanged {
+            title: "Fix the login redirect".to_string(),
+        };
+        let applied = apply(&mut info, title, Utc::now(), &config);
+
+        // Adopted, but the session is exactly as idle as it was
+        assert_eq!(info.name, "Fix the login redirect");
+        assert_eq!(info.last_activity, long_ago);
+        assert_eq!(info.state, SessionState::Waiting);
+        assert!(info.attention.is_none());
+        assert!(!applied.rang);
+    }
+
+    #[test]
+    fn test_agent_title_never_overwrites_user_name() {
+        let config = Config::default();
+
+        // Both sources, as they reach the state machine
+        let claude = crate::transcript::claude::parse_line(
+            r#"{"type":"ai-title","aiTitle":"Claude's title","sessionId":"s"}"#,
+        )
+        .expect("an ai-title record is a title");
+        let codex_name = crate::transcript::session_index::latest_names([
+            r#"{"id":"t","thread_name":"Codex's title","updated_at":"2026-09-23T10:20:46Z"}"#,
+        ])
+        .remove("t")
+        .expect("the thread is named");
+        let codex = AgentEvent::TitleChanged { title: codex_name };
+
+        for (event, adopted) in [(claude, "Claude's title"), (codex, "Codex's title")] {
+            // A name the user typed is theirs
+            let mut typed = test_info();
+            apply(&mut typed, event.clone(), Utc::now(), &config);
+            assert_eq!(typed.name, "test-session");
+
+            // A name Panoptes generated gives way
+            let mut generated = test_info();
+            generated.auto_named = true;
+            apply(&mut generated, event, Utc::now(), &config);
+            assert_eq!(generated.name, adopted);
+        }
     }
 
     #[test]

@@ -3,11 +3,13 @@
 //! Claude writes `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-uuid>.jsonl`
 //! as the conversation happens.
 //!
-//! **This tailer contributes usage figures, plus one state change: a failed
-//! turn.** Claude's hooks report everything else, they arrive sooner, and two
-//! producers writing the same field would fight over it. The transcript is
-//! read for what hooks do not carry: how full the context window is, which
-//! model is answering - and whether the turn died on an API error.
+//! **This tailer contributes usage figures and the conversation's title, plus
+//! one state change: a failed turn.** Claude's hooks report everything else,
+//! they arrive sooner, and two producers writing the same field would fight
+//! over it. The transcript is read for what hooks do not carry: how full the
+//! context window is, which model is answering, what Claude has named the
+//! conversation (its `ai-title` records, revised as it goes) - and whether the
+//! turn died on an API error.
 //!
 //! That last one breaks the rule deliberately. A turn that dies on an API
 //! error (usage limit, expired login, overload) fires Claude's `StopFailure`
@@ -35,8 +37,8 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 /// Translate one transcript line into an event
 ///
-/// Returns `None` for everything that is neither an assistant message carrying
-/// usage nor a failed turn - which is most of the file. Never fails: the
+/// Returns `None` for everything that is not an assistant message carrying
+/// usage, a title, or a failed turn - which is most of the file. Never fails: the
 /// transcript belongs to another process and may be read mid-write.
 pub fn parse_line(line: &str) -> Option<AgentEvent> {
     let record: Value = serde_json::from_str(line).ok()?;
@@ -61,6 +63,16 @@ pub fn parse_line(line: &str) -> Option<AgentEvent> {
 
     if flag(&record, "isMeta") || flag(&record, "isCompactSummary") {
         return None;
+    }
+
+    // Claude's own name for the conversation, rewritten as it evolves - so
+    // every one is passed on and the latest wins. After the sidechain check:
+    // a subagent's title would name its task, not the session.
+    if record.get("type").and_then(Value::as_str) == Some("ai-title") {
+        let title = record.get("aiTitle").and_then(Value::as_str)?.trim();
+        return (!title.is_empty()).then(|| AgentEvent::TitleChanged {
+            title: title.to_string(),
+        });
     }
 
     let message = record.get("message")?;
@@ -458,6 +470,38 @@ mod tests {
         let sidechain =
             RATE_LIMIT_RECORD.replace(r#""isSidechain":false"#, r#""isSidechain":true"#);
         assert_ne!(sidechain, RATE_LIMIT_RECORD);
+        assert_eq!(parse_line(&sidechain), None);
+    }
+
+    /// Shape of a real record (Claude Code 2.1.280), title redacted
+    const AI_TITLE_RECORD: &str = r#"{"type":"ai-title","aiTitle":"Fix the login redirect","sessionId":"00000000-0000-4000-8000-000000000001"}"#;
+
+    #[test]
+    fn test_ai_title_record_emits_title_changed() {
+        assert_eq!(
+            parse_line(AI_TITLE_RECORD),
+            Some(AgentEvent::TitleChanged {
+                title: "Fix the login redirect".to_string()
+            })
+        );
+
+        // Nothing to adopt: no title, or only whitespace
+        assert_eq!(parse_line(r#"{"type":"ai-title","sessionId":"x"}"#), None);
+        assert_eq!(
+            parse_line(r#"{"type":"ai-title","aiTitle":"   ","sessionId":"x"}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn test_sidechain_ai_title_ignored() {
+        // No real transcript carries one today, but the rule is the same as for
+        // every other record: a subagent's title names its task, not the session
+        let sidechain = AI_TITLE_RECORD.replace(
+            r#""type":"ai-title","#,
+            r#""type":"ai-title","isSidechain":true,"#,
+        );
+        assert_ne!(sidechain, AI_TITLE_RECORD);
         assert_eq!(parse_line(&sidechain), None);
     }
 
