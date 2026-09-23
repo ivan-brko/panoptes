@@ -64,6 +64,52 @@ pub enum AgentEvent {
         tool: Option<String>,
     },
 
+    /// Something the agent was blocked on the user for went away without the
+    /// turn ending - a tool call denied without a dialog, or an MCP question
+    /// answered
+    ///
+    /// The turn carries on afterwards, so this demotes an open approval rather
+    /// than finishing anything.
+    ApprovalResolved {
+        /// The tool whose approval resolved, when the agent names one; `None`
+        /// resolves any approval
+        tool: Option<String>,
+    },
+
+    /// A subagent began running inside this session
+    ///
+    /// Claude's subagents share the parent's process and session, so unlike
+    /// Codex's they are reported by the agent itself, one at a time, rather
+    /// than inferred from files on disk.
+    SubagentStarted {
+        /// Pairs this with its [`AgentEvent::SubagentFinished`]
+        id: String,
+    },
+
+    /// A subagent finished
+    SubagentFinished {
+        /// Matches the id from [`AgentEvent::SubagentStarted`]
+        id: String,
+    },
+
+    /// A snapshot of the work that outlives the turn
+    ///
+    /// Background shells, monitors, backgrounded subagents and scheduled
+    /// prompts keep running - or will wake the session - after the turn has
+    /// settled into `Waiting`. Each figure replaces the last rather than
+    /// adding to it; `None` means the agent did not say, and leaves the known
+    /// figure alone.
+    BackgroundWork {
+        /// In-flight background tasks of every kind
+        tasks: Option<usize>,
+        /// Session-scoped scheduled prompts (`/loop` and friends)
+        crons: Option<usize>,
+        /// How many of `tasks` are subagents - only reported at the end of a
+        /// turn, when every subagent still running is a backgrounded one and
+        /// so is guaranteed to be listed
+        subagents: Option<usize>,
+    },
+
     /// The agent is reminding the user that nothing has happened
     ///
     /// Deliberately distinct from every other event: it reports the *absence*
