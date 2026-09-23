@@ -670,12 +670,14 @@ fn render_branch_sessions(
 
         if mode == SideMode::Full {
             // What the session wants, or failing that what it last said.
-            // The reason is the more useful of the two, so it wins.
-            let trailer = info
-                .attention
-                .as_ref()
-                .map(|reason| reason.summary())
-                .or_else(|| info.last_message.clone());
+            // The reason is the more useful of the two, so it wins. A failed
+            // turn has neither to add: the state already names the failure,
+            // and the last message is from the turn before it.
+            let trailer = match &info.attention {
+                _ if info.failed_turn().is_some() => None,
+                Some(reason) => Some(reason.summary()),
+                None => info.last_message.clone(),
+            };
             spans.push(Span::raw(format!("{} [{}]", info.name, state_display)));
             if let Some(trailer) = trailer {
                 spans.push(Span::styled(format!(" — {}", trailer), t.muted_style()));
@@ -752,10 +754,12 @@ fn render_project_settings(
 /// Shorten a state string for the compact density
 ///
 /// `Executing: Bash(ls)` becomes `Exec`, `Waiting - 3m` becomes `Waiting`: the
-/// qualifier is what a narrow pane cannot afford, not the state itself.
+/// qualifier is what a narrow pane cannot afford, not the state itself. A
+/// failed turn's `Waiting ✗ usage limit` drops its reason too - the `✗` badge
+/// marks the row until it is looked at, and the full density spells it out.
 pub(crate) fn compact_state(state_display: &str) -> String {
     let head = state_display
-        .split([':', '·', '-'])
+        .split([':', '·', '-', '✗'])
         .next()
         .unwrap_or(state_display)
         .trim();
@@ -1482,6 +1486,8 @@ mod tests {
     fn test_compact_state_keeps_the_state_and_drops_the_qualifier() {
         assert_eq!(compact_state("Executing: Bash(ls)"), "Exec");
         assert_eq!(compact_state("Waiting - 3m"), "Waiting");
+        assert_eq!(compact_state("Waiting ✗ usage limit"), "Waiting");
+        assert_eq!(compact_state("Waiting - 3m ✗ usage limit"), "Waiting");
         assert_eq!(compact_state("Waiting"), "Waiting");
         assert_eq!(compact_state("Suspended - idle 2h"), "Suspended");
     }

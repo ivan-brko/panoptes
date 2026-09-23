@@ -201,7 +201,8 @@ fn header_suffix(info: &SessionInfo, scroll_offset: usize) -> String {
     // the screen cannot say. The two states the scrollback cannot report are
     // the ones that survive: a process that died, and one Panoptes killed to
     // reclaim memory - both leave the output frozen mid-page, looking exactly
-    // like a session sitting at its prompt.
+    // like a session sitting at its prompt. So does a third, below: a prompt
+    // the agent fell back to because its turn failed.
     let state_display = match info.state {
         SessionState::Exited => {
             let reason = info
@@ -212,6 +213,13 @@ fn header_suffix(info: &SessionInfo, scroll_offset: usize) -> String {
             format!(" - Exited{}", reason)
         }
         SessionState::Suspended => " - Suspended".to_string(),
+        // The error scrolls away with the next thing printed, and after
+        // that a turn that died on a usage limit looks exactly like one that
+        // finished. The badge that said otherwise is cleared on sight.
+        SessionState::Waiting => info
+            .failed_turn()
+            .map(|reason| format!(" - \u{2717} {}", reason))
+            .unwrap_or_default(),
         _ => String::new(),
     };
     // The agent and the account it runs as are one fact - "Claude Code, signed
@@ -407,6 +415,20 @@ mod tests {
         let mut suspended = info(SessionType::ClaudeCode);
         suspended.state = SessionState::Suspended;
         assert_eq!(header_suffix(&suspended, 0), "[CC] - Suspended");
+    }
+
+    /// A failed turn leaves the agent at its prompt like a finished one; the
+    /// header keeps the reason once the error has scrolled off
+    #[test]
+    fn test_a_failed_turn_names_its_reason() {
+        let mut failed = info(SessionType::ClaudeCode);
+        failed.state = SessionState::Waiting;
+        failed.turn_failure = Some("usage limit".to_string());
+        assert_eq!(header_suffix(&failed, 0), "[CC] - \u{2717} usage limit");
+
+        // Only while it is sitting on that failure
+        failed.state = SessionState::Thinking;
+        assert_eq!(header_suffix(&failed, 0), "[CC]");
     }
 
     /// "Claude Code, signed in as dot-lambda" is one fact, so it gets one

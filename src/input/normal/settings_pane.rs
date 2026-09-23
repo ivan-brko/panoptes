@@ -1,8 +1,8 @@
 //! Pane 3 input: settings sections and their drill-downs
 //!
 //! The Notification toggles write straight through [`Config::save`] on every
-//! keystroke. That is safe precisely because these six fields are the ones the
-//! runtime re-reads on every event: nothing caches them, so a toggle takes
+//! keystroke. That is safe precisely because these seven fields are the ones
+//! the runtime re-reads on every event: nothing caches them, so a toggle takes
 //! effect on the next event with no reload path to build.
 //!
 //! The Theme picker inverts that: it repaints on every keystroke and writes
@@ -193,6 +193,10 @@ fn toggle_row(app: &mut App) -> bool {
             true
         }
         5 => {
+            app.config.notify_on.failed = !app.config.notify_on.failed;
+            true
+        }
+        6 => {
             app.config.attention_on_idle = !app.config.attention_on_idle;
             true
         }

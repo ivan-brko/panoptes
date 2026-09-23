@@ -4,7 +4,7 @@
 //! the btop/weechat shape, one list plus a description of the highlighted item,
 //! rather than htop's two columns, which needs width this pane does not have.
 //!
-//! Only the six Notification rows and the Theme presets are editable, and
+//! Only the seven Notification rows and the Theme presets are editable, and
 //! deliberately so: they are exactly the settings the runtime re-reads rather
 //! than caches, so a change takes effect immediately with no restart and no
 //! "restart required" badge. Everything numeric or path-shaped is shown
@@ -24,16 +24,17 @@ use crate::tui::views::pane_projects::clamp_line;
 use crate::tui::views::{truncate_string, window_rows};
 use crate::tui::widgets::selection::{selection_prefix, selection_style_with_accent};
 
-/// The six editable notification rows, in list order
+/// The seven editable notification rows, in list order
 ///
 /// Editable *only* because these are the fields the runtime re-reads on every
 /// event; nothing here needs a restart, so nothing here can be stale.
-pub const NOTIFICATION_ROWS: [&str; 6] = [
+pub const NOTIFICATION_ROWS: [&str; 7] = [
     "Notify me by",
     "…on approval needed",
     "…on turn finished",
     "…on tool stalled",
     "…on session crashed",
+    "…on turn failed",
     "Idle nudge counts as attention",
 ];
 
@@ -184,7 +185,7 @@ fn palette_marker(palette: Palette, config: &Config) -> &'static str {
 fn notification_description(index: usize) -> &'static str {
     match index {
         0 => "Space/Enter to change",
-        1..=5 => "Space/Enter to toggle · takes effect on the next event",
+        1..=6 => "Space/Enter to toggle · takes effect on the next event",
         _ => "",
     }
 }
@@ -289,7 +290,7 @@ fn render_sections(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext) {
     frame.render_widget(List::new(items), area);
 }
 
-/// The six live notification toggles
+/// The seven live notification rows
 fn render_notifications(frame: &mut Frame, area: Rect, ctx: &SettingsPaneContext) {
     let t = theme();
     let state = ctx.state;
@@ -380,13 +381,14 @@ fn row_line(
 }
 
 /// The value each notification row shows, in list order
-fn notification_values(config: &Config) -> [String; 6] {
+fn notification_values(config: &Config) -> [String; 7] {
     [
         format!("< {} >", method_label(config.notification_method)),
         checkbox(config.notify_on.approval),
         checkbox(config.notify_on.turn_complete),
         checkbox(config.notify_on.stalled),
         checkbox(config.notify_on.crashed),
+        checkbox(config.notify_on.failed),
         checkbox(config.attention_on_idle),
     ]
 }
@@ -547,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn test_notifications_shows_six_editable_rows() {
+    fn test_notifications_shows_seven_editable_rows() {
         let config = Config::default();
         let lines = render(60, &focused(SettingsNav::Notifications), &config);
 
@@ -557,6 +559,7 @@ mod tests {
             "{lines:?}"
         );
         assert!(contains_line(&lines, "[ ] …on tool stalled"), "{lines:?}");
+        assert!(contains_line(&lines, "[x] …on turn failed"), "{lines:?}");
         assert!(
             contains_line(&lines, "[ ] Idle nudge counts as attention"),
             "{lines:?}"
