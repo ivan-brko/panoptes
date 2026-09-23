@@ -7,6 +7,7 @@
 //! per-account shadow homes ([`homes`]).
 
 pub mod homes;
+pub mod merge;
 pub mod store;
 
 pub use homes::CodexHomes;
