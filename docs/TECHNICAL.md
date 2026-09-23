@@ -694,6 +694,28 @@ spawned with, and `Observed` from the agent itself (Codex's
 source, and a weaker one only when the model has changed, since the stronger
 figure described the previous model.
 
+**Copied parent history.** A forked Codex rollout - every subagent that inherits
+its parent's context is one - opens with a copy of the parent's history: the
+parent's own `session_meta`, then its turns, re-stamped to the instant of the
+fork and written in one burst. Read from the start, that copy would replay the
+parent's `task_started` / `task_complete` / `token_count` as if they were
+happening now. `codex::CopiedHistorySkip` drops it, using the most exact
+boundary the header allows:
+
+| Rollout | Boundary |
+|---|---|
+| Not a fork (no `forked_from_id`), or a referenced fork (`history_base`) | nothing was copied |
+| Paginated subagent | records with `ordinal` below the header's `subagent_history_start_ordinal` |
+| Legacy fork, 0.156.1 (not 0.145) | up to and including the fork's own `thread_settings_applied` (the one whose `thread_id` is this rollout's) |
+| Older legacy fork | the first gap of a second or more between record timestamps - a **heuristic** |
+
+The heuristic is the fallback only for rollouts too old to mark the boundary:
+the copy lands within milliseconds, the child's own work after a model round
+trip. Its known cost is the child's opening `task_started`, written a few
+milliseconds after the copy and indistinguishable from it. Attaching at EOF
+finds the same boundary first, so the backwards usage scan never reaches into
+the copy and a fresh fork does not show its parent's token count.
+
 **Threading.** The watcher runs on its own OS thread and is drained with
 `try_recv` each tick, the same shape as hook events. The reads are incremental,
 but a burst of tool output can append a lot at once and parsing that on the
@@ -707,11 +729,27 @@ exact. Liveness is not: there is no reliable "this subagent exited" signal, so
 it is inferred from recent writes. That is why the display is a count and not a
 claim, and why a session with subagents is never suspended.
 
-The same `forked_from_id` marker keeps `discover_session_id` from claiming a
-subagent rollout as a session's own conversation - they sit in the same working
-directory with their own fresh timestamps and otherwise match every criterion.
-Note that on a subagent rollout `payload.id` is the subagent's own ID while
-`payload.session_id` is its parent's.
+Not every rollout with subagent-shaped metadata is a subagent. Each header is
+classified as a `RolloutKind`, and only `Subagent` is counted:
+
+| Kind | `session_meta.payload` |
+|---|---|
+| `System` | `source.internal` (any), `thread_source` of `memory_consolidation` or `guardian_review`, `source.subagent` of `"memory_consolidation"`, or `source.subagent.other` of `"guardian"` |
+| `Subagent` | otherwise, any `source.subagent` (`thread_spawn`, `review`, `compact`, ...), `thread_source: "subagent"`, or a non-null `forked_from_id` |
+| `Session` | everything else (`source: "cli"`, `"exec"`, `"vscode"`, ...) |
+
+System threads are Codex working for itself: memory consolidation, and the
+guardian that reviews approval requests - which is forked from, and so names,
+the session it reviews for. Counting one would show subagents on a session that
+is only waiting for the user, and would keep it from ever being suspended.
+(Codex 0.156.1 runs memory consolidation ephemerally, so it writes no rollout;
+older versions did, filed as `source.subagent`.)
+
+The same classification keeps `discover_session_id` from claiming anything but a
+`Session` as a session's own conversation - subagent rollouts sit in the same
+working directory with their own fresh timestamps and otherwise match every
+criterion. Note that on a subagent rollout `payload.id` is the subagent's own ID
+while `payload.session_id` is its parent's.
 
 Setting `log_agent_events = true` writes every raw transcript line to
 `~/.panoptes/logs/agent-events/<session>.ndjson`, so the reader's interpretation
