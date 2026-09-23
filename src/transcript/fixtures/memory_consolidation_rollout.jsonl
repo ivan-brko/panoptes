@@ -1,0 +1,2 @@
+{"timestamp":"2026-09-23T10:00:00.000Z","type":"session_meta","payload":{"session_id":"00000000-0000-7000-8000-00000000c0de","id":"00000000-0000-7000-8000-00000000c0de","timestamp":"2026-09-23T10:00:00.000Z","cwd":"/Users/redacted/.codex/memories","originator":"codex_cli_rs","cli_version":"0.156.1","source":{"internal":"memory_consolidation"},"thread_source":"memory_consolidation","model_provider":"openai","history_mode":"paginated"}}
+{"timestamp":"2026-09-23T10:00:00.010Z","type":"event_msg","payload":{"type":"task_started","turn_id":"00000000-0000-7000-8000-000000000001"}}

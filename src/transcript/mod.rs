@@ -75,6 +75,9 @@ pub struct Tailer {
     partial: String,
     /// Trailing bytes that stop mid-character and cannot be decoded yet
     pending_bytes: Vec<u8>,
+    /// While set, lines are checked against the copy of a parent's history
+    /// that opens a forked Codex rollout, and the copy is not read as news
+    copied_history: Option<codex::CopiedHistorySkip>,
 }
 
 impl Tailer {
@@ -91,7 +94,14 @@ impl Tailer {
     /// discovered - are lost outright rather than merely delayed.
     pub fn attach(kind: TranscriptKind, path: PathBuf) -> (Self, Option<UsageSnapshot>) {
         let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let seed = seed_usage(kind, &path, len);
+        // A fork's copy of its parent's history carries the parent's token
+        // counts, which must not seed this rollout's display. Caught mid-copy,
+        // the tailer keeps skipping it as the rest arrives.
+        let (floor, copied_history) = match kind {
+            TranscriptKind::Codex => copied_history_end(&path, len),
+            TranscriptKind::Claude => (0, None),
+        };
+        let seed = seed_usage(kind, &path, len, floor);
 
         (
             Self {
@@ -100,6 +110,7 @@ impl Tailer {
                 offset: len,
                 partial: String::new(),
                 pending_bytes: Vec::new(),
+                copied_history,
             },
             seed,
         )
@@ -108,7 +119,9 @@ impl Tailer {
     /// Follow a file from the beginning
     ///
     /// For a transcript this session wrote itself, where everything in the file
-    /// describes what this session has just been doing.
+    /// describes what this session has just been doing - except, in a forked
+    /// Codex rollout, the copy of the parent's history it opens with, which is
+    /// skipped (see [`codex::CopiedHistory`]).
     pub fn from_start(kind: TranscriptKind, path: PathBuf) -> Self {
         Self {
             kind,
@@ -116,6 +129,10 @@ impl Tailer {
             offset: 0,
             partial: String::new(),
             pending_bytes: Vec::new(),
+            copied_history: match kind {
+                TranscriptKind::Codex => Some(codex::CopiedHistorySkip::new()),
+                TranscriptKind::Claude => None,
+            },
         }
     }
 
@@ -194,6 +211,15 @@ impl Tailer {
                 continue;
             }
             raw.push(line.to_string());
+            if let Some(skip) = &mut self.copied_history {
+                let skipped = skip.skips(line);
+                if skip.is_done() {
+                    self.copied_history = None;
+                }
+                if skipped {
+                    continue;
+                }
+            }
             if let Some(event) = self.kind.parse_line(line) {
                 events.push(event);
             }
@@ -252,23 +278,71 @@ fn read_fully(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize
     Ok(total)
 }
 
+/// Where the copy of a parent's history at the top of a Codex rollout ends
+///
+/// Returns the byte offset of the first line that is the rollout's own - `0`
+/// when nothing was copied - and, when the copy runs right up to `len`, the
+/// skipper still inside it, so a tailer can keep skipping what arrives next.
+///
+/// Reads forwards from the start, because that is the only direction the copy
+/// can be recognised in. The read stops at the header for anything that is
+/// not a fork, so only forks pay for more than one line.
+fn copied_history_end(path: &Path, len: u64) -> (u64, Option<codex::CopiedHistorySkip>) {
+    use std::io::BufRead;
+
+    let Ok(file) = std::fs::File::open(path) else {
+        return (0, None);
+    };
+    let mut reader = std::io::BufReader::new(file.take(len));
+    let mut skip = codex::CopiedHistorySkip::new();
+    let mut offset = 0u64;
+    let mut line = Vec::new();
+
+    loop {
+        line.clear();
+        let read = match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read as u64,
+        };
+        // An unterminated final line is still being written; it belongs to
+        // whatever reads next
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        let text = String::from_utf8_lossy(&line);
+        let skipped = skip.skips(text.trim_end());
+        if skip.is_done() {
+            // The line that ended the copy was either its last record (a
+            // skipped marker) or the first of the rollout's own
+            return (if skipped { offset + read } else { offset }, None);
+        }
+        offset += read;
+    }
+
+    (offset, Some(skip))
+}
+
 /// Scan backwards through the end of a file for the most recent usage figures
-fn seed_usage(kind: TranscriptKind, path: &Path, len: u64) -> Option<UsageSnapshot> {
-    if len == 0 {
+///
+/// Nothing before `floor` is read: that is copied parent history, whose token
+/// counts are the parent's.
+fn seed_usage(kind: TranscriptKind, path: &Path, len: u64, floor: u64) -> Option<UsageSnapshot> {
+    let start = len.saturating_sub(SEED_SCAN_BYTES).max(floor);
+    if start >= len {
         return None;
     }
 
     let mut file = std::fs::File::open(path).ok()?;
-    let start = len.saturating_sub(SEED_SCAN_BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
 
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
     let text = String::from_utf8_lossy(&buf);
 
-    // Skip the first line when the window started mid-record
+    // Skip the first line when the window started mid-record. `floor` is
+    // always a line boundary, so a window starting there is whole.
     let mut lines: Vec<&str> = text.split('\n').collect();
-    if start > 0 && !lines.is_empty() {
+    if start > floor && !lines.is_empty() {
         lines.remove(0);
     }
 
@@ -594,6 +668,127 @@ mod tests {
             2,
             "a session's own opening events must not be skipped"
         );
+    }
+
+    #[test]
+    fn test_from_start_skips_copied_parent_history() {
+        // A real 0.142 fork, redacted: the child's header, the parent's copied
+        // header and turns re-stamped to the fork instant, then the child's
+        // own work seconds later. Old enough to carry no end-of-copy marker,
+        // so the one-second gap heuristic is what finds the boundary.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        append(&path, include_str!("fixtures/forked_legacy_rollout.jsonl"));
+
+        let mut tailer = Tailer::from_start(TranscriptKind::Codex, path.clone());
+        let (events, raw) = tailer.poll();
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::ToolStarted {
+                    key: "child-call-1".to_string(),
+                    name: "shell".to_string()
+                },
+                AgentEvent::ToolFinished {
+                    key: "child-call-1".to_string()
+                },
+                AgentEvent::Usage(UsageSnapshot {
+                    total_tokens: Some(12_000),
+                    context_window: Some(258_400),
+                    context_window_source: crate::agent::events::WindowSource::Observed,
+                    model: Some("child-model".to_string()),
+                    ..Default::default()
+                }),
+                AgentEvent::TurnCompleted {
+                    last_message: Some("[redacted child answer]".to_string())
+                },
+            ],
+            "only the child's own records are news; the parent's turns, tool \
+             and 990k-token usage are history. The child's own task_started, \
+             6ms after the copy, is the heuristic's known casualty."
+        );
+        assert_eq!(raw.len(), 17, "the debug log still sees every line");
+
+        // Past the copy, the tailer reads normally
+        append(
+            &path,
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+        );
+        assert_eq!(
+            tailer.poll().0,
+            vec![AgentEvent::TurnStarted { title: None }]
+        );
+    }
+
+    #[test]
+    fn test_from_start_skips_a_copy_that_arrives_across_polls() {
+        // Caught mid-copy: the rest of the burst must still be skipped, and
+        // the first line after the marker read
+        let fixture = include_str!("fixtures/forked_marked_rollout.jsonl");
+        let lines: Vec<&str> = fixture.lines().collect();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let mut tailer = Tailer::from_start(TranscriptKind::Codex, path.clone());
+
+        for line in &lines[..4] {
+            append(&path, &format!("{line}\n"));
+        }
+        assert!(tailer.poll().0.is_empty());
+
+        for line in &lines[4..] {
+            append(&path, &format!("{line}\n"));
+        }
+        assert_eq!(
+            tailer.poll().0,
+            vec![
+                AgentEvent::TurnStarted { title: None },
+                AgentEvent::ToolStarted {
+                    key: "child-call-1".to_string(),
+                    name: "shell".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_seed_usage_ignores_copied_history() {
+        // A fork attached to before it has done anything of its own: the only
+        // token counts in the file are the parent's, copied, and must not
+        // show as this conversation's usage
+        let fixture = include_str!("fixtures/forked_marked_rollout.jsonl");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        append(&path, fixture);
+
+        let (mut tailer, seed) = Tailer::attach(TranscriptKind::Codex, path.clone());
+        assert_eq!(seed, None, "the parent's 990k tokens must not seed");
+
+        // Once the child reports its own figures, those seed
+        append(&path, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model\":\"child-model\",\"total_token_usage\":{\"total_tokens\":1200}}}}\n");
+        let (_, seed) = Tailer::attach(TranscriptKind::Codex, path.clone());
+        assert_eq!(seed.and_then(|u| u.total_tokens), Some(1_200));
+
+        // A fork caught mid-copy keeps skipping the rest of it
+        let paginated = dir.path().join("paginated.jsonl");
+        let lines: Vec<&str> = include_str!("fixtures/forked_paginated_rollout.jsonl")
+            .lines()
+            .collect();
+        for line in &lines[..2] {
+            append(&paginated, &format!("{line}\n"));
+        }
+        let (mut mid_copy, seed) = Tailer::attach(TranscriptKind::Codex, paginated.clone());
+        assert_eq!(seed, None);
+        for line in &lines[2..] {
+            append(&paginated, &format!("{line}\n"));
+        }
+        assert_eq!(
+            mid_copy.poll().0,
+            vec![AgentEvent::TurnStarted { title: None }],
+            "the rest of the copy is skipped, the child's own turn is read"
+        );
+
+        // And the first tailer, attached past the copy, reads the child's news
+        assert_eq!(tailer.poll().0.len(), 1);
     }
 
     #[test]

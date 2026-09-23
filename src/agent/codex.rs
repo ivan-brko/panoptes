@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::adapter::{AgentAdapter, SpawnConfig};
-use crate::transcript::codex::{read_session_meta, rollout_files};
+use crate::transcript::codex::{read_session_meta, rollout_files, RolloutKind};
 
 /// Notify hook script filename
 const CODEX_NOTIFY_SCRIPT_NAME: &str = "codex-notify.sh";
@@ -73,8 +73,10 @@ pub fn discover_session_id(
         // with its own fresh timestamp, so it matches every other criterion
         // here and would be claimed as if it were the session's own
         // conversation. Resuming that pointer would reattach to a subagent
-        // rather than the conversation the user was having.
-        if meta.is_subagent {
+        // rather than the conversation the user was having. Codex's own
+        // background threads (memory consolidation, the guardian) are no
+        // better a thing to reattach to, so only a real session qualifies.
+        if meta.kind != RolloutKind::Session {
             continue;
         }
         let same_cwd = meta
@@ -1604,6 +1606,40 @@ notify = ["bash", "-lc", "'/test/codex-notify.sh' \"$@\"; 'echo' 'legacy-hook'"]
         assert_eq!(
             discover_session_id(home.path(), cwd.path(), started, &nothing_claimed()).as_deref(),
             Some("parent-id")
+        );
+    }
+
+    #[test]
+    fn test_discover_session_id_never_claims_system_rollout() {
+        // A background thread writes its rollout with a fresh timestamp; if
+        // its cwd happens to match, it passes every other criterion. The
+        // redacted fixture's cwd is replaced by the session's own to prove
+        // the classification alone rejects it.
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let started = an_hour_ago();
+        let at = started + chrono::Duration::minutes(1);
+
+        let fixture = include_str!("../transcript/fixtures/memory_consolidation_rollout.jsonl");
+        let mut header: serde_json::Value =
+            serde_json::from_str(fixture.lines().next().unwrap()).unwrap();
+        header["payload"]["cwd"] = serde_json::json!(cwd.path().to_string_lossy());
+        header["payload"]["timestamp"] = serde_json::json!(at.to_rfc3339());
+        let dir = home.path().join("sessions/2026/09/23");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rollout-memory.jsonl"), format!("{header}\n")).unwrap();
+
+        assert_eq!(
+            discover_session_id(home.path(), cwd.path(), started, &nothing_claimed()),
+            None,
+            "a system thread must never be claimed as a session's conversation"
+        );
+
+        // The session's own rollout is still found beside it
+        write_rollout(home.path(), "own-id", cwd.path(), at);
+        assert_eq!(
+            discover_session_id(home.path(), cwd.path(), started, &nothing_claimed()).as_deref(),
+            Some("own-id")
         );
     }
 

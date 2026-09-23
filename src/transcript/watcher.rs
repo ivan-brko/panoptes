@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use crate::agent::events::AgentEvent;
 use crate::session::SessionId;
 
+use super::codex::RolloutKind;
 use super::{Tailer, TranscriptKind};
 
 /// How often to check followed files for new content
@@ -252,12 +253,18 @@ fn recent_rollouts(sessions_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// How many of these rollouts are subagents of the given conversation
-fn count_subagents(rollouts: &[PathBuf], conversation_id: &str) -> usize {
+///
+/// Only [`RolloutKind::Subagent`] counts. A system thread can name the same
+/// parent - the guardian is forked from the session it reviews - but nothing
+/// the user is waiting on runs in it, and counting it would keep a Waiting
+/// session from ever being suspended.
+pub(crate) fn count_subagents(rollouts: &[PathBuf], conversation_id: &str) -> usize {
     rollouts
         .iter()
         .filter(|path| {
             super::codex::read_session_meta(path).is_some_and(|meta| {
-                meta.is_subagent && meta.parent_id.as_deref() == Some(conversation_id)
+                meta.kind == RolloutKind::Subagent
+                    && meta.parent_id.as_deref() == Some(conversation_id)
             })
         })
         .count()
@@ -370,6 +377,41 @@ mod tests {
         assert_eq!(count_subagents(&recent, "parent"), 2);
         assert_eq!(count_subagents(&recent, "someone-else"), 1);
         assert_eq!(count_subagents(&recent, "nobody"), 0);
+    }
+
+    #[test]
+    fn test_count_subagents_ignores_system_threads() {
+        let dir = TempDir::new().unwrap();
+        let sessions = dir.path();
+
+        // Codex's own background threads, including a guardian forked from
+        // the very conversation being counted
+        write_rollout(
+            sessions,
+            "rollout-guardian.jsonl",
+            serde_json::json!({"id": "g", "forked_from_id": "parent",
+                "source": {"subagent": {"other": "guardian"}},
+                "thread_source": "guardian_review"}),
+        );
+        write_rollout(
+            sessions,
+            "rollout-memory.jsonl",
+            serde_json::json!({"id": "m", "forked_from_id": "parent",
+                "source": {"subagent": "memory_consolidation"}}),
+        );
+        let recent = recent_rollouts(sessions);
+        assert_eq!(count_subagents(&recent, "parent"), 0);
+
+        // A real subagent beside them is still counted, alone
+        write_rollout(
+            sessions,
+            "rollout-child.jsonl",
+            serde_json::json!({"id": "c", "forked_from_id": "parent",
+                "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}},
+                "thread_source": "subagent"}),
+        );
+        let recent = recent_rollouts(sessions);
+        assert_eq!(count_subagents(&recent, "parent"), 1);
     }
 
     #[test]
