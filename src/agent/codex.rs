@@ -17,6 +17,15 @@ use crate::transcript::codex::{read_session_meta, rollout_files};
 
 /// Notify hook script filename
 const CODEX_NOTIFY_SCRIPT_NAME: &str = "codex-notify.sh";
+/// `$0` for the `bash -c` command that chains Panoptes' notify hook in front
+/// of the user's, so the event Codex appends lands in `$1` rather than `$0`
+const CHAIN_ARGV0: &str = "panoptes-notify";
+/// What older Panoptes versions wrote for a `'` inside a single-quoted word
+///
+/// It does not round-trip through a shell - `it's` came out as `it"\"s` -
+/// which is one reason those chains are repaired. Kept only to recognise and
+/// decode them.
+const LEGACY_QUOTE_ESCAPE: &str = r#"'\"'\"'"#;
 /// Disable Codex alternate screen so Panoptes scrollback behaves like Claude sessions.
 const NO_ALT_SCREEN_FLAG: &str = "--no-alt-screen";
 
@@ -176,12 +185,15 @@ impl CodexAdapter {
 # Panoptes notify hook for OpenAI Codex CLI
 # Silently exits for non-Panoptes Codex instances
 #
+# Codex spawns this hook directly (no shell) and appends the event JSON as
+# the final argument, so the event is "${{@: -1}}". stdin is /dev/null and
+# stdout/stderr are discarded. This hook ignores the event on purpose.
+#
 # CRITICAL: Do NOT use blocking stdin reads (e.g. `read -r`) in this script.
-# Codex executes notify hooks synchronously and pipes event JSON to stdin.
-# A blocking read stalls Codex's output pipeline, causing typed characters
-# to be dropped during streaming. If stdin data is needed in the future,
-# it MUST be consumed non-blockingly (e.g. `cat > /dev/null &` to drain,
-# or read in a backgrounded subshell).
+# Codex writes nothing to stdin; the event is on argv. Whatever runs this
+# hook - a Codex version, or a wrapper chained in front of it - must never
+# be left waiting on a stdin that may not be /dev/null, because a stalled
+# hook has been seen to drop typed characters while Codex streams.
 
 SESSION_ID="${{PANOPTES_SESSION_ID:-}}"
 if [ -z "$SESSION_ID" ]; then exit 0; fi
@@ -225,15 +237,26 @@ exit 0
                 let Some(existing_cmd) = Self::parse_notify_command(existing) else {
                     return NotifyPlan::Unsupported;
                 };
-                if Self::notify_command_mentions_script(&existing_cmd, script) {
-                    // Already chained through Panoptes (or equivalent), avoid
-                    // duplicate wrapping — and avoid rewriting a file that
-                    // needs no change.
-                    NotifyPlan::AlreadyConfigured
-                } else {
+                if !Self::notify_command_mentions_script(&existing_cmd, script) {
                     let chained_cmd = Self::build_chained_notify_command(script, &existing_cmd);
-                    NotifyPlan::Set(Self::notify_array_value(&chained_cmd))
+                    return NotifyPlan::Set(Self::notify_array_value(&chained_cmd));
                 }
+                if Self::is_legacy_chain(&existing_cmd) {
+                    // An older Panoptes chained with a command that dropped
+                    // the event on the way to the user's hook. Rewrite it,
+                    // but only if the user's argv comes back out exactly -
+                    // a repair that guessed would silently change their hook.
+                    return match Self::recover_legacy_chain(&existing_cmd, script) {
+                        Some(user_cmd) => NotifyPlan::Set(Self::notify_array_value(
+                            &Self::build_chained_notify_command(script, &user_cmd),
+                        )),
+                        None => NotifyPlan::Unsupported,
+                    };
+                }
+                // Already chained through Panoptes (or merged by hand), avoid
+                // duplicate wrapping — and avoid rewriting a file that needs
+                // no change.
+                NotifyPlan::AlreadyConfigured
             }
         }
     }
@@ -337,11 +360,18 @@ exit 0
                     Some(cmd)
                 }
             }
-            // Codex supports command strings in addition to argv arrays.
+            // Codex itself only accepts an argv array (`notify` is a
+            // `Vec<String>` in its config), so a string cannot be run as-is.
+            // Treat it as the command line it reads as, with Codex's
+            // arguments appended: the event reaches it as it would an argv
+            // hook. Plain `-c`, not `-lc` - Codex runs nothing through a
+            // login shell, and sourcing the user's profile on every turn is
+            // slow and leaks whatever the profile prints.
             toml::Value::String(shell_cmd) => Some(vec![
                 "bash".to_string(),
-                "-lc".to_string(),
-                shell_cmd.clone(),
+                "-c".to_string(),
+                format!("{shell_cmd} \"$@\""),
+                CHAIN_ARGV0.to_string(),
             ]),
             _ => None,
         }
@@ -352,10 +382,20 @@ exit 0
         cmd.iter().any(|part| part.contains(script.as_ref()))
     }
 
+    /// Quote one word for a POSIX shell, so it arrives as exactly one argument
     fn shell_quote(arg: &str) -> String {
-        format!("'{}'", arg.replace('\'', r#"'\"'\"'"#))
+        format!("'{}'", arg.replace('\'', r"'\''"))
     }
 
+    /// Chain Panoptes' hook in front of the user's own
+    ///
+    /// Codex spawns `notify` directly and appends the event JSON as one final
+    /// argument. Under `bash -c`, the first argument after the script is `$0`,
+    /// not `$1`, so the chain supplies its own `$0` ([`CHAIN_ARGV0`]) and the
+    /// event lands in `"$@"`, which both hooks are then given unchanged.
+    ///
+    /// The hooks are joined with `;`, not `&&`: the user's hook runs whether
+    /// or not ours succeeds, so Panoptes can never suppress it.
     fn build_chained_notify_command(
         notify_script_path: &Path,
         existing_notify_cmd: &[String],
@@ -367,8 +407,95 @@ exit 0
             .collect::<Vec<_>>()
             .join(" ");
 
-        let script = format!("{panoptes_hook} \"$@\"; {existing}");
-        vec!["bash".to_string(), "-lc".to_string(), script]
+        let script = format!("{panoptes_hook} \"$@\"; {existing} \"$@\"");
+        vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            script,
+            CHAIN_ARGV0.to_string(),
+        ]
+    }
+
+    /// Whether `cmd` has the shape older Panoptes versions chained with
+    ///
+    /// That was `["bash", "-lc", "'<ours>' \"$@\"; '<theirs>'..."]`: a login
+    /// shell, and no `$0` placeholder, so the event Codex appended became
+    /// `$0` and neither hook received it. Only called on a command that
+    /// already mentions our script.
+    fn is_legacy_chain(cmd: &[String]) -> bool {
+        matches!(cmd, [bash, flag, _] if bash == "bash" && flag == "-lc")
+    }
+
+    /// Recover the user's own argv from a legacy chain, or `None` if it
+    /// cannot be recovered exactly
+    ///
+    /// The legacy chain quoted every word with [`LEGACY_QUOTE_ESCAPE`] for
+    /// embedded single quotes. The words are decoded, then quoted again the
+    /// old way; only a result that reproduces the stored command byte for
+    /// byte is trusted. Anything hand-edited, truncated, or otherwise off that
+    /// exact shape is refused rather than guessed at.
+    fn recover_legacy_chain(cmd: &[String], script: &Path) -> Option<Vec<String>> {
+        let [_, _, chain] = cmd else {
+            return None;
+        };
+        let prefix = format!(
+            "{} \"$@\"; ",
+            Self::legacy_shell_quote(&script.to_string_lossy())
+        );
+        let user_words = chain.strip_prefix(&prefix)?;
+        let user_cmd = Self::decode_legacy_quoted_words(user_words)?;
+
+        let reencoded = user_cmd
+            .iter()
+            .map(|word| Self::legacy_shell_quote(word))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if reencoded != user_words {
+            return None;
+        }
+        // The legacy writer never chained over a command naming our script,
+        // so one that does was not written by it
+        if Self::notify_command_mentions_script(&user_cmd, script) {
+            return None;
+        }
+        Some(user_cmd)
+    }
+
+    /// How the legacy chain quoted a word (see [`LEGACY_QUOTE_ESCAPE`])
+    fn legacy_shell_quote(arg: &str) -> String {
+        format!("'{}'", arg.replace('\'', LEGACY_QUOTE_ESCAPE))
+    }
+
+    /// Split space-separated words quoted by [`Self::legacy_shell_quote`]
+    ///
+    /// Inside such a word the only `'` characters are its closing quote and
+    /// the start of [`LEGACY_QUOTE_ESCAPE`], so the decoding is unambiguous.
+    fn decode_legacy_quoted_words(mut rest: &str) -> Option<Vec<String>> {
+        let mut words = Vec::new();
+        loop {
+            rest = rest.strip_prefix('\'')?;
+            let mut word = String::new();
+            loop {
+                let quote = rest.find('\'')?;
+                word.push_str(&rest[..quote]);
+                rest = &rest[quote..];
+                match rest.strip_prefix(LEGACY_QUOTE_ESCAPE) {
+                    Some(after) => {
+                        word.push('\'');
+                        rest = after;
+                    }
+                    None => {
+                        rest = &rest[1..];
+                        break;
+                    }
+                }
+            }
+            words.push(word);
+            if rest.is_empty() {
+                return Some(words);
+            }
+            rest = rest.strip_prefix(' ')?;
+        }
     }
 
     fn detect_existing_notify_hook_path(
@@ -868,11 +995,13 @@ notify = ["echo", "legacy-hook"]
         let config: toml::Value = toml::from_str(&content).unwrap();
 
         let notify = config.get("notify").unwrap().as_array().unwrap();
+        assert_eq!(notify.len(), 4);
         assert_eq!(notify[0].as_str().unwrap(), "bash");
-        assert_eq!(notify[1].as_str().unwrap(), "-lc");
+        assert_eq!(notify[1].as_str().unwrap(), "-c");
         let script = notify[2].as_str().unwrap();
         assert!(script.contains("/test/codex-notify.sh"));
-        assert!(script.contains("'echo' 'legacy-hook'"));
+        assert!(script.contains("'echo' 'legacy-hook' \"$@\""));
+        assert_eq!(notify[3].as_str(), Some(CHAIN_ARGV0));
 
         // Existing settings should still be present.
         assert_eq!(config.get("model").unwrap().as_str().unwrap(), "o3-mini");
@@ -980,11 +1109,13 @@ notify = ["bash", "__LEGACY__", 42]
             panic!("expected Set, got {plan:?}");
         };
         let arr = value.as_array().unwrap();
+        assert_eq!(arr.len(), 4);
         assert_eq!(arr[0].as_str(), Some("bash"));
-        assert_eq!(arr[1].as_str(), Some("-lc"));
+        assert_eq!(arr[1].as_str(), Some("-c"));
         let script = arr[2].as_str().unwrap();
         assert!(script.contains("/test/codex-notify.sh"));
-        assert!(script.contains("'echo' 'legacy-hook'"));
+        assert!(script.contains("'echo' 'legacy-hook' \"$@\""));
+        assert_eq!(arr[3].as_str(), Some(CHAIN_ARGV0));
     }
 
     #[test]
@@ -1008,12 +1139,294 @@ notify = ["bash", "__LEGACY__", 42]
 
     #[test]
     fn test_plan_notify_recognises_a_string_command_mentioning_the_script() {
-        // Codex accepts a shell command string as well as an argv array
+        // Codex itself rejects a string, but one naming our script was put
+        // there on purpose: leave it alone
         let existing = toml::Value::String("/test/codex-notify.sh \"$@\"; my-own-hook".to_string());
         assert_eq!(
             CodexAdapter::plan_notify(Some(&existing), &panoptes_script()),
             NotifyPlan::AlreadyConfigured
         );
+    }
+
+    // The chained notify command, executed
+    //
+    // A string comparison cannot catch the bug these guard against: the old
+    // chain looked right and still delivered the event to neither hook.
+
+    /// An event as Codex would send it, with everything a shell could mangle
+    const EVENT_JSON: &str = r#"{"type":"agent-turn-complete","last-assistant-message":"it's \"done\" - cost $5, `id` $(id) ${HOME} \\n"}"#;
+
+    /// A hook that records every argument it is given, NUL-terminated, to `out`
+    #[cfg(unix)]
+    fn recording_hook(path: &Path, out: &Path) -> PathBuf {
+        let script = format!(
+            "#!/bin/bash\nfor arg in \"$@\"; do printf '%s\\0' \"$arg\"; done > {}\n",
+            CodexAdapter::shell_quote(&out.to_string_lossy())
+        );
+        super::super::install_executable_script(path, &script).unwrap();
+        path.to_path_buf()
+    }
+
+    /// What a [`recording_hook`] was called with, or `None` if it never ran
+    #[cfg(unix)]
+    fn recorded_args(out: &Path) -> Option<Vec<String>> {
+        let bytes = std::fs::read(out).ok()?;
+        let text = String::from_utf8(bytes).unwrap();
+        Some(
+            text.split_terminator('\0')
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Run a `notify` value exactly as Codex does: argv spawned directly, no
+    /// shell, the event appended as one final argument, stdin at /dev/null
+    #[cfg(unix)]
+    fn run_as_codex(notify: &toml::Value, event: &str) {
+        let argv = CodexAdapter::parse_notify_command(notify).expect("argv");
+        // The exit status is the user hook's, and Codex ignores it; only what
+        // the hooks recorded matters
+        std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .arg(event)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run notify command");
+    }
+
+    #[cfg(unix)]
+    fn chained_value(panoptes_hook: &Path, user_cmd: &[String]) -> toml::Value {
+        CodexAdapter::notify_array_value(&CodexAdapter::build_chained_notify_command(
+            panoptes_hook,
+            user_cmd,
+        ))
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chained_notify_passes_event_to_both_hooks() {
+        let dir = TempDir::new().unwrap();
+        let ours_out = dir.path().join("ours.out");
+        let theirs_out = dir.path().join("theirs.out");
+        let ours = recording_hook(&dir.path().join("ours.sh"), &ours_out);
+        let theirs = recording_hook(&dir.path().join("theirs.sh"), &theirs_out);
+
+        let notify = chained_value(&ours, &[theirs.to_string_lossy().to_string()]);
+        run_as_codex(&notify, EVENT_JSON);
+
+        assert_eq!(recorded_args(&ours_out), Some(vec![EVENT_JSON.to_string()]));
+        assert_eq!(
+            recorded_args(&theirs_out),
+            Some(vec![EVENT_JSON.to_string()])
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chained_notify_user_hook_runs_when_panoptes_hook_fails() {
+        let dir = TempDir::new().unwrap();
+        let theirs_out = dir.path().join("theirs.out");
+        let theirs = recording_hook(&dir.path().join("theirs.sh"), &theirs_out);
+        let ours = dir.path().join("ours.sh");
+        super::super::install_executable_script(&ours, "#!/bin/bash\nexit 3\n").unwrap();
+
+        run_as_codex(
+            &chained_value(&ours, &[theirs.to_string_lossy().to_string()]),
+            EVENT_JSON,
+        );
+        assert_eq!(
+            recorded_args(&theirs_out),
+            Some(vec![EVENT_JSON.to_string()]),
+            "a failing Panoptes hook must not suppress the user's"
+        );
+
+        // Nor must one that is missing altogether
+        std::fs::remove_file(&theirs_out).unwrap();
+        run_as_codex(
+            &chained_value(
+                &dir.path().join("no-such-hook.sh"),
+                &[theirs.to_string_lossy().to_string()],
+            ),
+            EVENT_JSON,
+        );
+        assert_eq!(
+            recorded_args(&theirs_out),
+            Some(vec![EVENT_JSON.to_string()])
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chained_notify_quotes_user_argv_with_spaces_and_quotes() {
+        let dir = TempDir::new().unwrap();
+        let ours_out = dir.path().join("ours.out");
+        let theirs_out = dir.path().join("theirs.out");
+        let ours = recording_hook(&dir.path().join("ours.sh"), &ours_out);
+        // The hook itself lives somewhere a shell would split and unquote
+        let awkward_dir = dir.path().join("it's a \"dir\" $HOME");
+        let theirs = recording_hook(&awkward_dir.join("hook.sh"), &theirs_out);
+
+        let user_cmd = vec![
+            "bash".to_string(),
+            theirs.to_string_lossy().to_string(),
+            "--title".to_string(),
+            "it's \"quoted\"".to_string(),
+            "$HOME `id` ;&|*".to_string(),
+            String::new(),
+        ];
+        run_as_codex(&chained_value(&ours, &user_cmd), EVENT_JSON);
+
+        let mut expected = user_cmd[2..].to_vec();
+        expected.push(EVENT_JSON.to_string());
+        assert_eq!(recorded_args(&theirs_out), Some(expected));
+        assert_eq!(recorded_args(&ours_out), Some(vec![EVENT_JSON.to_string()]));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_chained_string_form_notify_receives_the_event() {
+        let dir = TempDir::new().unwrap();
+        let ours_out = dir.path().join("ours.out");
+        let theirs_out = dir.path().join("theirs.out");
+        let ours = recording_hook(&dir.path().join("ours.sh"), &ours_out);
+        let theirs = recording_hook(&dir.path().join("theirs.sh"), &theirs_out);
+
+        let existing = toml::Value::String(format!(
+            "{} --flag",
+            CodexAdapter::shell_quote(&theirs.to_string_lossy())
+        ));
+        let NotifyPlan::Set(notify) = CodexAdapter::plan_notify(Some(&existing), &ours) else {
+            panic!("a string-form notify should be chained");
+        };
+        assert_eq!(notify.as_array().unwrap()[1].as_str(), Some("-c"));
+        run_as_codex(&notify, EVENT_JSON);
+
+        assert_eq!(
+            recorded_args(&theirs_out),
+            Some(vec!["--flag".to_string(), EVENT_JSON.to_string()])
+        );
+        assert_eq!(recorded_args(&ours_out), Some(vec![EVENT_JSON.to_string()]));
+    }
+
+    // Repairing chains written by older Panoptes versions
+
+    /// A chain exactly as older Panoptes versions wrote it
+    fn legacy_chain(chain: &str) -> toml::Value {
+        CodexAdapter::notify_array_value(&[
+            "bash".to_string(),
+            "-lc".to_string(),
+            chain.to_string(),
+        ])
+    }
+
+    #[test]
+    fn test_plan_notify_repairs_legacy_chain() {
+        let existing = legacy_chain(r#"'/test/codex-notify.sh' "$@"; 'echo' 'legacy-hook'"#);
+        assert_eq!(
+            CodexAdapter::plan_notify(Some(&existing), &panoptes_script()),
+            NotifyPlan::Set(CodexAdapter::notify_array_value(
+                &CodexAdapter::build_chained_notify_command(
+                    &panoptes_script(),
+                    &["echo".to_string(), "legacy-hook".to_string()],
+                )
+            ))
+        );
+
+        // A word with an embedded quote, in the legacy escaping
+        let existing =
+            legacy_chain(r#"'/test/codex-notify.sh' "$@"; '/hooks/my hook.sh' 'it'\"'\"'s' ''"#);
+        assert_eq!(
+            CodexAdapter::plan_notify(Some(&existing), &panoptes_script()),
+            NotifyPlan::Set(CodexAdapter::notify_array_value(
+                &CodexAdapter::build_chained_notify_command(
+                    &panoptes_script(),
+                    &[
+                        "/hooks/my hook.sh".to_string(),
+                        "it's".to_string(),
+                        String::new(),
+                    ],
+                )
+            ))
+        );
+    }
+
+    #[test]
+    fn test_plan_notify_new_chain_is_already_configured() {
+        let user_cmd = ["notify-send".to_string(), "it's done".to_string()];
+        let chained = CodexAdapter::notify_array_value(
+            &CodexAdapter::build_chained_notify_command(&panoptes_script(), &user_cmd),
+        );
+        assert_eq!(
+            CodexAdapter::plan_notify(Some(&chained), &panoptes_script()),
+            NotifyPlan::AlreadyConfigured
+        );
+
+        // The value a repair writes is itself left alone next time
+        let legacy = legacy_chain(r#"'/test/codex-notify.sh' "$@"; 'notify-send'"#);
+        let NotifyPlan::Set(repaired) =
+            CodexAdapter::plan_notify(Some(&legacy), &panoptes_script())
+        else {
+            panic!("legacy chain should be repaired");
+        };
+        assert_eq!(
+            CodexAdapter::plan_notify(Some(&repaired), &panoptes_script()),
+            NotifyPlan::AlreadyConfigured
+        );
+    }
+
+    #[test]
+    fn test_plan_notify_unparseable_legacy_chain_is_unsupported() {
+        for chain in [
+            // Hand-edited: an unquoted word
+            r#"'/test/codex-notify.sh' "$@"; echo legacy-hook"#,
+            // Truncated mid-word
+            r#"'/test/codex-notify.sh' "$@"; 'echo' 'legacy"#,
+            // Nothing chained after ours
+            r#"'/test/codex-notify.sh' "$@"; "#,
+            // Doubled separator
+            r#"'/test/codex-notify.sh' "$@"; 'echo'  'legacy-hook'"#,
+            // Our script, but not the prefix the legacy writer produced
+            r#"/test/codex-notify.sh; 'echo' 'legacy-hook'"#,
+            // A user argv that itself names our script
+            r#"'/test/codex-notify.sh' "$@"; 'bash' '/test/codex-notify.sh'"#,
+        ] {
+            assert_eq!(
+                CodexAdapter::plan_notify(Some(&legacy_chain(chain)), &panoptes_script()),
+                NotifyPlan::Unsupported,
+                "{chain:?} must not be guessed at"
+            );
+        }
+    }
+
+    #[test]
+    fn test_configure_codex_notify_repairs_legacy_chain_with_backup() {
+        let temp_dir = TempDir::new().unwrap();
+        let codex_home = temp_dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        let legacy_config = r#"
+model = "o3-mini"
+notify = ["bash", "-lc", "'/test/codex-notify.sh' \"$@\"; 'echo' 'legacy-hook'"]
+"#;
+        std::fs::write(codex_home.join("config.toml"), legacy_config).unwrap();
+
+        CodexAdapter::configure_codex_notify(&codex_home, &panoptes_script()).unwrap();
+
+        let content = std::fs::read_to_string(codex_home.join("config.toml")).unwrap();
+        let config: toml::Value = toml::from_str(&content).unwrap();
+        assert_eq!(
+            config.get("notify"),
+            Some(&CodexAdapter::notify_array_value(
+                &CodexAdapter::build_chained_notify_command(
+                    &panoptes_script(),
+                    &["echo".to_string(), "legacy-hook".to_string()],
+                )
+            ))
+        );
+        // A repair is a modification: the pre-repair file is kept
+        let backup = std::fs::read_to_string(codex_home.join("config.toml.panoptes.bak")).unwrap();
+        assert_eq!(backup, legacy_config);
     }
 
     #[test]
