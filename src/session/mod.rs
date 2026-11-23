@@ -761,13 +761,15 @@ impl SessionInfo {
     /// that is thinking or running a tool is using its cache as it goes.
     /// `None` too while the cache's tier is unknown (no request has written
     /// to it yet) and for agents that do not report it - only Claude does.
+    /// `cold` once the session's model is no longer the cached request's.
     pub fn cache_warmth(
         &self,
         now: DateTime<Utc>,
     ) -> Option<crate::agent::prompt_cache::CacheWarmth> {
         match self.state {
             SessionState::Waiting | SessionState::AwaitingApproval | SessionState::Suspended => {
-                self.usage.prompt_cache.as_ref()?.warmth_at(now)
+                let model = self.usage.model.as_deref();
+                self.usage.prompt_cache.as_ref()?.warmth_for(model, now)
             }
             _ => None,
         }

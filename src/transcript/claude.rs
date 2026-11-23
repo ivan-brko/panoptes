@@ -117,7 +117,7 @@ pub fn parse_line(line: &str) -> Option<AgentEvent> {
         // count is far less useful than a percentage.
         context_window: model.and_then(context_window_for),
         model: model.map(str::to_string),
-        prompt_cache: prompt_cache(&record, usage),
+        prompt_cache: prompt_cache(&record, usage).map(|cache| cache.on_model(model)),
         ..Default::default()
     };
 
@@ -163,26 +163,35 @@ fn flag(record: &Value, name: &str) -> bool {
 /// it - and the record has a timestamp to start the clock from. The TTL tier
 /// comes from the `usage.cache_creation` split, which only a request that
 /// wrote something carries; one of pure reads still restarts the clock, with
-/// the tier left to what is already known. See [`crate::agent::prompt_cache`]
-/// for why the clock starts where it does.
+/// the tier its `promptCacheRequested` names, or else left to what is already
+/// known. See [`crate::agent::prompt_cache`] for why the clock starts where it
+/// does.
 ///
 /// Shape, as of Claude Code 2.1.3xx: `usage.cache_creation` is
 /// `{"ephemeral_1h_input_tokens":N,"ephemeral_5m_input_tokens":N}` beside the
 /// summed `cache_creation_input_tokens`, and the record carries `timestamp`
-/// (RFC 3339), `requestId`, and - on the first record of a request that
-/// thought - `thinkingDurationMs`.
+/// (RFC 3339), `requestId`, `promptCacheRequested` (`"1h"`), and - on the
+/// first record of a request that thought - `thinkingDurationMs`.
 fn prompt_cache(record: &Value, usage: &Value) -> Option<PromptCache> {
     let tokens = |value: Option<&Value>| value.and_then(Value::as_u64).unwrap_or(0);
     let split = usage.get("cache_creation");
-    let ttl = CacheTtl::from_split(
+    let written_tier = CacheTtl::from_split(
         tokens(split.and_then(|s| s.get("ephemeral_1h_input_tokens"))),
         tokens(split.and_then(|s| s.get("ephemeral_5m_input_tokens"))),
     );
     let read = tokens(usage.get("cache_read_input_tokens"));
     let written = tokens(usage.get("cache_creation_input_tokens"));
-    if ttl.is_none() && read == 0 && written == 0 {
+    if written_tier.is_none() && read == 0 && written == 0 {
         return None;
     }
+    // What was written says what the cache is; what was asked for is the
+    // fallback for a request that only read
+    let ttl = written_tier.or_else(|| {
+        record
+            .get("promptCacheRequested")
+            .and_then(Value::as_str)
+            .and_then(CacheTtl::from_requested)
+    });
 
     let written_at = record
         .get("timestamp")
@@ -530,6 +539,30 @@ mod tests {
             1,
         );
         assert_eq!(cache_of(&undated), None);
+    }
+
+    #[test]
+    fn test_requested_tier_stands_in_for_a_request_of_pure_reads() {
+        let reads = cache_record(0, 0, 50_000, "r1").replacen(
+            r#""requestId""#,
+            r#""promptCacheRequested":"1h","requestId""#,
+            1,
+        );
+        assert_eq!(cache_of(&reads).unwrap().ttl, Some(CacheTtl::OneHour));
+
+        // What was written outranks what was asked for
+        let written = cache_record(0, 4_000, 0, "r1").replacen(
+            r#""requestId""#,
+            r#""promptCacheRequested":"1h","requestId""#,
+            1,
+        );
+        assert_eq!(cache_of(&written).unwrap().ttl, Some(CacheTtl::FiveMinutes));
+    }
+
+    #[test]
+    fn test_the_cache_remembers_its_model() {
+        let cache = cache_of(&cache_record(4_000, 0, 0, "r1")).unwrap();
+        assert_eq!(cache.model.as_deref(), Some("claude-opus-4-8"));
     }
 
     #[test]

@@ -26,12 +26,20 @@
 //! ## Which TTL
 //!
 //! Claude's `usage.cache_creation` splits what a request wrote into
-//! `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`. Any 1-hour
-//! tokens means a 1-hour cache (typical on subscriptions), otherwise 5-minute
-//! tokens mean five minutes (typical with API keys). A request that wrote
-//! nothing - all reads - says nothing about the tier, so the last known tier
-//! carries over; a session that has never written anything has no known tier,
+//! `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`. 1-hour tokens
+//! mean a 1-hour cache (typical on subscriptions), 5-minute tokens five
+//! minutes (typical with API keys). Real transcripts never mix the two; were a
+//! request to, the shorter wins, since part of the prefix would expire then.
+//! A request that wrote nothing - all reads - says nothing about the tier, so
+//! the last known tier carries over, or failing that the record's
+//! `promptCacheRequested` (`"1h"`); a session with neither has no known tier,
 //! and nothing is shown for it.
+//!
+//! ## Which model
+//!
+//! A cache belongs to one model. Once the session's model is no longer the one
+//! the cached request ran on - a `/model` switch, reported at once by the
+//! status line - the next turn starts a fresh cache, so the row says `cold`.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -64,13 +72,26 @@ impl CacheTtl {
     ///
     /// `None` when it wrote nothing, which is not the same as a tier: a
     /// request of pure cache reads leaves the tier as it was.
+    ///
+    /// Both tiers at once has never been seen; should it happen, the shorter
+    /// wins, because that part of the prefix expires first and the request
+    /// that follows pays to rewrite it.
     pub fn from_split(one_hour_tokens: u64, five_minute_tokens: u64) -> Option<Self> {
-        if one_hour_tokens > 0 {
-            Some(CacheTtl::OneHour)
-        } else if five_minute_tokens > 0 {
+        if five_minute_tokens > 0 {
             Some(CacheTtl::FiveMinutes)
+        } else if one_hour_tokens > 0 {
+            Some(CacheTtl::OneHour)
         } else {
             None
+        }
+    }
+
+    /// The tier a record says was requested: Claude's `promptCacheRequested`
+    pub fn from_requested(requested: &str) -> Option<Self> {
+        match requested {
+            "1h" => Some(CacheTtl::OneHour),
+            "5m" => Some(CacheTtl::FiveMinutes),
+            _ => None,
         }
     }
 }
@@ -84,6 +105,9 @@ pub struct PromptCache {
     pub requested_at: DateTime<Utc>,
     /// That request's id, so its later records do not move the clock forward
     pub request_id: Option<String>,
+    /// The model that request ran on, without its `[1m]` suffix
+    #[serde(default)]
+    pub model: Option<String>,
     /// `requested_at` plus the tier's TTL; `None` while the tier is unknown
     ///
     /// Worked out once, when a record arrives, so drawing a row only compares
@@ -102,10 +126,17 @@ impl PromptCache {
             ttl,
             requested_at,
             request_id,
+            model: None,
             expires_at: None,
         };
         cache.expires_at = cache.compute_expiry();
         cache
+    }
+
+    /// The same request, run on `model`
+    pub fn on_model(mut self, model: Option<&str>) -> Self {
+        self.model = model.map(|m| crate::agent::events::base_model_id(m).to_string());
+        self
     }
 
     /// Fold in a later record's view of the cache
@@ -120,6 +151,9 @@ impl PromptCache {
         } else {
             self.requested_at = newer.requested_at;
             self.request_id = newer.request_id;
+        }
+        if newer.model.is_some() {
+            self.model = newer.model;
         }
         if newer.ttl.is_some() {
             self.ttl = newer.ttl;
@@ -137,6 +171,18 @@ impl PromptCache {
         } else {
             CacheWarmth::Cold
         })
+    }
+
+    /// [`Self::warmth_at`] for a session now running `model`
+    ///
+    /// A different model has no cache yet, whatever the clock says.
+    pub fn warmth_for(&self, model: Option<&str>, now: DateTime<Utc>) -> Option<CacheWarmth> {
+        let warmth = self.warmth_at(now)?;
+        let switched = match (self.model.as_deref(), model) {
+            (Some(cached), Some(current)) => cached != crate::agent::events::base_model_id(current),
+            _ => false,
+        };
+        Some(if switched { CacheWarmth::Cold } else { warmth })
     }
 
     fn compute_expiry(&self) -> Option<DateTime<Utc>> {
@@ -170,6 +216,55 @@ impl CacheWarmth {
             CacheWarmth::Cold => "cold".to_string(),
         }
     }
+
+    /// How long until [`Self::label`] reads differently
+    ///
+    /// A warm cache's label steps down a minute at a time and turns `cold` at
+    /// expiry; a cold one never changes by itself. The label counts whole
+    /// seconds, so this can be up to a second late, never early.
+    pub fn label_changes_in(&self) -> Option<Duration> {
+        match self {
+            CacheWarmth::Warm { remaining } => {
+                let minutes = ((remaining.num_seconds() + 59) / 60).max(1);
+                Some(*remaining - Duration::minutes(minutes - 1))
+            }
+            CacheWarmth::Cold => None,
+        }
+    }
+}
+
+/// When the rows' cache labels next need redrawing
+///
+/// Nothing else redraws an idle screen, so without this a row would read
+/// `cache 3m` long after the cache went cold. It does not redraw every frame
+/// either: it keeps the earliest moment any label changes, and owes a frame
+/// only once that passes.
+#[derive(Debug, Default)]
+pub struct WarmthRedraw {
+    due: Option<DateTime<Utc>>,
+}
+
+impl WarmthRedraw {
+    /// Whether a label has changed since the last frame
+    ///
+    /// `rescan` says something else changed this pass - an event, a key, a
+    /// state change - which may have moved any session's label, so the
+    /// schedule is worked out again from `warmths`. Otherwise `warmths` is
+    /// only called once the schedule comes due.
+    pub fn tick<I>(&mut self, now: DateTime<Utc>, rescan: bool, warmths: impl FnOnce() -> I) -> bool
+    where
+        I: IntoIterator<Item = CacheWarmth>,
+    {
+        let due = self.due.is_some_and(|due| now >= due);
+        if due || rescan {
+            self.due = warmths()
+                .into_iter()
+                .filter_map(|warmth| warmth.label_changes_in())
+                .map(|wait| now + wait)
+                .min();
+        }
+        due
+    }
 }
 
 #[cfg(test)]
@@ -183,8 +278,8 @@ mod tests {
     #[test]
     fn test_one_hour_tokens_mean_a_one_hour_cache() {
         assert_eq!(CacheTtl::from_split(5_000, 0), Some(CacheTtl::OneHour));
-        // Any 1-hour tokens decide it, even beside 5-minute ones
-        assert_eq!(CacheTtl::from_split(1, 9_000), Some(CacheTtl::OneHour));
+        // Both at once: the shorter tier expires first, so it decides
+        assert_eq!(CacheTtl::from_split(9_000, 1), Some(CacheTtl::FiveMinutes));
         assert_eq!(CacheTtl::OneHour.duration(), Duration::hours(1));
     }
 
@@ -271,6 +366,72 @@ mod tests {
             usage.prompt_cache.and_then(|c| c.expires_at),
             Some(at(5_600))
         );
+    }
+
+    #[test]
+    fn test_requested_tier() {
+        assert_eq!(CacheTtl::from_requested("1h"), Some(CacheTtl::OneHour));
+        assert_eq!(CacheTtl::from_requested("5m"), Some(CacheTtl::FiveMinutes));
+        assert_eq!(CacheTtl::from_requested("2h"), None);
+    }
+
+    #[test]
+    fn test_a_model_switch_is_cold() {
+        let cache = PromptCache::new(Some(CacheTtl::OneHour), at(1_000), None)
+            .on_model(Some("claude-opus-4-8[1m]"));
+        let now = at(1_060);
+        let warm = |w: Option<CacheWarmth>| matches!(w, Some(CacheWarmth::Warm { .. }));
+        assert!(warm(cache.warmth_for(Some("claude-opus-4-8"), now)));
+        assert!(warm(cache.warmth_for(Some("claude-opus-4-8[1m]"), now)));
+        // Not knowing the model now is not a switch
+        assert!(warm(cache.warmth_for(None, now)));
+        assert_eq!(
+            cache.warmth_for(Some("claude-sonnet-5"), now),
+            Some(CacheWarmth::Cold)
+        );
+    }
+
+    #[test]
+    fn test_label_changes_in_lands_on_the_next_label() {
+        let cache = PromptCache::new(Some(CacheTtl::OneHour), at(0), None);
+        for now in [at(1), at(17 * 60 + 30), at(59 * 60), at(3_599)] {
+            let warmth = cache.warmth_at(now).unwrap();
+            let wait = warmth.label_changes_in().unwrap();
+            assert!(wait > Duration::zero(), "at {now}");
+            let before = cache.warmth_at(now + wait - Duration::seconds(1)).unwrap();
+            let after = cache.warmth_at(now + wait).unwrap();
+            assert_eq!(before.label(), warmth.label(), "at {now}");
+            assert_ne!(after.label(), warmth.label(), "at {now}");
+        }
+        assert_eq!(CacheWarmth::Cold.label_changes_in(), None);
+    }
+
+    #[test]
+    fn test_redraw_comes_due_when_a_label_changes_and_not_before() {
+        let cache = PromptCache::new(Some(CacheTtl::FiveMinutes), at(0), None);
+        let warmths = |now| {
+            let cache = cache.clone();
+            move || cache.warmth_at(now)
+        };
+        let mut redraw = WarmthRedraw::default();
+
+        // First pass: nothing owed yet, but the schedule is set - `cache 5m`
+        // becomes `cache 4m` at 60s
+        assert!(!redraw.tick(at(10), true, warmths(at(10))));
+        assert!(!redraw.tick(at(59), false, || -> Option<CacheWarmth> {
+            panic!("not due: nothing to scan")
+        }));
+        assert!(redraw.tick(at(60), false, warmths(at(60))));
+        assert!(!redraw.tick(at(61), false, warmths(at(61))));
+
+        // Through to cold, and then quiet for good
+        assert!(redraw.tick(at(300), false, warmths(at(300))));
+        assert!(!redraw.tick(at(10_000), false, warmths(at(10_000))));
+
+        // No caches at all: never due
+        let mut idle = WarmthRedraw::default();
+        assert!(!idle.tick(at(0), true, Vec::new));
+        assert!(!idle.tick(at(10_000), false, Vec::new));
     }
 
     #[test]

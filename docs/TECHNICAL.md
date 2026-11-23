@@ -1359,10 +1359,12 @@ records, once per record; the row only compares the stored expiry with the
 clock.
 
 - *Tier.* `usage.cache_creation` splits what a request wrote into
-  `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`. Any 1-hour
-  tokens make it a one-hour cache (subscriptions), else 5-minute tokens make it
-  five minutes (API keys). A request that wrote nothing teaches no tier, and
-  until some request has, nothing is shown.
+  `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`: 1-hour tokens
+  make it a one-hour cache (subscriptions), 5-minute tokens five minutes (API
+  keys). Real transcripts never mix them; a request that did would get the
+  shorter TTL, since that part of the prefix expires first. A request that
+  wrote nothing falls back to its `promptCacheRequested` (`"1h"`), else keeps
+  the tier already learned; with no tier known, nothing is shown.
 - *Clock.* A cache hit refreshes the TTL as much as a write does, so the clock
   restarts at every request that read *or* wrote the cache, keeping the tier
   already learned. It starts at the request, not the record: the earliest
@@ -1370,14 +1372,23 @@ clock.
   less its `thinkingDurationMs`, less a 30-second margin for the first token.
   Every approximation errs early, since a cache shown warm after it expired is
   the expensive mistake.
+- *Model.* A cache belongs to one model. The cache keeps the model of the
+  request that used it; once the session's model (bare, without `[1m]`) is
+  another - a `/model` switch, which the status line reports at once - the row
+  says `cold`, because the next turn starts a fresh cache.
 - *Reattaching.* The backward seed scan keeps going past a newest record of
-  pure reads until it finds the tier, so a resumed session shows its warmth
-  before its next turn.
+  pure reads until it finds the tier, and past the newest request's later
+  records back to its first, so a resumed session shows its warmth - from the
+  request's real start - before its next turn.
+- *Redrawing.* Nothing else redraws an idle screen, so `App::tick_cache_warmth`
+  keeps the earliest moment any row's label next changes (a minute boundary,
+  or expiry) and owes a frame only then. The sessions are looked at only on a
+  pass where something else changed, or when that moment comes due.
 
-The field is dropped whole: it outlasts a failed turn's limit and the full
-project and branch, but goes before the row would fall to its compact form.
-Warm is the `success` token, cold `text_dim`. A `/model` switch is not
-modelled - the next request rewrites the cache under the new model anyway.
+The field is dropped whole and goes first: it stays only beside the complete
+row - limit, project and branch all whole - after the update badge's words
+but never the `↻` glyph, which stays last. Warm is the `success` token,
+cold `text_dim`.
 
 **Where reading starts.** A session that created its own transcript is read
 from the beginning: everything in the file describes what it has just been
