@@ -2004,6 +2004,56 @@ notify = ["bash", "-lc", "'/test/codex-notify.sh' \"$@\"; 'echo' 'legacy-hook'"]
         assert_eq!(rollout_path(home.path(), "no-such-id"), None);
     }
 
+    /// Compress a rollout in place as Codex does: `X.jsonl` becomes `X.jsonl.zst`
+    fn compress_rollout(plain: &Path, keep_plain: bool) -> PathBuf {
+        let text = std::fs::read_to_string(plain).unwrap();
+        let compressed = PathBuf::from(format!("{}.zst", plain.display()));
+        std::fs::write(
+            &compressed,
+            crate::transcript::rollout_file::tests::compress(&text),
+        )
+        .unwrap();
+        if !keep_plain {
+            std::fs::remove_file(plain).unwrap();
+        }
+        compressed
+    }
+
+    #[test]
+    fn test_a_compressed_rollout_is_found_dated_and_discovered() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let started = an_hour_ago();
+        let plain = write_rollout(home.path(), "zst-id", cwd.path(), started);
+        let compressed = compress_rollout(&plain, false);
+
+        assert_eq!(rollout_path(home.path(), "zst-id"), Some(compressed));
+        assert_eq!(
+            rollout_created_at(home.path(), "zst-id").map(|t| t.timestamp()),
+            Some(started.timestamp())
+        );
+        assert_eq!(
+            discover_session_id(
+                home.path(),
+                cwd.path(),
+                started - chrono::Duration::seconds(1),
+                &nothing_claimed()
+            )
+            .as_deref(),
+            Some("zst-id")
+        );
+    }
+
+    #[test]
+    fn test_rollout_path_prefers_the_plain_file_of_a_pair() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let plain = write_rollout(home.path(), "both-id", cwd.path(), an_hour_ago());
+        compress_rollout(&plain, true);
+
+        assert_eq!(rollout_path(home.path(), "both-id"), Some(plain));
+    }
+
     #[test]
     fn test_rollout_path_tolerates_a_missing_sessions_directory() {
         let home = TempDir::new().unwrap();

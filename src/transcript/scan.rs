@@ -18,7 +18,9 @@
 //! Everything here is bounded, because a heavy user has thousands of rollouts
 //! and transcripts of tens of megabytes. [`ScanBudget`] caps the files opened,
 //! the bytes read and the results kept, and every read is a bounded prefix:
-//! no transcript is ever read whole. The scan runs on a worker thread
+//! no transcript is ever read whole - a compressed Codex rollout
+//! (`.jsonl.zst`) included, which is decoded as a stream only as far as the
+//! budget allows (see `Meter::read`). The scan runs on a worker thread
 //! (`app/background.rs`), and checks its cancel flag between files.
 //!
 //! Nothing read here is trusted. Files are written by other processes and may
@@ -301,26 +303,56 @@ impl Meter {
     ///
     /// Shortened to whatever byte budget is left. `None` when the file cannot
     /// be read, which callers treat as "skip it".
-    fn read(&mut self, path: &Path, offset: u64, max: u64) -> Option<Vec<u8>> {
+    ///
+    /// A compressed Codex rollout (`.jsonl.zst`) is decoded as a stream, and
+    /// `offset` and `max` count decompressed bytes. Reaching `offset` means
+    /// decoding everything before it, so those bytes are charged too - only
+    /// what the budget can pay for is ever inflated, never the whole file. One
+    /// that does not decode is skipped with a warning.
+    fn read(&mut self, path: &Path, offset: u64, max: u64) -> Option<Chunk> {
+        let compressed = super::rollout_file::is_compressed(path);
+        let skip = if compressed { offset } else { 0 };
         let allowed = max.min(
             self.budget
                 .max_bytes
-                .saturating_sub(self.counters.bytes_read),
+                .saturating_sub(self.counters.bytes_read)
+                .saturating_sub(skip),
         );
         if allowed == 0 {
             return None;
         }
+        // Everything decoded is charged, whether or not the read then fails -
+        // a file that breaks partway has still cost what was inflated of it
+        let mut reader: Option<Counted<Box<dyn Read>>> = None;
         let read = (|| {
-            let mut file = std::fs::File::open(path)?;
-            file.seek(SeekFrom::Start(offset))?;
-            let mut buf = Vec::new();
-            file.take(allowed).read_to_end(&mut buf)?;
-            Ok::<_, std::io::Error>(buf)
+            let opened: Box<dyn Read> = if compressed {
+                super::rollout_file::open(path)?
+            } else {
+                let mut file = std::fs::File::open(path)?;
+                file.seek(SeekFrom::Start(offset))?;
+                Box::new(file)
+            };
+            let reader = reader.insert(Counted {
+                inner: opened,
+                count: 0,
+            });
+            std::io::copy(&mut (&mut *reader).take(skip), &mut std::io::sink())?;
+            let mut bytes = Vec::new();
+            (&mut *reader).take(allowed).read_to_end(&mut bytes)?;
+            // A read that filled its allowance may have stopped exactly at the
+            // end; one more byte (not kept, not charged) says which. Should
+            // that byte fail to decode, what was read is still good - the end
+            // just has not been reached.
+            let at_end = (bytes.len() as u64) < allowed
+                || reader.inner.read(&mut [0u8]).is_ok_and(|n| n == 0);
+            Ok::<_, std::io::Error>(Chunk { bytes, at_end })
         })();
+        self.counters.bytes_read += reader.map_or(0, |r| r.count);
         match read {
-            Ok(buf) => {
-                self.counters.bytes_read += buf.len() as u64;
-                Some(buf)
+            Ok(chunk) => Some(chunk),
+            Err(e) if compressed => {
+                tracing::warn!(path = %path.display(), error = %e, "Skipping a compressed Codex rollout that does not decode");
+                None
             }
             Err(e) => {
                 tracing::debug!(path = %path.display(), error = %e, "Skipping unreadable transcript");
@@ -328,6 +360,28 @@ impl Meter {
             }
         }
     }
+}
+
+/// A reader that counts the bytes it hands out, for charging to the budget
+struct Counted<R> {
+    inner: R,
+    count: u64,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count += n as u64;
+        Ok(n)
+    }
+}
+
+/// What one [`Meter::read`] returned
+struct Chunk {
+    bytes: Vec<u8>,
+    /// The read reached the end of the file (of the decompressed stream, for a
+    /// compressed rollout), so its last line is not cut short
+    at_end: bool,
 }
 
 /// The complete lines of a prefix read
@@ -494,12 +548,10 @@ fn examine_claude(
     if !meter.open_file() {
         return None;
     }
-    let len = std::fs::metadata(&candidate.path).ok()?.len();
-    let buf = meter.read(&candidate.path, 0, CLAUDE_HEAD_BYTES)?;
-    let reached_end = buf.len() as u64 >= len;
+    let chunk = meter.read(&candidate.path, 0, CLAUDE_HEAD_BYTES)?;
 
     let mut header = ClaudeHeader::default();
-    for line in complete_lines(&buf, reached_end) {
+    for line in complete_lines(&chunk.bytes, chunk.at_end) {
         header.read(&line);
     }
 
@@ -640,10 +692,16 @@ impl CodexRollouts {
             let Ok(entries) = std::fs::read_dir(&day) else {
                 continue;
             };
-            let mut listed: Vec<Candidate> = entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            // Compressed rollouts too, unless the plain twin is beside them
+            let rollouts = super::rollout_file::prefer_plain(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| super::rollout_file::is_rollout_path(path))
+                    .collect(),
+            );
+            let mut listed: Vec<Candidate> = rollouts
+                .into_iter()
                 .filter_map(|path| {
                     Some(Candidate {
                         kind: TranscriptKind::Codex,
@@ -681,18 +739,18 @@ fn sorted_subdirs(dir: &Path) -> Vec<PathBuf> {
 /// reading the ~20 KB of instructions that follow it. Only a match is read on
 /// to the end of that line, for the fields that classify it.
 ///
-/// Returns the conversation ID and the bytes read so far, so looking further
-/// for the first prompt carries on from there rather than paying for them
-/// twice.
+/// Returns the conversation ID and what has been read so far, so looking
+/// further for the first prompt carries on from there rather than paying for
+/// it twice.
 fn examine_codex(
     meter: &mut Meter,
     candidate: &Candidate,
     target: &Path,
     claimed: &HashSet<String>,
-) -> Option<(String, Vec<u8>)> {
+) -> Option<(String, Chunk)> {
     // The file name ends in the conversation ID, so a claimed one is skipped
     // without being opened
-    let stem = candidate.path.file_stem()?.to_str()?;
+    let stem = super::rollout_file::stem(&candidate.path)?;
     if claimed.iter().any(|id| stem.ends_with(id.as_str())) {
         return None;
     }
@@ -701,26 +759,24 @@ fn examine_codex(
     }
 
     let mut head = meter.read(&candidate.path, 0, CODEX_PROBE_BYTES)?;
-    if !head.contains(&b'\n') {
+    if !head.bytes.contains(&b'\n') && !head.at_end {
         // The header runs past the probe. Rule the file out on its `cwd`
         // alone if it can be; otherwise read on for the whole line.
-        if let Some(cwd) = probe_cwd(&head) {
+        if let Some(cwd) = probe_cwd(&head.bytes) {
             if canonical(Path::new(&cwd)) != target {
                 return None;
             }
         }
-        let rest = meter.read(
-            &candidate.path,
-            head.len() as u64,
-            CODEX_HEAD_BYTES.saturating_sub(head.len() as u64),
-        )?;
-        head.extend_from_slice(&rest);
+        let read = head.bytes.len() as u64;
+        let rest = meter.read(&candidate.path, read, CODEX_HEAD_BYTES.saturating_sub(read))?;
+        head.bytes.extend_from_slice(&rest.bytes);
+        head.at_end = rest.at_end;
     }
-    let Some(end) = head.iter().position(|&b| b == b'\n') else {
+    let Some(end) = head.bytes.iter().position(|&b| b == b'\n') else {
         tracing::debug!(path = %candidate.path.display(), "Codex header line is incomplete or too long; skipping");
         return None;
     };
-    let header_line = String::from_utf8_lossy(&head[..end]).into_owned();
+    let header_line = String::from_utf8_lossy(&head.bytes[..end]).into_owned();
 
     let Some(meta) = codex::meta_from_line(&header_line) else {
         tracing::debug!(path = %candidate.path.display(), "Not a Codex rollout header; skipping");
@@ -756,27 +812,28 @@ fn probe_cwd(probe: &[u8]) -> Option<String> {
 /// Codex records what the user typed as a `user_message` event; the
 /// `response_item` user messages before it are injected context (AGENTS.md,
 /// the environment), not the subject.
-fn codex_first_prompt(meter: &mut Meter, path: &Path, head: Vec<u8>) -> Option<String> {
-    let len = std::fs::metadata(path).ok()?.len();
-    let mut buf = head;
-    let wanted = CODEX_HEAD_BYTES.saturating_sub(buf.len() as u64);
-    if wanted > 0 && (buf.len() as u64) < len {
-        if let Some(rest) = meter.read(path, buf.len() as u64, wanted) {
-            buf.extend_from_slice(&rest);
+fn codex_first_prompt(meter: &mut Meter, path: &Path, head: Chunk) -> Option<String> {
+    let mut head = head;
+    let wanted = CODEX_HEAD_BYTES.saturating_sub(head.bytes.len() as u64);
+    if wanted > 0 && !head.at_end {
+        if let Some(rest) = meter.read(path, head.bytes.len() as u64, wanted) {
+            head.bytes.extend_from_slice(&rest.bytes);
+            head.at_end = rest.at_end;
         }
     }
-    let reached_end = buf.len() as u64 >= len;
-    complete_lines(&buf, reached_end).iter().find_map(|line| {
-        let record: Value = serde_json::from_str(line).ok()?;
-        if record.get("type").and_then(Value::as_str) != Some("event_msg") {
-            return None;
-        }
-        let payload = record.get("payload")?;
-        if payload.get("type").and_then(Value::as_str) != Some("user_message") {
-            return None;
-        }
-        non_empty_title(payload.get("message")?.as_str()?)
-    })
+    complete_lines(&head.bytes, head.at_end)
+        .iter()
+        .find_map(|line| {
+            let record: Value = serde_json::from_str(line).ok()?;
+            if record.get("type").and_then(Value::as_str) != Some("event_msg") {
+                return None;
+            }
+            let payload = record.get("payload")?;
+            if payload.get("type").and_then(Value::as_str) != Some("user_message") {
+                return None;
+            }
+            non_empty_title(payload.get("message")?.as_str()?)
+        })
 }
 
 /// The thread names Codex keeps for one `CODEX_HOME`
@@ -789,10 +846,10 @@ fn read_thread_names(meter: &mut Meter, codex_home: &Path) -> HashMap<String, St
         return HashMap::new();
     };
     let start = metadata.len().saturating_sub(SESSION_INDEX_TAIL_BYTES);
-    let Some(buf) = meter.read(&path, start, SESSION_INDEX_TAIL_BYTES) else {
+    let Some(chunk) = meter.read(&path, start, SESSION_INDEX_TAIL_BYTES) else {
         return HashMap::new();
     };
-    let mut lines = complete_lines(&buf, true);
+    let mut lines = complete_lines(&chunk.bytes, true);
     // A window starting mid-file starts mid-line
     if start > 0 && !lines.is_empty() {
         lines.remove(0);
@@ -950,6 +1007,26 @@ mod tests {
             );
         }
 
+        /// Where [`Fixture::codex`] files a rollout
+        fn codex_path(&self, id: &str) -> PathBuf {
+            self.codex
+                .join("sessions/2026/09/23")
+                .join(format!("rollout-2026-09-23T10-00-00-{id}.jsonl"))
+        }
+
+        /// A Codex rollout as [`Fixture::codex`] writes it, then compressed
+        /// as Codex does: `X.jsonl` becomes `X.jsonl.zst`
+        fn codex_compressed(
+            &self,
+            cwd: &Path,
+            id: &str,
+            age_secs: u64,
+            prompt: Option<&str>,
+        ) -> PathBuf {
+            self.codex(cwd, id, age_secs, r#""cli""#, prompt);
+            compress_in_place(&self.codex_path(id), age_secs)
+        }
+
         fn codex_index(&self, lines: &[(&str, &str)]) {
             let text: Vec<String> = lines
                 .iter()
@@ -988,6 +1065,26 @@ mod tests {
     fn write(path: &Path, text: &str, age_secs: u64) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, format!("{text}\n")).unwrap();
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - Duration::from_secs(age_secs))
+            .unwrap();
+    }
+
+    /// Replace a plain rollout by its compressed form, aged `age_secs`
+    fn compress_in_place(plain: &Path, age_secs: u64) -> PathBuf {
+        let text = std::fs::read_to_string(plain).unwrap();
+        std::fs::remove_file(plain).unwrap();
+        let compressed = PathBuf::from(format!("{}.zst", plain.display()));
+        std::fs::write(
+            &compressed,
+            super::super::rollout_file::tests::compress(&text),
+        )
+        .unwrap();
+        set_age(&compressed, age_secs);
+        compressed
+    }
+
+    fn set_age(path: &Path, age_secs: u64) {
         let file = std::fs::File::options().write(true).open(path).unwrap();
         file.set_modified(SystemTime::now() - Duration::from_secs(age_secs))
             .unwrap();
@@ -1063,6 +1160,121 @@ mod tests {
         );
         assert!(!outcome.truncated);
         assert!(!outcome.cancelled);
+    }
+
+    #[test]
+    fn test_lists_and_titles_compressed_rollouts() {
+        let f = Fixture::new();
+        let prompted = f.codex_compressed(&f.working_dir, "zst-prompted", 10, Some("Old question"));
+        f.codex_compressed(&f.working_dir, "zst-named", 20, None);
+        f.codex_index(&[("zst-named", "Named long ago")]);
+        let other = f.other_dir();
+        f.codex_compressed(&other, "zst-elsewhere", 5, None);
+
+        let outcome = run(&f.request());
+        let found: Vec<(&str, Option<&str>)> = outcome
+            .conversations
+            .iter()
+            .map(|c| (c.id.as_str(), c.title.as_deref()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("zst-prompted", Some("Old question")),
+                ("zst-named", Some("Named long ago")),
+            ]
+        );
+        assert_eq!(outcome.conversations[0].path, prompted);
+    }
+
+    #[test]
+    fn test_a_long_compressed_header_is_read_past_the_probe() {
+        let f = Fixture::new();
+        let day = f.codex.join("sessions/2026/09/23");
+        let plain = day.join("rollout-2026-09-23T10-00-00-zst-long.jsonl");
+        let header = codex_meta(&f.working_dir, "zst-long", r#""cli""#, 40_000);
+        let prompt =
+            r#"{"type":"event_msg","payload":{"type":"user_message","message":"Past the header"}}"#;
+        write(&plain, &format!("{header}\n{prompt}"), 10);
+        compress_in_place(&plain, 10);
+
+        let outcome = run(&f.request());
+        assert_eq!(ids(&outcome), vec!["zst-long"]);
+        assert_eq!(
+            outcome.conversations[0].title.as_deref(),
+            Some("Past the header")
+        );
+    }
+
+    #[test]
+    fn test_prefers_the_plain_rollout_when_both_forms_exist() {
+        let f = Fixture::new();
+        f.codex(&f.working_dir, "both", 10, r#""cli""#, Some("Still going"));
+        let plain = f.codex_path("both");
+        let text = std::fs::read_to_string(&plain).unwrap();
+        std::fs::write(
+            PathBuf::from(format!("{}.zst", plain.display())),
+            super::super::rollout_file::tests::compress(&text),
+        )
+        .unwrap();
+
+        let outcome = run(&f.request());
+        assert_eq!(ids(&outcome), vec!["both"]);
+        assert_eq!(outcome.conversations[0].path, plain);
+        assert_eq!(outcome.counters.files_examined, 1);
+    }
+
+    #[test]
+    fn test_skips_a_corrupt_compressed_rollout_and_carries_on() {
+        let f = Fixture::new();
+        f.codex_compressed(&f.working_dir, "zst-good", 30, None);
+        f.codex(&f.working_dir, "plain-good", 20, r#""cli""#, None);
+        // Newest, so it is examined first
+        let garbage = f.codex_path("zst-garbage").with_extension("jsonl.zst");
+        write(&garbage, "not zstd at all", 5);
+        // A real frame cut short
+        let cut = f.codex_compressed(&f.working_dir, "zst-cut", 6, None);
+        let bytes = std::fs::read(&cut).unwrap();
+        std::fs::write(&cut, &bytes[..bytes.len() / 2]).unwrap();
+        set_age(&cut, 6);
+
+        let outcome = run(&f.request());
+        assert_eq!(ids(&outcome), vec!["plain-good", "zst-good"]);
+        assert_eq!(outcome.counters.files_examined, 4);
+        assert!(!outcome.truncated);
+    }
+
+    #[test]
+    fn test_a_compressed_rollout_is_decoded_only_within_the_budget() {
+        let f = Fixture::new();
+        // Inflates to far more than the scan ever reads; compresses to little
+        let day = f.codex.join("sessions/2026/09/23");
+        let plain = day.join("rollout-2026-09-23T10-00-00-zst-huge.jsonl");
+        let header = codex_meta(&f.working_dir, "zst-huge", r#""cli""#, 0);
+        let filler = r#"{"type":"event_msg","payload":{"type":"agent_reasoning","text":"filler"}}"#;
+        let mut text = header;
+        for _ in 0..60_000 {
+            text.push('\n');
+            text.push_str(filler);
+        }
+        write(&plain, &text, 10);
+        compress_in_place(&plain, 10);
+
+        let outcome = run(&f.request());
+        assert_eq!(ids(&outcome), vec!["zst-huge"]);
+        // The head, plus the probe decoded a second time to reach past it
+        assert!(
+            outcome.counters.bytes_read <= CODEX_HEAD_BYTES + CODEX_PROBE_BYTES,
+            "decoded {} of {} bytes",
+            outcome.counters.bytes_read,
+            text.len()
+        );
+
+        // And a byte budget smaller than the head is never exceeded
+        let mut request = f.request();
+        request.budget.max_bytes = 4 * 1024;
+        let outcome = run(&request);
+        assert!(outcome.counters.bytes_read <= 4 * 1024);
     }
 
     #[test]

@@ -331,9 +331,10 @@ panoptes merge-codex-history          # every account
 panoptes merge-codex-history Work     # one account, by name
 ```
 
-It **copies** each account's rollouts (`sessions/`, `archived_sessions/`) and
-thread names into the shared home, never overwriting and never moving
-anything. Run it again whenever you like; what is already there is skipped.
+It **copies** each account's rollouts (`sessions/`, `archived_sessions/`,
+including the older ones Codex has compressed to `.jsonl.zst`) and thread
+names into the shared home, never overwriting and never moving anything. Run
+it again whenever you like; what is already there, in either form, is skipped.
 
 **Things to know:**
 
