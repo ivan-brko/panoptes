@@ -4,6 +4,7 @@
 //! used with different projects. Each configuration points to a different
 //! CLAUDE_CONFIG_DIR, allowing users to switch between different Claude accounts.
 
+pub mod account;
 pub mod store;
 
 pub use store::ClaudeConfigStore;

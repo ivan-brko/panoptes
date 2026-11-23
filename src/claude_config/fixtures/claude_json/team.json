@@ -1,0 +1,25 @@
+{
+  "numStartups": 7,
+  "oauthAccount": {
+    "accountCreatedAt": "2025-03-01T00:00:00.000Z",
+    "accountUuid": "00000000-0000-4000-8000-000000000011",
+    "billingType": "stripe_subscription",
+    "ccOnboardingFlags": {},
+    "claudeCodeTrialDurationDays": null,
+    "claudeCodeTrialEndsAt": null,
+    "displayName": "Dev",
+    "emailAddress": "dev@example.com",
+    "fullName": "Dev Example",
+    "hasExtraUsageEnabled": false,
+    "organizationName": "Example Team",
+    "organizationRateLimitTier": "default_raven",
+    "organizationRole": "membership_admin",
+    "organizationType": "claude_team",
+    "organizationUuid": "00000000-0000-4000-8000-000000000012",
+    "profileFetchedAt": 1760000000000,
+    "seatTier": "team_tier_1",
+    "subscriptionCreatedAt": "2025-03-02T00:00:00.000Z",
+    "userRateLimitTier": "default_claude_max_5x",
+    "workspaceRole": null
+  }
+}
