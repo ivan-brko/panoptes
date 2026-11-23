@@ -1,7 +1,14 @@
 //! Codex rollout files, plain or zstd-compressed
 //!
 //! Codex writes every rollout as `rollout-<ts>-<uuid>.jsonl`, and later
-//! zstd-compresses finished ones in place to `rollout-<ts>-<uuid>.jsonl.zst`.
+//! zstd-compresses idle ones in place to `rollout-<ts>-<uuid>.jsonl.zst`. The
+//! rule, from codex-rs at `rust-v0.156.1` (`rollout/src/compression.rs`): a
+//! worker at startup compresses each rollout idle for at least seven days
+//! (`MIN_ROLLOUT_AGE`) whose writer lock is not held, as a single zstd frame.
+//! A live session always writes plain `.jsonl`. Resuming a compressed one
+//! (`materialize_rollout_for_append`, `rollout/src/recorder.rs`) decompresses it
+//! back to plain with the same mtime, deletes the `.zst`, and then appends.
+//!
 //! Every place that discovers rollouts goes through [`is_rollout_name`] so a
 //! compressed conversation is never silently left out, and every place that
 //! reads one from its start goes through [`open`], which hands back the
@@ -10,8 +17,9 @@
 //! Byte offsets into a rollout always count *decompressed* bytes: a compressed
 //! file is read as the stream it decodes to, never as the bytes on disk.
 //!
-//! Only finished rollouts are compressed, so nothing ever appends to one and
-//! the live tailer (`transcript::Tailer`) never reads them.
+//! Nothing ever appends to a compressed rollout, so the live tailer
+//! (`transcript::Tailer`) never reads one: a resumed conversation is plain
+//! again by the time it grows.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -82,6 +90,16 @@ pub fn plain_twin(path: &Path) -> PathBuf {
         Some(plain) => PathBuf::from(plain),
         None => path.to_path_buf(),
     }
+}
+
+/// The compressed path a plain rollout becomes once Codex compresses it
+///
+/// For a path that is already compressed, the path itself.
+pub fn compressed_twin(path: &Path) -> PathBuf {
+    if is_compressed(path) {
+        return path.to_path_buf();
+    }
+    PathBuf::from(format!("{}.zst", path.display()))
 }
 
 /// Open a rollout for reading from its first byte, decompressing if needed

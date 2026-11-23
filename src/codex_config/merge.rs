@@ -62,10 +62,14 @@ pub fn merge_history(source: &Path, shared: &Path) -> Result<MergeReport> {
                 continue;
             };
             let dest = into_root.join(relative);
-            // A compressed rollout is the same conversation as its plain twin,
-            // and the plain file is the one every reader prefers
+            // Either form in the shared home is this conversation already. A
+            // plain copy next to a compressed one would be worse than nothing:
+            // Codex compresses only what has sat idle for a week, so the `.zst`
+            // there is the newer, and the stale plain file would win every
+            // reader and take the next resume's appends.
+            let plain = rollout_file::plain_twin(&dest);
             let have_it = |path: &Path| std::fs::symlink_metadata(path).is_ok();
-            if have_it(&dest) || have_it(&rollout_file::plain_twin(&dest)) {
+            if have_it(&plain) || have_it(&rollout_file::compressed_twin(&plain)) {
                 report.already_there += 1;
                 continue;
             }
@@ -382,6 +386,31 @@ mod tests {
         assert!(shared.join(plain).exists());
         assert!(!shared.join(&zst).exists());
         assert!(!shared.join(format!("{other}.zst")).exists());
+    }
+
+    #[test]
+    fn test_merge_leaves_a_compressed_shared_copy_alone() {
+        // Merged once, then compressed in the shared home by Codex after a week
+        // idle; the account still has its plain original
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("account");
+        let shared = tmp.path().join("shared");
+        let plain = "sessions/2025/11/20/rollout-2025-11-20T09-00-00-again.jsonl";
+        let zst = format!("{plain}.zst");
+        write(&source.join(plain), "old plain\n");
+        write(&shared.join(&zst), "newer, compressed\n");
+
+        let report = merge_history(&source, &shared).unwrap();
+
+        assert_eq!((report.copied, report.already_there), (0, 1));
+        assert!(
+            !shared.join(plain).exists(),
+            "no stale plain file beside it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(shared.join(&zst)).unwrap(),
+            "newer, compressed\n"
+        );
     }
 
     #[test]

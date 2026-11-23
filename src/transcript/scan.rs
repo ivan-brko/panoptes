@@ -321,30 +321,35 @@ impl Meter {
         if allowed == 0 {
             return None;
         }
-        let mut skipped = 0;
+        // Everything decoded is charged, whether or not the read then fails -
+        // a file that breaks partway has still cost what was inflated of it
+        let mut reader: Option<Counted<Box<dyn Read>>> = None;
         let read = (|| {
-            let mut reader: Box<dyn Read> = if compressed {
-                let mut decoder = super::rollout_file::open(path)?;
-                skipped = std::io::copy(&mut (&mut decoder).take(skip), &mut std::io::sink())?;
-                decoder
+            let opened: Box<dyn Read> = if compressed {
+                super::rollout_file::open(path)?
             } else {
                 let mut file = std::fs::File::open(path)?;
                 file.seek(SeekFrom::Start(offset))?;
                 Box::new(file)
             };
+            let reader = reader.insert(Counted {
+                inner: opened,
+                count: 0,
+            });
+            std::io::copy(&mut (&mut *reader).take(skip), &mut std::io::sink())?;
             let mut bytes = Vec::new();
-            (&mut reader).take(allowed).read_to_end(&mut bytes)?;
+            (&mut *reader).take(allowed).read_to_end(&mut bytes)?;
             // A read that filled its allowance may have stopped exactly at the
-            // end; one more byte (not kept, not charged) says which
-            let at_end = (bytes.len() as u64) < allowed || reader.read(&mut [0u8])? == 0;
+            // end; one more byte (not kept, not charged) says which. Should
+            // that byte fail to decode, what was read is still good - the end
+            // just has not been reached.
+            let at_end = (bytes.len() as u64) < allowed
+                || reader.inner.read(&mut [0u8]).is_ok_and(|n| n == 0);
             Ok::<_, std::io::Error>(Chunk { bytes, at_end })
         })();
-        self.counters.bytes_read += skipped;
+        self.counters.bytes_read += reader.map_or(0, |r| r.count);
         match read {
-            Ok(chunk) => {
-                self.counters.bytes_read += chunk.bytes.len() as u64;
-                Some(chunk)
-            }
+            Ok(chunk) => Some(chunk),
             Err(e) if compressed => {
                 tracing::warn!(path = %path.display(), error = %e, "Skipping a compressed Codex rollout that does not decode");
                 None
@@ -354,6 +359,20 @@ impl Meter {
                 None
             }
         }
+    }
+}
+
+/// A reader that counts the bytes it hands out, for charging to the budget
+struct Counted<R> {
+    inner: R,
+    count: u64,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count += n as u64;
+        Ok(n)
     }
 }
 
