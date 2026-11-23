@@ -328,6 +328,9 @@ nothing once cancelled.
 Worktree create/remove are not - interrupting one halfway would leave the repo
 in a worse state than it started.
 
+The Codex account probes also run off the event loop, but not as jobs: see
+*Login and quota probe* under Multi-Account Support.
+
 ### State Updates (Hooks)
 1. Agent (Claude Code or Codex) executes hook scripts on events
 2. Hook script reads the agent's JSON payload from stdin
@@ -672,6 +675,63 @@ Via the `CODEX_HOME` environment variable:
 2. **Set project defaults** - Each project can have a default Codex configuration (independent of Claude config)
 3. **Session selection** - When creating a Codex session with multiple configs available, a selector appears
 4. **Environment injection** - `CODEX_HOME` is set when spawning with a non-default configuration (defaults to `~/.codex/`)
+5. **Login and quota probe** - see below
+
+#### Login and quota probe (`codex_config::probe`)
+
+A running session's limits come from its rollout's `token_count` records; an
+idle account has none. So while the Codex accounts are on screen - pane 3's
+Codex section, or the `SelectingCodexConfig` step of the wizard
+(`codex_accounts_visible`) - Panoptes probes each account with
+`codex app-server`, speaking its JSON-RPC over stdio (one JSON object per
+line, no `jsonrpc` member):
+
+1. `initialize` (`clientInfo.name = "panoptes"`), then the `initialized`
+   notification
+2. `account/read` → logged out (`account: null`), `apiKey`, or `chatgpt` with
+   email and plan
+3. `account/rateLimits/read`, only for a ChatGPT login whose top-level
+   `config.toml` routes to OpenAI (no `model_provider` other than `openai`, no
+   `openai_base_url` off `api.openai.com`/`chatgpt.com`). The `codex` bucket
+   of `rateLimitsByLimitId` is read, else `rateLimits`; `primary`/`secondary`
+   become the five-hour (monthly on Free/Go) and weekly windows,
+   `individualLimit` a "credit" window. Its `planType` overrides
+   `account/read`'s, which comes from the cached token, unless it is `unknown`.
+
+The probe spawns with exactly the environment a session would get:
+`CODEX_HOME` from `CodexHomes::prepare_spawn` (so with shared history it is
+the shadow, healed first) and `CODEX_SQLITE_HOME` from `sqlite_home_for`.
+
+- **Never killed early.** Once answered, stdin is closed and Codex exits by
+  itself (in tens of milliseconds on 0.156.1); a reaper thread kills it only
+  after 60 s. Codex runs git/ssh for plugin marketplaces at startup, and
+  killing it mid-fetch strands ssh.
+- **Usage is optional.** The handshake and `account/read` have 20 s; a usage
+  read that fails or takes over 10 s leaves the login shown and the quota as
+  "usage unavailable".
+- **`CODEX_INTERNAL_ORIGINATOR_OVERRIDE` is removed, not set.** app-server
+  refreshes `models_cache.json` before `initialize`, under the default
+  (plain-CLI) originator, which is what Panoptes sessions are; verified on
+  0.156.1 that the cache it writes carries the CLI's `client_version` and the
+  account's identity hash, so the CLI reuses it. Setting the override (as
+  T3 Code does for its own app-server sessions) would file another client's
+  model list in the sessions' home.
+
+Scheduling is `app::background::CodexProbes`, polled by
+`App::tick_codex_probes`. Not a `BackgroundJob`: no overlay, one thread per
+account, nothing waits on it. An account is probed when the list opens unless
+it was probed in the last 60 s, and when its own `auth.json`'s mtime changes -
+at once if noticed on open, else after it has been still for 250 ms
+(`codex login` writes it more than once). The mtime is checked every 100 ms,
+only while the list is on screen. Results land in
+`AppState::codex_account_probes`; the last one stays up while a refresh runs.
+`tui/views/codex_account.rs` draws them as a second row per account, dropping
+fields whole as the row narrows and keeping the window closest to its limit
+last.
+
+Response parsing and the client are tested against fixtures recorded from
+Codex 0.156.1 (`src/codex_config/fixtures/app_server/`, redacted), and an
+ignored test runs the real `codex` against an empty home.
 
 #### Shared Codex history (`codex_shared_history`)
 

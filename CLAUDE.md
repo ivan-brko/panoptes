@@ -70,6 +70,8 @@ PTY Output → Session buffer → TUI render
 - `codex_config/` - Codex CLI multi-account configuration (CODEX_HOME)
 - `codex_config/homes.rs` - The one resolver for Codex homes; per-account shadow homes for
   shared history (`codex_shared_history`), and `merge.rs` to copy old history in
+- `codex_config/probe.rs` - Login, plan and quota of an idle account via `codex app-server`
+  JSON-RPC; scheduled by `CodexProbes` in `app/background.rs`, drawn by `tui/views/codex_account.rs`
 - `config.rs` - Configuration (~/.panoptes/)
 - `clipboard.rs` - Clipboard writes (`pbcopy` and friends, OSC 52 fallback)
 
