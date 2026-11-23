@@ -47,7 +47,7 @@ const HOOK_SCRIPT_NAME: &str = "panoptes-hook.sh";
 ///
 /// Also how a `statusLine` command is recognised as Panoptes' own, whatever
 /// directory it was installed to.
-const STATUS_LINE_SCRIPT_NAME: &str = "panoptes-statusline.sh";
+pub(crate) const STATUS_LINE_SCRIPT_NAME: &str = "panoptes-statusline.sh";
 
 /// Marks a wrapped command that came from `settings.local.json` itself
 const STATUS_LINE_LOCAL_FLAG: &str = "--local";
@@ -400,7 +400,11 @@ exit 0
     }
 
     /// Install the shared status-line wrapper
-    fn install_status_line_script(config: &Config) -> Result<PathBuf> {
+    ///
+    /// Antigravity sessions run the same wrapper (see `agent/antigravity.rs`):
+    /// it splices whatever document it is handed into the envelope, and the
+    /// default line it draws reads either agent's shape.
+    pub(crate) fn install_status_line_script(config: &Config) -> Result<PathBuf> {
         let script_path = Self::status_line_script_path(config);
         super::install_executable_script(
             &script_path,

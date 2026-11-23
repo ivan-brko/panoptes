@@ -348,6 +348,9 @@ fn watch_target_for(
 
     match info.session_type {
         SessionType::Shell => None,
+        // Its status line carries state, context and quota; the transcript
+        // would add nothing the header shows
+        SessionType::Antigravity => None,
 
         SessionType::ClaudeCode => Some(WatchTarget {
             session_id: info.id,
@@ -1228,6 +1231,7 @@ impl App {
             }
             InputMode::CreatingSession
             | InputMode::CreatingCodexSession
+            | InputMode::CreatingAntigravitySession
             | InputMode::CreatingShellSession => {
                 (&mut state.session_draft.name, MAX_SESSION_NAME_LEN)
             }
@@ -3267,10 +3271,12 @@ impl App {
                 // rather than dropping into pane 1
                 InputMode::CreatingSession
                 | InputMode::CreatingCodexSession
+                | InputMode::CreatingAntigravitySession
                 | InputMode::CreatingShellSession => {
                     let (agent, esc_backs_up) = match state.input_mode {
                         InputMode::CreatingSession => ("Claude", true),
                         InputMode::CreatingCodexSession => ("Codex", true),
+                        InputMode::CreatingAntigravitySession => ("Antigravity", true),
                         // A shell has a one-step flow: nothing behind it
                         _ => ("shell", false),
                     };

@@ -140,6 +140,9 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::CreatingCodexSession => {
             agent_configs::handle_creating_agent_session_key(app, key, AgentKind::Codex)
         }
+        InputMode::CreatingAntigravitySession => {
+            super::text_input::handle_creating_antigravity_session_key(app, key)
+        }
         InputMode::AddingCodexConfigName => {
             agent_configs::handle_adding_config_name_key(app, key, AgentKind::Codex)
         }
@@ -355,6 +358,7 @@ fn validate_mode_focus_consistency(state: &mut AppState) {
         InputMode::SelectingAgentType
         | InputMode::CreatingSession
         | InputMode::CreatingCodexSession
+        | InputMode::CreatingAntigravitySession
         | InputMode::CreatingShellSession => {
             on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::Branch(_, _))
         }

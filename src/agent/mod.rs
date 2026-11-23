@@ -1,16 +1,18 @@
 //! Agent adapter module
 //!
 //! This module defines the abstraction layer for different AI coding agents.
-//! Currently supports Claude Code and OpenAI Codex CLI, as well as generic
+//! Currently supports Claude Code, OpenAI Codex CLI and Antigravity CLI, as well as generic
 //! shell sessions for running bash/zsh alongside agent sessions.
 
 pub mod adapter;
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod events;
 pub mod shell;
 
 pub use adapter::{AgentAdapter, SpawnConfig, SpawnResult};
+pub use antigravity::AntigravityAdapter;
 pub use claude::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
 pub use shell::ShellAdapter;
@@ -101,6 +103,8 @@ pub enum AgentType {
     Shell,
     /// OpenAI Codex CLI
     OpenAICodex,
+    /// Antigravity CLI (`agy`)
+    Antigravity,
 }
 
 impl AgentType {
@@ -110,6 +114,7 @@ impl AgentType {
             AgentType::ClaudeCode => "Claude Code",
             AgentType::Shell => "Shell",
             AgentType::OpenAICodex => "Codex",
+            AgentType::Antigravity => "Antigravity",
         }
     }
 
@@ -119,6 +124,7 @@ impl AgentType {
             AgentType::ClaudeCode => Box::new(ClaudeCodeAdapter::new()),
             AgentType::Shell => Box::new(ShellAdapter::new()),
             AgentType::OpenAICodex => Box::new(CodexAdapter::new()),
+            AgentType::Antigravity => Box::new(AntigravityAdapter),
         }
     }
 }
@@ -142,6 +148,7 @@ impl From<crate::session::SessionType> for AgentType {
             SessionType::ClaudeCode => AgentType::ClaudeCode,
             SessionType::OpenAICodex => AgentType::OpenAICodex,
             SessionType::Shell => AgentType::Shell,
+            SessionType::Antigravity => AgentType::Antigravity,
         }
     }
 }
@@ -178,6 +185,7 @@ mod tests {
         assert_eq!(AgentType::ClaudeCode.display_name(), "Claude Code");
         assert_eq!(AgentType::Shell.display_name(), "Shell");
         assert_eq!(AgentType::OpenAICodex.display_name(), "Codex");
+        assert_eq!(AgentType::Antigravity.display_name(), "Antigravity");
     }
 
     #[test]
@@ -213,5 +221,10 @@ mod tests {
         assert_eq!(codex_adapter.name(), "Codex");
         assert_eq!(codex_adapter.command(), "codex");
         assert!(codex_adapter.supports_hooks());
+
+        let agy_adapter = AgentType::Antigravity.create_adapter();
+        assert_eq!(agy_adapter.name(), "Antigravity");
+        assert_eq!(agy_adapter.command(), "agy");
+        assert!(agy_adapter.supports_hooks());
     }
 }

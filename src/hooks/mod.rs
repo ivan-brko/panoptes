@@ -4,8 +4,9 @@
 //! Claude Code's hook system sends POST requests when state changes occur.
 //! Codex sends the same lifecycle events through its own hooks (0.156.1 and
 //! later), and older Codex versions a single `AgentTurnComplete` through
-//! `notify`.
+//! `notify`. Antigravity sends nothing but its status line, as `StatusLine`.
 
+pub mod antigravity_status_line;
 pub mod server;
 pub mod status_line;
 

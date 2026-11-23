@@ -96,3 +96,20 @@ fn test_wrapper_default_path_prints_the_compact_line() {
     assert!(success);
     assert_fixture_line(&stdout);
 }
+
+#[test]
+fn test_status_line_subcommand_draws_antigravity_quota() {
+    // Antigravity sessions run the same wrapper, so the same subcommand
+    let payload = include_str!("../src/agent/fixtures/antigravity/status-line/idle.json");
+    let (stdout, success) = run(panoptes(), &["status-line"], &[], payload);
+    assert!(success);
+    // The reset part is dropped once the captured reset time has passed
+    assert!(stdout.starts_with("quota 1%"), "{stdout:?}");
+    assert!(!stdout.contains('\n'), "{stdout:?}");
+
+    // Before the first quota report there is nothing to draw
+    let startup = include_str!("../src/agent/fixtures/antigravity/status-line/authenticating.json");
+    let (stdout, success) = run(panoptes(), &["status-line"], &[], startup);
+    assert!(success);
+    assert_eq!(stdout, "");
+}
