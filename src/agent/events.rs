@@ -61,6 +61,30 @@ pub enum AgentEvent {
         limit: Option<UsageLimit>,
     },
 
+    /// A failed turn as Codex's rollout reports it
+    ///
+    /// Once admitted it means exactly [`AgentEvent::TurnFailed`]. It is kept
+    /// apart because no hook reports a failed Codex turn, so the rollout's
+    /// report gets past live hooks - and the rollout can be read after the
+    /// hooks have moved on to the next turn. These fields are what decides
+    /// whether it is still news (`state_machine::admits_transcript_event`).
+    RolloutTurnFailed {
+        /// As for [`AgentEvent::TurnFailed`]
+        reason: Option<String>,
+        /// As for [`AgentEvent::TurnFailed`]
+        limit: Option<UsageLimit>,
+        /// The turn that failed, Codex's `turn_id`, which its hooks also carry
+        turn_id: Option<String>,
+        /// Concluded from the rate-limit figures rather than written as an
+        /// error, for a Codex too old to write one - and so never true of a
+        /// Codex that has hooks
+        inferred: bool,
+        /// Whether the error leaves open that the turn was refused on its
+        /// usage allowance (`other`, or retries given up on a 429), so the
+        /// rate-limit figures decide
+        open_to_usage_limit: bool,
+    },
+
     /// The agent is blocked waiting for the user to approve something
     ApprovalRequested {
         /// The tool awaiting approval, when the agent names one
@@ -223,6 +247,12 @@ pub struct UsageSnapshot {
     #[serde(default)]
     pub individual: Option<RateLimitWindow>,
 
+    /// Whether the account can keep working past a used-up window, on
+    /// purchased or unlimited credits (Codex only: `credits.has_credits` or
+    /// `credits.unlimited`)
+    #[serde(default)]
+    pub credits_available: Option<bool>,
+
     /// Plan name backing the rate limit (Codex only)
     #[serde(default)]
     pub plan: Option<String>,
@@ -367,6 +397,9 @@ impl UsageSnapshot {
         if newer_has_limits {
             self.limit_reached = newer.limit_reached;
         }
+        if newer.credits_available.is_some() {
+            self.credits_available = newer.credits_available;
+        }
     }
 
     /// Whether `newer`'s context window may replace the one already held
@@ -480,9 +513,17 @@ impl UsageSnapshot {
     }
 
     /// Whether these figures say the agent is refusing turns: it says so
-    /// outright, or a limit is used up
+    /// outright, or a limit is used up with nothing to carry on with
+    ///
+    /// A used-up window alone is not a refusal while credits are available:
+    /// Plus and Pro accounts keep working past 100% on purchased credits. The
+    /// credit allowance itself has nothing behind it, so it always counts.
     pub fn is_limited(&self) -> bool {
-        self.limit_reached.is_some() || self.slots().any(|(_, w)| w.used_percent >= 100.0)
+        self.limit_reached.is_some()
+            || self.slots().any(|(slot, w)| {
+                w.used_percent >= 100.0
+                    && (slot == Slot::Individual || self.credits_available != Some(true))
+            })
     }
 
     /// The limit standing between the user and their next turn, if any
@@ -491,8 +532,11 @@ impl UsageSnapshot {
     /// one that lifts *last*. An exhausted limit whose reset is unknown could
     /// lift later than any known one, so it wins and the reset stays unknown,
     /// rather than promising a time that may be too early. With nothing used
-    /// up, a refusal the agent names anyway (a workspace out of credits) falls
-    /// on the credit allowance if there is one, else on the binding window.
+    /// up, a refusal the agent names anyway falls on the credit allowance when
+    /// it is a workspace's refusal (`workspace_*`: out of credits, or a spend
+    /// cap hit) and there is one, and on the binding window otherwise - a plain
+    /// `rate_limit_reached` at 99.6% is the window's, however little of the
+    /// allowance is used.
     ///
     /// The window is this snapshot's own label (`5h`, `wk`, `credits`), which
     /// [`UsageLimit::window_label`] passes through as it is.
@@ -504,10 +548,10 @@ impl UsageSnapshot {
         let (slot, window) = match exhausted {
             Some(found) => found,
             None => {
-                self.limit_reached.as_ref()?;
+                let workspace = self.limit_reached.as_ref()?.starts_with("workspace_");
                 match &self.individual {
-                    Some(credits) => (Slot::Individual, credits),
-                    None => self.binding_slot()?,
+                    Some(credits) if workspace => (Slot::Individual, credits),
+                    _ => self.binding_slot()?,
                 }
             }
         };
@@ -1126,6 +1170,63 @@ mod tests {
         };
         assert!(named.is_limited());
         assert_eq!(named.exhausted_limit().unwrap().window, "5h");
+    }
+
+    #[test]
+    fn test_named_refusal_falls_on_credits_only_for_a_workspace() {
+        let snapshot = |reached: &str| UsageSnapshot {
+            primary: Some(window(99.6, Some(300), Some(at(1_000)))),
+            individual: Some(window(20.0, None, Some(at(9_000)))),
+            limit_reached: Some(reached.to_string()),
+            ..Default::default()
+        };
+        // A plain rate limit just short of a full window is the window's,
+        // however little of the credit allowance is used
+        assert_eq!(
+            snapshot("rate_limit_reached")
+                .exhausted_limit()
+                .unwrap()
+                .window,
+            "5h"
+        );
+        // A workspace's refusal is about its credits or spend cap
+        for reached in [
+            "workspace_member_credits_depleted",
+            "workspace_owner_usage_limit_reached",
+        ] {
+            let limit = snapshot(reached).exhausted_limit().unwrap();
+            assert_eq!(
+                (limit.window.as_str(), limit.resets_at),
+                ("credits", Some(at(9_000))),
+                "for {reached}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_full_window_on_credits_is_not_limited() {
+        let full = |credits: Option<bool>| UsageSnapshot {
+            primary: Some(window(100.0, Some(300), None)),
+            credits_available: credits,
+            ..Default::default()
+        };
+        assert!(full(None).is_limited());
+        assert!(full(Some(false)).is_limited());
+        // Plus and Pro keep working on purchased credits
+        assert!(!full(Some(true)).is_limited());
+        // ...unless Codex says it is refusing anyway
+        let refused = UsageSnapshot {
+            limit_reached: Some("rate_limit_reached".to_string()),
+            ..full(Some(true))
+        };
+        assert!(refused.is_limited());
+        // The credit allowance has nothing behind it
+        let spent = UsageSnapshot {
+            individual: Some(window(100.0, None, None)),
+            credits_available: Some(true),
+            ..Default::default()
+        };
+        assert!(spent.is_limited());
     }
 
     #[test]

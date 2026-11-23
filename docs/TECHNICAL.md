@@ -1306,9 +1306,22 @@ workspace member's own credit allowance, `individual_limit`
 **Codex failed turns.** A turn that dies on an API error still ends with
 `task_complete`, which then carries `error: {message, codex_error_info}`
 (Codex's `Error` event itself is never persisted). That becomes
-`AgentEvent::TurnFailed`, labelled from `codex_error_info`
-(`usage_limit_exceeded`, `rate_limit_exceeded` and retries given up on a 429
-are `usage limit`; `other` says nothing). For a usage limit Codex first writes
+`AgentEvent::RolloutTurnFailed`, labelled from `codex_error_info`:
+`usage_limit_exceeded` is `usage limit`; `rate_limit_exceeded`, a throughput
+limit Codex retries, is `rate limited`; `other` says nothing. `other` and
+retries given up on a 429 are left to the figures: they are a usage limit only
+when this turn's figures showed the allowance refusing turns -
+`rate_limit_reached_type` set, or a limit at 100% with no credits behind it
+(`credits.has_credits` / `unlimited` keep Plus and Pro working past 100%).
+
+The rollout can be read after the hooks have moved on, so with hooks live the
+failure carries its `turn_id` and is dropped when it is no longer news
+(`state_machine::admits_transcript_event`): when a root-thread hook has
+already named a later turn (Codex starts queued input the moment a turn
+fails), or when `Stop` / `Interrupt` already ended that same turn (an
+`after_agent` hook that aborts writes its error after `Stop`). The turns the
+hooks named are kept in `SessionInfo::codex_turns`. Once admitted it is a
+plain `TurnFailed`. For a usage limit Codex first writes
 a `token_count` with the figures the refusal came with, and
 `transcript::codex::RolloutLimits`, held by the tailer, joins them to the
 failure: every exhausted limit must lift before a turn can run, so the one
@@ -1319,7 +1332,11 @@ proxy can strip them - the reset is read from Codex's text,
 local clock, plus a minute for the seconds Codex drops, taking the later
 instant of a repeated fall-back hour. A turn that ends with no message after
 figures this turn showed the limit hit is a usage-limit failure too, for Codex
-versions that do not write the error. The row reads
+versions that do not write the error; it is marked `inferred` and admitted only
+without hooks, since 0.156.1 always writes the error and a quiet end after a
+full window (compaction, a reasoning-only turn) is otherwise just an end. With
+nothing at 100%, a named refusal falls on the `credits` allowance only for a
+`workspace_*` reason, and on the binding window otherwise. The row reads
 `Waiting ✗ usage limit · wk resets Nov 14 10:00`, as for Claude.
 
 **Claude rate limits.** The status line's `five_hour` and `seven_day` windows

@@ -501,6 +501,11 @@ fn parse_token_count(payload: &Value) -> UsageSnapshot {
     snapshot.individual = limits
         .get("individual_limit")
         .and_then(parse_individual_limit);
+    // Plus and Pro accounts carry on past 100% on purchased credits
+    snapshot.credits_available = limits.get("credits").filter(|c| c.is_object()).map(|c| {
+        let flag = |key| c.get(key).and_then(Value::as_bool).unwrap_or(false);
+        flag("has_credits") || flag("unlimited")
+    });
     snapshot
 }
 
@@ -537,7 +542,8 @@ fn turn_failed(payload: &Value, error: &Value, record: &Value) -> AgentEvent {
         .unwrap_or_else(Utc::now);
     let retry_at = retry_at(message, failed_at);
 
-    let mut reason = failure_reason(error.get("codex_error_info"));
+    let info = error.get("codex_error_info");
+    let mut reason = failure_reason(info);
     // Codex wraps some service failures as `other`; a retry time in the text is
     // only ever written for a usage limit
     if reason.is_none() && retry_at.is_some() {
@@ -551,16 +557,48 @@ fn turn_failed(payload: &Value, error: &Value, record: &Value) -> AgentEvent {
         }),
         _ => None,
     };
-    AgentEvent::TurnFailed { reason, limit }
+    AgentEvent::RolloutTurnFailed {
+        open_to_usage_limit: reason.as_deref() != Some(USAGE_LIMIT) && could_be_usage_limit(info),
+        reason,
+        limit,
+        turn_id: payload
+            .get("turn_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        inferred: false,
+    }
+}
+
+/// The label for a throughput limit, which passes in moments - unlike a usage
+/// limit, which holds until its window resets
+const RATE_LIMITED: &str = "rate limited";
+
+/// Whether an error leaves open that the turn was refused on its usage
+/// allowance: `other`, which Codex wraps service failures in, and retries given
+/// up on a 429, which may be either kind of limit
+fn could_be_usage_limit(info: Option<&Value>) -> bool {
+    match info {
+        Some(Value::String(code)) => code == "other",
+        Some(Value::Object(map)) => {
+            map.get("response_too_many_failed_attempts")
+                .and_then(|d| d.get("http_status_code"))
+                .and_then(Value::as_u64)
+                == Some(429)
+        }
+        _ => false,
+    }
 }
 
 /// Short label for why a Codex turn failed, from its `codex_error_info`
 ///
 /// The codes are Codex's `CodexErrorInfo` as of `rust-v0.156.1`, written
 /// snake_case: a bare string for most, an object keyed by the code for those
-/// that carry an HTTP status. Retries given up on a 429 are a usage limit too,
-/// as T3 Code classifies them. `other`, or no code at all, says nothing and
-/// gives `None`; a code this table does not know is kept as it is.
+/// that carry an HTTP status. `rate_limit_exceeded` is a throughput limit,
+/// which Codex retries and which passes in moments, so it is `rate limited`
+/// rather than a usage limit; so are retries given up on a 429, unless the
+/// figures show the allowance spent (see [`RolloutLimits`]). `other`, or no
+/// code at all, says nothing and gives `None`; a code this table does not know
+/// is kept as it is.
 fn failure_reason(info: Option<&Value>) -> Option<String> {
     let (code, status) = match info? {
         Value::String(code) => (code.as_str(), None),
@@ -572,8 +610,9 @@ fn failure_reason(info: Option<&Value>) -> Option<String> {
         _ => return None,
     };
     let label = match code {
-        "usage_limit_exceeded" | "rate_limit_exceeded" => USAGE_LIMIT,
-        "response_too_many_failed_attempts" if status == Some(429) => USAGE_LIMIT,
+        "usage_limit_exceeded" => USAGE_LIMIT,
+        "rate_limit_exceeded" => RATE_LIMITED,
+        "response_too_many_failed_attempts" if status == Some(429) => RATE_LIMITED,
         "context_window_exceeded" => "context full",
         "session_budget_exceeded" => "budget spent",
         "server_overloaded" | "internal_server_error" => "server error",
@@ -682,7 +721,8 @@ const MONTHS: [&str; 12] = [
 pub struct RolloutLimits {
     /// The rate-limit figures as of the latest record
     usage: UsageSnapshot,
-    /// Whether a record since the turn began showed the limit hit
+    /// Whether a record since the turn began showed the allowance refusing
+    /// turns (see [`UsageSnapshot::is_limited`])
     hit_this_turn: bool,
 }
 
@@ -710,19 +750,42 @@ impl RolloutLimits {
                 }
                 event
             }
-            AgentEvent::TurnFailed { reason, limit } => {
-                let reason = reason.or_else(|| self.hit_this_turn.then(|| USAGE_LIMIT.to_string()));
+            AgentEvent::RolloutTurnFailed {
+                reason,
+                limit,
+                turn_id,
+                inferred,
+                open_to_usage_limit,
+            } => {
+                let reason = if open_to_usage_limit && self.hit_this_turn {
+                    Some(USAGE_LIMIT.to_string())
+                } else {
+                    reason
+                };
                 let limit = if reason.as_deref() == Some(USAGE_LIMIT) {
                     self.refused_on(limit)
                 } else {
                     limit
                 };
-                AgentEvent::TurnFailed { reason, limit }
+                AgentEvent::RolloutTurnFailed {
+                    reason,
+                    limit,
+                    turn_id,
+                    inferred,
+                    // Settled now, one way or the other
+                    open_to_usage_limit: false,
+                }
             }
+            // Only a Codex too old to write the error ends a refused turn like
+            // this, and one that old has no hooks; `inferred` keeps it from
+            // overruling the hooks of one that does
             AgentEvent::TurnCompleted { last_message: None } if self.hit_this_turn => {
-                AgentEvent::TurnFailed {
+                AgentEvent::RolloutTurnFailed {
                     reason: Some(USAGE_LIMIT.to_string()),
                     limit: self.refused_on(None),
+                    turn_id: None,
+                    inferred: true,
+                    open_to_usage_limit: false,
                 }
             }
             event => event,
@@ -1076,12 +1139,32 @@ mod tests {
     }
 
     /// Feed lines through a fresh tracker, as a tailer would
-    fn observed(lines: &[&str]) -> Vec<AgentEvent> {
+    fn observed_raw(lines: &[&str]) -> Vec<AgentEvent> {
         let mut limits = RolloutLimits::default();
         lines
             .iter()
             .filter_map(|line| parse_line(line))
             .map(|event| limits.observe(event))
+            .collect()
+    }
+
+    /// [`observed_raw`], with each failure read as what it means once
+    /// admitted, for tests about the reason and limit alone
+    fn observed(lines: &[&str]) -> Vec<AgentEvent> {
+        observed_raw(lines)
+            .into_iter()
+            .map(|event| match event {
+                AgentEvent::RolloutTurnFailed {
+                    reason,
+                    limit,
+                    open_to_usage_limit,
+                    ..
+                } => {
+                    assert!(!open_to_usage_limit, "the tracker settles it");
+                    AgentEvent::TurnFailed { reason, limit }
+                }
+                event => event,
+            })
             .collect()
     }
 
@@ -1337,14 +1420,16 @@ mod tests {
             reason(r#""usage_limit_exceeded""#).as_deref(),
             Some("usage limit")
         );
+        // A throughput limit, which Codex retries, is not a spent allowance
         assert_eq!(
             reason(r#""rate_limit_exceeded""#).as_deref(),
-            Some("usage limit")
+            Some("rate limited")
         );
-        // Retries given up on a 429 are a limit too; on anything else they are not
+        // Nor are retries given up on a 429, on the code alone; on anything
+        // else they are a plain API error
         assert_eq!(
             reason(r#"{"response_too_many_failed_attempts":{"http_status_code":429}}"#).as_deref(),
-            Some("usage limit")
+            Some("rate limited")
         );
         assert_eq!(
             reason(r#"{"response_too_many_failed_attempts":{"http_status_code":502}}"#).as_deref(),
@@ -1430,16 +1515,20 @@ mod tests {
         );
         let bare_end =
             r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null}}"#;
-        let events = observed(&[TASK_STARTED, &limited, bare_end]);
+        let events = observed_raw(&[TASK_STARTED, &limited, bare_end]);
         assert_eq!(
             events.last(),
-            Some(&AgentEvent::TurnFailed {
+            Some(&AgentEvent::RolloutTurnFailed {
                 reason: Some("usage limit".to_string()),
                 limit: Some(UsageLimit {
                     window: "credits".to_string(),
                     resets_at: DateTime::from_timestamp(1_794_646_800, 0),
                     using_overage: false,
                 }),
+                turn_id: None,
+                // Marked, so live hooks never let it through
+                inferred: true,
+                open_to_usage_limit: false,
             })
         );
 
@@ -1459,6 +1548,101 @@ mod tests {
         assert!(matches!(
             observed(&[TASK_STARTED, &limited, TASK_STARTED, &lifted, bare_end]).last(),
             Some(AgentEvent::TurnCompleted { .. })
+        ));
+    }
+
+    #[test]
+    fn test_full_window_with_credits_is_not_a_refusal() {
+        // Plus and Pro carry on past 100% on purchased credits
+        let on_credits = token_count(
+            r#"{"limit_id":"codex",
+              "primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1794411420},
+              "credits":{"has_credits":true,"unlimited":false,"balance":"12.50"},
+              "plan_type":"pro","rate_limit_reached_type":null}"#,
+        );
+        // An `after_agent` hook's abort, say: `other`, and nothing to do with
+        // the allowance
+        let other = failed_task(
+            r#"{"message":"after_agent hook 'x' failed and aborted turn completion","codex_error_info":"other"}"#,
+        );
+        assert_eq!(
+            observed(&[TASK_STARTED, &on_credits, &other]).last(),
+            Some(&AgentEvent::TurnFailed {
+                reason: None,
+                limit: None
+            })
+        );
+        // ...and a quiet turn end after it is just an end
+        let bare_end =
+            r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null}}"#;
+        assert!(matches!(
+            observed(&[TASK_STARTED, &on_credits, bare_end]).last(),
+            Some(AgentEvent::TurnCompleted { .. })
+        ));
+
+        // Unlimited counts the same; no credits at all does not
+        let unlimited = on_credits.replace(r#""unlimited":false"#, r#""unlimited":true"#);
+        let unlimited = unlimited.replace(r#""has_credits":true"#, r#""has_credits":false"#);
+        assert!(matches!(
+            observed(&[TASK_STARTED, &unlimited, bare_end]).last(),
+            Some(AgentEvent::TurnCompleted { .. })
+        ));
+        let spent = unlimited.replace(r#""unlimited":true"#, r#""unlimited":false"#);
+        assert!(matches!(
+            observed(&[TASK_STARTED, &spent, &other]).last(),
+            Some(AgentEvent::TurnFailed { reason: Some(r), .. }) if r == "usage limit"
+        ));
+    }
+
+    #[test]
+    fn test_retries_on_a_429_are_a_usage_limit_only_when_the_figures_say_so() {
+        let given_up = failed_task(
+            r#"{"message":"exceeded retry limit, last status: 429 Too Many Requests","codex_error_info":{"response_too_many_failed_attempts":{"http_status_code":429}}}"#,
+        );
+        let roomy = token_count(
+            r#"{"limit_id":"codex","primary":{"used_percent":30.0,"window_minutes":300}}"#,
+        );
+        assert_eq!(
+            observed(&[TASK_STARTED, &roomy, &given_up]).last(),
+            Some(&AgentEvent::TurnFailed {
+                reason: Some("rate limited".to_string()),
+                limit: None
+            })
+        );
+
+        let spent = token_count(
+            r#"{"limit_id":"codex","primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1794411420}}"#,
+        );
+        assert_eq!(
+            observed(&[TASK_STARTED, &spent, &given_up]).last(),
+            Some(&AgentEvent::TurnFailed {
+                reason: Some("usage limit".to_string()),
+                limit: Some(UsageLimit {
+                    window: "5h".to_string(),
+                    resets_at: DateTime::from_timestamp(1_794_411_420, 0),
+                    using_overage: false,
+                }),
+            })
+        );
+
+        // `rate_limit_exceeded` is a throughput limit whatever the figures say
+        let throughput = failed_task(
+            r#"{"message":"Rate limit reached","codex_error_info":"rate_limit_exceeded"}"#,
+        );
+        assert!(matches!(
+            observed(&[TASK_STARTED, &spent, &throughput]).last(),
+            Some(AgentEvent::TurnFailed { reason: Some(r), .. }) if r == "rate limited"
+        ));
+    }
+
+    #[test]
+    fn test_failure_carries_its_turn_id() {
+        let fixture = include_str!("fixtures/usage_limit_rollout.jsonl");
+        let events = observed_raw(&fixture.lines().collect::<Vec<_>>());
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::RolloutTurnFailed { turn_id: Some(id), inferred: false, .. })
+                if id == "turn-1"
         ));
     }
 

@@ -166,6 +166,12 @@ impl HookEvent {
         self.str_field("agent_id")
     }
 
+    /// The turn a Codex hook belongs to, the same id the rollout's
+    /// `task_complete` carries
+    pub fn turn_id(&self) -> Option<&str> {
+        self.str_field("turn_id")
+    }
+
     /// The MCP server behind an `Elicitation` / `ElicitationResult`
     pub fn mcp_server_name(&self) -> Option<&str> {
         self.str_field("mcp_server_name")

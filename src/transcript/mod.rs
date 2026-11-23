@@ -484,7 +484,7 @@ mod tests {
         // The refusal lands in a later poll than the figures it came with
         append(&path, &format!("{failure}\n"));
         let (events, _) = tailer.poll();
-        let [AgentEvent::TurnFailed {
+        let [AgentEvent::RolloutTurnFailed {
             limit: Some(limit), ..
         }] = events.as_slice()
         else {
