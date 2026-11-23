@@ -10,6 +10,7 @@ use crate::config::CustomShortcut;
 use crate::session::{AttentionReason, SessionInfo, SessionManager, SessionState, SessionType};
 use crate::tui::theme::theme;
 
+mod account_row;
 mod agent_configs;
 mod claude_settings;
 pub(crate) mod codex_account;
