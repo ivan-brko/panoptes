@@ -215,6 +215,14 @@ pub struct UsageSnapshot {
     #[serde(default)]
     pub secondary: Option<RateLimitWindow>,
 
+    /// A workspace member's own credit allowance (Codex only)
+    ///
+    /// Codex writes it as `individual_limit` beside the two windows, as a
+    /// remaining share rather than a used one; it is held here converted, with
+    /// no length, since it is a spend cap rather than a rolling window.
+    #[serde(default)]
+    pub individual: Option<RateLimitWindow>,
+
     /// Plan name backing the rate limit (Codex only)
     #[serde(default)]
     pub plan: Option<String>,
@@ -257,14 +265,39 @@ impl RateLimitWindow {
 
     /// Short name for the window's length: `5h`, `wk`, or `limit` when unknown
     pub(crate) fn label(&self) -> String {
-        match self.window_minutes {
+        self.label_or(None)
+    }
+
+    /// [`Self::label`], with a length to assume when the agent wrote none
+    fn label_or(&self, fallback_minutes: Option<u64>) -> String {
+        match self.window_minutes.filter(|&m| m > 0).or(fallback_minutes) {
             None | Some(0) => "limit".to_string(),
-            Some(10_080) => "wk".to_string(),
+            Some(WEEK_MINUTES) => "wk".to_string(),
+            Some(MONTH_MINUTES) => "mo".to_string(),
             Some(m) if m % 1_440 == 0 => format!("{}d", m / 1_440),
             Some(m) if m % 60 == 0 => format!("{}h", m / 60),
             Some(m) => format!("{}m", m),
         }
     }
+}
+
+/// A five-hour window, the short window on paid Codex plans
+const SESSION_MINUTES: u64 = 5 * 60;
+/// A week, the long window
+const WEEK_MINUTES: u64 = 7 * 24 * 60;
+/// Thirty days, the only window on Codex's Free and Go plans
+const MONTH_MINUTES: u64 = 30 * 24 * 60;
+
+/// Which of a snapshot's rate limits a window is
+///
+/// Codex's `primary` and `secondary` are positions, not lengths: a record that
+/// leaves out `window_minutes` still means the same windows, and which ones
+/// depends on the plan (see [`UsageSnapshot::assumed_minutes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Primary,
+    Secondary,
+    Individual,
 }
 
 /// Where a context window figure came from, weakest first
@@ -300,8 +333,7 @@ impl UsageSnapshot {
     /// The context window is the one field that is not simply last-writer-wins:
     /// see [`Self::accepts_window_from`].
     pub fn merge(&mut self, newer: UsageSnapshot) {
-        let newer_has_limits =
-            newer.primary.is_some() || newer.secondary.is_some() || newer.limit_reached.is_some();
+        let newer_has_limits = newer.carries_limits();
         if newer.total_tokens.is_some() {
             self.total_tokens = newer.total_tokens;
         }
@@ -325,6 +357,7 @@ impl UsageSnapshot {
         // window says nothing about the week
         merge_window(&mut self.primary, newer.primary);
         merge_window(&mut self.secondary, newer.secondary);
+        merge_window(&mut self.individual, newer.individual);
         if newer.plan.is_some() {
             self.plan = newer.plan;
         }
@@ -387,19 +420,23 @@ impl UsageSnapshot {
         } else if let Some(total) = self.total_tokens {
             parts.push(format!("{} tok", format_thousands(total)));
         }
-        let binding = self.binding_window();
+        let binding = self.binding_slot();
         if self.limit_reached.is_some() {
             // Blocked outright - how full the window is no longer matters, only
             // when it lets the user back in
             match binding
-                .and_then(|w| w.resets_at)
+                .and_then(|(_, w)| w.resets_at)
                 .and_then(|at| format_reset(at, now))
             {
                 Some(reset) => parts.push(format!("limit hit · resets {}", reset)),
                 None => parts.push("limit hit".to_string()),
             }
-        } else if let Some(window) = binding {
-            parts.push(format!("{} {:.0}%", window.label(), window.used_percent));
+        } else if let Some((slot, window)) = binding {
+            parts.push(format!(
+                "{} {:.0}%",
+                self.slot_label(slot, window),
+                window.used_percent
+            ));
         }
 
         (!parts.is_empty()).then(|| parts.join(" · "))
@@ -410,13 +447,124 @@ impl UsageSnapshot {
     /// Higher usage wins; on a tie the longer window does, since it takes
     /// longer to recover from.
     pub(crate) fn binding_window(&self) -> Option<&RateLimitWindow> {
-        match (&self.primary, &self.secondary) {
-            (Some(a), Some(b)) => {
-                let a_key = (a.used_percent, a.window_minutes.unwrap_or(0));
-                let b_key = (b.used_percent, b.window_minutes.unwrap_or(0));
-                Some(if b_key > a_key { b } else { a })
+        self.binding_slot().map(|(_, window)| window)
+    }
+
+    /// [`Self::binding_window`], with which of the limits it is
+    fn binding_slot(&self) -> Option<(Slot, &RateLimitWindow)> {
+        let mut best: Option<(Slot, &RateLimitWindow)> = None;
+        for (slot, window) in self.slots() {
+            let wins = match best {
+                None => true,
+                Some((held_slot, held)) => {
+                    (window.used_percent, self.minutes_of(slot, window))
+                        > (held.used_percent, self.minutes_of(held_slot, held))
+                }
+            };
+            if wins {
+                best = Some((slot, window));
             }
-            (a, b) => a.as_ref().or(b.as_ref()),
+        }
+        best
+    }
+
+    /// Whether this snapshot reads the rate limits at all
+    ///
+    /// A record that does is authoritative about every limit field, including
+    /// the ones it leaves empty.
+    pub(crate) fn carries_limits(&self) -> bool {
+        self.primary.is_some()
+            || self.secondary.is_some()
+            || self.individual.is_some()
+            || self.limit_reached.is_some()
+    }
+
+    /// Whether these figures say the agent is refusing turns: it says so
+    /// outright, or a limit is used up
+    pub fn is_limited(&self) -> bool {
+        self.limit_reached.is_some() || self.slots().any(|(_, w)| w.used_percent >= 100.0)
+    }
+
+    /// The limit standing between the user and their next turn, if any
+    ///
+    /// Every exhausted limit has to lift before a turn can run, so this is the
+    /// one that lifts *last*. An exhausted limit whose reset is unknown could
+    /// lift later than any known one, so it wins and the reset stays unknown,
+    /// rather than promising a time that may be too early. With nothing used
+    /// up, a refusal the agent names anyway (a workspace out of credits) falls
+    /// on the credit allowance if there is one, else on the binding window.
+    ///
+    /// The window is this snapshot's own label (`5h`, `wk`, `credits`), which
+    /// [`UsageLimit::window_label`] passes through as it is.
+    pub fn exhausted_limit(&self) -> Option<UsageLimit> {
+        let exhausted = self
+            .slots()
+            .filter(|(_, w)| w.used_percent >= 100.0)
+            .max_by_key(|(_, w)| w.resets_at.unwrap_or(DateTime::<Utc>::MAX_UTC));
+        let (slot, window) = match exhausted {
+            Some(found) => found,
+            None => {
+                self.limit_reached.as_ref()?;
+                match &self.individual {
+                    Some(credits) => (Slot::Individual, credits),
+                    None => self.binding_slot()?,
+                }
+            }
+        };
+        Some(UsageLimit {
+            window: self.slot_label(slot, window),
+            resets_at: window.resets_at,
+            using_overage: false,
+        })
+    }
+
+    /// Every limit the snapshot holds, in slot order
+    fn slots(&self) -> impl Iterator<Item = (Slot, &RateLimitWindow)> {
+        [
+            (Slot::Primary, &self.primary),
+            (Slot::Secondary, &self.secondary),
+            (Slot::Individual, &self.individual),
+        ]
+        .into_iter()
+        .filter_map(|(slot, window)| window.as_ref().map(|w| (slot, w)))
+    }
+
+    /// The length a slot's window is taken to have when the agent wrote none
+    ///
+    /// Codex's primary window is a month on the Free and Go plans and five
+    /// hours on every paid one; the secondary is always the week. With no plan
+    /// known there is nothing to go on for the primary, and it stays
+    /// unlabelled rather than guessed at.
+    fn assumed_minutes(&self, slot: Slot) -> Option<u64> {
+        match slot {
+            Slot::Primary => self.plan.as_deref().map(|plan| match plan {
+                "free" | "go" => MONTH_MINUTES,
+                _ => SESSION_MINUTES,
+            }),
+            Slot::Secondary => Some(WEEK_MINUTES),
+            Slot::Individual => None,
+        }
+    }
+
+    /// How long a window is, for ranking: its own figure, else the assumed one
+    ///
+    /// The credit allowance ranks as monthly, which is how Codex bills it.
+    fn minutes_of(&self, slot: Slot, window: &RateLimitWindow) -> u64 {
+        match slot {
+            Slot::Individual => MONTH_MINUTES,
+            _ => window
+                .window_minutes
+                .filter(|&m| m > 0)
+                .or(self.assumed_minutes(slot))
+                .unwrap_or(0),
+        }
+    }
+
+    /// A window's label in this snapshot: `5h`, `wk`, `credits`
+    fn slot_label(&self, slot: Slot, window: &RateLimitWindow) -> String {
+        match slot {
+            Slot::Individual => "credits".to_string(),
+            _ => window.label_or(self.assumed_minutes(slot)),
         }
     }
 }
@@ -469,11 +617,17 @@ where
 /// A usage limit the agent refused a turn on: which window, and when it lifts
 ///
 /// Claude writes this as `quotaLimits` on the failed turn's transcript record
-/// (`rateLimitType`, `resetsAt` in epoch seconds, `isUsingOverage`). Kept
-/// agent-neutral so Codex's own limit reports can carry the same thing.
+/// (`rateLimitType`, `resetsAt` in epoch seconds, `isUsingOverage`). Codex
+/// names no window on a refused turn, so its limits are read off the rate-limit
+/// figures instead (see [`UsageSnapshot::exhausted_limit`]) and carry those
+/// figures' own labels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageLimit {
-    /// The window as the agent names it, e.g. `five_hour`, `seven_day_opus`
+    /// The window as the agent names it, e.g. `five_hour`, `seven_day_opus`,
+    /// or Codex's `5h` / `credits`
+    ///
+    /// Empty when only the reset is known - Codex's error text says when, not
+    /// which. A limit is never built with neither.
     pub window: String,
     /// When the window's allowance is restored, if the agent said
     pub resets_at: Option<DateTime<Utc>>,
@@ -503,10 +657,19 @@ impl UsageLimit {
     }
 
     /// `5h resets 20:10`, or just `5h` when the reset is unknown or past
+    ///
+    /// A limit with no window reads `resets 20:10`, and once that has passed,
+    /// the generic `limit`.
     pub fn describe_at(&self, now: DateTime<Utc>) -> String {
-        match self.resets_at.and_then(|at| format_reset(at, now)) {
-            Some(reset) => format!("{} resets {}", self.window_label(), reset),
-            None => self.window_label().to_string(),
+        let label = match self.window_label() {
+            "" => None,
+            label => Some(label),
+        };
+        match (label, self.resets_at.and_then(|at| format_reset(at, now))) {
+            (Some(label), Some(reset)) => format!("{} resets {}", label, reset),
+            (None, Some(reset)) => format!("resets {}", reset),
+            (Some(label), None) => label.to_string(),
+            (None, None) => "limit".to_string(),
         }
     }
 }
@@ -873,6 +1036,126 @@ mod tests {
         assert_eq!(window(0.0, Some(1_440), None).label(), "1d");
         assert_eq!(window(0.0, Some(90), None).label(), "90m");
         assert_eq!(window(0.0, None, None).label(), "limit");
+        assert_eq!(window(0.0, Some(43_200), None).label(), "mo");
+    }
+
+    #[test]
+    fn test_window_without_minutes_is_labelled_by_plan() {
+        let exhausted = |plan: Option<&str>| UsageSnapshot {
+            primary: Some(window(100.0, None, Some(at(5_000)))),
+            plan: plan.map(str::to_string),
+            ..Default::default()
+        };
+        // Codex's primary is a month on Free and Go, five hours on paid plans
+        for (plan, label) in [
+            (Some("free"), "mo"),
+            (Some("go"), "mo"),
+            (Some("plus"), "5h"),
+            (Some("business"), "5h"),
+            // With no plan there is nothing to go on
+            (None, "limit"),
+        ] {
+            let usage = exhausted(plan);
+            assert_eq!(
+                usage.exhausted_limit().map(|l| l.window).as_deref(),
+                Some(label),
+                "for {plan:?}"
+            );
+            assert_eq!(usage.summary_at(at(0)).unwrap(), format!("{label} 100%"));
+        }
+
+        // The secondary is the week whatever the plan
+        let usage = UsageSnapshot {
+            secondary: Some(window(100.0, None, None)),
+            ..Default::default()
+        };
+        assert_eq!(usage.exhausted_limit().unwrap().window, "wk");
+    }
+
+    #[test]
+    fn test_exhausted_limit_is_the_last_to_lift() {
+        let both = UsageSnapshot {
+            primary: Some(window(100.0, Some(300), Some(at(1_000)))),
+            secondary: Some(window(100.0, Some(10_080), Some(at(9_000)))),
+            ..Default::default()
+        };
+        let limit = both.exhausted_limit().unwrap();
+        assert_eq!(
+            (limit.window.as_str(), limit.resets_at),
+            ("wk", Some(at(9_000)))
+        );
+
+        // Order does not matter, only the reset
+        let reversed = UsageSnapshot {
+            primary: Some(window(100.0, Some(300), Some(at(9_000)))),
+            secondary: Some(window(100.0, Some(10_080), Some(at(1_000)))),
+            ..Default::default()
+        };
+        assert_eq!(reversed.exhausted_limit().unwrap().window, "5h");
+
+        // A used-up window with no known reset could lift later than any
+        // known one, so no time is promised
+        let unknown = UsageSnapshot {
+            primary: Some(window(100.0, Some(300), None)),
+            secondary: Some(window(100.0, Some(10_080), Some(at(9_000)))),
+            ..Default::default()
+        };
+        let limit = unknown.exhausted_limit().unwrap();
+        assert_eq!((limit.window.as_str(), limit.resets_at), ("5h", None));
+
+        // A window short of full is not what blocks the turn
+        let one = UsageSnapshot {
+            primary: Some(window(99.5, Some(300), Some(at(1_000)))),
+            secondary: Some(window(100.0, Some(10_080), Some(at(9_000)))),
+            ..Default::default()
+        };
+        assert_eq!(one.exhausted_limit().unwrap().window, "wk");
+
+        // Nothing used up and no refusal named: nothing is in the way
+        let fine = UsageSnapshot {
+            primary: Some(window(60.0, Some(300), Some(at(1_000)))),
+            ..Default::default()
+        };
+        assert_eq!(fine.exhausted_limit(), None);
+        assert!(!fine.is_limited());
+
+        // A named refusal with nothing used up falls on the binding window
+        let named = UsageSnapshot {
+            limit_reached: Some("rate_limit_reached".to_string()),
+            ..fine
+        };
+        assert!(named.is_limited());
+        assert_eq!(named.exhausted_limit().unwrap().window, "5h");
+    }
+
+    #[test]
+    fn test_usage_limit_without_a_window_names_only_its_reset() {
+        let now = at(1_787_939_997);
+        let reset = at(1_787_940_600);
+        let limit = UsageLimit {
+            window: String::new(),
+            resets_at: Some(reset),
+            using_overage: false,
+        };
+        assert_eq!(
+            limit.describe_at(now),
+            format!("resets {}", format_reset(reset, now).unwrap())
+        );
+        // Once past, there is nothing specific left to say
+        assert_eq!(limit.describe_at(reset), "limit");
+    }
+
+    #[test]
+    fn test_merge_keeps_the_credit_allowance_alongside_the_windows() {
+        let mut usage = UsageSnapshot {
+            individual: Some(window(70.0, None, Some(at(9_000)))),
+            ..Default::default()
+        };
+        usage.merge(UsageSnapshot {
+            primary: Some(window(5.0, Some(300), None)),
+            ..Default::default()
+        });
+        assert_eq!(usage.individual, Some(window(70.0, None, Some(at(9_000)))));
     }
 
     #[test]
