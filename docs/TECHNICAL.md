@@ -1179,7 +1179,7 @@ without lifecycle hooks it is the only channel there is.
 | File | `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<uuid>.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
 | Path is | as reported by `SessionStart` after a conversation change, else derived from cwd and ID | searched for, since the name embeds a timestamp |
 | Drives state | only for a failed turn - hooks own the rest | only until lifecycle hooks report (never, on 0.156.1+) |
-| Contributes | context usage, model, title, failed turns | context usage, model, rate limits, title (from `session_index.jsonl`); state and subagents without hooks |
+| Contributes | context usage, model, title, failed turns, prompt-cache expiry | context usage, model, rate limits, title (from `session_index.jsonl`); state and subagents without hooks |
 | Measured flush latency | immediate | under 50ms |
 
 Claude's rate limits and observed context window come from its status line
@@ -1350,6 +1350,34 @@ map onto the same `primary` / `secondary` windows (300 and 10080 minutes), so
 the header shows Claude's limits exactly as it shows Codex's. Claude reports no
 "limit reached" flag there; a turn refused for it still arrives as a failed turn
 from the transcript.
+
+**Claude prompt cache.** A session row at rest (`Waiting`, `AwaitingApproval`,
+`Suspended`) ends in `cache 42m` while Claude's prompt cache is warm and `cold`
+once it has expired, because resuming a long conversation after expiry re-sends
+it all uncached. `agent::prompt_cache` works it out from main-chain assistant
+records, once per record; the row only compares the stored expiry with the
+clock.
+
+- *Tier.* `usage.cache_creation` splits what a request wrote into
+  `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`. Any 1-hour
+  tokens make it a one-hour cache (subscriptions), else 5-minute tokens make it
+  five minutes (API keys). A request that wrote nothing teaches no tier, and
+  until some request has, nothing is shown.
+- *Clock.* A cache hit refreshes the TTL as much as a write does, so the clock
+  restarts at every request that read *or* wrote the cache, keeping the tier
+  already learned. It starts at the request, not the record: the earliest
+  record of a `requestId` (one request writes one record per content block),
+  less its `thinkingDurationMs`, less a 30-second margin for the first token.
+  Every approximation errs early, since a cache shown warm after it expired is
+  the expensive mistake.
+- *Reattaching.* The backward seed scan keeps going past a newest record of
+  pure reads until it finds the tier, so a resumed session shows its warmth
+  before its next turn.
+
+The field is dropped whole: it outlasts a failed turn's limit and the full
+project and branch, but goes before the row would fall to its compact form.
+Warm is the `success` token, cold `text_dim`. A `/model` switch is not
+modelled - the next request rewrites the cache under the new model anyway.
 
 **Where reading starts.** A session that created its own transcript is read
 from the beginning: everything in the file describes what it has just been

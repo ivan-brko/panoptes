@@ -112,6 +112,7 @@ Panoptes actively helps you manage your attention across sessions:
   - Green dot (`●`) - The turn finished; the agent is waiting for your next prompt
   - Yellow dot (`●`) - Blocked on a permission dialog, or a tool that stopped reporting
   - Red cross (`✗`) - The agent process died, or a turn died on an API error (usage limit, expired login, overload); for a failed turn the row and header name the reason until the next prompt, and for a usage limit which one and when it resets (`usage limit · 5h resets 20:10`); for a Claude turn that failed on its login the header also gives the exact command to sign that account back in (``auth failed · run `CLAUDE_CONFIG_DIR=~/.claude-work claude auth login` ``)
+- **Prompt-cache warmth** - An idle Claude session's row ends in `cache 42m` while its prompt cache is still warm, counting down, and `cold` once it has expired - so you know before you type whether picking a long conversation back up will re-send all of it uncached
 - **Needs Attention Section** - Pinned to the top of the Sessions pane, with a blinking count in the header that is visible from every pane
 - **Auto-Acknowledge** - Opening a session clears its attention flag, and nothing re-raises it until something new happens
 
