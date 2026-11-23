@@ -1179,7 +1179,7 @@ without lifecycle hooks it is the only channel there is.
 | File | `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<uuid>.jsonl` | `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
 | Path is | as reported by `SessionStart` after a conversation change, else derived from cwd and ID | searched for, since the name embeds a timestamp |
 | Drives state | only for a failed turn - hooks own the rest | only until lifecycle hooks report (never, on 0.156.1+) |
-| Contributes | context usage, model, title, failed turns | context usage, model, rate limits, title (from `session_index.jsonl`); state and subagents without hooks |
+| Contributes | context usage, model, title, failed turns, prompt-cache expiry | context usage, model, rate limits, title (from `session_index.jsonl`); state and subagents without hooks |
 | Measured flush latency | immediate | under 50ms |
 
 Claude's rate limits and observed context window come from its status line
@@ -1350,6 +1350,45 @@ map onto the same `primary` / `secondary` windows (300 and 10080 minutes), so
 the header shows Claude's limits exactly as it shows Codex's. Claude reports no
 "limit reached" flag there; a turn refused for it still arrives as a failed turn
 from the transcript.
+
+**Claude prompt cache.** A session row at rest (`Waiting`, `AwaitingApproval`,
+`Suspended`) ends in `cache 42m` while Claude's prompt cache is warm and `cold`
+once it has expired, because resuming a long conversation after expiry re-sends
+it all uncached. `agent::prompt_cache` works it out from main-chain assistant
+records, once per record; the row only compares the stored expiry with the
+clock.
+
+- *Tier.* `usage.cache_creation` splits what a request wrote into
+  `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`: 1-hour tokens
+  make it a one-hour cache (subscriptions), 5-minute tokens five minutes (API
+  keys). Real transcripts never mix them; a request that did would get the
+  shorter TTL, since that part of the prefix expires first. A request that
+  wrote nothing falls back to its `promptCacheRequested` (`"1h"`), else keeps
+  the tier already learned; with no tier known, nothing is shown.
+- *Clock.* A cache hit refreshes the TTL as much as a write does, so the clock
+  restarts at every request that read *or* wrote the cache, keeping the tier
+  already learned. It starts at the request, not the record: the earliest
+  record of a `requestId` (one request writes one record per content block),
+  less its `thinkingDurationMs`, less a 30-second margin for the first token.
+  Every approximation errs early, since a cache shown warm after it expired is
+  the expensive mistake.
+- *Model.* A cache belongs to one model. The cache keeps the model of the
+  request that used it; once the session's model (bare, without `[1m]`) is
+  another - a `/model` switch, which the status line reports at once - the row
+  says `cold`, because the next turn starts a fresh cache.
+- *Reattaching.* The backward seed scan keeps going past a newest record of
+  pure reads until it finds the tier, and past the newest request's later
+  records back to its first, so a resumed session shows its warmth - from the
+  request's real start - before its next turn.
+- *Redrawing.* Nothing else redraws an idle screen, so `App::tick_cache_warmth`
+  keeps the earliest moment any row's label next changes (a minute boundary,
+  or expiry) and owes a frame only then. The sessions are looked at only on a
+  pass where something else changed, or when that moment comes due.
+
+The field is dropped whole and goes first: it stays only beside the complete
+row - limit, project and branch all whole - after the update badge's words
+but never the `↻` glyph, which stays last. Warm is the `success` token,
+cold `text_dim`.
 
 **Where reading starts.** A session that created its own transcript is read
 from the beginning: everything in the file describes what it has just been

@@ -10,6 +10,7 @@ pub mod binary;
 pub mod claude;
 pub mod codex;
 pub mod events;
+pub mod prompt_cache;
 pub mod shell;
 
 pub use adapter::{AgentAdapter, SpawnConfig, SpawnResult};

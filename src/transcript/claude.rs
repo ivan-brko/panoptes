@@ -8,8 +8,9 @@
 //! they arrive sooner, and two producers writing the same field would fight
 //! over it. The transcript is read for what hooks do not carry: how full the
 //! context window is, which model is answering, what Claude has named the
-//! conversation (its `ai-title` records, revised as it goes) - and whether the
-//! turn died on an API error.
+//! conversation (its `ai-title` records, revised as it goes), when its prompt
+//! cache expires (the usage's `cache_creation` split and the record's time) -
+//! and whether the turn died on an API error.
 //!
 //! That last one breaks the rule deliberately. A turn that dies on an API
 //! error (usage limit, expired login, overload) fires Claude's `StopFailure`
@@ -36,10 +37,11 @@
 //! as the session goes is reported only to the status line, which Panoptes
 //! reads for that - see `hooks/status_line.rs`.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 
 use crate::agent::events::{AgentEvent, UsageLimit, UsageSnapshot};
+use crate::agent::prompt_cache::{CacheTtl, PromptCache, REQUEST_MARGIN};
 
 /// The model name Claude stamps on records it wrote itself, not the API
 const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -115,6 +117,7 @@ pub fn parse_line(line: &str) -> Option<AgentEvent> {
         // count is far less useful than a percentage.
         context_window: model.and_then(context_window_for),
         model: model.map(str::to_string),
+        prompt_cache: prompt_cache(&record, usage).map(|cache| cache.on_model(model)),
         ..Default::default()
     };
 
@@ -152,6 +155,62 @@ const CONTEXT_WINDOWS: &[(&str, u64)] = &[
 /// Whether a top-level boolean flag is set on a record
 fn flag(record: &Value, name: &str) -> bool {
     record.get(name).and_then(Value::as_bool) == Some(true)
+}
+
+/// What a main-chain assistant record says about the prompt cache
+///
+/// `None` unless the request used the cache at all - read from it or wrote to
+/// it - and the record has a timestamp to start the clock from. The TTL tier
+/// comes from the `usage.cache_creation` split, which only a request that
+/// wrote something carries; one of pure reads still restarts the clock, with
+/// the tier its `promptCacheRequested` names, or else left to what is already
+/// known. See [`crate::agent::prompt_cache`] for why the clock starts where it
+/// does.
+///
+/// Shape, as of Claude Code 2.1.3xx: `usage.cache_creation` is
+/// `{"ephemeral_1h_input_tokens":N,"ephemeral_5m_input_tokens":N}` beside the
+/// summed `cache_creation_input_tokens`, and the record carries `timestamp`
+/// (RFC 3339), `requestId`, `promptCacheRequested` (`"1h"`), and - on the
+/// first record of a request that thought - `thinkingDurationMs`.
+fn prompt_cache(record: &Value, usage: &Value) -> Option<PromptCache> {
+    let tokens = |value: Option<&Value>| value.and_then(Value::as_u64).unwrap_or(0);
+    let split = usage.get("cache_creation");
+    let written_tier = CacheTtl::from_split(
+        tokens(split.and_then(|s| s.get("ephemeral_1h_input_tokens"))),
+        tokens(split.and_then(|s| s.get("ephemeral_5m_input_tokens"))),
+    );
+    let read = tokens(usage.get("cache_read_input_tokens"));
+    let written = tokens(usage.get("cache_creation_input_tokens"));
+    if written_tier.is_none() && read == 0 && written == 0 {
+        return None;
+    }
+    // What was written says what the cache is; what was asked for is the
+    // fallback for a request that only read
+    let ttl = written_tier.or_else(|| {
+        record
+            .get("promptCacheRequested")
+            .and_then(Value::as_str)
+            .and_then(CacheTtl::from_requested)
+    });
+
+    let written_at = record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())?
+        .with_timezone(&Utc);
+    let thinking = record
+        .get("thinkingDurationMs")
+        .and_then(Value::as_i64)
+        .map(Duration::milliseconds)
+        .unwrap_or_default();
+    Some(PromptCache::new(
+        ttl,
+        written_at - thinking - REQUEST_MARGIN,
+        record
+            .get("requestId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    ))
 }
 
 /// The text Claude showed the user for a failed turn
@@ -410,6 +469,100 @@ mod tests {
         ] {
             assert_eq!(context_window_for(model), None, "for {model:?}");
         }
+    }
+
+    /// A main-chain assistant record with the cache fields Claude writes,
+    /// synthetic: only the shape is real
+    fn cache_record(one_hour: u64, five_minute: u64, read: u64, request: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":false,"timestamp":"2026-11-23T10:00:00.000Z","requestId":"{request}","message":{{"model":"claude-opus-4-8","usage":{{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":{written},"cache_read_input_tokens":{read},"cache_creation":{{"ephemeral_1h_input_tokens":{one_hour},"ephemeral_5m_input_tokens":{five_minute}}}}}}}}}"#,
+            written = one_hour + five_minute,
+        )
+    }
+
+    fn cache_of(line: &str) -> Option<PromptCache> {
+        match parse_line(line) {
+            Some(AgentEvent::Usage(usage)) => usage.prompt_cache,
+            other => panic!("expected usage, got {other:?}"),
+        }
+    }
+
+    fn ten_o_clock() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-23T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn test_cache_creation_split_picks_the_ttl() {
+        let one_hour = cache_of(&cache_record(4_000, 0, 50_000, "r1")).unwrap();
+        assert_eq!(one_hour.ttl, Some(CacheTtl::OneHour));
+        let five_minute = cache_of(&cache_record(0, 4_000, 50_000, "r1")).unwrap();
+        assert_eq!(five_minute.ttl, Some(CacheTtl::FiveMinutes));
+    }
+
+    #[test]
+    fn test_cache_expiry_counts_from_the_request_not_the_record() {
+        let cache = cache_of(&cache_record(4_000, 0, 0, "r1")).unwrap();
+        let sent = ten_o_clock() - REQUEST_MARGIN;
+        assert_eq!(cache.requested_at, sent);
+        assert_eq!(cache.request_id.as_deref(), Some("r1"));
+        assert_eq!(cache.expires_at, Some(sent + Duration::hours(1)));
+
+        // A record that thought first was written that much after the request
+        let thought = cache_record(4_000, 0, 0, "r1").replacen(
+            r#""requestId""#,
+            r#""thinkingDurationMs":90000,"requestId""#,
+            1,
+        );
+        let cache = cache_of(&thought).unwrap();
+        assert_eq!(cache.requested_at, sent - Duration::seconds(90));
+    }
+
+    #[test]
+    fn test_no_cache_creation_tokens_means_no_known_expiry() {
+        // Pure reads: the clock is restarted, but no tier is learned
+        let reads = cache_of(&cache_record(0, 0, 50_000, "r1")).unwrap();
+        assert_eq!(reads.ttl, None);
+        assert_eq!(reads.expires_at, None);
+        assert_eq!(reads.warmth_at(ten_o_clock()), None);
+
+        // No cache use at all, or no split: nothing about the cache
+        assert_eq!(cache_of(&cache_record(0, 0, 0, "r1")), None);
+        let bare = r#"{"type":"assistant","timestamp":"2026-11-23T10:00:00.000Z","message":{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5}}}"#;
+        assert_eq!(cache_of(bare), None);
+
+        // A record without a timestamp has no clock to start
+        let undated = cache_record(4_000, 0, 0, "r1").replacen(
+            r#""timestamp":"2026-11-23T10:00:00.000Z","#,
+            "",
+            1,
+        );
+        assert_eq!(cache_of(&undated), None);
+    }
+
+    #[test]
+    fn test_requested_tier_stands_in_for_a_request_of_pure_reads() {
+        let reads = cache_record(0, 0, 50_000, "r1").replacen(
+            r#""requestId""#,
+            r#""promptCacheRequested":"1h","requestId""#,
+            1,
+        );
+        assert_eq!(cache_of(&reads).unwrap().ttl, Some(CacheTtl::OneHour));
+
+        // What was written outranks what was asked for
+        let written = cache_record(0, 4_000, 0, "r1").replacen(
+            r#""requestId""#,
+            r#""promptCacheRequested":"1h","requestId""#,
+            1,
+        );
+        assert_eq!(cache_of(&written).unwrap().ttl, Some(CacheTtl::FiveMinutes));
+    }
+
+    #[test]
+    fn test_the_cache_remembers_its_model() {
+        let cache = cache_of(&cache_record(4_000, 0, 0, "r1")).unwrap();
+        assert_eq!(cache.model.as_deref(), Some("claude-opus-4-8"));
     }
 
     #[test]

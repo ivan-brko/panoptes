@@ -397,27 +397,49 @@ fn seed_usage(kind: TranscriptKind, path: &Path, len: u64, floor: u64) -> Option
     }
 
     let mut merged: Option<UsageSnapshot> = None;
+    let mut complete = false;
     for line in lines.iter().rev() {
-        if let Some(AgentEvent::Usage(usage)) = kind.parse_line(line) {
-            match &mut merged {
-                // Walking backwards, so anything already collected is newer and
-                // must win; only fields it left unknown get filled in.
-                Some(existing) => {
-                    let mut older = usage;
-                    older.merge(existing.clone());
-                    *existing = older;
-                }
-                None => merged = Some(usage),
-            }
-            let complete = merged
-                .as_ref()
-                .is_some_and(|u| u.model.is_some() && u.total_tokens.is_some());
-            if complete {
-                break;
-            }
+        let Some(AgentEvent::Usage(usage)) = kind.parse_line(line) else {
+            continue;
+        };
+        // With every figure in hand, only the newest request's own earlier
+        // records still count: Claude writes one per content block, and the
+        // first of them says when the request - and the cache's clock -
+        // started. Stopping at the newest would start it up to minutes late.
+        if complete && !same_request(merged.as_ref(), &usage) {
+            break;
         }
+        match &mut merged {
+            // Walking backwards, so anything already collected is newer and
+            // must win; only fields it left unknown get filled in.
+            Some(existing) => {
+                let mut older = usage;
+                older.merge(existing.clone());
+                *existing = older;
+            }
+            None => merged = Some(usage),
+        }
+        // A prompt cache seen only through reads has its clock but not its
+        // tier, which an older write supplies
+        complete = merged.as_ref().is_some_and(|u| {
+            u.model.is_some()
+                && u.total_tokens.is_some()
+                && !u.prompt_cache.as_ref().is_some_and(|c| c.ttl.is_none())
+        });
     }
     merged
+}
+
+/// Whether `older` is another record of the request `merged` last saw
+fn same_request(merged: Option<&UsageSnapshot>, older: &UsageSnapshot) -> bool {
+    let request = |usage: &UsageSnapshot| {
+        usage
+            .prompt_cache
+            .as_ref()
+            .and_then(|cache| cache.request_id.clone())
+    };
+    let newest = merged.and_then(request);
+    newest.is_some() && newest == request(older)
 }
 
 #[cfg(test)]
@@ -582,6 +604,69 @@ mod tests {
             Some("gpt-5-codex"),
             "a field the newest record lacks is filled from an older one"
         );
+    }
+
+    #[test]
+    fn test_seed_finds_the_cache_tier_behind_a_turn_of_pure_reads() {
+        // Reattaching to a Claude conversation whose last request only read
+        // the cache: its clock is the one that counts, but the tier comes from
+        // the older request that wrote it
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("conversation.jsonl");
+        let record = |ts: &str, request: &str, one_hour: u64, read: u64| {
+            format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"{ts}\",\"requestId\":\"{request}\",\"message\":{{\"model\":\"claude-opus-4-8\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":5,\"cache_creation_input_tokens\":{one_hour},\"cache_read_input_tokens\":{read},\"cache_creation\":{{\"ephemeral_1h_input_tokens\":{one_hour},\"ephemeral_5m_input_tokens\":0}}}}}}}}\n"
+            )
+        };
+        append(&path, &record("2026-11-23T09:00:00Z", "r1", 4_000, 0));
+        append(&path, &record("2026-11-23T10:00:00Z", "r2", 0, 50_000));
+
+        let (_, seed) = Tailer::attach(TranscriptKind::Claude, path);
+        let cache = seed.and_then(|s| s.prompt_cache).expect("a cache figure");
+        let sent = chrono::DateTime::parse_from_rfc3339("2026-11-23T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            - crate::agent::prompt_cache::REQUEST_MARGIN;
+        assert_eq!(
+            cache.ttl,
+            Some(crate::agent::prompt_cache::CacheTtl::OneHour)
+        );
+        assert_eq!(cache.expires_at, Some(sent + chrono::Duration::hours(1)));
+    }
+
+    #[test]
+    fn test_seed_starts_the_cache_clock_at_the_newest_request_s_first_record() {
+        // One request, three records - the first of them after a long think -
+        // behind an older request: the clock is the first record's, less its
+        // thinking, and the older request is not read into it
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("conversation.jsonl");
+        let record = |ts: &str, request: &str, extra: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"{ts}\",{extra}\"requestId\":\"{request}\",\"message\":{{\"model\":\"claude-opus-4-8\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":5,\"cache_creation_input_tokens\":4000,\"cache_read_input_tokens\":0,\"cache_creation\":{{\"ephemeral_1h_input_tokens\":4000,\"ephemeral_5m_input_tokens\":0}}}}}}}}\n"
+            )
+        };
+        append(&path, &record("2026-11-23T09:00:00Z", "r1", ""));
+        append(
+            &path,
+            &record(
+                "2026-11-23T10:00:00Z",
+                "r2",
+                "\"thinkingDurationMs\":120000,",
+            ),
+        );
+        append(&path, &record("2026-11-23T10:02:00Z", "r2", ""));
+        append(&path, &record("2026-11-23T10:04:06Z", "r2", ""));
+
+        let (_, seed) = Tailer::attach(TranscriptKind::Claude, path);
+        let cache = seed.and_then(|s| s.prompt_cache).expect("a cache figure");
+        let sent = chrono::DateTime::parse_from_rfc3339("2026-11-23T09:58:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            - crate::agent::prompt_cache::REQUEST_MARGIN;
+        assert_eq!(cache.request_id.as_deref(), Some("r2"));
+        assert_eq!(cache.requested_at, sent);
+        assert_eq!(cache.expires_at, Some(sent + chrono::Duration::hours(1)));
     }
 
     #[test]

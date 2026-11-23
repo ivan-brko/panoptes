@@ -460,6 +460,19 @@ impl Theme {
         }
     }
 
+    /// Colour for a prompt cache's warmth on a session row
+    ///
+    /// Warm is the good news - resuming now is cheap - so it reads as
+    /// success. Cold is muted rather than alarming: every session left alone
+    /// for an hour goes cold, and a row full of warnings would say nothing.
+    pub fn cache_warmth_color(&self, warmth: &crate::agent::prompt_cache::CacheWarmth) -> Color {
+        use crate::agent::prompt_cache::CacheWarmth;
+        match warmth {
+            CacheWarmth::Warm { .. } => self.success,
+            CacheWarmth::Cold => self.text_dim,
+        }
+    }
+
     // === Style Builders ===
 
     /// Style for headers/titles
