@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use super::homes::{append_lines, CodexHomes};
 use super::CodexConfigStore;
 use crate::config::Config;
+use crate::transcript::rollout_file;
 
 /// The directories rollouts are filed under, relative to a Codex home
 const ROLLOUT_DIRS: &[&str] = &["sessions", "archived_sessions"];
@@ -61,7 +62,10 @@ pub fn merge_history(source: &Path, shared: &Path) -> Result<MergeReport> {
                 continue;
             };
             let dest = into_root.join(relative);
-            if std::fs::symlink_metadata(&dest).is_ok() {
+            // A compressed rollout is the same conversation as its plain twin,
+            // and the plain file is the one every reader prefers
+            let have_it = |path: &Path| std::fs::symlink_metadata(path).is_ok();
+            if have_it(&dest) || have_it(&rollout_file::plain_twin(&dest)) {
                 report.already_there += 1;
                 continue;
             }
@@ -85,6 +89,10 @@ pub fn merge_history(source: &Path, shared: &Path) -> Result<MergeReport> {
 /// A symlinked directory is skipped rather than followed: in a shadow home
 /// `sessions` is a link to the shared tree, and following it would "merge"
 /// the shared tree into itself.
+///
+/// Compressed rollouts (`rollout-*.jsonl.zst`) are included and copied as
+/// they are, so the oldest history comes over too - except one whose plain
+/// twin is beside it, which is the copy that counts.
 fn rollout_files_below(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         if depth > MAX_DEPTH {
@@ -103,7 +111,7 @@ fn rollout_files_below(root: &Path) -> Vec<PathBuf> {
             } else if kind.is_file() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if name.starts_with("rollout-") && name.ends_with(".jsonl") {
+                if name.starts_with("rollout-") && rollout_file::is_rollout_name(&name) {
                     out.push(path);
                 }
             }
@@ -115,7 +123,7 @@ fn rollout_files_below(root: &Path) -> Vec<PathBuf> {
         walk(root, 0, &mut out);
     }
     out.sort();
-    out
+    rollout_file::prefer_plain(out)
 }
 
 /// Copy one rollout to `dest` via a temporary name, keeping its mtime
@@ -327,6 +335,53 @@ mod tests {
         assert!(!shared.join("auth.json").exists());
         assert!(!shared.join("sessions/2026/01/02/notes.txt").exists());
         assert_eq!(tree(&source), before);
+    }
+
+    #[test]
+    fn test_merge_copies_compressed_rollouts_as_they_are() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("account");
+        let shared = tmp.path().join("shared");
+        let rel = "sessions/2025/11/20/rollout-2025-11-20T09-00-00-old.jsonl.zst";
+        let compressed = crate::transcript::rollout_file::tests::compress(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"old\",\"cwd\":\"/w\"}}\n",
+        );
+        std::fs::create_dir_all(source.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(source.join(rel), &compressed).unwrap();
+
+        let report = merge_history(&source, &shared).unwrap();
+
+        assert_eq!(report.copied, 1);
+        assert_eq!(std::fs::read(shared.join(rel)).unwrap(), compressed);
+        // And the shared home now resumes it
+        assert_eq!(
+            crate::agent::codex::rollout_path(&shared, "old"),
+            Some(shared.join(rel))
+        );
+    }
+
+    #[test]
+    fn test_merge_prefers_the_plain_rollout_of_a_pair() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("account");
+        let shared = tmp.path().join("shared");
+        let plain = "sessions/2025/11/20/rollout-2025-11-20T09-00-00-both.jsonl";
+        let zst = format!("{plain}.zst");
+        // Both forms in the account: only the plain one comes over
+        write(&source.join(plain), "plain\n");
+        write(&source.join(&zst), "compressed\n");
+        // The shared home already has the plain one of another conversation's
+        // pair: its compressed twin is not copied beside it
+        let other = "sessions/2025/11/20/rollout-2025-11-20T09-00-00-other.jsonl";
+        write(&shared.join(other), "plain\n");
+        write(&source.join(format!("{other}.zst")), "compressed\n");
+
+        let report = merge_history(&source, &shared).unwrap();
+
+        assert_eq!((report.copied, report.already_there), (1, 1));
+        assert!(shared.join(plain).exists());
+        assert!(!shared.join(&zst).exists());
+        assert!(!shared.join(format!("{other}.zst")).exists());
     }
 
     #[test]
