@@ -899,11 +899,13 @@ mod tests {
             parent.env(key, "from-host-session");
         }
         let out = parent.output().expect("re-run test binary");
+        // Never print stdout: it is the child's whole environment, which
+        // carries whatever secrets the developer's or CI's shell holds
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
             out.status.success() && stdout.contains(HOST_ENV_DONE),
-            "parent process failed: {}\n{}",
-            stdout,
+            "parent process failed ({}): {}",
+            out.status,
             String::from_utf8_lossy(&out.stderr)
         );
 
@@ -912,14 +914,12 @@ mod tests {
             .filter_map(|line| line.trim_end_matches('\r').split_once('='))
             .map(|(key, _)| key)
             .collect();
-        for key in HOST_SESSION_ENV {
-            assert!(
-                !child_vars.contains(key),
-                "{} leaked into the child: {}",
-                key,
-                stdout
-            );
-        }
+        let leaked: Vec<&str> = HOST_SESSION_ENV
+            .iter()
+            .copied()
+            .filter(|key| child_vars.contains(key))
+            .collect();
+        assert!(leaked.is_empty(), "leaked into the child: {:?}", leaked);
         assert!(stdout.contains("ANTHROPIC_BASE_URL=https://example.invalid"));
         assert!(stdout.contains("CODEX_HOME=/tmp/panoptes-test-codex-home"));
     }
