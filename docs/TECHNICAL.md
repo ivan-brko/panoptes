@@ -1050,6 +1050,19 @@ to `Waiting` with a `TurnFailed` attention reason (a red `✗`, gated by
 still sitting on the first, so the hook and the transcript cannot double-fire
 once both report it.
 
+The one thing a repeat may still add is *which* limit. A usage-limit record
+carries `quotaLimits` (`rateLimitType`, `resetsAt` in epoch seconds,
+`isUsingOverage`); `StopFailure` does not (Claude Code 2.1.330 sends only
+`error`, `error_details` and `last_assistant_message`). So the transcript's
+repeat quietly fills the window and reset into the failure, and into a badge
+still up, without ringing. The row and header then read
+`Waiting ✗ usage limit · 5h resets 20:10`: the reset goes through the same
+`agent::events::format_reset` as the header's `limit hit`, on the local clock,
+with the date added when it is not today (`Aug 29 00:10`). Window labels:
+`five_hour` → `5h`, `seven_day` → `wk`, `seven_day_opus` → `wk opus`,
+`seven_day_sonnet` → `wk sonnet`, `seven_day_overage_included` → `wk overage`,
+`overage` → `overage`; any other name is shown raw.
+
 The Claude tailer skips records that are not the live conversation's own:
 subagent turns (`isSidechain`), injected records (`isMeta`), compaction
 summaries (`isCompactSummary`), and placeholders Claude wrote locally
@@ -1090,8 +1103,8 @@ overwrite the account's figures with an unrelated pool's (in real rollouts,
 about one `token_count` in fifteen). The session header shows whichever window
 is closer to stopping the user - higher `used_percent` first, the longer window
 on a tie - labelled by its length (`5h 12%`, `wk 40%`), or
-`limit hit · resets in 3h 20m` while `rate_limit_reached_type` is set. Each
-window merges independently, so an update naming only one never blanks the
+`limit hit · resets 20:10` (local time, with the date when the reset is not
+today) while `rate_limit_reached_type` is set. Each window merges independently, so an update naming only one never blanks the
 other.
 
 **Claude rate limits.** The status line's `five_hour` and `seven_day` windows

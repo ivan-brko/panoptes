@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A Claude usage limit says which limit and when it lifts.** A turn refused on a usage limit now reads `Waiting ✗ usage limit · 5h resets 20:10` in the session row and header (or `wk sonnet`, `wk opus`, ...), from the window and reset time Claude records with the failure. Reset times - here and in the header's `limit hit` - are now shown on your local clock, with the date when the reset is not today, instead of as a countdown.
+
 ## [0.5.0] - 2026-09-23
 
 ### Added
