@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Antigravity CLI (`agy`) sessions.** Antigravity is a third agent in the new-session dialog. It runs single-account, as whoever `agy` is signed in as, and needs `agy` 1.5 or later. Its state comes from its status line, injected for each session with `agy --settings` and never saved: working, waiting for your approval, and idle, including the turn it starts by itself when a background command finishes. The header shows the model, context, the binding weekly quota and the signed-in email. Your own `agy` status line is wrapped, never replaced. **Downgrade note:** an older Panoptes cannot read a `sessions.json` that records an Antigravity session; it backs the file up and starts with no recovered sessions.
+
 ### Changed
 - **A Claude usage limit says which limit and when it lifts.** A turn refused on a usage limit now reads `Waiting ✗ usage limit · 5h resets 20:10` in the session row and header (or `wk sonnet`, `wk opus`, ...), from the window and reset time Claude records with the failure. Reset times - here, in the header's `limit hit` and in Panoptes' default status line - now share one format: your local clock, with the date when the reset is not today (`Aug 29 00:10`), and left out once passed. The header used to show a countdown, and the status line a weekday.
 

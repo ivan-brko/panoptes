@@ -95,18 +95,50 @@ fn check_version(version: Option<AgyVersion>) -> Result<()> {
     }
 }
 
-/// Run `<command> --version`
-fn probe_version(command: &str) -> Option<AgyVersion> {
-    let output = std::process::Command::new(command)
+/// How long `agy --version` may take before it is given up on
+///
+/// The probe runs on the UI thread, inside a spawn: a hung `agy` must cost a
+/// version check, never the whole of Panoptes.
+const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Run `<command> --version`, giving up after `timeout`
+///
+/// A probe that times out, fails or prints no version reads as `None`, which
+/// [`check_version`] lets through.
+fn probe_version(command: &str, timeout: std::time::Duration) -> Option<AgyVersion> {
+    use std::io::Read;
+    use std::time::Instant;
+
+    let mut child = std::process::Command::new(command)
         .arg("--version")
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
-    if !output.status.success() {
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                tracing::warn!("`{command} --version` did not answer in time; skipping the check");
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
         return None;
     }
-    AgyVersion::parse(&String::from_utf8_lossy(&output.stdout))
+    // A bare semver: far below a pipe's buffer, so it was all written before
+    // the process could exit
+    let mut stdout = String::new();
+    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
+    AgyVersion::parse(&stdout)
 }
 
 /// The installed `agy`'s version, probed at most once per [`VERSION_PROBE_TTL`]
@@ -126,7 +158,7 @@ fn cached_version(command: &str) -> Option<AgyVersion> {
             return version;
         }
     }
-    let version = probe_version(command);
+    let version = probe_version(command, VERSION_PROBE_TIMEOUT);
     tracing::debug!(?version, "Probed Antigravity CLI version");
     *cached = Some((Instant::now(), version));
     version
@@ -170,19 +202,18 @@ impl AntigravityAdapter {
             .as_str()
             .filter(|c| !c.trim().is_empty())?
             .to_string();
-        if setting.get("type").and_then(|t| t.as_str()) != Some("command") {
-            return None;
+        // agy accepts a `statusLine` that leaves `type` out (the spike's
+        // partial override ran); only another type explicitly is not a command
+        match setting.get("type") {
+            None => {}
+            Some(kind) if kind.as_str() == Some("command") => {}
+            Some(_) => return None,
         }
-        let command = match super::split_shell_quoted(&command) {
-            Some(words)
-                if words
-                    .first()
-                    .and_then(|w| Path::new(w).file_name())
-                    .is_some_and(|name| name == STATUS_LINE_SCRIPT_NAME) =>
-            {
-                words.get(1).cloned()?
-            }
-            _ => command,
+        // Our own wrapper, `--local` mark and all, wraps the user's command -
+        // or none, in which case the user has no status line of their own
+        let command = match ClaudeCodeAdapter::parse_own_status_line(&command) {
+            Some((_, wrapped)) => wrapped?,
+            None => command,
         };
         Some((setting, command))
     }
@@ -428,6 +459,16 @@ mod tests {
             serde_json::json!({"statusLine": {"type": "static", "command": "x"}}),
         );
         assert_eq!(AntigravityAdapter::user_status_line(Some(dir.path())), None);
+
+        // No `type` at all is still a command, as agy reads it
+        write_settings(
+            dir.path(),
+            serde_json::json!({"statusLine": {"command": "my-line"}}),
+        );
+        assert_eq!(
+            AntigravityAdapter::user_status_line(Some(dir.path())).map(|(_, c)| c),
+            Some("my-line".to_string())
+        );
         assert_eq!(AntigravityAdapter::user_status_line(None), None);
 
         // A real one: its options carry over, its command is wrapped
@@ -459,6 +500,70 @@ mod tests {
         );
         let (_, found) = AntigravityAdapter::user_status_line(Some(dir.path())).unwrap();
         assert_eq!(found, "echo \"it's $USER\"");
+
+        // ...including one Claude's flow marked `--local`
+        let marked = format!(
+            "{} {} {}",
+            super::super::shell_quote("/hooks/panoptes-statusline.sh"),
+            super::super::shell_quote("--local"),
+            super::super::shell_quote("my-line"),
+        );
+        write_settings(
+            dir.path(),
+            serde_json::json!({"statusLine": {"type": "command", "command": marked}}),
+        );
+        let (_, found) = AntigravityAdapter::user_status_line(Some(dir.path())).unwrap();
+        assert_eq!(found, "my-line");
+
+        // ...and a bare wrapper wraps nothing: no status line of the user's
+        write_settings(
+            dir.path(),
+            serde_json::json!({"statusLine": {
+                "type": "command",
+                "command": super::super::shell_quote("/hooks/panoptes-statusline.sh"),
+            }}),
+        );
+        assert_eq!(AntigravityAdapter::user_status_line(Some(dir.path())), None);
+    }
+
+    /// An executable script that prints `output` after `delay` seconds
+    #[cfg(unix)]
+    fn fake_agy(dir: &Path, delay: u32, output: &str) -> PathBuf {
+        let path = dir.join(format!("agy-{delay}"));
+        super::super::install_executable_script(
+            &path,
+            &format!("#!/bin/sh\nsleep {delay}\necho {output}\n"),
+        )
+        .unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_version_probe_reads_a_quick_agy() {
+        let dir = TempDir::new().unwrap();
+        let agy = fake_agy(dir.path(), 0, "1.5.15");
+        assert_eq!(
+            probe_version(agy.to_str().unwrap(), std::time::Duration::from_secs(5)),
+            Some(AgyVersion(1, 5, 15))
+        );
+        assert_eq!(
+            probe_version("/nonexistent/agy", VERSION_PROBE_TIMEOUT),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_version_probe_gives_up_on_a_hung_agy() {
+        let dir = TempDir::new().unwrap();
+        let agy = fake_agy(dir.path(), 30, "1.5.15");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe_version(agy.to_str().unwrap(), std::time::Duration::from_millis(300)),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

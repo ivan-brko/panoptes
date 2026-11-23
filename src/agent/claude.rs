@@ -463,7 +463,7 @@ exit 0
         };
         format!(
             r#"#!/bin/sh
-# Panoptes status line for Claude Code
+# Panoptes status line, shared by Claude Code and Antigravity sessions
 # Forwards the status-line JSON on stdin to Panoptes, then runs the user's own
 # status line on the same input and prints what it prints - or, if they have
 # none, Panoptes' own compact line.
@@ -523,7 +523,7 @@ fi
     /// Returns whether it was marked local and the user command it wraps, or
     /// `None` if it is not one of ours. Only the exact shape
     /// [`Self::status_line_command`] writes is accepted.
-    fn parse_own_status_line(command: &str) -> Option<(bool, Option<String>)> {
+    pub(crate) fn parse_own_status_line(command: &str) -> Option<(bool, Option<String>)> {
         let words = super::split_shell_quoted(command)?;
         let (script, rest) = words.split_first()?;
         if Path::new(script).file_name()? != STATUS_LINE_SCRIPT_NAME {
