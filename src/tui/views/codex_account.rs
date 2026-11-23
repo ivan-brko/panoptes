@@ -3,7 +3,7 @@
 //! Drawn in the Settings Codex accounts list and in the account step of the
 //! new-session wizard, from what the last probe found
 //! ([`crate::codex_config::probe`]). The row reads like
-//! `user@example.com · Plus · 5h ██░░░░░░ 21% resets in 3h 20m · wk █░░░░░░░ 9%`.
+//! `user@example.com · Plus · 5h ██░░░░░░ 21% resets 20:10 · wk █░░░░░░░ 9%`.
 //!
 //! Fields drop whole as the row narrows, least useful first: the other
 //! window's reset, the email, the binding window's reset, the plan, the other
@@ -143,9 +143,10 @@ fn quota_fields(quota: &CodexQuota, now: DateTime<Utc>, t: &Theme) -> Vec<Field>
             keep: if is_binding { 8 } else { 6 },
             joined: false,
         });
-        if let Some(at) = window.resets_at {
+        // A reset already past means nothing; it is left out, as everywhere
+        if let Some(when) = window.resets_at.and_then(|at| format_reset(at, now)) {
             let mut reset = Field::text(
-                format!("resets {}", format_reset(at, now)),
+                format!("resets {}", when),
                 t.muted_style(),
                 if is_binding { 4 } else { 1 },
             );
@@ -261,54 +262,84 @@ mod tests {
         text_of(&codex_account_line(Some(probe), width, now()))
     }
 
+    /// The reset text for a window resetting `mins` from now, as drawn
+    ///
+    /// Computed rather than spelled out: resets are clock times on the
+    /// user's own clock, so the text depends on the machine's time zone.
+    fn reset_text(mins: i64) -> String {
+        let at = now() + chrono::Duration::minutes(mins);
+        format!("resets {}", format_reset(at, now()).unwrap())
+    }
+
     #[test]
     fn wide_row_shows_everything() {
         let line = row(&chatgpt(25.0, 40.0), 200);
         assert_eq!(
             line,
-            "    user@example.com · Plus · 5h ██░░░░░░ 25% resets in 3h 20m · wk ███░░░░░ 40% resets in 2d 4h"
+            format!(
+                "    user@example.com · Plus · 5h ██░░░░░░ 25% {} · wk ███░░░░░ 40% {}",
+                reset_text(200),
+                reset_text((2 * 24 + 4) * 60)
+            )
         );
     }
 
     #[test]
     fn narrowing_drops_fields_whole_keeping_the_binding_window() {
         let probe = chatgpt(25.0, 40.0);
+        let short_reset = reset_text(200);
+        let week_reset = reset_text((2 * 24 + 4) * 60);
+        let fields = [
+            short_reset.as_str(),
+            "user@example.com",
+            week_reset.as_str(),
+            "Plus",
+            "5h ██░░░░░░ 25%",
+        ];
 
-        let no_side_reset = row(&probe, 80);
-        assert!(!no_side_reset.contains("in 3h 20m"), "{no_side_reset}");
-        assert!(
-            no_side_reset.contains("user@example.com"),
-            "{no_side_reset}"
-        );
-
-        let no_email = row(&probe, 64);
-        assert!(!no_email.contains("user@example.com"), "{no_email}");
-        assert!(no_email.contains("Plus"), "{no_email}");
-        assert!(no_email.contains("resets in 2d 4h"), "{no_email}");
-
-        let two_bars = row(&probe, 40);
-        assert_eq!(two_bars, "    5h ██░░░░░░ 25% · wk ███░░░░░ 40%");
-
-        let narrow = row(&probe, 30);
-        assert_eq!(narrow, "    wk ███░░░░░ 40%");
-
-        let tiny = row(&probe, 20);
-        assert!(tiny.chars().count() <= 20, "{tiny}");
-        assert!(tiny.starts_with("    wk"), "{tiny}");
+        // Narrow a column at a time and note the order fields disappear in
+        let mut gone: Vec<&str> = Vec::new();
+        for width in (10..=200).rev() {
+            let line = row(&probe, width);
+            assert!(line.chars().count() <= width, "width {width}: {line}");
+            for field in fields {
+                if !line.contains(field) && !gone.contains(&field) {
+                    gone.push(field);
+                }
+            }
+            if width >= 20 {
+                assert!(line.contains("wk ███░░░░░ 40%"), "width {width}: {line}");
+            }
+        }
+        assert_eq!(gone, fields);
+        assert_eq!(row(&probe, 30), "    wk ███░░░░░ 40%");
     }
 
     #[test]
     fn a_reset_never_outlives_its_window() {
         let probe = chatgpt(25.0, 40.0);
+        let (short_reset, week_reset) = (reset_text(200), reset_text((2 * 24 + 4) * 60));
         for width in 10..120 {
             let line = row(&probe, width);
-            if line.contains("in 3h 20m") {
+            if line.contains(&short_reset) {
                 assert!(line.contains("5h ██"), "width {width}: {line}");
             }
-            if line.contains("in 2d 4h") {
+            if line.contains(&week_reset) {
                 assert!(line.contains("wk ███"), "width {width}: {line}");
             }
         }
+    }
+
+    #[test]
+    fn a_past_reset_is_left_out() {
+        let mut probe = chatgpt(25.0, 40.0);
+        if let Some(Ok(status)) = probe.result.as_mut() {
+            if let CodexUsage::Known(quota) = &mut status.usage {
+                quota.primary = Some(window(25.0, 300, -5));
+            }
+        }
+        let line = row(&probe, 200);
+        assert!(line.contains("5h ██░░░░░░ 25% · wk"), "{line}");
     }
 
     #[test]
