@@ -64,7 +64,7 @@ pub enum InputMode {
     AddingCustomShortcutAutoClose,
     /// Confirming custom shortcut deletion
     ConfirmingCustomShortcutDelete,
-    /// Selecting agent type (Claude Code vs Codex) for new session
+    /// Selecting agent type (Claude Code, Codex or Antigravity) for new session
     SelectingAgentType,
     /// Creating a new Codex session - typing session name
     CreatingCodexSession,

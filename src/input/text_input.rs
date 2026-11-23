@@ -674,7 +674,7 @@ fn apply_path_completion(app: &mut App) {
 // Agent Type Selection Handler
 // ========================================================================
 
-/// Handle key on the new-session wizard's first step (Claude Code vs Codex)
+/// Handle key on the new-session wizard's first step: which agent
 ///
 /// The only step `Esc` cancels from: every later step backs up into this one.
 pub fn handle_selecting_agent_type_key(app: &mut App, key: KeyEvent) -> Result<()> {

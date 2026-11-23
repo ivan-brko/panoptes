@@ -482,6 +482,55 @@ when a rate-limit window resets, when the prompt cache expires, and every
 `refreshInterval` seconds if the user set one. Many of those fire while nobody
 is doing anything, which is why `UsageRefresh` is not activity.
 
+**Antigravity's status line (agy 1.5 and later).** For `agy` the status line is
+the whole report: Panoptes registers no `agy` hooks. They load only from
+`~/.gemini/config/hooks.json` and the workspace's `.agents/hooks.json`, so they
+cannot be injected per session, and an Esc-cancel fires none of them. The PAN-59
+spike's captures are in `src/agent/fixtures/antigravity/` (its README explains
+each file), and the state-machine tests replay them.
+
+- **Injection.** `agy --settings <json>` merges a JSON object of `settings.json`
+  keys over the user's own, per top-level key, and never saves it. Panoptes
+  passes one key, `statusLine`, inline on the command line, so nothing is
+  written anywhere per session and nothing needs cleaning up. Its command is
+  the Claude wrapper above (the same `panoptes-statusline.sh`), wrapping the
+  user's own `statusLine` command from `~/.gemini/antigravity-cli/settings.json`.
+  `panoptes status-line` recognises an Antigravity payload (`product:
+  "antigravity"`) and draws a quota line for it. `GEMINI_HOME` is ignored by
+  agy 1.5, and the hidden `--gemini_dir` is not used: it would hide the user's
+  conversations and replay onboarding.
+- **Spawn.** `PANOPTES_SESSION_ID` (the status-line process inherits the
+  agent's environment, so the wrapper's guard works) and
+  `AGY_CLI_DISABLE_AUTO_UPDATE=1`. `agy --version` (a bare semver, probed at
+  most every ten minutes) must be at least 1.5, or the spawn fails saying so.
+  Nothing is pinned for rendering: Panoptes already answers what agy queries at
+  startup (DECRQM 2026, OSC 11, kitty keyboard `?u`).
+- **State.** The status line re-sends the whole state about every 300 ms while
+  anything changes, so `translate_antigravity_status_line` turns it into
+  events only where it differs from the session's state. Each payload also
+  yields a `UsageRefresh` (not activity) and, when `task_count` changes, a
+  `BackgroundWork` count.
+
+  | Status line | Session was | Event |
+  | --- | --- | --- |
+  | `tool_confirmation_pending: true` | anything else | `ApprovalRequested` |
+  | `working`, `tool_use` (nothing pending), anything unknown | `AwaitingApproval` | `ApprovalResolved` |
+  | the same | `Starting`, `Waiting` | `TurnStarted` - a prompt, or the self-wake when a background command finishes |
+  | `idle` | `Thinking`, `Executing`, `AwaitingApproval` | `TurnCompleted` (an Esc-cancel reads the same) |
+  | `idle` | `Starting` | `SessionReset`: up, nothing asked yet |
+  | `error` | anything | `TurnFailed` (never observed; repeats are dropped) |
+  | `authenticating`, `initializing` | | nothing |
+
+  A session with no process takes figures only.
+- **Figures.** `context_window.total_input_tokens` over `context_window_size`
+  (what agy's own `used_percentage` is computed from), `model.display_name`,
+  `plan_tier`, and each `quota.<family>-weekly` window as `1 -
+  remaining_fraction`: `gemini-*` is the primary window, the most used of the
+  rest (`3p-weekly` on the consumer tier) the secondary. There is no `cost` and
+  no five-hour window. `email` becomes the session's account in the header
+  (`SessionInfo::agent_account`). The payload's `transcript_path` names a
+  directory that does not exist in 1.5.15, and is not read.
+
 **Codex lifecycle hooks (Codex 0.156.1 and later):** `SessionStart`,
 `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
 `PermissionRequest`, `Stop`, `SubagentStart`, `SubagentStop`, `Interrupt`.
@@ -652,7 +701,10 @@ visible warning.
 
 ## Multi-Account Support
 
-Panoptes supports multiple accounts for both Claude Code and Codex CLI. Both
+Panoptes supports multiple accounts for both Claude Code and Codex CLI.
+Antigravity is single-account by design (the PAN-59 spike: its terms forbid
+running several accounts side by side, and `agy` keeps one sign-in in the
+Keychain whatever its home), so its sessions skip the wizard's account step. Both
 account stores are aliases of the same generic `ProfileStore`
 (`src/agent_profiles.rs`), and the add/select/delete dialogs share one set of
 input handlers and views (`input/agent_configs.rs`, `tui/views/agent_configs.rs`),
@@ -920,6 +972,12 @@ needed to relaunch it.
   wrong when several sessions share a directory. The notify hook cannot be used
   for this - it must not read stdin, or it stalls Codex's output pipeline and
   drops keystrokes.
+- **Antigravity**: has no flag to set the ID either. Its status line names the
+  conversation in `conversation_id`, which is `""` until the first prompt of a
+  new conversation; the first one named is recorded, and a different one later
+  (the live process moved to another conversation) replaces it. Resume passes
+  `--conversation=<id>`, and the conversation counts as present while
+  `~/.gemini/antigravity-cli/conversations/<id>.db` exists.
 - **Shell**: has no conversation, and is therefore **not persisted at all**. Its
   state is the scrollback, the environment, and the processes it is running,
   none of which survive the PTY; respawning `$SHELL` in the recorded directory
@@ -1074,7 +1132,10 @@ without lifecycle hooks it is the only channel there is.
 | Measured flush latency | immediate | under 50ms |
 
 Claude's rate limits and observed context window come from its status line
-instead (see State Updates above); the transcript has neither.
+instead (see State Updates above); the transcript has neither. Antigravity's
+transcript (`brain/<id>/.system_generated/logs/transcript.jsonl`, plus a SQLite
+database per conversation) is not read at all: its status line carries state,
+context and quota.
 
 **Compressed Codex rollouts.** Codex zstd-compresses idle rollouts in place,
 to `rollout-<ts>-<uuid>.jsonl.zst`. The rule, from codex-rs at `rust-v0.156.1`
