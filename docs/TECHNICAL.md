@@ -728,7 +728,8 @@ conversation ID, which is globally unique, so a shared tree cannot confuse it.
 account's old rollouts and thread names into the shared home - copy, never
 move, never overwrite, via a temporary name so Codex never lists a partial
 file. Copied rollouts need no database rows; Codex lists and resumes them from
-the file.
+the file. Compressed rollouts (`.jsonl.zst`) are copied as they are, unless
+their plain twin is in the account or already in the shared home.
 
 ### Session Display
 
@@ -989,6 +990,21 @@ without lifecycle hooks it is the only channel there is.
 
 Claude's rate limits and observed context window come from its status line
 instead (see State Updates above); the transcript has neither.
+
+**Compressed Codex rollouts.** Codex zstd-compresses older, finished rollouts
+in place, to `rollout-<ts>-<uuid>.jsonl.zst`. These are read too, through one
+predicate and one reader (`transcript::rollout_file`, decoding with the
+pure-Rust, decoder-only `ruzstd`): conversation-ID discovery, `rollout_path`
+(and so resume and the missing-transcript check), the subagent scan, the
+import scanner and `merge-codex-history` all list both forms. Where one
+conversation has both a plain and a compressed file, the plain one wins - it
+is the one that can still grow. Byte offsets into a compressed rollout count
+decompressed bytes, and the import scanner decodes as a stream, charging
+everything it decodes (including what it skips to reach an offset) to its
+byte budget, so a compressed file is never inflated whole. One that does not
+decode is skipped with a warning. Live tailing is unchanged: only finished
+rollouts are compressed, so a session whose rollout is compressed has nothing
+to follow until Codex carries the conversation on in a plain file.
 
 The two tailers have deliberately different jobs. For a Codex without
 lifecycle hooks, the rollout drives its state, since `notify` can only ever
