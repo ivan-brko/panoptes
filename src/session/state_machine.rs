@@ -228,10 +228,13 @@ pub fn apply(
     // says *which* usage limit was hit and when it lifts - `StopFailure` does
     // not carry it - and the hook usually lands first. So a repeat may still
     // fill in a limit the first report lacked, quietly, on both the record and
-    // a badge that is still up.
-    if let AgentEvent::TurnFailed { limit, .. } = &event {
+    // a badge that is still up - but only when it reports the same failure.
+    // A late record of an earlier turn's usage limit must not pin a window
+    // onto the "auth failed" the session is now sitting on.
+    if let AgentEvent::TurnFailed { reason, limit } = &event {
         if let (SessionState::Waiting, Some(failure)) = (info.state, info.turn_failure.as_mut()) {
-            if failure.limit.is_none() && limit.is_some() {
+            let same_failure = TurnFailure::new(reason.clone(), None).reason == failure.reason;
+            if same_failure && failure.limit.is_none() && limit.is_some() {
                 failure.limit = limit.clone();
                 if let Some(AttentionReason::TurnFailed { limit: badge, .. }) = &mut info.attention
                 {
@@ -1158,6 +1161,60 @@ mod tests {
         assert_eq!(
             info.failed_turn().and_then(|f| f.limit.as_ref()),
             Some(&five_hour_limit())
+        );
+    }
+
+    #[test]
+    fn test_late_limit_from_an_earlier_turn_is_not_pinned_on_a_new_failure() {
+        let config = Config::default();
+        let mut info = test_info();
+        let now = Utc::now();
+
+        // Turn 1 fails on a usage limit; only the hook gets through in time
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        apply_hook(
+            &mut info,
+            "StopFailure",
+            serde_json::json!({"error": "rate_limit"}),
+            &config,
+        );
+
+        // Turn 2 fails differently, again reported by the hook
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        apply_hook(
+            &mut info,
+            "StopFailure",
+            serde_json::json!({"error": "authentication_failed"}),
+            &config,
+        );
+
+        // Turn 1's transcript record lands only now
+        let late = AgentEvent::TurnFailed {
+            reason: Some("usage limit".to_string()),
+            limit: Some(five_hour_limit()),
+        };
+        assert!(!apply(&mut info, late, now, &config).rang);
+        assert_eq!(
+            info.failed_turn(),
+            Some(&TurnFailure::new(Some("auth failed".to_string()), None)),
+            "an auth failure has no usage window to show"
+        );
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::TurnFailed {
+                reason: Some("auth failed".to_string()),
+                limit: None,
+            })
         );
     }
 
