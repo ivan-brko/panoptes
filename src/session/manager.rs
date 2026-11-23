@@ -5745,7 +5745,9 @@ mod tests {
             typed
         };
         let col = 3 + typed.chars().count();
-        let frame = format!("\x1b[2J\x1b[5;1H\u{276f} {placeholder}\x1b[K\x1b[5;{col}H");
+        let frame = format!(
+            "\x1b[2J\x1b[4;1H────────\x1b[5;1H\u{276f} {placeholder}\x1b[K\x1b[6;1H────────\x1b[5;{col}H"
+        );
         manager.get_mut(id).unwrap().vterm.process(frame.as_bytes());
     }
 

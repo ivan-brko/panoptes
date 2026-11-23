@@ -420,8 +420,12 @@ fn prompt_glyphs(agent: SessionType) -> &'static [&'static str] {
 /// is not a prompt: the cursor must be visible and on a line starting with
 /// the agent's prompt glyph, the typed text (everything not dim) must end at
 /// the cursor - or the cursor must sit right after the glyph when there is
-/// none - and no line below may look like a menu (a selection marker or a
-/// numbered option). Anything else is [`PromptRead::Unrecognised`].
+/// none - and the rest of the input area must be blank (see
+/// [`input_area_is_clear`]), so a multi-line draft whose first line is empty
+/// is not mistaken for an empty prompt. No line below the prompt, and none
+/// above it as far as the block it sits in, may look like a menu (a
+/// selection marker or a numbered option). Anything else is
+/// [`PromptRead::Unrecognised`].
 pub fn read_prompt(screen: &ScreenSnapshot, agent: SessionType) -> PromptRead {
     let glyphs = prompt_glyphs(agent);
     if glyphs.is_empty() {
@@ -442,6 +446,9 @@ pub fn read_prompt(screen: &ScreenSnapshot, agent: SessionType) -> PromptRead {
         .any(|below| looks_like_menu(below))
     {
         return PromptRead::Unrecognised("a menu is open");
+    }
+    if let Err(why) = input_area_is_clear(&screen.rows, cursor_row, agent) {
+        return PromptRead::Unrecognised(why);
     }
 
     let start = glyph + 2;
@@ -474,6 +481,114 @@ pub fn read_prompt(screen: &ScreenSnapshot, agent: SessionType) -> PromptRead {
         })
         .collect();
     PromptRead::Text(text)
+}
+
+/// Whether everything around the prompt line that belongs to the input is
+/// blank, and nothing abutting it is a menu
+///
+/// Claude draws its input between two rules, so the rows from the prompt
+/// line down to the bottom rule must be blank - a draft's later lines sit
+/// there - and so must those up to the top rule. Above that rule, the block
+/// of rows touching it is checked for a menu too. No rule either way is not a
+/// prompt box Panoptes knows, and fails.
+///
+/// Codex draws its composer with a blank row of padding above and below and
+/// its status line underneath, so every row below the prompt but that last
+/// status line must be blank, and the status line must be set off by a blank
+/// row; above, the rows up to the padding must be empty of menus and text.
+fn input_area_is_clear(
+    rows: &[Vec<ScreenCell>],
+    cursor_row: usize,
+    agent: SessionType,
+) -> Result<(), &'static str> {
+    const MORE_INPUT: &str = "there is more input around the prompt line";
+    const MENU: &str = "a menu is open";
+    let boxed = agent == SessionType::ClaudeCode;
+
+    // Up: inside the prompt box, then the block abutting it
+    let mut row = cursor_row;
+    loop {
+        if row == 0 {
+            if boxed {
+                return Err("no prompt box above the prompt line");
+            }
+            break;
+        }
+        row -= 1;
+        let above = &rows[row];
+        if boxed && is_rule(above) {
+            break;
+        }
+        if row_is_blank(above) {
+            if boxed {
+                continue;
+            }
+            break;
+        }
+        return Err(if looks_like_menu(above) {
+            MENU
+        } else {
+            MORE_INPUT
+        });
+    }
+    while row > 0 {
+        row -= 1;
+        if row_is_blank(&rows[row]) {
+            break;
+        }
+        if looks_like_menu(&rows[row]) {
+            return Err(MENU);
+        }
+    }
+
+    // Down: to the bottom rule, or to the status line
+    let below = &rows[cursor_row + 1..];
+    if boxed {
+        for row in below {
+            if is_rule(row) {
+                return Ok(());
+            }
+            if !row_is_blank(row) {
+                return Err(MORE_INPUT);
+            }
+        }
+        return Err("no prompt box below the prompt line");
+    }
+    let status = below.iter().rposition(|row| !row_is_blank(row));
+    for (i, row) in below.iter().enumerate() {
+        let set_off = i > 0 && row_is_blank(&below[i - 1]);
+        if !row_is_blank(row) && !(Some(i) == status && set_off) {
+            return Err(MORE_INPUT);
+        }
+    }
+    Ok(())
+}
+
+/// Whether a row has nothing on it but blanks and a box's sides
+fn row_is_blank(row: &[ScreenCell]) -> bool {
+    row.iter().all(|cell| is_blank(cell) || is_frame(cell))
+}
+
+/// Whether a row is a horizontal rule or a box's top or bottom edge
+fn is_rule(row: &[ScreenCell]) -> bool {
+    let drawn: Vec<&ScreenCell> = row.iter().filter(|cell| !is_blank(cell)).collect();
+    drawn.len() >= 3
+        && drawn.iter().all(|cell| {
+            matches!(
+                cell.text.as_str(),
+                "\u{2500}"
+                    | "\u{2501}"
+                    | "\u{2550}"
+                    | "\u{256d}"
+                    | "\u{256e}"
+                    | "\u{2570}"
+                    | "\u{256f}"
+                    | "\u{250c}"
+                    | "\u{2510}"
+                    | "\u{2514}"
+                    | "\u{2518}"
+            )
+        })
 }
 
 /// The column of the row's prompt glyph, when the row starts with one
@@ -898,6 +1013,80 @@ mod tests {
         );
     }
 
+    /// An option list over a prompt that is still drawn, empty: inside the
+    /// box above the prompt line, or in the block touching the box
+    #[test]
+    fn test_a_menu_above_an_empty_prompt_is_not_a_prompt() {
+        let inside = format!(
+            "\x1b[2;1H{rule}\x1b[3;3H1. Stop and wait\x1b[4;3H2. Upgrade\x1b[5;1H❯ \x1b[6;1H{rule}\x1b[5;3H",
+            rule = "────────────"
+        );
+        assert_eq!(
+            read_prompt(&screen(inside.as_bytes()), SessionType::ClaudeCode),
+            PromptRead::Unrecognised("a menu is open")
+        );
+
+        let abutting = format!(
+            "\x1b[1;1HWhat now?\x1b[2;1H❯ 1. Stop and wait\x1b[3;3H2. Upgrade\x1b[4;1H{rule}\x1b[5;1H❯ \x1b[6;1H{rule}\x1b[5;3H",
+            rule = "────────────"
+        );
+        assert_eq!(
+            read_prompt(&screen(abutting.as_bytes()), SessionType::ClaudeCode),
+            PromptRead::Unrecognised("a menu is open")
+        );
+
+        // Codex: a popup drawn straight over the composer
+        let codex = "\x1b[2;1H\x1b[7m› 1. Switch model\x1b[27m\x1b[3;1H› \x1b[2mAsk Codex\x1b[22m\x1b[5;3Hgpt-5.5 high\x1b[3;3H";
+        assert_eq!(
+            read_prompt(&screen(codex.as_bytes()), SessionType::OpenAICodex),
+            PromptRead::Unrecognised("a menu is open")
+        );
+    }
+
+    /// A multi-line draft whose first line is empty: the prompt line reads
+    /// empty, but the input is not
+    #[test]
+    fn test_a_draft_below_an_empty_prompt_line_is_not_empty() {
+        let rule = "────────────";
+        for below in ["\x1b[6;3Hsecond line", "\x1b[7;3Hthird line"] {
+            let bytes = format!("\x1b[4;1H{rule}\x1b[5;1H❯ {below}\x1b[8;1H{rule}\x1b[5;3H");
+            let read = read_prompt(&screen(bytes.as_bytes()), SessionType::ClaudeCode);
+            assert!(
+                matches!(read, PromptRead::Unrecognised(_)),
+                "{below:?}: {read:?}"
+            );
+            assert!(confirm(Step::Type, &read).is_err());
+        }
+        // Before `Enter`: the typed prompt on the first line, a draft below
+        let bytes = format!(
+            "\x1b[4;1H{rule}\x1b[5;1H❯ {CONTINUE_PROMPT}\x1b[6;3Hdraft\x1b[7;1H{rule}\x1b[5;31H"
+        );
+        let read = read_prompt(&screen(bytes.as_bytes()), SessionType::ClaudeCode);
+        assert!(confirm(Step::Submit, &read).is_err(), "{read:?}");
+
+        // Codex: continuation lines sit under the prompt, above the padding
+        // and the status line
+        for below in ["\x1b[2;3Hsecond line", "\x1b[3;3Hthird line"] {
+            let bytes = format!("\x1b[1;1H› {below}\x1b[5;3Hgpt-5.5 high\x1b[1;3H");
+            let read = read_prompt(&screen(bytes.as_bytes()), SessionType::OpenAICodex);
+            assert!(
+                matches!(read, PromptRead::Unrecognised(_)),
+                "{below:?}: {read:?}"
+            );
+        }
+    }
+
+    /// Claude's input always sits between two rules; without them this is
+    /// not a prompt box Panoptes knows
+    #[test]
+    fn test_a_claude_prompt_without_its_rules_is_unrecognised() {
+        let bytes = "\x1b[5;1H\u{276f} \x1b[5;3H";
+        assert!(matches!(
+            read_prompt(&screen(bytes.as_bytes()), SessionType::ClaudeCode),
+            PromptRead::Unrecognised(_)
+        ));
+    }
+
     #[test]
     fn test_a_hidden_cursor_or_one_off_the_prompt_is_unrecognised() {
         let mut hidden = claude_prompt("");
@@ -921,6 +1110,7 @@ mod tests {
         for i in 0..30 {
             vt.process(format!("line {i}\r\n").as_bytes());
         }
+        vt.process(b"\x1b[2J");
         vt.process(&codex_prompt(""));
         vt.set_scrollback(5);
         assert_eq!(
