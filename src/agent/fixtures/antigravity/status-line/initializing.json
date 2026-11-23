@@ -1,0 +1,28 @@
+{
+  "cwd": "/home/user/projects/demo",
+  "session_id": "",
+  "conversation_id": "",
+  "transcript_path": "/home/user/.gemini/antigravity/brain/.system_generated/logs/transcript.jsonl",
+  "model": null,
+  "workspace": {
+    "current_dir": "/home/user/projects/demo",
+    "project_dir": "/home/user/projects/demo"
+  },
+  "version": "1.5.15",
+  "context_window": {
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "context_window_size": 0,
+    "used_percentage": 0,
+    "remaining_percentage": 0,
+    "current_usage": null
+  },
+  "exceeds_200k_tokens": null,
+  "product": "antigravity",
+  "agent_state": "initializing",
+  "sandbox": {
+    "enabled": false
+  },
+  "email": "user@example.com",
+  "terminal_width": 120
+}

@@ -1,0 +1,46 @@
+{
+  "cwd": "/home/user/projects/demo",
+  "session_id": "",
+  "conversation_id": "",
+  "transcript_path": "/home/user/.gemini/antigravity/brain/.system_generated/logs/transcript.jsonl",
+  "model": {
+    "id": "Gemini 3.8 Flash (High)",
+    "display_name": "Gemini 3.8 Flash (High)",
+    "effort": "high"
+  },
+  "workspace": {
+    "current_dir": "/home/user/projects/demo",
+    "project_dir": "/home/user/projects/demo"
+  },
+  "version": "1.5.15",
+  "context_window": {
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "context_window_size": 1048576,
+    "used_percentage": 0,
+    "remaining_percentage": 100,
+    "current_usage": null
+  },
+  "exceeds_200k_tokens": null,
+  "product": "antigravity",
+  "quota": {
+    "3p-weekly": {
+      "remaining_fraction": 1,
+      "reset_time": "2026-11-30T10:17:16Z",
+      "reset_in_seconds": 604741
+    },
+    "gemini-weekly": {
+      "remaining_fraction": 1,
+      "reset_time": "2026-11-30T10:17:16Z",
+      "reset_in_seconds": 604741
+    }
+  },
+  "agent_state": "idle",
+  "cycle_mode": "plan",
+  "sandbox": {
+    "enabled": false
+  },
+  "plan_tier": "Antigravity Starter Quota",
+  "email": "user@example.com",
+  "terminal_width": 120
+}

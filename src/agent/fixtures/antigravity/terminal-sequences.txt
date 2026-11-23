@@ -1,0 +1,35 @@
+# agy 1.5.15 raw PTY output, escaped. Captured at 120x40, TERM=xterm-256color,
+# behind a responder that answers like Panoptes' QueryResponder (src/session/proxy.rs).
+# The same sequences appeared with and without TERM_PROGRAM=iTerm.app in the environment.
+
+## Startup (the first bytes written, before any visible output)
+\x1b[?2026$p          DECRQM synchronized output      -> answered (?2026;2$y)
+\x1b[?2027$p          DECRQM grapheme clustering      -> not answered (agy carries on)
+\x1b]11;?\x07         OSC 11 background colour query  -> answered from the host colours
+\x1b]7501;?\x07       private OSC query               -> not answered (agy carries on)
+\x1b[>4m              XTMODKEYS reset
+\x1b[?1049h           alt screen ON  (splash/onboarding only; see below)
+\x1b[?25l             hide cursor
+\x1b[?5W              DECST8C (reset tab stops)
+\x1b[?2004h           bracketed paste ON
+\x1b[>4;2m            modifyOtherKeys level 2
+\x1b[>5u              kitty keyboard PUSH flags=5 (disambiguate | report alternate keys)
+\x1b[?u               kitty keyboard flags query      -> answered (?5u)
+\x1b[H\x1b[2J         home + clear, then the wordmark
+
+## Leaving the splash for the main UI (default "inline" rendering mode)
+\x1b[>4m\x1b[<1u\x1b[?1049l\x1b[?2026h\x1b[>4;2m\x1b[>5u\x1b[?u\x1b[0 q\r\x1b[J ...
+# The kitty stack is popped and re-pushed around the alt-screen exit, so it stays
+# balanced (depth 1). The main UI then draws inline on the primary screen.
+
+## Steady state
+# Every frame is wrapped in \x1b[?2026h ... \x1b[?2026l (531 frames in a 4-minute
+# session). OSC 8 hyperlinks (\x1b]8;id=...;file://...\x07) are used for paths.
+# Seen in 4 minutes: no DA1 (\x1b[c), no XTVERSION (\x1b[>0q), no DSR (\x1b[6n),
+# and no kitty graphics APC (\x1b_G...). The graphics probe is lazy: agy sends it only
+# when it renders an image (Mermaid/LaTeX in the artifact viewer, /swarm board).
+
+## Exit (Ctrl+C twice)
+...\x1b[?2026l\x1b[>4m\x1b[<1u\r\n\n\x1b[J\x1b[?2004l\x1b[0 q\r\n
+Resume with -c (or command below):\r\n
+agy --conversation=11111111-1111-4111-8111-111111111111\r\n
