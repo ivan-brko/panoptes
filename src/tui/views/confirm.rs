@@ -199,6 +199,73 @@ pub fn render_session_delete_confirmation(
     render_confirm_dialog(frame, area, config);
 }
 
+/// Render the "Restart session?" dialog, as a centred overlay
+///
+/// Only shown for a session a restart would interrupt, so it names what is
+/// lost: the turn or dialog in progress, and anything running in the
+/// background, all of which die with the process. The conversation itself
+/// survives - the restart resumes it.
+pub fn render_session_restart_confirmation(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    sessions: &SessionManager,
+) {
+    let t = theme();
+    let info = state
+        .pending_restart_session
+        .and_then(|id| sessions.get(id))
+        .map(|s| &s.info);
+    let name = info.map(|i| i.name.as_str()).unwrap_or("Unknown");
+    let interrupted = match info.map(|i| i.state) {
+        Some(crate::session::SessionState::AwaitingApproval) => {
+            "It is waiting on a permission dialog"
+        }
+        Some(crate::session::SessionState::Thinking | crate::session::SessionState::Executing) => {
+            "Its current turn will be interrupted"
+        }
+        _ => "Its background work will be stopped",
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Restart session: ", Style::default().fg(t.text)),
+            Span::styled(
+                name.to_string(),
+                Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("?", Style::default().fg(t.text)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            format!("\u{26A0}  {}", interrupted),
+            Style::default()
+                .fg(t.border_warning)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            "The conversation is resumed on the current agent build",
+            Style::default().fg(t.text_dim),
+        )]),
+        Line::from(""),
+        confirm_prompt_line(),
+    ];
+
+    render_dialog(
+        frame,
+        area,
+        DialogSpec {
+            title: "Confirm Restart",
+            border_color: t.border_warning,
+            alignment: Alignment::Center,
+            width: DialogSize::Fixed(60),
+            height: DialogSize::Fixed(10),
+        },
+        lines,
+    );
+}
+
 /// Render a quit confirmation dialog
 ///
 /// Centered dialog asking user to confirm quitting the application.

@@ -81,6 +81,9 @@ pub struct Header<'a> {
     attention_count: usize,
     /// Optional custom style (for session view state-based coloring)
     custom_style: Option<Style>,
+    /// A badge trailing the breadcrumb in its own colour - the session view's
+    /// "restart to update"
+    flag: Option<Span<'static>>,
     /// How much of the wordmark this header draws
     logo: LogoKind,
 }
@@ -94,6 +97,7 @@ impl<'a> Header<'a> {
             notifications: None,
             attention_count: 0,
             custom_style: None,
+            flag: None,
             logo: LogoKind::None,
         }
     }
@@ -173,6 +177,15 @@ impl<'a> Header<'a> {
         self
     }
 
+    /// Trail the breadcrumb with a badge in a style of its own
+    ///
+    /// Kept whole where the breadcrumb is not: on the wordmark's breadcrumb
+    /// row it is right-aligned after it, so a long breadcrumb is cut first.
+    pub fn with_flag(mut self, flag: Option<Span<'static>>) -> Self {
+        self.flag = flag;
+        self
+    }
+
     /// Render the header to the given area
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         let t = theme();
@@ -214,6 +227,9 @@ impl<'a> Header<'a> {
         };
 
         let mut left_spans = vec![Span::raw(left)];
+        if let Some(flag) = &self.flag {
+            left_spans.push(flag.clone());
+        }
         if let Some(notification) = self.notification_span() {
             left_spans.push(Span::raw(" | "));
             left_spans.push(notification);
@@ -258,7 +274,7 @@ impl<'a> Header<'a> {
                 width,
                 vec![Span::styled(logo::WORDMARK[1], art)],
                 breadcrumb,
-                vec![],
+                self.flag.iter().cloned().collect(),
             ),
             Self::row(
                 width,
@@ -420,6 +436,32 @@ mod tests {
         let breadcrumb = Breadcrumb::new().push("Projects");
         let header = Header::new(breadcrumb).with_attention_count(5);
         assert_eq!(header.attention_count, 5);
+    }
+
+    /// The flag follows the breadcrumb in both header forms, and on the
+    /// wordmark's row a long breadcrumb is what gets cut, not the flag
+    #[test]
+    fn test_the_flag_trails_the_breadcrumb_and_outlasts_it() {
+        use crate::tui::views::test_util::render_to_lines;
+
+        let flag = || Some(Span::raw(" ! flagged"));
+        let short = || Breadcrumb::new().push("panoptes").push("main");
+
+        let plain = render_to_lines(80, 2, |frame| {
+            Header::new(short())
+                .with_flag(flag())
+                .render(frame, frame.size())
+        });
+        assert!(plain[0].contains("panoptes > main ! flagged"), "{plain:?}");
+
+        let long = Breadcrumb::new().push("x".repeat(200));
+        let logo = render_to_lines(100, 4, |frame| {
+            Header::new(long)
+                .with_logo(LogoKind::Wordmark)
+                .with_flag(flag())
+                .render(frame, frame.size())
+        });
+        assert!(logo[1].trim_end().ends_with("! flagged"), "{logo:?}");
     }
 
     fn area(width: u16, height: u16) -> Rect {

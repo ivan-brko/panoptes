@@ -395,6 +395,13 @@ fn handle_branch_key(
                 app.state.input_mode = InputMode::ConfirmingSessionDelete;
             }
         }
+        // Ahead of the custom-shortcut arm below, like import. A recovered
+        // session has no process to restart; `Enter` resumes it.
+        KeyCode::Char(super::RESTART_SESSION_KEY) => {
+            if let Some((session_id, true)) = selected_session {
+                app.restart_session(session_id, false);
+            }
+        }
         // Ahead of the custom-shortcut arm below, which would otherwise claim it
         KeyCode::Char(IMPORT_CONVERSATION_KEY) => {
             app.start_conversation_import(project_id, branch_id);
@@ -528,6 +535,11 @@ mod tests {
             .expect("a shortcut on the import key must be dropped, and said so");
         assert!(warning.contains("IntelliJ"), "{warning}");
         assert!(config.custom_shortcuts.is_empty());
+
+        // The restart key is bound at the same level, for the same reason
+        assert!(crate::config::is_reserved_key(
+            super::super::RESTART_SESSION_KEY
+        ));
     }
 
     /// The last row of the branch list is what `,` used to be

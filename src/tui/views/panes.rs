@@ -257,7 +257,7 @@ fn footer_text(ctx: &PaneContext) -> String {
     let base = match state.focus.tab() {
         Some(Tab::Projects) => projects_footer(state, ctx.project_store, ctx.config),
         Some(Tab::Sessions) => {
-            "↑↓/1-9: select | Enter: open | d: delete | Esc: projects".to_string()
+            "↑↓/1-9: select | Enter: open | u: restart | d: delete | Esc: projects".to_string()
         }
         Some(Tab::Settings) => settings_footer(state).to_string(),
         None => String::new(),
@@ -292,6 +292,7 @@ fn prompt_footer(state: &AppState) -> Option<&'static str> {
             "w: also delete the directory | y: confirm | n/Esc: cancel"
         }
         InputMode::ConfirmingSessionDelete
+        | InputMode::ConfirmingSessionRestart
         | InputMode::ConfirmingProjectDelete
         | InputMode::ConfirmingFolderRemove => "y: confirm | n/Esc: cancel",
         InputMode::ConfirmingQuit => "y/Enter: quit | n/Esc: cancel",
@@ -344,7 +345,7 @@ fn projects_footer(state: &AppState, project_store: &ProjectStore, config: &Conf
         ProjectsNav::Branch(_, _) => {
             let shortcuts = format_custom_shortcuts_hint(&config.custom_shortcuts);
             format!(
-                "↑↓/Enter | n: new AI | s: shell | i: import | d: delete | {}Esc: back",
+                "↑↓/Enter | n: new AI | s: shell | i: import | u: restart | d: delete | {}Esc: back",
                 shortcuts
             )
         }
@@ -718,6 +719,8 @@ mod tests {
         };
         let footer = projects_footer(&state, &f.project_store, &f.config);
         assert!(footer.contains("i: import"), "{footer:?}");
+        // Restart is bound in both session lists, and said so in both
+        assert!(footer.contains("u: restart"), "{footer:?}");
 
         for nav in [ProjectsNav::Overview, ProjectsNav::Project(project_id)] {
             let state = AppState {

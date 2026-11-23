@@ -22,6 +22,8 @@ pub enum InputMode {
     SelectingDefaultBase,
     /// Confirming session deletion
     ConfirmingSessionDelete,
+    /// Confirming a restart that would interrupt a busy session
+    ConfirmingSessionRestart,
     /// Confirming branch/worktree deletion
     ConfirmingBranchDelete,
     /// Confirming project deletion
@@ -88,7 +90,7 @@ impl InputMode {
     /// Keep in sync with the enum; `test_all_lists_every_mode_once` fails if
     /// an entry is duplicated, and the dispatcher's routing-table test fails
     /// to compile if a new variant is missing from its match.
-    pub const ALL: [InputMode; 37] = [
+    pub const ALL: [InputMode; 38] = [
         InputMode::Normal,
         InputMode::Session,
         InputMode::CreatingSession,
@@ -97,6 +99,7 @@ impl InputMode {
         InputMode::AddingProjectName,
         InputMode::SelectingDefaultBase,
         InputMode::ConfirmingSessionDelete,
+        InputMode::ConfirmingSessionRestart,
         InputMode::ConfirmingBranchDelete,
         InputMode::ConfirmingProjectDelete,
         InputMode::ConfirmingQuit,

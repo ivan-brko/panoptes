@@ -373,6 +373,8 @@ pub struct AppState {
     pub fetch_error: Option<String>,
     /// Session pending deletion (for confirmation dialog)
     pub pending_delete_session: Option<SessionId>,
+    /// Session pending a restart that would interrupt it (for confirmation)
+    pub pending_restart_session: Option<SessionId>,
     /// Project pending deletion (for confirmation dialog)
     pub pending_delete_project: Option<ProjectId>,
     /// Branch pending deletion (for confirmation dialog)

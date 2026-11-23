@@ -65,6 +65,8 @@ impl CustomShortcut {
 /// - n, s, d: new worktree/AI, shell, delete - bound in pane 1 and pane 2
 /// - i: import an existing Claude/Codex conversation - bound at pane 1's
 ///   branch level, exactly where custom shortcuts fire
+/// - u: restart a session on its agent's updated binary - bound in pane 2 and
+///   at pane 1's branch level
 /// - 0-9: jump to session by number
 ///
 /// `c`, `g`, `G`, `k` and `x` used to be here and are now free: configs,
@@ -77,7 +79,7 @@ impl CustomShortcut {
 /// where custom shortcuts do not fire.
 ///
 /// `Space`, `Esc`, `Enter`, and `Tab` are not chars and cannot be bound at all.
-const RESERVED_KEYS: &[char] = &['q', 'n', 's', 'd', 'i'];
+const RESERVED_KEYS: &[char] = &['q', 'n', 's', 'd', 'i', 'u'];
 const RESERVED_DIGITS: bool = true;
 
 /// Check if a key is reserved and cannot be used for custom shortcuts
@@ -967,6 +969,9 @@ notification_method = "title"
 
         // Import a conversation, at the branch level where shortcuts fire
         assert!(is_reserved_key('i'));
+
+        // Restart on an updated agent, in both session lists
+        assert!(is_reserved_key('u'));
 
         // Never bound at all
         assert!(!is_reserved_key('v'));

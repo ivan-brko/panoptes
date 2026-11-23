@@ -135,6 +135,10 @@ pub struct Theme {
     pub attention_idle: Color,
     /// Attention badge color
     pub attention_badge: Color,
+    /// The "restart to update" badge: the agent binary under a live session
+    /// was updated. Not an attention colour - nothing is wrong, and nothing
+    /// is blocked on the user - so it sits apart from green, yellow and red.
+    pub update_available: Color,
 
     // === Outcomes ===
     /// Something completed or is safe to take (green in every tier)
@@ -361,6 +365,7 @@ impl Theme {
             attention_waiting: Color::Green,
             attention_idle: Color::Yellow,
             attention_badge: Color::Yellow,
+            update_available: Color::LightBlue,
 
             // Outcomes
             success: Color::Green,
@@ -650,6 +655,7 @@ mod tests {
                 );
                 assert_eq!(tier.attention_idle, base.attention_idle, "{palette:?}");
                 assert_eq!(tier.attention_badge, base.attention_badge, "{palette:?}");
+                assert_eq!(tier.update_available, base.update_available, "{palette:?}");
                 assert_eq!(tier.error_bg, base.error_bg, "{palette:?}");
                 assert_eq!(tier.error_fg, base.error_fg, "{palette:?}");
                 assert_eq!(tier.warning_bg, base.warning_bg, "{palette:?}");
