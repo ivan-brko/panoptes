@@ -596,6 +596,20 @@ pub struct SessionInfo {
     /// the process was actually handed, which only links there.
     #[serde(skip)]
     pub spawned_codex_home: Option<std::path::PathBuf>,
+    /// The agent executable the live process was launched from
+    ///
+    /// Runtime only, like the process. `None` for a shell, which is not
+    /// watched for updates, and for an agent whose command could not be found
+    /// on `PATH` at spawn.
+    #[serde(skip)]
+    pub launched_binary: Option<crate::agent::binary::BinaryFingerprint>,
+    /// Whether that executable has since been replaced by an update
+    ///
+    /// Set by the throttled re-check (`SessionManager::check_binary_updates`)
+    /// and cleared only by a new process: the running one stays on the old
+    /// build until it is restarted, which is what the badge says.
+    #[serde(skip)]
+    pub binary_updated: bool,
 }
 
 impl SessionInfo {
@@ -739,6 +753,17 @@ impl SessionInfo {
             "run `{}`",
             crate::claude_config::account::login_command(self.spawned_claude_config_dir.as_deref())
         ))
+    }
+
+    /// Whether restarting this session now would interrupt something
+    ///
+    /// A turn in progress, a dialog held open, or background work that dies
+    /// with the process. A restart asks first when this is true.
+    pub fn is_busy(&self) -> bool {
+        matches!(
+            self.state,
+            SessionState::Thinking | SessionState::Executing | SessionState::AwaitingApproval
+        ) || self.has_background_work()
     }
 
     /// Whether anything still runs, or is scheduled to run, in this session's
@@ -948,6 +973,8 @@ impl SessionInfo {
             transcript_missing: false,
             spawned_claude_config_dir: None,
             spawned_codex_home: None,
+            launched_binary: None,
+            binary_updated: false,
         }
     }
 
