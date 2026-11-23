@@ -113,6 +113,9 @@ pub struct Tailer {
     /// While set, lines are checked against the copy of a parent's history
     /// that opens a forked Codex rollout, and the copy is not read as news
     copied_history: Option<codex::CopiedHistorySkip>,
+    /// For a Codex rollout, the rate-limit figures read so far, which a usage
+    /// limit failure needs to say which window it was refused on
+    codex_limits: Option<codex::RolloutLimits>,
 }
 
 impl Tailer {
@@ -137,6 +140,10 @@ impl Tailer {
             TranscriptKind::Claude => (0, None),
         };
         let seed = seed_usage(kind, &path, len, floor);
+        let codex_limits = match kind {
+            TranscriptKind::Codex => Some(codex::RolloutLimits::seeded(seed.clone())),
+            TranscriptKind::Claude => None,
+        };
 
         (
             Self {
@@ -146,6 +153,7 @@ impl Tailer {
                 partial: String::new(),
                 pending_bytes: Vec::new(),
                 copied_history,
+                codex_limits,
             },
             seed,
         )
@@ -166,6 +174,10 @@ impl Tailer {
             pending_bytes: Vec::new(),
             copied_history: match kind {
                 TranscriptKind::Codex => Some(codex::CopiedHistorySkip::new()),
+                TranscriptKind::Claude => None,
+            },
+            codex_limits: match kind {
+                TranscriptKind::Codex => Some(codex::RolloutLimits::default()),
                 TranscriptKind::Claude => None,
             },
         }
@@ -256,7 +268,10 @@ impl Tailer {
                 }
             }
             if let Some(event) = self.kind.parse_line(line) {
-                events.push(event);
+                events.push(match &mut self.codex_limits {
+                    Some(limits) => limits.observe(event),
+                    None => event,
+                });
             }
         }
 
@@ -454,6 +469,28 @@ mod tests {
             tailer.poll().0,
             vec![AgentEvent::TurnCompleted { last_message: None }]
         );
+    }
+
+    #[test]
+    fn test_codex_usage_limit_failure_names_its_window_across_polls() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let fixture = include_str!("fixtures/usage_limit_rollout.jsonl");
+        let (figures, failure) = fixture.trim_end().rsplit_once('\n').unwrap();
+        append(&path, &format!("{figures}\n"));
+
+        let mut tailer = Tailer::from_start(TranscriptKind::Codex, path.clone());
+        tailer.poll();
+        // The refusal lands in a later poll than the figures it came with
+        append(&path, &format!("{failure}\n"));
+        let (events, _) = tailer.poll();
+        let [AgentEvent::RolloutTurnFailed {
+            limit: Some(limit), ..
+        }] = events.as_slice()
+        else {
+            panic!("expected one failed turn with its limit, got {events:?}");
+        };
+        assert_eq!(limit.window, "wk");
     }
 
     #[test]

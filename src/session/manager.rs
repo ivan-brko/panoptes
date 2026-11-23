@@ -1724,6 +1724,7 @@ impl SessionManager {
                 "Codex lifecycle hooks are reporting; the rollout now supplies usage only"
             );
         }
+        state_machine::note_codex_turn(info, event);
         if event.event_type() != HookEventType::SessionStart
             || event.session_start_source() == Some(SessionStartSource::Compact)
         {
@@ -4736,6 +4737,51 @@ mod tests {
         assert!(info.agent_session_id.is_some());
         assert!(info.agent_transcript_path.is_none());
         assert!(info.hooks_live);
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_codex_failure_from_the_rollout_yields_to_a_newer_hook_turn() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_codex(&mut manager);
+        let failure = |turn: &str| AgentEvent::RolloutTurnFailed {
+            reason: Some("usage limit".to_string()),
+            limit: None,
+            turn_id: Some(turn.to_string()),
+            inferred: false,
+            open_to_usage_limit: false,
+        };
+
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "UserPromptSubmit",
+            serde_json::json!({"turn_id": "t1"}),
+        ));
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "UserPromptSubmit",
+            serde_json::json!({"turn_id": "t2"}),
+        ));
+        // t1's failure is read after t2 has started: no bell, still working
+        assert_eq!(
+            manager.apply_transcript_event(session_id, failure("t1")),
+            None
+        );
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Thinking
+        );
+        // t2's own failure is reported
+        assert_eq!(
+            manager.apply_transcript_event(session_id, failure("t2")),
+            Some(session_id)
+        );
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Waiting
+        );
 
         manager.shutdown_all();
     }

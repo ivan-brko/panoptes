@@ -273,12 +273,71 @@ pub fn translate_antigravity_status_line(info: &SessionInfo, event: &HookEvent) 
 /// turn, and two producers of the same transitions, each with its own
 /// latency, would fight over it. The rollout-recency subagent count is
 /// dropped with the rest: the hooks report subagents exactly, by ID.
+///
+/// A failed Codex turn is the exception, because no hook reports it: Codex
+/// runs its `Stop` hooks only once a model request succeeds, so a turn refused
+/// on a usage limit (or any other API error) ends with nothing but the
+/// rollout's `task_complete` and its error. Without this the session would sit
+/// in `Thinking` until the next prompt. It is admitted only while it is still
+/// news, though:
+///
+/// - not when it was inferred from the figures rather than written - only a
+///   Codex too old for hooks needs that, and on one with hooks a turn that
+///   merely ended quietly after a full window would ring as a failure;
+/// - not when the hooks have already reported a later turn - Codex starts
+///   queued input the moment a turn fails, and the new turn's prompt hook can
+///   land before the tailer reads the failure;
+/// - not when the hooks saw that same turn end - an `after_agent` hook that
+///   aborts writes its error after `Stop` has already fired.
 pub fn admits_transcript_event(info: &SessionInfo, event: &AgentEvent) -> bool {
-    !info.hooks_live
-        || matches!(
-            event,
-            AgentEvent::Usage(_) | AgentEvent::TitleChanged { .. }
-        )
+    if !info.hooks_live {
+        return true;
+    }
+    match event {
+        AgentEvent::Usage(_) | AgentEvent::TitleChanged { .. } => true,
+        AgentEvent::RolloutTurnFailed {
+            turn_id, inferred, ..
+        } => {
+            // A failure naming no turn, or hooks that have named none yet,
+            // cannot be told stale, and is taken as current
+            let turns = &info.codex_turns;
+            let still_news = match turn_id.as_deref() {
+                None => true,
+                Some(failed) => {
+                    turns
+                        .current
+                        .as_deref()
+                        .map_or(true, |current| current == failed)
+                        && turns.ended.as_deref() != Some(failed)
+                }
+            };
+            !inferred && still_news
+        }
+        _ => false,
+    }
+}
+
+/// Record which Codex turn a lifecycle hook belongs to
+///
+/// Only root-thread hooks count: a subagent's carry its own turn, and the
+/// parent's turn is what a rollout failure is compared against. `Stop` and
+/// `Interrupt` also mark their turn as ended.
+pub fn note_codex_turn(info: &mut SessionInfo, event: &HookEvent) {
+    let (Some(turn), None) = (event.turn_id(), event.agent_id()) else {
+        return;
+    };
+    let turns = &mut info.codex_turns;
+    turns.current = Some(turn.to_string());
+    // Any other root hook means the turn is running again. One Codex task
+    // keeps one `turn_id` across every model loop it runs: queued input
+    // starts another under the same id (`UserPromptSubmit` again), and so
+    // does a `Stop` hook that blocks and continues. A failure of that
+    // continuation is news, though its id has already been seen to stop.
+    turns.ended = matches!(
+        event.event_type(),
+        HookEventType::Stop | HookEventType::Interrupt
+    )
+    .then(|| turn.to_string());
 }
 
 /// Apply a canonical agent event to a session
@@ -293,6 +352,15 @@ pub fn apply(
     now: DateTime<Utc>,
     config: &Config,
 ) -> Applied {
+    // The rollout's failure carried what its admission needed; past that it
+    // means what any failed turn does
+    let event = match event {
+        AgentEvent::RolloutTurnFailed { reason, limit, .. } => {
+            AgentEvent::TurnFailed { reason, limit }
+        }
+        event => event,
+    };
+
     // A failed turn is reported twice: by the transcript tailer, and by
     // Claude's `StopFailure` hook. Whichever
     // lands second must not ring again or re-flag a session the user has
@@ -557,7 +625,8 @@ pub fn apply(
             Move::Unchanged
         }
 
-        AgentEvent::Ignored => Move::Unchanged,
+        // Rewritten as `TurnFailed` on the way in
+        AgentEvent::RolloutTurnFailed { .. } | AgentEvent::Ignored => Move::Unchanged,
     };
 
     match movement {
@@ -2091,11 +2160,12 @@ mod tests {
     }
 
     #[test]
-    fn test_hooks_live_admits_only_usage_and_titles_from_the_transcript() {
+    fn test_hooks_live_admits_only_usage_titles_and_failures_from_the_transcript() {
         let mut info = test_info();
         let title = AgentEvent::TitleChanged {
             title: "Fix the flaky test".to_string(),
         };
+        let failed = rollout_failure(Some("t1"), false);
         let events = [
             AgentEvent::TurnStarted { title: None },
             AgentEvent::ToolStarted {
@@ -2106,6 +2176,7 @@ mod tests {
             AgentEvent::Subagents { active: 2 },
             AgentEvent::Usage(crate::agent::events::UsageSnapshot::default()),
             title.clone(),
+            failed.clone(),
         ];
 
         // Without hooks the rollout is the state machine's only source
@@ -2116,12 +2187,14 @@ mod tests {
             .iter()
             .filter(|e| admits_transcript_event(&info, e))
             .collect();
-        // What no hook carries still gets through
+        // What no hook carries still gets through: figures, titles, and a
+        // failed turn, for which Codex fires no `Stop`
         assert_eq!(
             admitted,
             [
                 &AgentEvent::Usage(crate::agent::events::UsageSnapshot::default()),
-                &title
+                &title,
+                &failed,
             ]
         );
     }
@@ -2334,5 +2407,212 @@ mod tests {
             // Figures are still welcome
             assert_eq!(info.usage.context_window, Some(1_048_576));
         }
+    }
+
+    #[test]
+    fn test_codex_usage_limit_from_the_rollout_raises_attention() {
+        let config = Config::default();
+        let mut info = test_info();
+        info.session_type = crate::session::SessionType::OpenAICodex;
+        info.hooks_live = true;
+        let now = Utc::now();
+
+        // The prompt arrives by hook; the refusal only in the rollout
+        assert!(!apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config
+        ));
+        assert_eq!(info.state, SessionState::Thinking);
+        note_turn(&mut info, "UserPromptSubmit", "turn-1");
+
+        let fixture = include_str!("../transcript/fixtures/usage_limit_rollout.jsonl");
+        let mut limits = crate::transcript::codex::RolloutLimits::default();
+        let mut rang = false;
+        for line in fixture.lines() {
+            let Some(event) = crate::transcript::codex::parse_line(line) else {
+                continue;
+            };
+            let event = limits.observe(event);
+            if admits_transcript_event(&info, &event) {
+                rang |= apply(&mut info, event, now, &config).rang;
+            }
+        }
+
+        assert!(rang, "a usage limit is worth the bell");
+        assert_eq!(info.state, SessionState::Waiting);
+        let limit = info.failed_turn().and_then(|f| f.limit.clone());
+        assert_eq!(limit.as_ref().map(|l| l.window.as_str()), Some("wk"));
+        assert_eq!(
+            limit.and_then(|l| l.resets_at),
+            chrono::DateTime::from_timestamp(1_794_646_800, 0)
+        );
+        assert!(matches!(
+            info.attention,
+            Some(AttentionReason::TurnFailed { .. })
+        ));
+    }
+
+    fn rollout_failure(turn_id: Option<&str>, inferred: bool) -> AgentEvent {
+        AgentEvent::RolloutTurnFailed {
+            reason: Some("usage limit".to_string()),
+            limit: None,
+            turn_id: turn_id.map(str::to_string),
+            inferred,
+            open_to_usage_limit: false,
+        }
+    }
+
+    /// A Codex hook for `turn`, noted as the manager notes it
+    fn note_turn(info: &mut SessionInfo, event: &str, turn: &str) {
+        let mut payload = codex_payload(event);
+        payload["turn_id"] = turn.into();
+        note_codex_turn(info, &hook(info.id, event, payload));
+    }
+
+    #[test]
+    fn test_inferred_failure_is_admitted_only_without_hooks() {
+        let mut info = test_info();
+        let inferred = rollout_failure(None, true);
+        // A Codex too old for hooks: the inference is all there is
+        assert!(admits_transcript_event(&info, &inferred));
+
+        // With hooks, a quiet end after a full window (compaction, a
+        // reasoning-only turn) is just an end, which `Stop` already reported
+        info.hooks_live = true;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "Stop", "t1");
+        assert!(!admits_transcript_event(&info, &inferred));
+        let mut info = test_info();
+        info.hooks_live = true;
+        assert!(!admits_transcript_event(&info, &inferred));
+    }
+
+    #[test]
+    fn test_rollout_failure_of_an_earlier_turn_is_dropped() {
+        let config = Config::default();
+        let mut info = test_info();
+        info.session_type = crate::session::SessionType::OpenAICodex;
+        info.hooks_live = true;
+
+        // Turn t1 fails, and Codex starts the queued prompt as t2 at once.
+        // Its prompt hook beats the tailer to the failure.
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "UserPromptSubmit", "t2");
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+
+        let stale = rollout_failure(Some("t1"), false);
+        assert!(!admits_transcript_event(&info, &stale));
+        assert_eq!(info.state, SessionState::Thinking, "t2 is still running");
+
+        // The running turn's own failure is news
+        assert!(admits_transcript_event(
+            &info,
+            &rollout_failure(Some("t2"), false)
+        ));
+        // ...and so is one that names no turn, which cannot be told stale
+        assert!(admits_transcript_event(
+            &info,
+            &rollout_failure(None, false)
+        ));
+    }
+
+    #[test]
+    fn test_rollout_failure_of_a_turn_the_hooks_saw_stop_is_dropped() {
+        // An `after_agent` hook that aborts writes its error after `Stop`
+        // fired for the same turn, which has already rung
+        let mut info = test_info();
+        info.hooks_live = true;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "Stop", "t1");
+        assert!(!admits_transcript_event(
+            &info,
+            &rollout_failure(Some("t1"), false)
+        ));
+
+        // Interrupt ends a turn just the same
+        let mut info = test_info();
+        info.hooks_live = true;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "Interrupt", "t1");
+        assert!(!admits_transcript_event(
+            &info,
+            &rollout_failure(Some("t1"), false)
+        ));
+    }
+
+    #[test]
+    fn test_queued_input_after_stop_reopens_the_same_turn() {
+        // One Codex task keeps one turn id across its model loops: queued
+        // input runs as a second loop of t1, which then hits the limit
+        let config = Config::default();
+        let mut info = test_info();
+        info.session_type = crate::session::SessionType::OpenAICodex;
+        info.hooks_live = true;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "Stop", "t1");
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+
+        let failure = rollout_failure(Some("t1"), false);
+        assert!(admits_transcript_event(&info, &failure));
+        apply(&mut info, failure, Utc::now(), &config);
+        assert_eq!(info.state, SessionState::Waiting, "not left in Thinking");
+    }
+
+    #[test]
+    fn test_blocked_stop_continuation_failure_is_admitted() {
+        // A `Stop` hook that blocks feeds the model a continuation in the
+        // same turn; its tools fire, and then the continuation fails
+        let mut info = test_info();
+        info.hooks_live = true;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "Stop", "t1");
+        note_turn(&mut info, "PreToolUse", "t1");
+        note_turn(&mut info, "PostToolUse", "t1");
+        assert!(admits_transcript_event(
+            &info,
+            &rollout_failure(Some("t1"), false)
+        ));
+
+        // With no hook between `Stop` and the failure there is nothing to tell
+        // a continuation's first request failing from an `after_agent` abort,
+        // and the abort is the one that has already rung - so it is dropped
+        let mut info = test_info();
+        info.hooks_live = true;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "Stop", "t1");
+        assert!(!admits_transcript_event(
+            &info,
+            &rollout_failure(Some("t1"), false)
+        ));
+    }
+
+    #[test]
+    fn test_subagent_hooks_do_not_move_the_codex_turn() {
+        let mut info = test_info();
+        let id = info.id;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        // A subagent's turn, under the parent's session
+        let mut payload = codex_subagent_payload("UserPromptSubmit");
+        payload["turn_id"] = "child-1".into();
+        note_codex_turn(&mut info, &hook(id, "UserPromptSubmit", payload));
+        let mut payload = codex_subagent_payload("Stop");
+        payload["turn_id"] = "child-1".into();
+        note_codex_turn(&mut info, &hook(id, "Stop", payload));
+
+        assert_eq!(info.codex_turns.current.as_deref(), Some("t1"));
+        assert_eq!(info.codex_turns.ended, None);
     }
 }

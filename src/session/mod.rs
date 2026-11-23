@@ -380,6 +380,15 @@ impl TurnFailure {
     }
 }
 
+/// The Codex turns the lifecycle hooks have reported, by Codex's `turn_id`
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexTurns {
+    /// The turn the latest root-thread hook belonged to
+    pub current: Option<String>,
+    /// The latest turn the hooks saw end, by `Stop` or `Interrupt`
+    pub ended: Option<String>,
+}
+
 /// Metadata for a session (without PTY details)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -492,6 +501,14 @@ pub struct SessionInfo {
     /// next one proves itself afresh.
     #[serde(skip)]
     pub hooks_live: bool,
+    /// Which Codex turn the hooks last reported, and which they saw end
+    ///
+    /// A failed turn is only in the rollout, which can be read after the hooks
+    /// have already moved on, so this is what tells a stale failure from a
+    /// current one (see `state_machine::admits_transcript_event`). Not
+    /// persisted, for the same reason as `hooks_live`.
+    #[serde(skip)]
+    pub codex_turns: CodexTurns,
     /// Whether this session reattached to a conversation that already existed
     ///
     /// Decides where transcript reading starts. A fresh session's transcript
@@ -915,6 +932,7 @@ impl SessionInfo {
             background_tasks: 0,
             session_crons: 0,
             hooks_live: false,
+            codex_turns: CodexTurns::default(),
             resumed_conversation: false,
             auto_named: false,
             exit_reason: None,
