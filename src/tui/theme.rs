@@ -849,7 +849,10 @@ mod tests {
             t.danger
         );
         assert_eq!(
-            t.attention_color(&AttentionReason::TurnFailed { reason: None }),
+            t.attention_color(&AttentionReason::TurnFailed {
+                reason: None,
+                limit: None
+            }),
             t.danger
         );
     }

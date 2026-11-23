@@ -10,7 +10,7 @@
 //! translates into it, so there is one place that decides what an event *means*
 //! and several small places that decide what an event *is*.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::hooks::NotificationKind;
@@ -56,6 +56,9 @@ pub enum AgentEvent {
         /// Short human label for why, e.g. "usage limit"; `None` when the
         /// agent gave no reason
         reason: Option<String>,
+        /// Which usage limit was hit and when it lifts, when the failure was
+        /// a usage limit and the agent said which
+        limit: Option<UsageLimit>,
     },
 
     /// The agent is blocked waiting for the user to approve something
@@ -424,21 +427,79 @@ fn merge_window(current: &mut Option<RateLimitWindow>, newer: Option<RateLimitWi
     }
 }
 
-/// Render the time until `at` as `in 3h 20m` / `in 2d 4h` / `in 45m`
+/// Render when a limit lifts, on the user's own clock: `20:10` today,
+/// `Aug 29 01:30` on any other day, `now` once it has passed
 ///
-/// Minutes are rounded up so a reset under a minute away still reads as
-/// pending rather than `in 0m`; a reset already past reads as `now`.
-fn format_reset(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let seconds = (at - now).num_seconds();
-    if seconds <= 0 {
+/// The one reset formatter, shared by the header's `limit hit` and a failed
+/// turn's `5h resets 20:10`, so the two never disagree about the same reset.
+/// A clock time rather than a countdown because it does not go stale: "resets
+/// in 2h" read an hour later is wrong, where "resets 20:10" is not.
+pub fn format_reset(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    format_reset_in(at, now, &Local)
+}
+
+/// [`format_reset`] in a given time zone, so midnight is testable
+pub(crate) fn format_reset_in<Tz: TimeZone>(
+    at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if at <= now {
         return "now".to_string();
     }
-    let minutes = (seconds + 59) / 60;
-    let (days, hours, mins) = (minutes / 1_440, minutes % 1_440 / 60, minutes % 60);
-    match (days, hours) {
-        (0, 0) => format!("in {}m", mins),
-        (0, _) => format!("in {}h {}m", hours, mins),
-        _ => format!("in {}d {}h", days, hours),
+    let (at, now) = (at.with_timezone(tz), now.with_timezone(tz));
+    if at.date_naive() == now.date_naive() {
+        at.format("%H:%M").to_string()
+    } else {
+        at.format("%b %-d %H:%M").to_string()
+    }
+}
+
+/// A usage limit the agent refused a turn on: which window, and when it lifts
+///
+/// Claude writes this as `quotaLimits` on the failed turn's transcript record
+/// (`rateLimitType`, `resetsAt` in epoch seconds, `isUsingOverage`). Kept
+/// agent-neutral so Codex's own limit reports can carry the same thing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageLimit {
+    /// The window as the agent names it, e.g. `five_hour`, `seven_day_opus`
+    pub window: String,
+    /// When the window's allowance is restored, if the agent said
+    pub resets_at: Option<DateTime<Utc>>,
+    /// Whether the turn was already drawing on paid overage when refused
+    ///
+    /// Carried for completeness; nothing renders it yet.
+    pub using_overage: bool,
+}
+
+impl UsageLimit {
+    /// Short label for the window, in the header's vocabulary (`5h`, `wk`)
+    ///
+    /// The names are Claude's `rateLimitType` values as of Claude Code
+    /// 2.1.330 (read from the binary). A window this table does not know is
+    /// shown by its raw name: one nobody has prettied still tells the user
+    /// more than a generic "limit".
+    pub fn window_label(&self) -> &str {
+        match self.window.as_str() {
+            "five_hour" => "5h",
+            "seven_day" => "wk",
+            "seven_day_opus" => "wk opus",
+            "seven_day_sonnet" => "wk sonnet",
+            "seven_day_overage_included" => "wk overage",
+            "overage" => "overage",
+            other => other,
+        }
+    }
+
+    /// `5h resets 20:10`, or just `5h` when the reset time is unknown
+    pub fn describe_at(&self, now: DateTime<Utc>) -> String {
+        match self.resets_at {
+            Some(at) => format!("{} resets {}", self.window_label(), format_reset(at, now)),
+            None => self.window_label().to_string(),
+        }
     }
 }
 
@@ -689,9 +750,11 @@ mod tests {
             limit_reached: Some("workspace_member_credits_depleted".to_string()),
             ..Default::default()
         };
+        // On the user's clock, through the same formatter a failed turn uses
+        let reset = format_reset(now + chrono::Duration::minutes(200), now);
         assert_eq!(
-            usage.summary_at(now).as_deref(),
-            Some("gpt-5.5 · limit hit · resets in 3h 20m")
+            usage.summary_at(now),
+            Some(format!("gpt-5.5 · limit hit · resets {reset}"))
         );
 
         // Without a reset time the block is still shown, just without a countdown
@@ -705,14 +768,65 @@ mod tests {
 
     #[test]
     fn test_format_reset() {
-        let now = at(1_000_000);
+        // 2026-08-28 17:59:57 UTC, which is 19:59:57 in Zagreb (UTC+2)
+        let now = at(1_787_939_997);
+        let zagreb = chrono::FixedOffset::east_opt(2 * 3_600).unwrap();
         let later = |secs| now + chrono::Duration::seconds(secs);
-        assert_eq!(format_reset(later(200 * 60), now), "in 3h 20m");
-        assert_eq!(format_reset(later(45 * 60), now), "in 45m");
-        assert_eq!(format_reset(later(30), now), "in 1m");
-        assert_eq!(format_reset(later((2 * 24 + 4) * 3_600), now), "in 2d 4h");
-        assert_eq!(format_reset(later(0), now), "now");
-        assert_eq!(format_reset(later(-60), now), "now");
+
+        // Today: just the clock time, in the zone's own hours
+        assert_eq!(format_reset_in(later(603), now, &zagreb), "20:10");
+        assert_eq!(format_reset_in(later(603), now, &Utc), "18:10");
+        assert_eq!(format_reset_in(later(30), now, &zagreb), "20:00");
+
+        // Past midnight it is another day, and says which
+        assert_eq!(
+            format_reset_in(later(4 * 3_600 + 603), now, &zagreb),
+            "Aug 29 00:10"
+        );
+        // ...but only where midnight has actually passed: the same instant is
+        // still the 28th in UTC
+        assert_eq!(format_reset_in(later(4 * 3_600 + 603), now, &Utc), "22:10");
+        assert_eq!(
+            format_reset_in(later(6 * 24 * 3_600), now, &zagreb),
+            "Sep 3 19:59"
+        );
+
+        // A reset already past reads as such
+        assert_eq!(format_reset_in(later(0), now, &zagreb), "now");
+        assert_eq!(format_reset_in(later(-60), now, &zagreb), "now");
+    }
+
+    #[test]
+    fn test_usage_limit_window_labels() {
+        let limit = |window: &str| UsageLimit {
+            window: window.to_string(),
+            resets_at: None,
+            using_overage: false,
+        };
+        for (window, label) in [
+            ("five_hour", "5h"),
+            ("seven_day", "wk"),
+            ("seven_day_opus", "wk opus"),
+            ("seven_day_sonnet", "wk sonnet"),
+            ("seven_day_overage_included", "wk overage"),
+            ("overage", "overage"),
+            // A window this was written before keeps its own name
+            ("seven_day_cowork", "seven_day_cowork"),
+        ] {
+            assert_eq!(limit(window).window_label(), label, "for {window}");
+        }
+
+        // No reset time: the window alone
+        assert_eq!(limit("five_hour").describe_at(at(0)), "5h");
+        let now = at(1_787_939_997);
+        let with_reset = UsageLimit {
+            resets_at: Some(at(1_787_940_600)),
+            ..limit("five_hour")
+        };
+        assert_eq!(
+            with_reset.describe_at(now),
+            format!("5h resets {}", format_reset(at(1_787_940_600), now))
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::agent::events::UsageLimit;
 use crate::claude_config::ClaudeConfigId;
 use crate::codex_config::CodexConfigId;
 use crate::project::{BranchId, ProjectId};
@@ -305,6 +306,9 @@ pub enum AttentionReason {
     TurnFailed {
         /// Short label such as "usage limit", when the agent gave one
         reason: Option<String>,
+        /// Which usage limit, and when it lifts, when the agent said
+        #[serde(default)]
+        limit: Option<UsageLimit>,
     },
 }
 
@@ -319,10 +323,44 @@ impl AttentionReason {
                 format!("{} stalled {}m", tool, secs / 60)
             }
             AttentionReason::Crashed { reason } => format!("crashed: {}", reason),
-            AttentionReason::TurnFailed {
-                reason: Some(reason),
-            } => format!("failed: {}", reason),
-            AttentionReason::TurnFailed { reason: None } => "turn failed".to_string(),
+            AttentionReason::TurnFailed { reason, limit } => {
+                let failure = TurnFailure::new(reason.clone(), limit.clone());
+                match reason {
+                    Some(_) => format!("failed: {}", failure.describe_at(Utc::now())),
+                    None => failure.describe_at(Utc::now()),
+                }
+            }
+        }
+    }
+}
+
+/// Why the turn a session is sitting on failed
+///
+/// Kept structured rather than as finished text because the reset time is
+/// rendered against the clock when it is drawn: a reset stored as "20:10"
+/// would read as today's even after midnight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnFailure {
+    /// Short label such as "usage limit"; "turn failed" when the agent gave none
+    pub reason: String,
+    /// Which usage limit, and when it lifts, when the agent said
+    pub limit: Option<UsageLimit>,
+}
+
+impl TurnFailure {
+    /// A failure as the agent reported it, with the stock label for no reason
+    pub fn new(reason: Option<String>, limit: Option<UsageLimit>) -> Self {
+        Self {
+            reason: reason.unwrap_or_else(|| "turn failed".to_string()),
+            limit,
+        }
+    }
+
+    /// `usage limit · 5h resets 20:10`, or the bare reason without a limit
+    pub fn describe_at(&self, now: DateTime<Utc>) -> String {
+        match &self.limit {
+            Some(limit) => format!("{} \u{00b7} {}", self.reason, limit.describe_at(now)),
+            None => self.reason.clone(),
         }
     }
 }
@@ -383,7 +421,7 @@ pub struct SessionInfo {
     /// the row and header should keep saying so until the next turn starts.
     /// Not persisted, like everything else describing a live turn.
     #[serde(skip)]
-    pub turn_failure: Option<String>,
+    pub turn_failure: Option<TurnFailure>,
     /// Token and rate-limit figures read from the agent's own transcript
     ///
     /// Not persisted: it describes a live conversation, and stale numbers shown
@@ -632,9 +670,9 @@ impl SessionInfo {
     /// to. Should the agent carry on regardless, it is no longer sitting there,
     /// and the reason stops being worth showing even before a new prompt
     /// formally clears it.
-    pub fn failed_turn(&self) -> Option<&str> {
+    pub fn failed_turn(&self) -> Option<&TurnFailure> {
         match self.state {
-            SessionState::Waiting => self.turn_failure.as_deref(),
+            SessionState::Waiting => self.turn_failure.as_ref(),
             _ => None,
         }
     }

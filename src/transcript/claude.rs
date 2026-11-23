@@ -27,13 +27,19 @@
 //! All of them are skipped, or the header would flash a subagent's model or a
 //! near-empty context over the real session.
 //!
-//! There is no rate-limit data anywhere in a Claude transcript. Claude reports
-//! its limits only to its status line, which Panoptes reads instead - see
-//! `hooks/status_line.rs`.
+//! The transcript carries rate-limit data in one place only: a turn refused on
+//! a usage limit has a `quotaLimits` object naming the window that was hit
+//! (`rateLimitType`) and when it resets (`resetsAt`), which rides on the
+//! `TurnFailed`. The `StopFailure` hook does not carry it (Claude Code 2.1.330
+//! sends only `error`, `error_details` and `last_assistant_message`), so this
+//! record is the only source for which limit it was. How full each window is
+//! as the session goes is reported only to the status line, which Panoptes
+//! reads for that - see `hooks/status_line.rs`.
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::agent::events::{AgentEvent, UsageSnapshot};
+use crate::agent::events::{AgentEvent, UsageLimit, UsageSnapshot};
 
 /// The model name Claude stamps on records it wrote itself, not the API
 const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -61,6 +67,7 @@ pub fn parse_line(line: &str) -> Option<AgentEvent> {
         tracing::debug!(code = ?code, "Claude transcript reports a failed turn");
         return Some(AgentEvent::TurnFailed {
             reason: failure_reason(code, error_text(&record)),
+            limit: quota_limit(&record),
         });
     }
 
@@ -155,6 +162,29 @@ fn error_text(record: &Value) -> Option<&str> {
         .as_array()?
         .iter()
         .find_map(|block| block.get("text").and_then(Value::as_str))
+}
+
+/// The usage limit a failed turn was refused on, from its `quotaLimits`
+///
+/// Real shape (Claude Code 2.1.267, see `RATE_LIMIT_RECORD` in the tests):
+/// `{"status":"rejected","resetsAt":1787940600,"rateLimitType":"five_hour",
+/// "overageStatus":"rejected","isUsingOverage":false}`, `resetsAt` in epoch
+/// seconds. Without a `rateLimitType` there is no window to name, so a bare
+/// reset time is not reported on its own.
+fn quota_limit(record: &Value) -> Option<UsageLimit> {
+    let quota = record.get("quotaLimits")?;
+    let window = quota.get("rateLimitType").and_then(Value::as_str)?.trim();
+    if window.is_empty() {
+        return None;
+    }
+    Some(UsageLimit {
+        window: window.to_string(),
+        resets_at: quota
+            .get("resetsAt")
+            .and_then(Value::as_i64)
+            .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0)),
+        using_overage: quota.get("isUsingOverage").and_then(Value::as_bool) == Some(true),
+    })
 }
 
 /// A short human label for why a Claude turn failed
@@ -302,7 +332,7 @@ mod tests {
         assert_eq!(usage.total_tokens, Some(50_500));
         assert_eq!(usage.context_window, Some(1_000_000));
         assert_eq!(usage.model.as_deref(), Some("claude-opus-4-8"));
-        // Claude publishes no rate limits anywhere
+        // An ordinary assistant record carries no rate limits
         assert_eq!(usage.primary, None);
         assert_eq!(usage.secondary, None);
         assert_eq!(usage.plan, None);
@@ -427,26 +457,21 @@ mod tests {
 
     #[test]
     fn test_api_error_record_is_turn_failed() {
-        assert_eq!(
-            parse_line(RATE_LIMIT_RECORD),
-            Some(AgentEvent::TurnFailed {
-                reason: Some("usage limit".to_string())
-            })
-        );
-
         // The other shapes seen on disk, trimmed to the fields that matter
         let auth = r#"{"isSidechain":false,"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]},"error":"authentication_failed","isApiErrorMessage":true}"#;
         assert_eq!(
             parse_line(auth),
             Some(AgentEvent::TurnFailed {
-                reason: Some("auth failed".to_string())
+                reason: Some("auth failed".to_string()),
+                limit: None,
             })
         );
         let too_long = r#"{"type":"assistant","message":{"model":"<synthetic>","content":[{"type":"text","text":"Prompt is too long"}]},"error":"invalid_request","isApiErrorMessage":true}"#;
         assert_eq!(
             parse_line(too_long),
             Some(AgentEvent::TurnFailed {
-                reason: Some("prompt too long".to_string())
+                reason: Some("prompt too long".to_string()),
+                limit: None,
             })
         );
 
@@ -456,14 +481,64 @@ mod tests {
         assert_eq!(
             parse_line(novel),
             Some(AgentEvent::TurnFailed {
-                reason: Some("some_new_code".to_string())
+                reason: Some("some_new_code".to_string()),
+                limit: None,
             })
         );
         let bare = r#"{"type":"assistant","isApiErrorMessage":true}"#;
         assert_eq!(
             parse_line(bare),
-            Some(AgentEvent::TurnFailed { reason: None })
+            Some(AgentEvent::TurnFailed {
+                reason: None,
+                limit: None
+            })
         );
+    }
+
+    #[test]
+    fn test_usage_limit_record_names_its_window_and_reset() {
+        let Some(AgentEvent::TurnFailed { reason, limit }) = parse_line(RATE_LIMIT_RECORD) else {
+            panic!("expected a failed turn");
+        };
+        assert_eq!(reason.as_deref(), Some("usage limit"));
+        let limit = limit.expect("the record carries quotaLimits");
+        assert_eq!(limit.window, "five_hour");
+        assert_eq!(limit.window_label(), "5h");
+        // 18:10 UTC - the "resets 8:10pm (Europe/Zagreb)" in the record's text
+        assert_eq!(
+            limit.resets_at,
+            DateTime::<Utc>::from_timestamp(1_787_940_600, 0)
+        );
+        assert_eq!(
+            limit.resets_at.unwrap().to_rfc3339(),
+            "2026-08-28T18:10:00+00:00"
+        );
+        assert!(!limit.using_overage);
+    }
+
+    #[test]
+    fn test_usage_limit_record_without_quota_limits_keeps_the_bare_reason() {
+        // Older Claude versions, and a 429 with no unified-limit headers,
+        // write the failure without `quotaLimits`
+        let without = RATE_LIMIT_RECORD.replace(
+            r#""quotaLimits":{"status":"rejected","resetsAt":1787940600,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false},"#,
+            "",
+        );
+        assert_ne!(without, RATE_LIMIT_RECORD);
+        assert_eq!(
+            parse_line(&without),
+            Some(AgentEvent::TurnFailed {
+                reason: Some("usage limit".to_string()),
+                limit: None,
+            })
+        );
+
+        // A reset with no window to pin it to is not reported on its own
+        let no_window = RATE_LIMIT_RECORD.replace(r#""rateLimitType":"five_hour","#, "");
+        let Some(AgentEvent::TurnFailed { limit, .. }) = parse_line(&no_window) else {
+            panic!("expected a failed turn");
+        };
+        assert_eq!(limit, None);
     }
 
     #[test]
