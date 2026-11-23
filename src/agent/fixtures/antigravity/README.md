@@ -19,12 +19,11 @@ PAN-59 spike. PAN-61's state-machine tests read them.
 
 | Real value | Replaced with |
 | --- | --- |
-| Conversation ids | `11111111-…` (main conversation), `22222222-…` |
+| Conversation id | `11111111-1111-4111-8111-111111111111`. It is the only conversation in the fixtures: sequences 04 and 05 resume and continue it |
 | Panoptes session id | `00000000-0000-4000-8000-0000000000aa` |
 | Email | `user@example.com` |
 | `gemini_dir` | `/home/user/.gemini` |
 | Project | `/home/user/projects/demo` |
-| Logger script | `/home/user/.panoptes/bin/agy-logger` |
 
 Prompts were written for the spike. Quota numbers are left as captured.
 
