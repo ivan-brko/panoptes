@@ -86,6 +86,48 @@ pub struct PtyWriteTimedOut {
     pub total: usize,
 }
 
+/// Session-identity variables a host agent exports to its own children
+///
+/// When Panoptes itself runs inside an agent session (a dev `cargo run`, a
+/// `!` shell, a terminal the agent spawned), these arrive in our environment
+/// and would otherwise pass straight through to every PTY we spawn. A Claude
+/// Code child that sees them treats itself as part of the parent session -
+/// its id, messaging socket, attended flag and effort level - instead of
+/// starting its own. They are stripped for every agent type, the shell
+/// included, since a shell is where a user starts `claude` by hand.
+///
+/// Deliberately absent: user configuration. `CLAUDE_CONFIG_DIR` and
+/// `CODEX_HOME` are set per spawn by the adapters anyway, and `ANTHROPIC_*`
+/// / `OPENAI_*` overrides are set on purpose by the user.
+pub const HOST_SESSION_ENV: &[&str] = &[
+    // Claude Code: the session a child would otherwise join
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_CHILD_NOTES_DIR",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_DESKTOP_APP_VERSION",
+    "CLAUDE_CODE_INVOKED_SKILLS",
+    "CLAUDE_CODE_STARTER_MAY_HOLD_CONNECTOR_FILE",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+    "CLAUDE_AGENT_SDK_VERSION",
+    // Set by Claude Code on its tool subprocesses to mark them agent-driven
+    "AI_AGENT",
+    // Codex: the thread and sandbox of the command that launched us
+    "CODEX_THREAD_ID",
+    "CODEX_SANDBOX",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+    "CODEX_CI",
+];
+
 /// Handle to a PTY with spawned process
 pub struct PtyHandle {
     master: Box<dyn MasterPty + Send>,
@@ -102,7 +144,8 @@ impl PtyHandle {
     /// * `cmd` - Command to execute
     /// * `args` - Command arguments
     /// * `working_dir` - Working directory for the process
-    /// * `env` - Additional environment variables
+    /// * `env` - Additional environment variables, layered over the inherited
+    ///   environment minus [`HOST_SESSION_ENV`]
     /// * `rows` - Initial PTY rows
     /// * `cols` - Initial PTY columns
     pub fn spawn(
@@ -130,6 +173,9 @@ impl PtyHandle {
         cmd_builder.args(args);
         cmd_builder.cwd(working_dir);
 
+        for key in HOST_SESSION_ENV {
+            cmd_builder.env_remove(key);
+        }
         for (key, value) in env {
             cmd_builder.env(key, value);
         }
@@ -801,6 +847,81 @@ mod tests {
             "Expected 'hello' in output, got: {:?}",
             output_str
         );
+    }
+
+    /// Set in the re-executed test process to make it act as the parent
+    const HOST_ENV_PARENT_MARKER: &str = "PANOPTES_TEST_HOST_ENV_PARENT";
+    const HOST_ENV_DONE: &str = "PANOPTES_HOST_ENV_DONE";
+
+    /// The parent half of `test_spawn_strips_host_session_env`
+    ///
+    /// Ignored so a normal run skips it; the test below re-executes this
+    /// binary to run it in a process whose environment really does carry the
+    /// host session's variables, rather than mutating the environment the
+    /// rest of the test harness shares.
+    #[test]
+    #[ignore = "run only by test_spawn_strips_host_session_env"]
+    fn host_session_env_parent() {
+        if std::env::var_os(HOST_ENV_PARENT_MARKER).is_none() {
+            return;
+        }
+        let script = format!("env; echo {}", HOST_ENV_DONE);
+        let mut pty = PtyHandle::spawn(
+            "sh",
+            &["-c", &script],
+            std::path::Path::new("/tmp"),
+            HashMap::new(),
+            24,
+            500,
+        )
+        .expect("Failed to spawn PTY");
+        let output = read_until_contains(&mut pty, HOST_ENV_DONE);
+        print!("{}", String::from_utf8_lossy(&output));
+    }
+
+    #[test]
+    fn test_spawn_strips_host_session_env() {
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut parent = std::process::Command::new(exe);
+        parent
+            .args([
+                "--exact",
+                "session::pty::tests::host_session_env_parent",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HOST_ENV_PARENT_MARKER, "1")
+            // User configuration, which must survive
+            .env("ANTHROPIC_BASE_URL", "https://example.invalid")
+            .env("CODEX_HOME", "/tmp/panoptes-test-codex-home");
+        for key in HOST_SESSION_ENV {
+            parent.env(key, "from-host-session");
+        }
+        let out = parent.output().expect("re-run test binary");
+        // Never print stdout: it is the child's whole environment, which
+        // carries whatever secrets the developer's or CI's shell holds
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains(HOST_ENV_DONE),
+            "parent process failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let child_vars: Vec<&str> = stdout
+            .lines()
+            .filter_map(|line| line.trim_end_matches('\r').split_once('='))
+            .map(|(key, _)| key)
+            .collect();
+        let leaked: Vec<&str> = HOST_SESSION_ENV
+            .iter()
+            .copied()
+            .filter(|key| child_vars.contains(key))
+            .collect();
+        assert!(leaked.is_empty(), "leaked into the child: {:?}", leaked);
+        assert!(stdout.contains("ANTHROPIC_BASE_URL=https://example.invalid"));
+        assert!(stdout.contains("CODEX_HOME=/tmp/panoptes-test-codex-home"));
     }
 
     // ExitInfo tests
