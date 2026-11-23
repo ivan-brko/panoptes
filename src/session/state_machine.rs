@@ -273,11 +273,17 @@ pub fn translate_antigravity_status_line(info: &SessionInfo, event: &HookEvent) 
 /// turn, and two producers of the same transitions, each with its own
 /// latency, would fight over it. The rollout-recency subagent count is
 /// dropped with the rest: the hooks report subagents exactly, by ID.
+///
+/// A failed turn is the exception, because no hook reports it: Codex runs its
+/// `Stop` hooks only once a model request succeeds, so a turn refused on a
+/// usage limit (or any other API error) ends with nothing but the rollout's
+/// `task_complete` and its error. Without this the session would sit in
+/// `Thinking` until the next prompt.
 pub fn admits_transcript_event(info: &SessionInfo, event: &AgentEvent) -> bool {
     !info.hooks_live
         || matches!(
             event,
-            AgentEvent::Usage(_) | AgentEvent::TitleChanged { .. }
+            AgentEvent::Usage(_) | AgentEvent::TitleChanged { .. } | AgentEvent::TurnFailed { .. }
         )
 }
 
@@ -2091,10 +2097,14 @@ mod tests {
     }
 
     #[test]
-    fn test_hooks_live_admits_only_usage_and_titles_from_the_transcript() {
+    fn test_hooks_live_admits_only_usage_titles_and_failures_from_the_transcript() {
         let mut info = test_info();
         let title = AgentEvent::TitleChanged {
             title: "Fix the flaky test".to_string(),
+        };
+        let failed = AgentEvent::TurnFailed {
+            reason: Some("usage limit".to_string()),
+            limit: None,
         };
         let events = [
             AgentEvent::TurnStarted { title: None },
@@ -2106,6 +2116,7 @@ mod tests {
             AgentEvent::Subagents { active: 2 },
             AgentEvent::Usage(crate::agent::events::UsageSnapshot::default()),
             title.clone(),
+            failed.clone(),
         ];
 
         // Without hooks the rollout is the state machine's only source
@@ -2116,12 +2127,14 @@ mod tests {
             .iter()
             .filter(|e| admits_transcript_event(&info, e))
             .collect();
-        // What no hook carries still gets through
+        // What no hook carries still gets through: figures, titles, and a
+        // failed turn, for which Codex fires no `Stop`
         assert_eq!(
             admitted,
             [
                 &AgentEvent::Usage(crate::agent::events::UsageSnapshot::default()),
-                &title
+                &title,
+                &failed,
             ]
         );
     }
@@ -2334,5 +2347,49 @@ mod tests {
             // Figures are still welcome
             assert_eq!(info.usage.context_window, Some(1_048_576));
         }
+    }
+
+    #[test]
+    fn test_codex_usage_limit_from_the_rollout_raises_attention() {
+        let config = Config::default();
+        let mut info = test_info();
+        info.session_type = crate::session::SessionType::OpenAICodex;
+        info.hooks_live = true;
+        let now = Utc::now();
+
+        // The prompt arrives by hook; the refusal only in the rollout
+        assert!(!apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config
+        ));
+        assert_eq!(info.state, SessionState::Thinking);
+
+        let fixture = include_str!("../transcript/fixtures/usage_limit_rollout.jsonl");
+        let mut limits = crate::transcript::codex::RolloutLimits::default();
+        let mut rang = false;
+        for line in fixture.lines() {
+            let Some(event) = crate::transcript::codex::parse_line(line) else {
+                continue;
+            };
+            let event = limits.observe(event);
+            if admits_transcript_event(&info, &event) {
+                rang |= apply(&mut info, event, now, &config).rang;
+            }
+        }
+
+        assert!(rang, "a usage limit is worth the bell");
+        assert_eq!(info.state, SessionState::Waiting);
+        let limit = info.failed_turn().and_then(|f| f.limit.clone());
+        assert_eq!(limit.as_ref().map(|l| l.window.as_str()), Some("wk"));
+        assert_eq!(
+            limit.and_then(|l| l.resets_at),
+            chrono::DateTime::from_timestamp(1_794_646_800, 0)
+        );
+        assert!(matches!(
+            info.attention,
+            Some(AttentionReason::TurnFailed { .. })
+        ));
     }
 }

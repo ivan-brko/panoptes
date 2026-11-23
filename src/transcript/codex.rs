@@ -8,7 +8,8 @@
 //! For a Codex without lifecycle hooks (before 0.156.1) this is the only
 //! usable channel for its state: `notify` fires once per turn and cannot be
 //! extended. Where the hooks report, they own the state and this file supplies
-//! usage figures only (see `state_machine::admits_transcript_event`).
+//! usage figures and failed turns only, the one turn ending no hook reports
+//! (see `state_machine::admits_transcript_event`).
 //!
 //! Two shapes matter. `event_msg` records describe what the session is doing;
 //! `response_item` records describe what the model emitted. Tool *starts* only
@@ -18,11 +19,11 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, MappedLocalTime, NaiveDate, TimeZone, Utc};
 use serde_json::Value;
 
 use super::rollout_file;
-use crate::agent::events::{AgentEvent, RateLimitWindow, UsageSnapshot, WindowSource};
+use crate::agent::events::{AgentEvent, RateLimitWindow, UsageLimit, UsageSnapshot, WindowSource};
 
 /// The `session_meta` header of a Codex rollout file
 ///
@@ -232,7 +233,7 @@ pub fn parse_line(line: &str) -> Option<AgentEvent> {
     let payload = record.get("payload")?;
 
     match record.get("type")?.as_str()? {
-        "event_msg" => parse_event_msg(payload),
+        "event_msg" => parse_event_msg(payload, &record),
         "response_item" => parse_response_item(payload),
         _ => None,
     }
@@ -368,14 +369,22 @@ fn record_timestamp(record: &Value) -> Option<chrono::DateTime<chrono::FixedOffs
 }
 
 /// `event_msg` records: the session narrating itself
-fn parse_event_msg(payload: &Value) -> Option<AgentEvent> {
+fn parse_event_msg(payload: &Value, record: &Value) -> Option<AgentEvent> {
     match payload.get("type")?.as_str()? {
         "task_started" => Some(AgentEvent::TurnStarted { title: None }),
-        "task_complete" => Some(AgentEvent::TurnCompleted {
-            last_message: payload
-                .get("last_agent_message")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+        // A turn that died on an error ends with the same record, carrying the
+        // error that killed it. Codex fires no `Stop` hook for such a turn
+        // (`run_turn_stop_hooks` only runs once a sampling request succeeds,
+        // `core/src/session/turn.rs` at `rust-v0.156.1`), and its `Error`
+        // event is never persisted, so this is the only report there is.
+        "task_complete" => Some(match payload.get("error").filter(|e| e.is_object()) {
+            Some(error) => turn_failed(payload, error, record),
+            None => AgentEvent::TurnCompleted {
+                last_message: payload
+                    .get("last_agent_message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
         }),
         "turn_aborted" => Some(AgentEvent::TurnAborted),
         "context_compacted" => Some(AgentEvent::ContextCompacted),
@@ -489,7 +498,254 @@ fn parse_token_count(payload: &Value) -> UsageSnapshot {
         .get("rate_limit_reached_type")
         .and_then(Value::as_str)
         .map(str::to_string);
+    snapshot.individual = limits
+        .get("individual_limit")
+        .and_then(parse_individual_limit);
     snapshot
+}
+
+/// Read a workspace member's credit allowance, which Codex writes as
+/// `individual_limit: {limit, used, remaining_percent, resets_at}`
+///
+/// The snake_case spelling of what app-server reports as `individualLimit`.
+/// Held as a window used to `100 - remaining_percent`, like the others.
+fn parse_individual_limit(limit: &Value) -> Option<RateLimitWindow> {
+    let remaining = limit.get("remaining_percent").and_then(Value::as_f64)?;
+    Some(RateLimitWindow {
+        used_percent: (100.0 - remaining).clamp(0.0, 100.0),
+        window_minutes: None,
+        resets_at: limit.get("resets_at").and_then(parse_resets_at),
+    })
+}
+
+/// The label every usage-limit failure carries, whichever agent reports it
+const USAGE_LIMIT: &str = "usage limit";
+
+/// A `task_complete` that carries the error its turn died on
+///
+/// The reason comes from `codex_error_info`. When the error is a usage limit
+/// the only reset this record has is the one in Codex's own message text
+/// ("Try again at 3:37 PM."); the rate-limit figures written just before it
+/// say which window it was, which [`RolloutLimits`] fills in.
+fn turn_failed(payload: &Value, error: &Value, record: &Value) -> AgentEvent {
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+    let failed_at = payload
+        .get("completed_at")
+        .and_then(Value::as_i64)
+        .and_then(|secs| DateTime::from_timestamp(secs, 0))
+        .or_else(|| record_timestamp(record).map(|t| t.with_timezone(&Utc)))
+        .unwrap_or_else(Utc::now);
+    let retry_at = retry_at(message, failed_at);
+
+    let mut reason = failure_reason(error.get("codex_error_info"));
+    // Codex wraps some service failures as `other`; a retry time in the text is
+    // only ever written for a usage limit
+    if reason.is_none() && retry_at.is_some() {
+        reason = Some(USAGE_LIMIT.to_string());
+    }
+    let limit = match (reason.as_deref(), retry_at) {
+        (Some(USAGE_LIMIT), Some(at)) => Some(UsageLimit {
+            window: String::new(),
+            resets_at: Some(at),
+            using_overage: false,
+        }),
+        _ => None,
+    };
+    AgentEvent::TurnFailed { reason, limit }
+}
+
+/// Short label for why a Codex turn failed, from its `codex_error_info`
+///
+/// The codes are Codex's `CodexErrorInfo` as of `rust-v0.156.1`, written
+/// snake_case: a bare string for most, an object keyed by the code for those
+/// that carry an HTTP status. Retries given up on a 429 are a usage limit too,
+/// as T3 Code classifies them. `other`, or no code at all, says nothing and
+/// gives `None`; a code this table does not know is kept as it is.
+fn failure_reason(info: Option<&Value>) -> Option<String> {
+    let (code, status) = match info? {
+        Value::String(code) => (code.as_str(), None),
+        Value::Object(map) => {
+            let (code, detail) = map.iter().next()?;
+            let status = detail.get("http_status_code").and_then(Value::as_u64);
+            (code.as_str(), status)
+        }
+        _ => return None,
+    };
+    let label = match code {
+        "usage_limit_exceeded" | "rate_limit_exceeded" => USAGE_LIMIT,
+        "response_too_many_failed_attempts" if status == Some(429) => USAGE_LIMIT,
+        "context_window_exceeded" => "context full",
+        "session_budget_exceeded" => "budget spent",
+        "server_overloaded" | "internal_server_error" => "server error",
+        "unauthorized" => "auth failed",
+        "bad_request" => "invalid request",
+        "http_connection_failed"
+        | "response_stream_connection_failed"
+        | "response_stream_disconnected" => "connection failed",
+        "response_too_many_failed_attempts" => "api error",
+        "cyber_policy" | "bio_policy" | "misalignment_policy_violation" => "policy refusal",
+        "sandbox_error" => "sandbox error",
+        "other" => return None,
+        other => other,
+    };
+    Some(label.to_string())
+}
+
+/// When a usage limit lifts, read from Codex's error text
+///
+/// See [`retry_at_in`]; Codex prints the time on its own clock, which for a
+/// process Panoptes spawned is Panoptes' own.
+fn retry_at(message: &str, failed_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    retry_at_in(message, failed_at, &chrono::Local)
+}
+
+/// When a usage limit lifts, read from Codex's error text in a given zone
+///
+/// Codex ends a usage-limit message with "Try again at 3:37 PM." when the
+/// reset is today, and "...or try again at Nov 11th, 2026 3:37 PM." when it is
+/// not (`format_retry_timestamp`, `protocol/src/error.rs`), on its local clock.
+/// `failed_at` is when it said so, which fixes the date of the first form.
+///
+/// Codex drops the seconds, so the minute after is the first one certainly
+/// past the reset. At a fall-back the repeated hour is taken at its later
+/// instant, for the same reason: a time too early is the one mistake that
+/// matters. `None` when there is no such text, or it names a time already past.
+fn retry_at_in<Tz: TimeZone>(
+    message: &str,
+    failed_at: DateTime<Utc>,
+    tz: &Tz,
+) -> Option<DateTime<Utc>> {
+    const MARKER: &str = "ry again at ";
+    let (at, _) = message
+        .match_indices(MARKER)
+        .find(|(at, _)| message[..*at].ends_with(['T', 't']))?;
+    let rest = &message[at + MARKER.len()..];
+    let stamp = &rest[..rest.find('.')?];
+    let tokens: Vec<&str> = stamp.split_whitespace().collect();
+
+    let (date, time, meridiem) = match tokens.as_slice() {
+        [time, meridiem] => (failed_at.with_timezone(tz).date_naive(), *time, *meridiem),
+        [month, day, year, time, meridiem] => {
+            let month = MONTHS.iter().position(|m| m == month)? as u32 + 1;
+            let day = day.strip_suffix(',')?;
+            let day: u32 = ["st", "nd", "rd", "th"]
+                .iter()
+                .find_map(|suffix| day.strip_suffix(suffix))?
+                .parse()
+                .ok()?;
+            let date = NaiveDate::from_ymd_opt(year.parse().ok()?, month, day)?;
+            (date, *time, *meridiem)
+        }
+        _ => return None,
+    };
+    let (hour, minute) = time.split_once(':')?;
+    if minute.len() != 2 {
+        return None;
+    }
+    let (hour, minute): (u32, u32) = (hour.parse().ok()?, minute.parse().ok()?);
+    if !(1..=12).contains(&hour) {
+        return None;
+    }
+    let hour = hour % 12
+        + match meridiem {
+            "AM" => 0,
+            "PM" => 12,
+            _ => return None,
+        };
+    let local = date.and_hms_opt(hour, minute, 0)?;
+    let reset = match tz.from_local_datetime(&local) {
+        MappedLocalTime::Single(t) => t,
+        MappedLocalTime::Ambiguous(_, later) => later,
+        MappedLocalTime::None => return None,
+    };
+    let reset = reset.with_timezone(&Utc) + chrono::TimeDelta::minutes(1);
+    (reset > failed_at).then_some(reset)
+}
+
+/// Month names as Codex's `%b` writes them
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// What a rollout's recent rate-limit figures say about the turn under way
+///
+/// A Codex turn refused on a usage limit leaves two records: a `token_count`
+/// carrying the figures the refusal came with, then the `task_complete`
+/// carrying the error. Each line parses on its own, so the window and its
+/// reset, which only the first has, are joined to the failure here by a tailer
+/// that sees both in order.
+///
+/// This is also what catches a limit a Codex too old to write the error leaves
+/// behind: a turn that ends with no message, after figures showing a limit used
+/// up or a refusal named, failed on that limit rather than finished.
+#[derive(Debug, Default)]
+pub struct RolloutLimits {
+    /// The rate-limit figures as of the latest record
+    usage: UsageSnapshot,
+    /// Whether a record since the turn began showed the limit hit
+    hit_this_turn: bool,
+}
+
+impl RolloutLimits {
+    /// Start from figures already known, e.g. a tailer's seed
+    pub fn seeded(usage: Option<UsageSnapshot>) -> Self {
+        Self {
+            usage: usage.unwrap_or_default(),
+            hit_this_turn: false,
+        }
+    }
+
+    /// Note what an event says about the limits, and complete a failure with
+    /// the window it was refused on
+    pub fn observe(&mut self, event: AgentEvent) -> AgentEvent {
+        match event {
+            AgentEvent::TurnStarted { .. } => {
+                self.hit_this_turn = false;
+                event
+            }
+            AgentEvent::Usage(ref usage) => {
+                if usage.carries_limits() {
+                    self.usage.merge(usage.clone());
+                    self.hit_this_turn |= self.usage.is_limited();
+                }
+                event
+            }
+            AgentEvent::TurnFailed { reason, limit } => {
+                let reason = reason.or_else(|| self.hit_this_turn.then(|| USAGE_LIMIT.to_string()));
+                let limit = if reason.as_deref() == Some(USAGE_LIMIT) {
+                    self.refused_on(limit)
+                } else {
+                    limit
+                };
+                AgentEvent::TurnFailed { reason, limit }
+            }
+            AgentEvent::TurnCompleted { last_message: None } if self.hit_this_turn => {
+                AgentEvent::TurnFailed {
+                    reason: Some(USAGE_LIMIT.to_string()),
+                    limit: self.refused_on(None),
+                }
+            }
+            event => event,
+        }
+    }
+
+    /// The limit a turn was refused on: the figures' window when they showed
+    /// one hit this turn, with the text's reset if they had none
+    fn refused_on(&self, from_text: Option<UsageLimit>) -> Option<UsageLimit> {
+        let from_figures = self
+            .hit_this_turn
+            .then(|| self.usage.exhausted_limit())
+            .flatten();
+        match (from_figures, from_text) {
+            (Some(mut limit), text) => {
+                if limit.resets_at.is_none() {
+                    limit.resets_at = text.and_then(|t| t.resets_at);
+                }
+                Some(limit)
+            }
+            (None, text) => text,
+        }
+    }
 }
 
 /// Read one window of a `rate_limits` block; `None` if it has no usage figure
@@ -792,6 +1048,418 @@ mod tests {
             Some("workspace_member_credits_depleted")
         );
         assert_eq!(usage.primary.map(|p| p.used_percent), Some(100.0));
+    }
+
+    #[test]
+    fn test_token_count_reads_individual_limit() {
+        // Codex's `SpendControlLimitSnapshot`, which app-server calls
+        // `individualLimit`, is `individual_limit` in the rollout
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":null,
+            "rate_limits":{"limit_id":"codex",
+              "primary":{"used_percent":12.0,"window_minutes":300,"resets_at":1794411420},
+              "individual_limit":{"limit":"50","used":"35","remaining_percent":30,"resets_at":1794646800},
+              "plan_type":"business","rate_limit_reached_type":null}}}"#;
+
+        let Some(AgentEvent::Usage(usage)) = parse_line(line) else {
+            panic!("expected a usage event");
+        };
+        assert_eq!(
+            usage.individual,
+            Some(RateLimitWindow {
+                used_percent: 70.0,
+                window_minutes: None,
+                resets_at: DateTime::from_timestamp(1_794_646_800, 0),
+            })
+        );
+        // The credit allowance is the binding constraint here
+        assert_eq!(usage.summary().as_deref(), Some("credits 70%"));
+    }
+
+    /// Feed lines through a fresh tracker, as a tailer would
+    fn observed(lines: &[&str]) -> Vec<AgentEvent> {
+        let mut limits = RolloutLimits::default();
+        lines
+            .iter()
+            .filter_map(|line| parse_line(line))
+            .map(|event| limits.observe(event))
+            .collect()
+    }
+
+    fn token_count(rate_limits: &str) -> String {
+        format!(
+            r#"{{"type":"event_msg","payload":{{"type":"token_count","info":null,"rate_limits":{rate_limits}}}}}"#
+        )
+    }
+
+    fn failed_task(error: &str) -> String {
+        format!(
+            r#"{{"timestamp":"2026-11-11T14:00:00.000Z","type":"event_msg","payload":{{"type":"task_complete","last_agent_message":null,"error":{error},"completed_at":1794405600}}}}"#
+        )
+    }
+
+    const TASK_STARTED: &str = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+
+    #[test]
+    fn test_usage_limit_failure_names_the_latest_exhausted_window() {
+        // Both windows used up: the turn can only run once both have lifted,
+        // so the week's later reset is the one that matters
+        let fixture = include_str!("fixtures/usage_limit_rollout.jsonl");
+        let events = observed(&fixture.lines().collect::<Vec<_>>());
+
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::TurnFailed {
+                reason: Some("usage limit".to_string()),
+                limit: Some(UsageLimit {
+                    window: "wk".to_string(),
+                    resets_at: DateTime::from_timestamp(1_794_646_800, 0),
+                    using_overage: false,
+                }),
+            })
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TurnCompleted { .. })),
+            "a refused turn must not read as finished"
+        );
+    }
+
+    #[test]
+    fn test_usage_limit_failure_with_one_exhausted_window() {
+        let events = observed(&[
+            TASK_STARTED,
+            &token_count(
+                r#"{"limit_id":"codex",
+                  "primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1794411420},
+                  "secondary":{"used_percent":64.0,"window_minutes":10080,"resets_at":1794646800},
+                  "plan_type":"plus","rate_limit_reached_type":"rate_limit_reached"}"#,
+            ),
+            &failed_task(
+                r#"{"message":"You’ve hit your usage limit. Try again at 3:37 PM.","codex_error_info":"usage_limit_exceeded"}"#,
+            ),
+        ]);
+        let Some(AgentEvent::TurnFailed { reason, limit }) = events.last() else {
+            panic!("expected a failed turn, got {events:?}");
+        };
+        assert_eq!(reason.as_deref(), Some("usage limit"));
+        let limit = limit.as_ref().expect("the window it was refused on");
+        // The figures' own reset, not the text's: they are exact to the second
+        assert_eq!(limit.window, "5h");
+        assert_eq!(limit.resets_at, DateTime::from_timestamp(1_794_411_420, 0));
+    }
+
+    #[test]
+    fn test_usage_limit_without_figures_falls_back_to_the_text() {
+        // A proxy can strip the rate-limit headers, leaving only the message.
+        // The text is on the user's clock, so read back on the same clock.
+        let failed_at = Utc.with_ymd_and_hms(2026, 11, 11, 14, 0, 0).unwrap();
+        let failed_local = failed_at.with_timezone(&chrono::Local);
+        let reset_local = failed_local + chrono::TimeDelta::hours(2);
+        // As Codex writes it: the dated form once the reset is another day,
+        // which it is in some zones
+        let text = if reset_local.date_naive() == failed_local.date_naive() {
+            reset_local.format("%-I:%M %p").to_string()
+        } else {
+            use chrono::Datelike;
+            let suffix = match reset_local.day() {
+                1 | 21 | 31 => "st",
+                2 | 22 => "nd",
+                3 | 23 => "rd",
+                _ => "th",
+            };
+            reset_local
+                .format(&format!("%b %-d{suffix}, %Y %-I:%M %p"))
+                .to_string()
+        };
+        let events = observed(&[
+            TASK_STARTED,
+            &failed_task(&format!(
+                r#"{{"message":"You’ve hit your usage limit. Try again at {text}.","codex_error_info":"usage_limit_exceeded"}}"#
+            )),
+        ]);
+        let Some(AgentEvent::TurnFailed { reason, limit }) = events.last() else {
+            panic!("expected a failed turn, got {events:?}");
+        };
+        assert_eq!(reason.as_deref(), Some("usage limit"));
+        let expected = failed_at + chrono::TimeDelta::hours(2) + chrono::TimeDelta::minutes(1);
+        // The text names no window, only when
+        assert_eq!(
+            limit.as_ref(),
+            Some(&UsageLimit {
+                window: String::new(),
+                resets_at: Some(expected),
+                using_overage: false,
+            })
+        );
+    }
+
+    #[test]
+    fn test_retry_text_parses_both_forms() {
+        // 14:00 UTC is 15:00 in Zagreb (UTC+1 in November)
+        let zagreb = chrono::FixedOffset::east_opt(3_600).unwrap();
+        let failed_at = Utc.with_ymd_and_hms(2026, 11, 11, 14, 0, 0).unwrap();
+        let utc = |d, h, m| Utc.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap();
+
+        // Today's form, plus the minute Codex's rounding may have dropped
+        assert_eq!(
+            retry_at_in(
+                "You’ve hit your usage limit. Try again at 3:37 PM.",
+                failed_at,
+                &zagreb
+            ),
+            Some(utc(11, 14, 38))
+        );
+        // The dated form, lower-cased mid-sentence
+        assert_eq!(
+            retry_at_in(
+                "You’ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at Nov 13th, 2026 9:05 AM.",
+                failed_at,
+                &zagreb
+            ),
+            Some(utc(13, 8, 6))
+        );
+        // Every ordinal suffix, and midnight/noon on a 12-hour clock
+        assert_eq!(
+            retry_at_in("Try again at Dec 1st, 2026 12:00 AM.", failed_at, &Utc),
+            Some(Utc.with_ymd_and_hms(2026, 12, 1, 0, 1, 0).unwrap())
+        );
+        assert_eq!(
+            retry_at_in("Try again at Nov 22nd, 2026 12:30 PM.", failed_at, &Utc),
+            Some(utc(22, 12, 31))
+        );
+        assert_eq!(
+            retry_at_in("Try again at Nov 23rd, 2026 1:00 AM.", failed_at, &Utc),
+            Some(utc(23, 1, 1))
+        );
+
+        // A time already past says nothing, and neither does anything else
+        assert_eq!(
+            retry_at_in("Try again at 2:00 PM.", failed_at, &zagreb),
+            None
+        );
+        for text in [
+            "You’ve hit your usage limit. Try again later.",
+            "Try again at 13:37 PM.",
+            "Try again at 3:7 PM.",
+            "Try again at 3:37 PM",
+            "Try again at Foo 11th, 2026 3:37 PM.",
+            "Try again at Nov 11, 2026 3:37 PM.",
+            "Pray again at 3:37 PM.",
+        ] {
+            assert_eq!(retry_at_in(text, failed_at, &zagreb), None, "for {text:?}");
+        }
+    }
+
+    /// US Eastern around the 2026 fall-back (Nov 1, 06:00 UTC), without a
+    /// time zone database: 01:00-02:00 local happens twice
+    #[derive(Debug, Clone, Copy)]
+    struct FallBack;
+
+    impl FallBack {
+        const EDT: i32 = -4 * 3_600;
+        const EST: i32 = -5 * 3_600;
+
+        fn switch() -> chrono::NaiveDateTime {
+            NaiveDate::from_ymd_opt(2026, 11, 1)
+                .unwrap()
+                .and_hms_opt(6, 0, 0)
+                .unwrap()
+        }
+    }
+
+    impl TimeZone for FallBack {
+        type Offset = chrono::FixedOffset;
+
+        fn from_offset(_: &chrono::FixedOffset) -> Self {
+            FallBack
+        }
+
+        fn offset_from_local_date(&self, local: &NaiveDate) -> MappedLocalTime<Self::Offset> {
+            self.offset_from_local_datetime(&local.and_hms_opt(0, 0, 0).unwrap())
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &chrono::NaiveDateTime,
+        ) -> MappedLocalTime<Self::Offset> {
+            let edt = chrono::FixedOffset::east_opt(Self::EDT).unwrap();
+            let est = chrono::FixedOffset::east_opt(Self::EST).unwrap();
+            let as_edt = *local - chrono::TimeDelta::seconds(Self::EDT.into()) < Self::switch();
+            let as_est = *local - chrono::TimeDelta::seconds(Self::EST.into()) >= Self::switch();
+            match (as_edt, as_est) {
+                (true, true) => MappedLocalTime::Ambiguous(edt, est),
+                (true, false) => MappedLocalTime::Single(edt),
+                (false, true) => MappedLocalTime::Single(est),
+                (false, false) => MappedLocalTime::None,
+            }
+        }
+
+        fn offset_from_utc_date(&self, utc: &NaiveDate) -> Self::Offset {
+            self.offset_from_utc_datetime(&utc.and_hms_opt(0, 0, 0).unwrap())
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> Self::Offset {
+            let secs = if *utc < Self::switch() {
+                Self::EDT
+            } else {
+                Self::EST
+            };
+            chrono::FixedOffset::east_opt(secs).unwrap()
+        }
+    }
+
+    #[test]
+    fn test_retry_text_takes_the_later_of_a_repeated_hour() {
+        // 00:30 EDT on the night the clocks go back
+        let failed_at = Utc.with_ymd_and_hms(2026, 11, 1, 4, 30, 0).unwrap();
+        // 1:30 AM happens at 05:30 UTC (EDT) and again at 06:30 UTC (EST);
+        // the later one is never too early
+        assert_eq!(
+            retry_at_in("Try again at 1:30 AM.", failed_at, &FallBack),
+            Some(Utc.with_ymd_and_hms(2026, 11, 1, 6, 31, 0).unwrap())
+        );
+        // Either side of the repeat there is only one answer
+        assert_eq!(
+            retry_at_in("Try again at 12:45 AM.", failed_at, &FallBack),
+            Some(Utc.with_ymd_and_hms(2026, 11, 1, 4, 46, 0).unwrap())
+        );
+        assert_eq!(
+            retry_at_in("Try again at 2:30 AM.", failed_at, &FallBack),
+            Some(Utc.with_ymd_and_hms(2026, 11, 1, 7, 31, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn test_failure_reason_codes() {
+        let reason = |info: &str| failure_reason(Some(&serde_json::from_str(info).unwrap()));
+        assert_eq!(
+            reason(r#""usage_limit_exceeded""#).as_deref(),
+            Some("usage limit")
+        );
+        assert_eq!(
+            reason(r#""rate_limit_exceeded""#).as_deref(),
+            Some("usage limit")
+        );
+        // Retries given up on a 429 are a limit too; on anything else they are not
+        assert_eq!(
+            reason(r#"{"response_too_many_failed_attempts":{"http_status_code":429}}"#).as_deref(),
+            Some("usage limit")
+        );
+        assert_eq!(
+            reason(r#"{"response_too_many_failed_attempts":{"http_status_code":502}}"#).as_deref(),
+            Some("api error")
+        );
+        assert_eq!(
+            reason(r#"{"http_connection_failed":{"http_status_code":null}}"#).as_deref(),
+            Some("connection failed")
+        );
+        assert_eq!(reason(r#""unauthorized""#).as_deref(), Some("auth failed"));
+        assert_eq!(
+            reason(r#""context_window_exceeded""#).as_deref(),
+            Some("context full")
+        );
+        // `other` says nothing; a code from a newer Codex is kept as it is
+        assert_eq!(reason(r#""other""#), None);
+        assert_eq!(
+            reason(r#""brand_new_code""#).as_deref(),
+            Some("brand_new_code")
+        );
+        assert_eq!(failure_reason(None), None);
+    }
+
+    #[test]
+    fn test_other_failure_is_a_usage_limit_only_with_evidence() {
+        let other = r#"{"message":"Something went wrong.","codex_error_info":"other"}"#;
+
+        // Nothing points at a limit: a bare failure, which still ends the turn
+        assert_eq!(
+            observed(&[TASK_STARTED, &failed_task(other)]).last(),
+            Some(&AgentEvent::TurnFailed {
+                reason: None,
+                limit: None
+            })
+        );
+
+        // The figures just before it say the limit was hit
+        let events = observed(&[
+            TASK_STARTED,
+            &token_count(
+                r#"{"limit_id":"codex","primary":{"used_percent":100.0,"resets_at":1794411420},
+                  "plan_type":"free","rate_limit_reached_type":null}"#,
+            ),
+            &failed_task(other),
+        ]);
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::TurnFailed {
+                reason: Some("usage limit".to_string()),
+                // No `window_minutes`: on the Free plan the primary is monthly
+                limit: Some(UsageLimit {
+                    window: "mo".to_string(),
+                    resets_at: DateTime::from_timestamp(1_794_411_420, 0),
+                    using_overage: false,
+                }),
+            })
+        );
+
+        // A different failure is not relabelled by a limit that happens to be hit
+        let events = observed(&[
+            TASK_STARTED,
+            &token_count(r#"{"limit_id":"codex","primary":{"used_percent":100.0}}"#),
+            &failed_task(r#"{"message":"Unauthorized","codex_error_info":"unauthorized"}"#),
+        ]);
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::TurnFailed {
+                reason: Some("auth failed".to_string()),
+                limit: None
+            })
+        );
+    }
+
+    #[test]
+    fn test_limit_hit_turn_without_an_error_record_still_fails() {
+        // A Codex too old to write the error on `task_complete`
+        let limited = token_count(
+            r#"{"limit_id":"codex",
+              "primary":{"used_percent":40.0,"window_minutes":300,"resets_at":1794411420},
+              "credits":{"has_credits":false,"unlimited":false,"balance":"0"},
+              "individual_limit":{"limit":"50","used":"50","remaining_percent":0,"resets_at":1794646800},
+              "plan_type":"business","rate_limit_reached_type":"workspace_member_credits_depleted"}"#,
+        );
+        let bare_end =
+            r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":null}}"#;
+        let events = observed(&[TASK_STARTED, &limited, bare_end]);
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::TurnFailed {
+                reason: Some("usage limit".to_string()),
+                limit: Some(UsageLimit {
+                    window: "credits".to_string(),
+                    resets_at: DateTime::from_timestamp(1_794_646_800, 0),
+                    using_overage: false,
+                }),
+            })
+        );
+
+        // A turn that says something finished, whatever the figures say
+        let spoke = r#"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Done."}}"#;
+        assert!(matches!(
+            observed(&[TASK_STARTED, &limited, spoke]).last(),
+            Some(AgentEvent::TurnCompleted { .. })
+        ));
+
+        // A limit hit in an earlier turn is not this turn's
+        let lifted = token_count(
+            r#"{"limit_id":"codex","primary":{"used_percent":41.0},
+              "individual_limit":{"limit":"100","used":"50","remaining_percent":50,"resets_at":1794646800},
+              "rate_limit_reached_type":null}"#,
+        );
+        assert!(matches!(
+            observed(&[TASK_STARTED, &limited, TASK_STARTED, &lifted, bare_end]).last(),
+            Some(AgentEvent::TurnCompleted { .. })
+        ));
     }
 
     #[test]
