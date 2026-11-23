@@ -677,7 +677,7 @@ fn render_branch_sessions(
             // and the last message is from the turn before it.
             let trailer = match &info.attention {
                 _ if info.failed_turn().is_some() => None,
-                Some(reason) => Some(reason.summary()),
+                Some(reason) => Some(reason.summary(now)),
                 None => info.last_message.clone(),
             };
             spans.push(Span::raw(format!("{} [{}]", info.name, state_display)));

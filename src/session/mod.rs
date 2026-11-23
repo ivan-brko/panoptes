@@ -314,7 +314,9 @@ pub enum AttentionReason {
 
 impl AttentionReason {
     /// Short human-readable description for the session list
-    pub fn summary(&self) -> String {
+    ///
+    /// `now` is what a usage limit's reset time is rendered against.
+    pub fn summary(&self, now: DateTime<Utc>) -> String {
         match self {
             AttentionReason::Approval { tool: Some(tool) } => format!("approve {}", tool),
             AttentionReason::Approval { tool: None } => "needs approval".to_string(),
@@ -326,8 +328,8 @@ impl AttentionReason {
             AttentionReason::TurnFailed { reason, limit } => {
                 let failure = TurnFailure::new(reason.clone(), limit.clone());
                 match reason {
-                    Some(_) => format!("failed: {}", failure.describe_at(Utc::now())),
-                    None => failure.describe_at(Utc::now()),
+                    Some(_) => format!("failed: {}", failure.describe_at(now)),
+                    None => failure.describe_at(now),
                 }
             }
         }
