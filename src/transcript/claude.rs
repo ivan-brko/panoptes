@@ -187,6 +187,12 @@ fn quota_limit(record: &Value) -> Option<UsageLimit> {
     })
 }
 
+/// The label of a turn that failed because the login no longer works
+///
+/// "Not logged in · Please run /login", an expired or revoked token, a bad
+/// API key - Claude's `authentication_failed`.
+pub const AUTH_FAILED: &str = "auth failed";
+
 /// A short human label for why a Claude turn failed
 ///
 /// `code` is the record's `error` field - the same enum Claude's `StopFailure`
@@ -197,7 +203,10 @@ fn quota_limit(record: &Value) -> Option<UsageLimit> {
 ///
 /// - `authentication_failed`*, `oauth_org_not_allowed`, `account_on_hold`,
 ///   `verification_required`, `cloud_credential_error`: the account cannot
-///   make the request
+///   make the request. Only `authentication_failed` is [`AUTH_FAILED`]: it
+///   is the one a fresh login fixes, so the session header offers the login
+///   command for it ([`crate::session::SessionInfo::failure_fix`]), and the
+///   others are labelled apart so it is not offered where it would not help
 /// - `rate_limit`*: a usage limit - the five-hour or weekly session limit
 ///   ("You've hit your session limit · resets 8:10pm"), or a 429
 /// - `billing_error`: out of credits
@@ -216,10 +225,10 @@ fn quota_limit(record: &Value) -> Option<UsageLimit> {
 pub fn failure_reason(code: Option<&str>, text: Option<&str>) -> Option<String> {
     let code = code?;
     let label = match code {
-        "authentication_failed"
-        | "oauth_org_not_allowed"
-        | "verification_required"
-        | "cloud_credential_error" => "auth failed",
+        "authentication_failed" => AUTH_FAILED,
+        "oauth_org_not_allowed" => "org not allowed",
+        "verification_required" => "verification required",
+        "cloud_credential_error" => "cloud credentials",
         "account_on_hold" => "account on hold",
         "rate_limit" => "usage limit",
         "billing_error" => "out of credits",
@@ -586,7 +595,10 @@ mod tests {
     #[test]
     fn test_failure_reason_labels() {
         for (code, label) in [
-            ("authentication_failed", "auth failed"),
+            ("authentication_failed", AUTH_FAILED),
+            ("oauth_org_not_allowed", "org not allowed"),
+            ("verification_required", "verification required"),
+            ("cloud_credential_error", "cloud credentials"),
             ("rate_limit", "usage limit"),
             ("server_error", "server error"),
             ("overloaded", "server error"),
