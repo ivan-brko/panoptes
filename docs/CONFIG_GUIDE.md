@@ -702,7 +702,7 @@ apply as they do outside Panoptes.
   Panoptes. Nothing is written to `~/.gemini/antigravity-cli/settings.json`.
   If that file sets a `statusLine` command of your own, Panoptes' command wraps
   it and prints exactly what yours prints; without one, it shows a compact line
-  such as `quota 12% (resets Mon 10:18)`: the weekly quota closest to running
+  such as `quota 12% (resets Nov 30 10:18)`: the weekly quota closest to running
   out, and when it resets.
 - **No hooks.** Panoptes does not register `agy` hooks; the status line already
   reports everything it tracks.
