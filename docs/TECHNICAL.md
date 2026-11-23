@@ -736,8 +736,10 @@ Enterprise). The token itself (keychain or `.credentials.json`) is never read.
 sessions authenticate. Variables come from the profile's `settings.json` `env`
 over Panoptes' environment (which sessions inherit):
 
-1. `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` → Bedrock / Vertex AI / Foundry
-2. `ANTHROPIC_AUTH_TOKEN` → auth token; an `apiKeyHelper` in `settings.json` → API key helper
+1. `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` → Bedrock / Vertex AI /
+   Foundry. "On" follows Claude's `isEnvTruthy`: `1`, `true`, `yes` or `on`, in any case
+2. `ANTHROPIC_AUTH_TOKEN` → auth token; an `apiKeyHelper` in `settings.json` →
+   API key helper. Neither needs `.claude.json`, so both win even when it is garbled
 3. `ANTHROPIC_API_KEY`, only if its last 20 characters are in
    `customApiKeyResponses.approved` - Claude ignores a key it was not told to use
 4. `oauthAccount` → the subscription login
@@ -751,9 +753,17 @@ one person in two organisations is two seats, not a duplicate.
 `App::tick_claude_logins` reads every profile when the profiles come on screen
 (pane 3's Claude section or `SelectingClaudeConfig`, `claude_accounts_visible`)
 and re-reads one whenever its `.claude.json` or `settings.json` mtime changes,
-looked at every 250 ms while on screen (`LoginWatch`). The read is synchronous:
-one small file, and Claude replaces it by renaming a finished temp file, so it
-is never caught half-written. Results land in `AppState::claude_logins`;
+looked at every 250 ms while on screen (`LoginWatch`). `.claude.json` is not
+small: a few hundred KB, mostly per-project history, and Claude rewrites it
+often while it runs. So it is deserialized into a struct with only
+`oauthAccount`, `primaryApiKey` and `customApiKeyResponses`, and serde skips
+the rest without building it. That parse is about 4.5 ms for a 365 KB file in a
+debug build, against about 12 ms for a full `serde_json::Value`, so the read
+stays on the event loop. Claude normally replaces the file by renaming a
+finished temp file, but a read that still comes back unparseable is not
+believed at once. The last good login stays up, the mtimes are not recorded,
+and the next look reads again. Only a file that is still broken at the same
+mtimes is shown as "can't read". Results land in `AppState::claude_logins`;
 `tui/views/claude_account.rs` draws them as the second row under each profile,
 through the same field-dropping row as the Codex accounts
 (`tui/views/account_row.rs`).

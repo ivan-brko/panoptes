@@ -13,13 +13,17 @@
 //! been told to use it), `ANTHROPIC_AUTH_TOKEN`, an `apiKeyHelper`, or a key
 //! stored by `/login` as `primaryApiKey`. Those are shown as what they are.
 //!
-//! Reading is synchronous and cheap - one small JSON file and a stat - and
-//! only happens while the profiles are on screen, when a file changes.
+//! `.claude.json` is not small - a few hundred KB, mostly per-project
+//! history - and Claude rewrites it often while it runs. So it is
+//! deserialized into [`ClaudeJson`], which names only the three fields used
+//! here and lets serde skip the rest without building it, and it is read
+//! only while the profiles are on screen, when a file changes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 /// How a profile's sessions will authenticate
@@ -72,42 +76,66 @@ pub fn claude_json_path(config_dir: Option<&Path>) -> Option<PathBuf> {
 fn effective_dir(config_dir: Option<&Path>) -> Option<PathBuf> {
     match config_dir {
         Some(dir) => Some(dir.to_path_buf()),
-        None => match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
-            Some(dir) => Some(PathBuf::from(dir)),
-            None => dirs::home_dir(),
-        },
+        None => crate::transcript::inherited_claude_config_dir().or_else(dirs::home_dir),
     }
 }
 
 /// The profile's user-level `settings.json`, whose `env` its sessions get
-fn settings_path(config_dir: Option<&Path>) -> Option<PathBuf> {
-    let dir = match config_dir {
-        Some(dir) => dir.to_path_buf(),
-        None => match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
-            Some(dir) => PathBuf::from(dir),
-            None => dirs::home_dir()?.join(".claude"),
-        },
-    };
-    Some(dir.join("settings.json"))
+fn settings_path(config_dir: Option<&Path>) -> PathBuf {
+    config_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::transcript::default_claude_config_dir)
+        .join("settings.json")
 }
 
 /// Modification times of the files a profile's login is read from
 ///
 /// Compared between looks to tell when to read again. A missing file is
 /// `None`, so creating or deleting one is a change too.
-pub fn login_files_mtime(config_dir: Option<&Path>) -> (Option<SystemTime>, Option<SystemTime>) {
+pub fn login_files_mtime(config_dir: Option<&Path>) -> LoginFilesMtime {
     let mtime = |path: Option<PathBuf>| {
         path.and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok())
     };
     (
         mtime(claude_json_path(config_dir)),
-        mtime(settings_path(config_dir)),
+        mtime(Some(settings_path(config_dir))),
+    )
+}
+
+/// The parts of `.claude.json` read here; serde skips everything else
+///
+/// Each is kept as a raw [`Value`] so that a field of an unexpected type
+/// costs that field, not the whole read. All three are small.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeJson {
+    #[serde(default)]
+    oauth_account: Option<Value>,
+    #[serde(default)]
+    primary_api_key: Option<Value>,
+    #[serde(default)]
+    custom_api_key_responses: Option<Value>,
+}
+
+/// Claude's `isEnvTruthy`: `1`, `true`, `yes` or `on`, in any case
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
     )
 }
 
 /// Read how a profile is signed in, from disk and Panoptes' environment
 pub fn read_auth(config_dir: Option<&Path>) -> ClaudeAuth {
+    read_auth_with(config_dir, &|name| std::env::var(name).ok())
+}
+
+/// [`read_auth`] with the environment lookup supplied
+pub fn read_auth_with(
+    config_dir: Option<&Path>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> ClaudeAuth {
     let read = |path: Option<PathBuf>| -> std::io::Result<Option<String>> {
         let Some(path) = path else { return Ok(None) };
         match std::fs::read_to_string(path) {
@@ -121,10 +149,8 @@ pub fn read_auth(config_dir: Option<&Path>) -> ClaudeAuth {
         Err(e) => return ClaudeAuth::Unreadable(e.to_string()),
     };
     // A settings file that cannot be read only loses its `env`
-    let settings = read(settings_path(config_dir)).ok().flatten();
-    parse_auth(claude_json.as_deref(), settings.as_deref(), &|name| {
-        std::env::var(name).ok()
-    })
+    let settings = read(Some(settings_path(config_dir))).ok().flatten();
+    parse_auth(claude_json.as_deref(), settings.as_deref(), env)
 }
 
 /// [`read_auth`] on file contents already read, with the environment supplied
@@ -151,9 +177,7 @@ pub fn parse_auth(
             .or_else(|| env(name))
             .filter(|v| !v.is_empty())
     };
-    let truthy = |name: &str| {
-        var(name).is_some_and(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
-    };
+    let truthy = |name: &str| var(name).is_some_and(|v| is_truthy(&v));
 
     // A cloud provider replaces Anthropic's login outright
     if truthy("CLAUDE_CODE_USE_BEDROCK") {
@@ -166,15 +190,7 @@ pub fn parse_auth(
         return ClaudeAuth::Other("Foundry");
     }
 
-    let config: Option<Value> = match claude_json {
-        None => None,
-        Some(text) if text.trim().is_empty() => None,
-        Some(text) => match serde_json::from_str(text) {
-            Ok(value) => Some(value),
-            Err(e) => return ClaudeAuth::Unreadable(format!("not valid JSON: {}", e)),
-        },
-    };
-
+    // Neither needs `.claude.json`, so neither waits on it parsing
     if var("ANTHROPIC_AUTH_TOKEN").is_some() {
         return ClaudeAuth::Other("auth token");
     }
@@ -186,6 +202,16 @@ pub fn parse_auth(
     {
         return ClaudeAuth::Other("API key helper");
     }
+
+    let config: Option<ClaudeJson> = match claude_json {
+        None => None,
+        Some(text) if text.trim().is_empty() => None,
+        Some(text) => match serde_json::from_str(text) {
+            Ok(config) => Some(config),
+            Err(e) => return ClaudeAuth::Unreadable(format!("not valid JSON: {}", e)),
+        },
+    };
+
     // Claude only uses an environment key the user has said yes to, and
     // remembers the answer by the key's last 20 characters
     if let Some(key) = var("ANTHROPIC_API_KEY") {
@@ -195,7 +221,8 @@ pub fn parse_auth(
         };
         let approved = config
             .as_ref()
-            .and_then(|c| c.pointer("/customApiKeyResponses/approved"))
+            .and_then(|c| c.custom_api_key_responses.as_ref())
+            .and_then(|r| r.get("approved"))
             .and_then(Value::as_array)
             .is_some_and(|keys| keys.iter().any(|k| k.as_str() == Some(tail.as_str())));
         if approved {
@@ -206,11 +233,12 @@ pub fn parse_auth(
     let Some(config) = config else {
         return ClaudeAuth::SignedOut;
     };
-    if let Some(account) = config.get("oauthAccount").and_then(parse_account) {
+    if let Some(account) = config.oauth_account.as_ref().and_then(parse_account) {
         return ClaudeAuth::Subscription(account);
     }
     if config
-        .get("primaryApiKey")
+        .primary_api_key
+        .as_ref()
         .and_then(Value::as_str)
         .is_some_and(|k| !k.is_empty())
     {
@@ -329,11 +357,9 @@ pub fn shared_accounts<'a>(
 /// default profile - which needs none unless Panoptes itself was started with
 /// one, since its sessions inherit that.
 pub fn login_command(config_dir: Option<&Path>) -> String {
-    let dir = config_dir.map(Path::to_path_buf).or_else(|| {
-        std::env::var_os("CLAUDE_CONFIG_DIR")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    });
+    let dir = config_dir
+        .map(Path::to_path_buf)
+        .or_else(crate::transcript::inherited_claude_config_dir);
     match dir {
         Some(dir) => format!(
             "CLAUDE_CONFIG_DIR={} claude auth login",
@@ -375,13 +401,22 @@ pub type LoginFilesMtime = (Option<SystemTime>, Option<SystemTime>);
 /// Every profile is read when the profiles come on screen (Settings, or the
 /// wizard's account step) - so at the very least each time they are opened -
 /// and again whenever its `.claude.json` or `settings.json` changes while
-/// they stay up. Claude replaces `.claude.json` by renaming a finished temp
-/// file over it, so a change is safe to read at once, with no debounce.
+/// they stay up.
+///
+/// Claude normally replaces `.claude.json` by renaming a finished temp file
+/// over it, but a read can still catch a file mid-write. So a read that
+/// comes back [`ClaudeAuth::Unreadable`] is not believed at once: the last
+/// good login stays up, the files' times are not recorded, and the next look
+/// reads again. Only a file still unreadable at the same times on that
+/// second read is shown as such.
 #[derive(Debug, Default)]
 pub struct LoginWatch {
     visible: bool,
     last_check: Option<std::time::Instant>,
+    /// The files' times each profile's shown login was read at
     seen: HashMap<uuid::Uuid, LoginFilesMtime>,
+    /// The files' times a profile was found unreadable at, not yet shown
+    unreadable_at: HashMap<uuid::Uuid, LoginFilesMtime>,
 }
 
 impl LoginWatch {
@@ -410,14 +445,23 @@ impl LoginWatch {
     }
 
     /// Whether to read profile `id` again, given its files' times now
+    pub fn should_read(&self, id: uuid::Uuid, mtime: LoginFilesMtime, opened: bool) -> bool {
+        opened || self.seen.get(&id) != Some(&mtime)
+    }
+
+    /// Take in what a read of profile `id` at `mtime` found
     ///
-    /// Records `mtime` as read when it answers yes.
-    pub fn should_read(&mut self, id: uuid::Uuid, mtime: LoginFilesMtime, opened: bool) -> bool {
-        let changed = self.seen.get(&id) != Some(&mtime);
-        if opened || changed {
-            self.seen.insert(id, mtime);
+    /// Returns whether to show `auth`; when not, the last login shown stays.
+    pub fn accept(&mut self, id: uuid::Uuid, mtime: LoginFilesMtime, auth: &ClaudeAuth) -> bool {
+        if matches!(auth, ClaudeAuth::Unreadable(_)) && self.unreadable_at.get(&id) != Some(&mtime)
+        {
+            // Perhaps caught mid-write: look again before believing it
+            self.unreadable_at.insert(id, mtime);
+            return false;
         }
-        opened || changed
+        self.unreadable_at.remove(&id);
+        self.seen.insert(id, mtime);
+        true
     }
 }
 
@@ -432,6 +476,7 @@ mod tests {
         let start = std::time::Instant::now();
         let t0 = SystemTime::UNIX_EPOCH;
         let t1 = t0 + std::time::Duration::from_secs(1);
+        let good = ClaudeAuth::SignedOut;
 
         // Off screen, nothing is looked at
         assert!(!watch.due(false, start));
@@ -440,6 +485,7 @@ mod tests {
         assert!(opened);
         assert!(watch.due(opened, start));
         assert!(watch.should_read(id, (Some(t0), None), opened));
+        assert!(watch.accept(id, (Some(t0), None), &good));
 
         // Still on screen: not due again until the poll interval passes
         assert!(!watch.set_visible(true));
@@ -449,6 +495,7 @@ mod tests {
         assert!(!watch.should_read(id, (Some(t0), None), false));
         // A login rewrites the file
         assert!(watch.should_read(id, (Some(t1), None), false));
+        assert!(watch.accept(id, (Some(t1), None), &good));
         assert!(!watch.should_read(id, (Some(t1), None), false));
 
         // Reopening reads again even when nothing changed
@@ -456,6 +503,60 @@ mod tests {
         let opened = watch.set_visible(true);
         assert!(watch.due(opened, later));
         assert!(watch.should_read(id, (Some(t1), None), opened));
+    }
+
+    /// A read caught mid-write is retried, not stuck until the next write
+    #[test]
+    fn test_login_watch_retries_an_unreadable_read() {
+        let mut watch = LoginWatch::default();
+        let id = uuid::Uuid::new_v4();
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        let torn = ClaudeAuth::Unreadable("not valid JSON".to_string());
+        watch.set_visible(true);
+        assert!(watch.accept(id, (Some(t0), None), &ClaudeAuth::SignedOut));
+
+        // The write lands while it is being read: the last login stays up,
+        // and the same times are read again on the next look
+        assert!(watch.should_read(id, (Some(t1), None), false));
+        assert!(!watch.accept(id, (Some(t1), None), &torn));
+        assert!(watch.should_read(id, (Some(t1), None), false));
+        // ...which finds the finished file
+        assert!(watch.accept(id, (Some(t1), None), &ClaudeAuth::SignedOut));
+        assert!(!watch.should_read(id, (Some(t1), None), false));
+
+        // A file still broken on the second read is shown as broken, and
+        // then left alone until it changes
+        let t2 = t1 + std::time::Duration::from_secs(1);
+        assert!(!watch.accept(id, (Some(t2), None), &torn));
+        assert!(watch.accept(id, (Some(t2), None), &torn));
+        assert!(!watch.should_read(id, (Some(t2), None), false));
+    }
+
+    /// Only Claude's truthy spellings switch a provider on
+    #[test]
+    fn test_truthy_matches_claude() {
+        for yes in ["1", "true", "TRUE", "yes", "On", " on "] {
+            assert!(is_truthy(yes), "{yes}");
+        }
+        for no in ["0", "false", "no", "off", "2", "enabled", ""] {
+            assert!(!is_truthy(no), "{no}");
+        }
+    }
+
+    /// An auth token or key helper is known even when `.claude.json` is torn
+    #[test]
+    fn test_token_and_helper_survive_a_garbled_file() {
+        let garbled = Some(r#"{"oauthAccount": {"emailAdd"#);
+        let token = |name: &str| (name == "ANTHROPIC_AUTH_TOKEN").then(|| "t".to_string());
+        assert_eq!(
+            parse_auth(garbled, None, &token),
+            ClaudeAuth::Other("auth token")
+        );
+        assert_eq!(
+            parse_auth(garbled, Some(r#"{"apiKeyHelper":"k.sh"}"#), &no_env),
+            ClaudeAuth::Other("API key helper")
+        );
     }
 
     const MAX: &str = include_str!("fixtures/claude_json/max.json");
@@ -615,12 +716,15 @@ mod tests {
     #[test]
     fn test_reads_a_profiles_own_claude_json() {
         let dir = tempfile::TempDir::new().unwrap();
-        assert_eq!(read_auth(Some(dir.path())), ClaudeAuth::SignedOut);
+        assert_eq!(
+            read_auth_with(Some(dir.path()), &no_env),
+            ClaudeAuth::SignedOut
+        );
         assert_eq!(login_files_mtime(Some(dir.path())), (None, None));
 
         std::fs::write(dir.path().join(".claude.json"), MAX).unwrap();
         assert!(matches!(
-            read_auth(Some(dir.path())),
+            read_auth_with(Some(dir.path()), &no_env),
             ClaudeAuth::Subscription(_)
         ));
         assert!(login_files_mtime(Some(dir.path())).0.is_some());

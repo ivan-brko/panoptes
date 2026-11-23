@@ -71,10 +71,15 @@ impl TranscriptKind {
 /// `~/.claude` regardless would miss every transcript of a user who sets it in
 /// their shell - and would call each of their conversations missing.
 pub fn default_claude_config_dir() -> PathBuf {
+    inherited_claude_config_dir().unwrap_or_else(|| home_dir().join(".claude"))
+}
+
+/// The `CLAUDE_CONFIG_DIR` Panoptes was started with, which a
+/// default-account Claude session inherits; `None` when unset or empty
+pub fn inherited_claude_config_dir() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".claude"))
 }
 
 /// The `CODEX_HOME` a session on the default account writes under

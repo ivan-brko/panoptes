@@ -2839,9 +2839,12 @@ impl App {
     /// Every profile is read when the profiles come on screen
     /// ([`claude_accounts_visible`]), and again whenever its `.claude.json` or
     /// `settings.json` changes - a `claude auth login` or `/login` while the
-    /// list is open shows up without reopening it. A read is one small file,
-    /// so it happens right here rather than on a thread. Returns whether a
-    /// row changed.
+    /// list is open shows up without reopening it. `.claude.json` runs to a
+    /// few hundred KB, but only three of its fields are deserialized, so a
+    /// read stays in the low milliseconds even in a debug build and happens
+    /// right here rather than on a thread. A read caught mid-write keeps the
+    /// last login up and is retried ([`account::LoginWatch::accept`]).
+    /// Returns whether a row changed.
     fn tick_claude_logins(&mut self) -> bool {
         use crate::claude_config::account;
         let opened = self
@@ -2861,8 +2864,10 @@ impl App {
             let mtime = account::login_files_mtime(dir.as_deref());
             if self.claude_logins.should_read(id, mtime, opened) {
                 let auth = account::read_auth(dir.as_deref());
-                self.state.claude_logins.set(id, auth, &live);
-                dirty = true;
+                if self.claude_logins.accept(id, mtime, &auth) {
+                    self.state.claude_logins.set(id, auth, &live);
+                    dirty = true;
+                }
             }
         }
         dirty
