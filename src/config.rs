@@ -161,7 +161,9 @@ pub struct Config {
     /// Off by default, and each session can still be armed or disarmed by
     /// hand with `a` in the Sessions pane. An armed session is sent "Continue
     /// where you left off." a minute after the limit lifts, unless the user
-    /// has typed into it, it has moved on, or it was restarted.
+    /// has typed into it, it has moved on, it was restarted, or its screen is
+    /// not the agent's empty prompt. A reset more than six hours out is never
+    /// armed.
     #[serde(default)]
     pub auto_resume_at_reset: bool,
 

@@ -393,9 +393,14 @@ impl Theme {
             cancel_key: Color::Red,
             default_marker: Color::Yellow,
 
-            // Scheduled actions: a calm colour no state uses, so "this will
-            // act by itself" reads apart from what the session is doing now
-            resume_armed: Color::LightCyan,
+            // Scheduled actions: "this will act by itself" has to read apart
+            // from everything else on a session row - the state's green, the
+            // failure's red, the cache's green or grey, the update badge's
+            // light blue - and from every preset's accent. Light magenta is
+            // the one named colour none of them use; plain magenta is only
+            // ever chrome (a prompt, Hera's accent) or a resumable row, which
+            // cannot be armed.
+            resume_armed: Color::LightMagenta,
         }
     }
 
@@ -777,6 +782,40 @@ mod tests {
                     assert_ne!(
                         ta.text_selection_bg, tb.text_selection_bg,
                         "{a:?} vs {b:?} at {support:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An armed resume must stand apart from everything else that can share
+    /// its row, and from the chrome, in every preset and tier
+    #[test]
+    fn test_the_armed_resume_colour_is_its_own() {
+        for support in TIERS {
+            for palette in Palette::ALL {
+                let t = Theme::new(palette, support);
+                let others = [
+                    t.accent,
+                    t.border_focus,
+                    t.input_prompt,
+                    t.default_marker,
+                    t.success,
+                    t.warning,
+                    t.danger,
+                    t.update_available,
+                    t.text,
+                    t.text_dim,
+                    t.attention_badge,
+                ];
+                for other in others {
+                    assert_ne!(t.resume_armed, other, "{palette:?} at {support:?}");
+                }
+                for state in STATES {
+                    assert_ne!(
+                        t.resume_armed,
+                        t.session_state_color(&state),
+                        "{palette:?} {state:?} at {support:?}"
                     );
                 }
             }

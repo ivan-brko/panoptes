@@ -477,6 +477,7 @@ pub fn apply(
             // its finishing is itself what starts one.
             info.in_flight.clear();
             info.turn_failure = None;
+            info.turn_started_at = Some(now);
             clear_attention = true;
             Move::Authoritative(SessionState::Thinking)
         }

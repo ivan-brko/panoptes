@@ -683,7 +683,9 @@ mod tests {
             Some(crate::session::auto_resume::ResumeArm {
                 resets_at: fires_at - crate::session::auto_resume::grace(),
                 failed_at: Utc::now(),
+                quiet_since: Utc::now(),
                 conversation: None,
+                hold_until: None,
                 pid: None,
                 armed_at: Utc::now(),
                 typed_at: None,

@@ -1099,11 +1099,11 @@ impl App {
     /// anyway. Says so in the header: a session that started working while
     /// nobody touched it should not be a mystery.
     fn tick_auto_resume(&mut self) -> bool {
-        let (resumed, changed) = self.sessions.tick_auto_resume(chrono::Utc::now());
-        for name in resumed {
-            self.state
-                .header_notifications
-                .push(format!("Resumed '{}' at its limit reset", name));
+        let (notices, changed) = self
+            .sessions
+            .tick_auto_resume(chrono::Utc::now(), std::time::Instant::now());
+        for notice in notices {
+            self.state.header_notifications.push(notice);
         }
         changed
     }
@@ -1117,7 +1117,7 @@ impl App {
                 None => "Will resume at the reset".to_string(),
             },
             Ok(None) => "Will not resume at the reset".to_string(),
-            Err(refusal) => refusal.describe().to_string(),
+            Err(refusal) => refusal.describe(now),
         };
         self.state.header_notifications.push(told);
         self.state.needs_render = true;

@@ -100,6 +100,11 @@ pub struct SessionManager {
     /// Whether the last output poll left a session's output queued because
     /// it ran out of budget (see [`SessionManager::output_backlogged`])
     output_backlogged: bool,
+    /// Both clocks at the last auto-resume tick, to tell a sleep from a tick
+    /// (see [`auto_resume::slept`])
+    resume_clock: Option<(std::time::Instant, DateTime<Utc>)>,
+    /// What auto-resume has to tell the user, drained by the next tick
+    resume_notices: Vec<String>,
     /// Run every session on a shell process, whatever its record says
     ///
     /// The one thing a test cannot do is launch a real Claude Code or Codex,
@@ -185,6 +190,8 @@ impl SessionManager {
             store,
             recovered,
             output_backlogged: false,
+            resume_clock: None,
+            resume_notices: Vec::new(),
             #[cfg(test)]
             spawn_as_shell: false,
             #[cfg(test)]
@@ -1329,8 +1336,9 @@ impl SessionManager {
 
         // Armed to resume at its limit's reset: killing it would only mean
         // waking it to do so, and a resume never wakes a session implicitly
-        // (see `auto_resume`). The arm lasts at most the length of a limit
-        // window plus a day, so it cannot hold a session awake for good.
+        // (see `auto_resume`). An arm is refused for a reset more than six
+        // hours out and gives up half an hour past it, so it cannot hold a
+        // session awake for long.
         if info.auto_resume.is_some() {
             return false;
         }
@@ -1434,7 +1442,7 @@ impl SessionManager {
         now: DateTime<Utc>,
     ) -> std::result::Result<Option<DateTime<Utc>>, auto_resume::Refusal> {
         let Some(session) = self.sessions.get_mut(&session_id) else {
-            return Err(auto_resume::Refusal::NotFailed);
+            return Err(auto_resume::Refusal::NoSuchSession);
         };
         if session.info.auto_resume.take().is_some() {
             tracing::info!(session_id = %session_id, "Disarmed the resume at reset");
@@ -1449,19 +1457,58 @@ impl SessionManager {
 
     /// Move every armed session one step towards its resume
     ///
-    /// The clock is a parameter so the guards are testable. Each guard is
-    /// re-checked here on every tick (see [`auto_resume::step`]); a session
-    /// that fails one is disarmed without anything being written. Returns
-    /// the names of the sessions whose continue prompt was submitted, and
-    /// whether any row changed.
-    pub fn tick_auto_resume(&mut self, now: DateTime<Utc>) -> (Vec<String>, bool) {
-        let mut resumed = Vec::new();
+    /// Both clocks are parameters so the guards are testable: `now` for the
+    /// reset, `mono` to tell a sleep from a tick. Each guard is re-checked
+    /// here on every tick (see [`auto_resume::step`]), and the screen is read
+    /// before every write (see [`auto_resume::confirm`]); a session that
+    /// fails one is disarmed without anything being written.
+    ///
+    /// Returns what to tell the user - sessions resumed, and resumes given up
+    /// for a reason they did not cause - and whether any row changed.
+    pub fn tick_auto_resume(
+        &mut self,
+        now: DateTime<Utc>,
+        mono: std::time::Instant,
+    ) -> (Vec<String>, bool) {
+        let mut notices = std::mem::take(&mut self.resume_notices);
         let mut changed = false;
-        for session in self.sessions.values_mut() {
-            let Some(arm) = session.info.auto_resume.clone() else {
+
+        // Just back from sleep: whoever opened the lid gets a minute before
+        // anything is typed at them
+        let woke = self
+            .resume_clock
+            .is_some_and(|previous| auto_resume::slept(previous, mono, now));
+        self.resume_clock = Some((mono, now));
+
+        // In list order, so which session goes first is not up to a hash
+        let mut typed_this_tick = 0;
+        for session_id in &self.session_order {
+            let Some(session) = self.sessions.get_mut(session_id) else {
                 continue;
             };
+            let Some(mut arm) = session.info.auto_resume.clone() else {
+                continue;
+            };
+            if woke {
+                arm.hold(now + auto_resume::WAKE_HOLD);
+                session.info.auto_resume = Some(arm.clone());
+            }
+
             let step = auto_resume::step(&arm, &session.info, session.process_id(), now);
+            let step = match step {
+                auto_resume::Step::Type | auto_resume::Step::Submit => {
+                    let read = auto_resume::read_prompt(
+                        &session.live_snapshot(),
+                        session.info.session_type,
+                    );
+                    match auto_resume::confirm(step, &read) {
+                        Ok(()) => step,
+                        Err(why) => auto_resume::Step::Disarm(why),
+                    }
+                }
+                step => step,
+            };
+
             let outcome = match step {
                 auto_resume::Step::Wait => continue,
                 auto_resume::Step::Disarm(why) => {
@@ -1470,20 +1517,39 @@ impl SessionManager {
                         reason = ?why,
                         "Gave up on resuming at reset"
                     );
+                    if let Some(notice) = why.notice() {
+                        notices.push(format!(
+                            "Did not resume '{}': {}",
+                            session.info.name, notice
+                        ));
+                    }
                     session.info.auto_resume = None;
                     changed = true;
                     continue;
                 }
-                auto_resume::Step::Type => session.type_resume_prompt().map(|()| {
-                    session.info.auto_resume = Some(auto_resume::ResumeArm {
-                        typed_at: Some(now),
-                        ..arm
-                    });
-                }),
+                // Another session typed this tick: this one goes a beat later
+                auto_resume::Step::Type if typed_this_tick > 0 => {
+                    arm.hold(now + auto_resume::STAGGER * typed_this_tick);
+                    session.info.auto_resume = Some(arm);
+                    typed_this_tick += 1;
+                    continue;
+                }
+                auto_resume::Step::Type => {
+                    typed_this_tick += 1;
+                    session.type_resume_prompt().map(|()| {
+                        session.info.auto_resume = Some(auto_resume::ResumeArm {
+                            typed_at: Some(now),
+                            ..arm
+                        });
+                    })
+                }
                 auto_resume::Step::Submit => session.submit_resume_prompt().map(|()| {
                     session.info.auto_resume = None;
                     changed = true;
-                    resumed.push(session.info.name.clone());
+                    notices.push(format!(
+                        "Resumed '{}' at its limit reset",
+                        session.info.name
+                    ));
                     tracing::info!(
                         session_id = %session.info.id,
                         "Resumed the session at its usage limit's reset"
@@ -1496,11 +1562,16 @@ impl SessionManager {
                     error = %e,
                     "Could not resume at reset; disarming"
                 );
+                notices.push(format!(
+                    "Did not resume '{}': the prompt could not be written",
+                    session.info.name
+                ));
                 session.info.auto_resume = None;
                 changed = true;
             }
         }
-        (resumed, changed)
+        changed |= !notices.is_empty();
+        (notices, changed)
     }
 
     /// Whether a session is suspended and can be brought back
@@ -2036,15 +2107,27 @@ impl SessionManager {
         // becomes armable - which for Claude is when the transcript fills in
         // the reset the hook did not carry. Only on that edge, so a session
         // the user disarmed by hand is not re-armed by the next event.
-        if self.config.auto_resume_at_reset && !armable_before && session.info.auto_resume.is_none()
+        if self.config.auto_resume_at_reset
+            && !armable_before
+            && session.info.auto_resume.is_none()
+            && auto_resume::armable(&session.info).is_ok()
         {
-            if let Ok(arm) = auto_resume::arm(&session.info, session.process_id(), now) {
-                tracing::info!(
-                    session_id = %session_id,
-                    fires_at = %arm.fires_at(),
-                    "Armed to resume at the usage limit's reset"
-                );
-                session.info.auto_resume = Some(arm);
+            match auto_resume::arm(&session.info, session.process_id(), now) {
+                Ok(arm) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        fires_at = %arm.fires_at(),
+                        "Armed to resume at the usage limit's reset"
+                    );
+                    session.info.auto_resume = Some(arm);
+                }
+                // A weekly limit days out, say: worth saying why it did not
+                // arm, since the user asked for every one to
+                Err(refusal) => self.resume_notices.push(format!(
+                    "Won't resume '{}': {}",
+                    session.info.name,
+                    refusal.describe(now)
+                )),
             }
         }
         let renamed = name_before.is_some_and(|before| before != session.info.name);
@@ -5623,15 +5706,23 @@ mod tests {
     /// A live Claude session that just failed on a usage limit resetting in 2h
     ///
     /// Returns the reset. The process is the test `sleep`, which takes PTY
-    /// writes without complaint.
+    /// writes without complaint; its screen shows Claude's empty prompt.
     fn usage_limited_session(manager: &mut SessionManager) -> (SessionId, DateTime<Utc>) {
+        usage_limited_session_resetting(manager, chrono::Duration::hours(2))
+    }
+
+    fn usage_limited_session_resetting(
+        manager: &mut SessionManager,
+        lead: chrono::Duration,
+    ) -> (SessionId, DateTime<Utc>) {
         let session_id = insert_test_session(manager);
-        let resets_at = Utc::now() + chrono::Duration::hours(2);
+        let resets_at = Utc::now() + lead;
         {
             let info = &mut manager.get_mut(session_id).unwrap().info;
             info.session_type = SessionType::ClaudeCode;
             info.agent_session_id = Some("conv-1".to_string());
         }
+        show_prompt(manager, session_id, "");
         manager.apply_agent_event(
             session_id,
             AgentEvent::TurnFailed {
@@ -5644,6 +5735,31 @@ mod tests {
             },
         );
         (session_id, resets_at)
+    }
+
+    /// Draw Claude's prompt line with `typed` on it, cursor at its end
+    fn show_prompt(manager: &mut SessionManager, id: SessionId, typed: &str) {
+        let placeholder = if typed.is_empty() {
+            "\x1b[2mTry \"edit manager.rs\"\x1b[22m"
+        } else {
+            typed
+        };
+        let col = 3 + typed.chars().count();
+        let frame = format!("\x1b[2J\x1b[5;1H\u{276f} {placeholder}\x1b[K\x1b[5;{col}H");
+        manager.get_mut(id).unwrap().vterm.process(frame.as_bytes());
+    }
+
+    /// A tick with the monotonic clock keeping pace with `now`, as it does
+    /// while the machine is awake
+    fn tick(manager: &mut SessionManager, now: DateTime<Utc>) -> (Vec<String>, bool) {
+        manager.tick_auto_resume(now, mono_for(now))
+    }
+
+    fn mono_for(now: DateTime<Utc>) -> std::time::Instant {
+        static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let base = *BASE.get_or_init(std::time::Instant::now);
+        let epoch = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        base + (now - epoch).to_std().unwrap()
     }
 
     fn armed_at(manager: &SessionManager, id: SessionId) -> Option<&auto_resume::ResumeArm> {
@@ -5662,19 +5778,149 @@ mod tests {
         let fires_at = fires_at.unwrap();
 
         // Before the reset plus its minute, nothing
-        assert_eq!(manager.tick_auto_resume(resets_at), (Vec::new(), false));
+        assert_eq!(tick(&mut manager, resets_at), (Vec::new(), false));
         assert!(armed_at(&manager, id).unwrap().typed_at.is_none());
 
         // Typed, not yet submitted
-        let (resumed, _) = manager.tick_auto_resume(fires_at);
-        assert!(resumed.is_empty());
+        let (notices, _) = tick(&mut manager, fires_at);
+        assert!(notices.is_empty());
         assert_eq!(armed_at(&manager, id).unwrap().typed_at, Some(fires_at));
 
-        // And `Enter` a beat later
-        let (resumed, changed) = manager.tick_auto_resume(fires_at + auto_resume::SUBMIT_DELAY);
-        assert_eq!(resumed, vec!["test-session".to_string()]);
+        // The agent echoes it; `Enter` a beat later
+        show_prompt(&mut manager, id, auto_resume::CONTINUE_PROMPT);
+        let (notices, changed) = tick(&mut manager, fires_at + auto_resume::SUBMIT_DELAY);
+        assert_eq!(
+            notices,
+            vec!["Resumed 'test-session' at its limit reset".to_string()]
+        );
         assert!(changed);
         assert!(armed_at(&manager, id).is_none());
+    }
+
+    #[test]
+    fn test_a_draft_on_the_prompt_is_never_typed_over() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (id, resets_at) = usage_limited_session(&mut manager);
+        manager.toggle_auto_resume(id, Utc::now()).unwrap();
+
+        // Typed during the turn, before anything Panoptes could see
+        show_prompt(&mut manager, id, "half a thought");
+        let (notices, changed) = tick(&mut manager, resets_at + chrono::Duration::minutes(1));
+        assert!(changed);
+        assert_eq!(
+            notices,
+            vec!["Did not resume 'test-session': its prompt already has text in it".to_string()]
+        );
+        assert!(armed_at(&manager, id).is_none());
+    }
+
+    #[test]
+    fn test_a_prompt_that_changed_is_left_unsent() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (id, resets_at) = usage_limited_session(&mut manager);
+        manager.toggle_auto_resume(id, Utc::now()).unwrap();
+        let fires_at = resets_at + chrono::Duration::minutes(1);
+        tick(&mut manager, fires_at);
+        assert!(armed_at(&manager, id).unwrap().typed_at.is_some());
+
+        // Not what was typed: a menu took the keys, or the agent mangled it
+        show_prompt(&mut manager, id, "ontinue where you left off.");
+        let (notices, _) = tick(&mut manager, fires_at + auto_resume::SUBMIT_DELAY);
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("left unsent"), "{notices:?}");
+        assert!(armed_at(&manager, id).is_none());
+    }
+
+    #[test]
+    fn test_sessions_due_together_are_staggered() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (first, resets_at) = usage_limited_session(&mut manager);
+        let second = usage_limited_session(&mut manager).0;
+        for id in [first, second] {
+            let arm = &mut manager.get_mut(id).unwrap().info;
+            arm.turn_failure
+                .as_mut()
+                .unwrap()
+                .limit
+                .as_mut()
+                .unwrap()
+                .resets_at = Some(resets_at);
+            manager.toggle_auto_resume(id, Utc::now()).unwrap();
+        }
+
+        let fires_at = resets_at + chrono::Duration::minutes(1);
+        tick(&mut manager, fires_at);
+        assert_eq!(armed_at(&manager, first).unwrap().typed_at, Some(fires_at));
+        let second_arm = armed_at(&manager, second).unwrap();
+        assert_eq!(second_arm.typed_at, None);
+        assert_eq!(second_arm.hold_until, Some(fires_at + auto_resume::STAGGER));
+
+        tick(&mut manager, fires_at + auto_resume::STAGGER);
+        assert_eq!(
+            armed_at(&manager, second).unwrap().typed_at,
+            Some(fires_at + auto_resume::STAGGER)
+        );
+    }
+
+    #[test]
+    fn test_waking_from_sleep_holds_the_resume_a_minute() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (id, resets_at) = usage_limited_session(&mut manager);
+        manager.toggle_auto_resume(id, Utc::now()).unwrap();
+        let fires_at = resets_at + chrono::Duration::minutes(1);
+
+        // Asleep from an hour before the reset until ten minutes after it:
+        // the wall clock moves seventy minutes, the monotonic one a second
+        let before = resets_at - chrono::Duration::hours(1);
+        let mono = mono_for(before);
+        manager.tick_auto_resume(before, mono);
+        let woke = fires_at + chrono::Duration::minutes(10);
+        let mono = mono + std::time::Duration::from_secs(1);
+        manager.tick_auto_resume(woke, mono);
+        let arm = armed_at(&manager, id).unwrap();
+        assert_eq!(arm.typed_at, None, "nothing typed at the user on wake");
+        assert_eq!(arm.hold_until, Some(woke + auto_resume::WAKE_HOLD));
+
+        // A minute later, awake all along
+        let later = woke + auto_resume::WAKE_HOLD;
+        manager.tick_auto_resume(later, mono + std::time::Duration::from_secs(60));
+        assert_eq!(armed_at(&manager, id).unwrap().typed_at, Some(later));
+    }
+
+    #[test]
+    fn test_a_weekly_reset_is_not_auto_armed_and_says_why() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config {
+            auto_resume_at_reset: true,
+            ..test_config(&temp_dir)
+        };
+        let mut manager = test_manager(&temp_dir, config);
+        let (id, _) = usage_limited_session_resetting(&mut manager, chrono::Duration::days(3));
+        assert!(armed_at(&manager, id).is_none());
+        let (notices, _) = tick(&mut manager, Utc::now());
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].contains("won't auto-resume that far out"),
+            "{notices:?}"
+        );
+        assert!(matches!(
+            manager.toggle_auto_resume(id, Utc::now()),
+            Err(auto_resume::Refusal::TooFarOut(_))
+        ));
+    }
+
+    #[test]
+    fn test_toggling_an_unknown_session_says_so() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        assert_eq!(
+            manager.toggle_auto_resume(Uuid::new_v4(), Utc::now()),
+            Err(auto_resume::Refusal::NoSuchSession)
+        );
     }
 
     #[test]
@@ -5716,7 +5962,7 @@ mod tests {
         manager.get_mut(id).unwrap().write(b"h").unwrap();
         assert!(armed_at(&manager, id).is_none());
         assert_eq!(
-            manager.tick_auto_resume(resets_at + chrono::Duration::hours(1)),
+            tick(&mut manager, resets_at + chrono::Duration::minutes(2)),
             (Vec::new(), false),
             "nothing left to fire"
         );
@@ -5738,8 +5984,8 @@ mod tests {
             .as_mut()
             .unwrap()
             .pid = Some(1);
-        let (resumed, changed) = manager.tick_auto_resume(resets_at + chrono::Duration::hours(1));
-        assert!(resumed.is_empty());
+        let (notices, changed) = tick(&mut manager, resets_at + chrono::Duration::minutes(2));
+        assert!(notices.is_empty());
         assert!(changed);
         assert!(armed_at(&manager, id).is_none());
     }
@@ -5752,8 +5998,8 @@ mod tests {
         manager.toggle_auto_resume(id, Utc::now()).unwrap();
 
         manager.apply_agent_event(id, AgentEvent::TurnStarted { title: None });
-        let (resumed, _) = manager.tick_auto_resume(resets_at + chrono::Duration::hours(1));
-        assert!(resumed.is_empty());
+        let (notices, _) = tick(&mut manager, resets_at + chrono::Duration::minutes(2));
+        assert!(notices.is_empty());
         assert!(armed_at(&manager, id).is_none());
     }
 

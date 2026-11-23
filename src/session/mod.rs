@@ -495,6 +495,14 @@ pub struct SessionInfo {
     /// over.
     #[serde(skip)]
     pub last_user_input: Option<DateTime<Utc>>,
+    /// When the latest turn began, as the agent reported it or Panoptes
+    /// guessed it
+    ///
+    /// Not persisted. What an auto-resume measures "the user typed during the
+    /// failed turn" from: a draft typed while the turn ran may still be in
+    /// the prompt when it fails.
+    #[serde(skip)]
+    pub turn_started_at: Option<DateTime<Utc>>,
     /// Token and rate-limit figures read from the agent's own transcript
     ///
     /// Not persisted: it describes a live conversation, and stale numbers shown
@@ -1054,6 +1062,7 @@ impl SessionInfo {
             turn_failure: None,
             auto_resume: None,
             last_user_input: None,
+            turn_started_at: None,
             usage: crate::agent::events::UsageSnapshot::default(),
             subagents: 0,
             subagent_ids: HashSet::new(),
@@ -1742,6 +1751,7 @@ impl Session {
             && !self.info.session_type.reports_prompt_submission();
         if must_guess && self.info.state == SessionState::Waiting {
             self.set_state(SessionState::Thinking);
+            self.info.turn_started_at = Some(Utc::now());
         }
     }
 
@@ -1813,6 +1823,11 @@ impl Session {
     /// an auto-resume was armed in
     pub fn process_id(&self) -> Option<u32> {
         self.pty.process_id()
+    }
+
+    /// The live screen, for an auto-resume to read the prompt off
+    pub fn live_snapshot(&mut self) -> auto_resume::ScreenSnapshot {
+        self.vterm.live_snapshot()
     }
 
     /// Type the auto-resume's continue prompt, without submitting it

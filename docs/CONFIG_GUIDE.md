@@ -287,11 +287,16 @@ Panoptes types "Continue where you left off." into it and presses Enter. The row
 shows `resumes 20:11` while it is armed.
 
 Off, each session can still be armed by hand with `a` in the Sessions pane; on,
-`a` cancels one. Either way nothing is written unless the session is still idle
-on that same failure, in the same conversation and process, and you have not
-typed into it since it failed. "Rate limited", auth and server failures never
-arm. An armed session is exempt from `suspend_after_secs`; a session more than a
-day past its reset gives up rather than continuing by surprise.
+`a` cancels one. A reset more than six hours away - a weekly limit - is never
+armed, and the header says so. Either way nothing is written unless the session
+is still idle on that same failure, in the same conversation and process, you
+have not typed into it since that turn began, and the screen shows the agent's
+own prompt, empty, with no menu open. Enter is pressed only if the line then
+holds exactly the prompt typed; otherwise it is left unsent and the header says
+why. "Rate limited", auth and server failures never arm. Sessions due together
+go a few seconds apart, a resume waits a minute after the machine wakes from
+sleep, and one more than half an hour late gives up. An armed session is exempt
+from `suspend_after_secs`.
 
 **When to change:** Turn it on if you run long jobs overnight and would rather
 they pick up on their own than wait for you.

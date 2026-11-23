@@ -357,6 +357,43 @@ impl VirtualTerminal {
         self.parser.screen().row_wrapped_absolute(row)
     }
 
+    /// The live screen - whatever the view is scrolled to - for reading the
+    /// agent's prompt off it
+    ///
+    /// The view's scroll is put back afterwards: an auto-resume checking the
+    /// prompt must not move what the user is reading.
+    pub fn live_snapshot(&mut self) -> crate::session::auto_resume::ScreenSnapshot {
+        use crate::session::auto_resume::{ScreenCell, ScreenSnapshot};
+        let offset = self.scroll_offset;
+        if offset > 0 {
+            self.set_scrollback(0);
+        }
+        let screen = self.parser.screen();
+        let (rows, cols) = screen.size();
+        let snapshot = ScreenSnapshot {
+            rows: (0..rows)
+                .map(|row| {
+                    (0..cols)
+                        .map(|col| match screen.cell(row, col) {
+                            Some(cell) => ScreenCell {
+                                text: cell.contents().to_string(),
+                                dim: cell.dim(),
+                                wide_tail: cell.is_wide_continuation(),
+                            },
+                            None => ScreenCell::default(),
+                        })
+                        .collect()
+                })
+                .collect(),
+            cursor: screen.cursor_position(),
+            cursor_visible: !screen.hide_cursor(),
+        };
+        if offset > 0 {
+            self.set_scrollback(offset);
+        }
+        snapshot
+    }
+
     /// The cells of an absolute row: text per column, `None` for the second
     /// half of a wide character
     pub fn row_cells(&self, row: usize) -> Vec<Option<String>> {
