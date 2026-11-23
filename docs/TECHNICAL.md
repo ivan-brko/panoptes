@@ -1322,7 +1322,11 @@ fails), or when `Stop` / `Interrupt` already ended that same turn (an
 `after_agent` hook that aborts writes its error after `Stop`). One task keeps
 one `turn_id` across its model loops - queued input, or a `Stop` hook that
 blocks, runs again under the same id - so any later root hook for the turn
-reopens it. The turns the hooks named are kept in `SessionInfo::codex_turns`. Once admitted it is a
+reopens it. The turns the hooks named are kept in `SessionInfo::codex_turns`.
+Known gap: when a user's blocking `Stop` hook sends the turn on and the
+continuation fails on its very first model request, no hook fires in between,
+so the failure looks like an `after_agent` abort and is dropped - the session
+reads finished, losing only the `failed` alert and the reset time. Once admitted it is a
 plain `TurnFailed`. For a usage limit Codex first writes
 a `token_count` with the figures the refusal came with, and
 `transcript::codex::RolloutLimits`, held by the tailer, joins them to the
