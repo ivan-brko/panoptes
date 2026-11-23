@@ -694,6 +694,9 @@ impl SessionManager {
         let mut info = match agent {
             AgentType::ClaudeCode => SessionInfo::new(name, working_dir, project_id, branch_id),
             AgentType::OpenAICodex => SessionInfo::codex(name, working_dir, project_id, branch_id),
+            AgentType::Antigravity => {
+                SessionInfo::antigravity(name, working_dir, project_id, branch_id)
+            }
             AgentType::Shell => SessionInfo::shell(name, working_dir, project_id, branch_id),
         };
         info.auto_close_after_command = auto_close;
@@ -715,6 +718,10 @@ impl SessionManager {
                 AgentType::Shell => {
                     // Shells have no account to run under; nothing to record
                     tracing::warn!("Ignoring account profile on a shell session");
+                }
+                AgentType::Antigravity => {
+                    // Single account: agy runs as whoever is signed in
+                    tracing::warn!("Ignoring account profile on an Antigravity session");
                 }
             }
         }
@@ -1523,10 +1530,14 @@ impl SessionManager {
             }
         };
 
-        let is_codex = self
+        let session_type = self
             .sessions
             .get(&session_id)
-            .is_some_and(|session| session.info.session_type == SessionType::OpenAICodex);
+            .map(|session| session.info.session_type);
+        if session_type == Some(SessionType::Antigravity) {
+            return self.handle_antigravity_event(session_id, event);
+        }
+        let is_codex = session_type == Some(SessionType::OpenAICodex);
         // Each agent's conversation bookkeeping, then its own translation.
         // `follow_agent_conversation` is Claude's and `note_codex_hook`
         // Codex's; neither acts on the other agent's sessions.
@@ -1545,6 +1556,69 @@ impl SessionManager {
             self.apply_agent_event(session_id, snapshot);
         }
         rang
+    }
+
+    /// Handle an Antigravity session's status line
+    ///
+    /// The only thing `agy` sends; anything else addressed to one of its
+    /// sessions is ignored. The payload's bookkeeping comes first - the
+    /// conversation it names, the account it is signed in as - then its state
+    /// and figures (see [`state_machine::translate_antigravity_status_line`]).
+    fn handle_antigravity_event(
+        &mut self,
+        session_id: SessionId,
+        event: &HookEvent,
+    ) -> Option<SessionId> {
+        if event.event_type() != HookEventType::StatusLine {
+            return None;
+        }
+        self.note_antigravity_status(session_id, event);
+        let events = {
+            let session = self.sessions.get(&session_id)?;
+            state_machine::translate_antigravity_status_line(&session.info, event)
+        };
+        let mut rang = None;
+        for meaning in events {
+            rang = self.apply_agent_event(session_id, meaning).or(rang);
+        }
+        rang
+    }
+
+    /// Bookkeeping an Antigravity status line does beyond moving the state
+    ///
+    /// - `conversation_id` is `""` until the first prompt of a new
+    ///   conversation; the first one named makes the session resumable. A
+    ///   later, different one means the live process moved to another
+    ///   conversation, and the figures shown described the one it left.
+    /// - `email` is who the session runs as, for the header.
+    fn note_antigravity_status(&mut self, session_id: SessionId, event: &HookEvent) {
+        use crate::hooks::antigravity_status_line as agy;
+
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return;
+        };
+        let info = &mut session.info;
+        if let Some(email) = agy::email(&event.payload) {
+            if info.agent_account.as_deref() != Some(email) {
+                info.agent_account = Some(email.to_string());
+            }
+        }
+        let Some(conversation_id) = agy::conversation_id(&event.payload) else {
+            return;
+        };
+        if info.agent_session_id.as_deref() == Some(conversation_id) {
+            return;
+        }
+        if info.agent_session_id.is_some() {
+            info.usage = Default::default();
+        }
+        let conversation_id = conversation_id.to_string();
+        self.set_agent_session_id(session_id, conversation_id.clone());
+        tracing::info!(
+            session_id = %session_id,
+            antigravity_conversation_id = %conversation_id,
+            "Antigravity conversation ID reported by the status line; session is now resumable"
+        );
     }
 
     /// Follow a Claude session onto a new conversation, if the event says it moved
@@ -4477,6 +4551,83 @@ mod tests {
         let session_id = create_persistable(manager, "codex");
         manager.get_mut(session_id).unwrap().info.session_type = SessionType::OpenAICodex;
         session_id
+    }
+
+    /// One of the spike's recorded Antigravity status-line payloads
+    fn agy_status_line(name: &str) -> serde_json::Value {
+        let path = format!(
+            "{}/src/agent/fixtures/antigravity/status-line/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn test_antigravity_status_line_names_the_conversation_and_account() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = SessionManager::with_store(
+            test_config(&temp_dir),
+            SessionStore::with_path(store_path.clone()),
+        );
+        let session_id = create_persistable(&mut manager, "agy");
+        manager.get_mut(session_id).unwrap().info.session_type = SessionType::Antigravity;
+        let status = |name: &str| hook(session_id, "StatusLine", agy_status_line(name));
+
+        // Before the first prompt the conversation has no ID yet
+        manager.handle_hook_event(&status("idle-before-first-prompt"));
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.agent_session_id, None);
+        assert_eq!(info.state, SessionState::Waiting);
+        assert_eq!(info.account_name(), Some("user@example.com"));
+
+        // The first prompt names it, and it is persisted for a resume
+        let conversation = "11111111-1111-4111-8111-111111111111";
+        manager.handle_hook_event(&status("working"));
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.agent_session_id.as_deref(), Some(conversation));
+        assert_eq!(info.state, SessionState::Thinking);
+        assert_eq!(
+            load_store(&store_path)
+                .get(session_id)
+                .unwrap()
+                .agent_session_id
+                .as_deref(),
+            Some(conversation)
+        );
+
+        // Approval, then the turn ends and rings
+        assert_eq!(
+            manager.handle_hook_event(&status("tool-confirmation-pending")),
+            Some(session_id)
+        );
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::AwaitingApproval
+        );
+        assert_eq!(manager.handle_hook_event(&status("idle")), Some(session_id));
+        assert_eq!(
+            manager.get(session_id).unwrap().info.state,
+            SessionState::Waiting
+        );
+
+        // A startup payload's empty ID never clears the recorded one
+        manager.handle_hook_event(&status("authenticating"));
+        assert_eq!(
+            manager
+                .get(session_id)
+                .unwrap()
+                .info
+                .agent_session_id
+                .as_deref(),
+            Some(conversation)
+        );
+
+        // agy sends nothing else; a stray hook moves nothing
+        manager.handle_hook_event(&hook(session_id, "Stop", serde_json::json!({})));
+        assert!(manager.get(session_id).unwrap().info.attention.is_some());
+
+        manager.shutdown_all();
     }
 
     fn codex_hook(session_id: SessionId, event: &str, payload: serde_json::Value) -> HookEvent {

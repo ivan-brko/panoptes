@@ -187,6 +187,83 @@ pub fn translate_codex_hook(event: &HookEvent) -> AgentEvent {
     }
 }
 
+/// Translate an Antigravity status-line payload into the canonical vocabulary
+///
+/// The status line is all `agy` reports, and it is a *level*, not an edge:
+/// it re-sends the whole state about every 300 ms while anything changes,
+/// and on quota and token updates while idle. Translated naively, every
+/// idle refresh would end a turn again - re-flagging and re-ringing a
+/// session the user has already looked at - and every refresh would count
+/// as activity, so idle suspension would never fire. So the state is
+/// compared with the session's own, and only a change becomes an event:
+///
+/// | Status line | From | Event |
+/// | --- | --- | --- |
+/// | pending confirmation | anything else | `ApprovalRequested` |
+/// | working | `AwaitingApproval` | `ApprovalResolved` |
+/// | working | `Starting` / `Waiting` | `TurnStarted` (a prompt, or the self-wake after a background command) |
+/// | idle | `Thinking` / `Executing` / `AwaitingApproval` | `TurnCompleted` |
+/// | idle | `Starting` | `SessionReset` (up, nothing asked yet) |
+/// | error | anything | `TurnFailed` (`apply` drops the repeats) |
+/// | authenticating, initializing | | nothing |
+///
+/// An Esc-cancel reads as a completed turn: the status line cannot tell it
+/// from one. The figures always come along as `UsageRefresh`, which is not
+/// activity, and `task_count` as `BackgroundWork` when it changes, which keeps
+/// the suspend sweep off a session whose background command will wake it.
+///
+/// A session with no process - suspended, exited - takes figures only: a
+/// payload that outlived its process must not bring the session back to life.
+pub fn translate_antigravity_status_line(info: &SessionInfo, event: &HookEvent) -> Vec<AgentEvent> {
+    use crate::hooks::antigravity_status_line::{self as agy, AgentState};
+
+    let payload = &event.payload;
+    let mut events = Vec::new();
+    if let Some(usage) = agy::usage_from_payload(payload) {
+        events.push(AgentEvent::UsageRefresh(usage));
+    }
+    if !info.state.has_process() {
+        return events;
+    }
+
+    let tasks = agy::task_count(payload);
+    if tasks != info.background_tasks {
+        events.push(AgentEvent::BackgroundWork {
+            tasks: Some(tasks),
+            crons: None,
+            subagents: None,
+        });
+    }
+
+    let busy = matches!(
+        info.state,
+        SessionState::Thinking | SessionState::Executing | SessionState::AwaitingApproval
+    );
+    let edge = match agy::agent_state(payload) {
+        Some(AgentState::AwaitingApproval) if info.state != SessionState::AwaitingApproval => {
+            Some(AgentEvent::ApprovalRequested { tool: None })
+        }
+        Some(AgentState::Working) => match info.state {
+            SessionState::AwaitingApproval => Some(AgentEvent::ApprovalResolved { tool: None }),
+            SessionState::Starting | SessionState::Waiting => {
+                Some(AgentEvent::TurnStarted { title: None })
+            }
+            _ => None,
+        },
+        Some(AgentState::Idle) if busy => Some(AgentEvent::TurnCompleted { last_message: None }),
+        Some(AgentState::Idle) if info.state == SessionState::Starting => {
+            Some(AgentEvent::SessionReset { title: None })
+        }
+        Some(AgentState::Error) => Some(AgentEvent::TurnFailed {
+            reason: Some("agent error".to_string()),
+            limit: None,
+        }),
+        _ => None,
+    };
+    events.extend(edge);
+    events
+}
+
 /// Whether a transcript-derived event may be applied to a session
 ///
 /// Once an agent's lifecycle hooks are reporting (`hooks_live`, which only
@@ -2047,5 +2124,215 @@ mod tests {
                 &title
             ]
         );
+    }
+
+    // ---- Antigravity: the status line is the whole report ----
+
+    /// An Antigravity session in `state`
+    fn agy_info(state: SessionState) -> SessionInfo {
+        let mut info = test_info();
+        info.session_type = SessionType::Antigravity;
+        info.set_state_at(state, Utc::now());
+        info
+    }
+
+    /// Feed one status-line payload through translation and application, as
+    /// the manager does. Returns whether anything rang.
+    fn apply_agy(info: &mut SessionInfo, payload: serde_json::Value, config: &Config) -> bool {
+        let event = hook(info.id, "StatusLine", payload);
+        let mut rang = false;
+        for meaning in translate_antigravity_status_line(info, &event) {
+            rang |= apply(info, meaning, Utc::now(), config).rang;
+        }
+        rang
+    }
+
+    /// The status-line payloads of one of the spike's recorded sequences
+    ///
+    /// The hooks interleaved with them are left out: Panoptes registers none.
+    fn agy_sequence(name: &str) -> Vec<serde_json::Value> {
+        let path = format!(
+            "{}/src/agent/fixtures/antigravity/sequences/{name}.jsonl",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(&path)
+            .expect("sequence exists")
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|entry| entry["source"] == "status_line")
+            .map(|entry| entry["payload"].clone())
+            .collect()
+    }
+
+    /// What a sequence did to a session: each state it moved to, in order,
+    /// and how many times it rang
+    fn drive_agy(
+        info: &mut SessionInfo,
+        name: &str,
+        config: &Config,
+    ) -> (Vec<SessionState>, usize) {
+        let mut states = vec![info.state];
+        let mut rings = 0;
+        for payload in agy_sequence(name) {
+            rings += usize::from(apply_agy(info, payload, config));
+            if states.last() != Some(&info.state) {
+                states.push(info.state);
+            }
+        }
+        (states, rings)
+    }
+
+    fn agy_fixture(name: &str) -> serde_json::Value {
+        crate::hooks::antigravity_status_line::tests::fixture(name)
+    }
+
+    #[test]
+    fn test_agy_startup_to_first_turn() {
+        use SessionState::*;
+        let config = Config::default();
+        let mut info = agy_info(Starting);
+
+        // Authenticating and initializing keep it starting; the first idle
+        // payload means it is up, which is nothing to ring about
+        let (states, rings) = drive_agy(&mut info, "01-startup-and-hook-denied-tool", &config);
+        assert_eq!(states, vec![Starting, Waiting, Thinking, Waiting]);
+        assert_eq!(rings, 1, "only the finished turn rings");
+        assert_eq!(info.attention, Some(AttentionReason::TurnComplete));
+        assert_eq!(info.usage.context_window, Some(1_048_576));
+    }
+
+    #[test]
+    fn test_agy_approval_turn() {
+        use SessionState::*;
+        let config = Config::default();
+        let mut info = agy_info(Waiting);
+
+        let (states, rings) = drive_agy(&mut info, "02-approval-turn", &config);
+        assert_eq!(
+            states,
+            vec![Waiting, Thinking, AwaitingApproval, Thinking, Waiting]
+        );
+        assert_eq!(rings, 2, "the approval and the finished turn");
+    }
+
+    #[test]
+    fn test_agy_waits_for_approval_on_the_pending_flag() {
+        let config = Config::default();
+        let mut info = agy_info(SessionState::Thinking);
+        let pending = agy_fixture("tool-confirmation-pending");
+
+        assert!(apply_agy(&mut info, pending.clone(), &config));
+        assert_eq!(info.state, SessionState::AwaitingApproval);
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::Approval { tool: None })
+        );
+
+        // Re-sent every refresh while the dialog is open: one bell only
+        assert!(!apply_agy(&mut info, pending, &config));
+    }
+
+    #[test]
+    fn test_agy_self_wake_after_a_background_command() {
+        use SessionState::*;
+        let config = Config::default();
+        let mut info = agy_info(Waiting);
+
+        let mut states = vec![info.state];
+        let mut background = vec![info.background_tasks];
+        for payload in agy_sequence("03-background-command-self-wake") {
+            apply_agy(&mut info, payload, &config);
+            if states.last() != Some(&info.state) {
+                states.push(info.state);
+                background.push(info.background_tasks);
+            }
+        }
+        // Approval, the turn ends with the command still running, then agy
+        // starts a turn by itself when it finishes
+        assert_eq!(
+            states,
+            vec![
+                Waiting,
+                Thinking,
+                AwaitingApproval,
+                Thinking,
+                Waiting,
+                Thinking,
+                Waiting
+            ]
+        );
+        // The background command is counted while the session waits on it,
+        // which is what keeps the suspend sweep off it
+        assert_eq!(background[4], 1);
+        assert_eq!(info.background_tasks, 0);
+    }
+
+    #[test]
+    fn test_agy_resume_and_esc_cancel() {
+        use SessionState::*;
+        let config = Config::default();
+
+        // A relaunch with `--conversation`: up, then an auto-approved turn
+        let mut info = agy_info(Starting);
+        let (states, _) = drive_agy(&mut info, "04-resume-auto-mode-turn", &config);
+        assert_eq!(states, vec![Starting, Waiting, Thinking, Waiting]);
+
+        // Esc fires no hook at all; the status line alone brings it back
+        let mut info = agy_info(Waiting);
+        let (states, _) = drive_agy(&mut info, "05-esc-cancel", &config);
+        assert_eq!(states, vec![Waiting, Thinking, Waiting]);
+        assert!(info.in_flight.is_empty());
+    }
+
+    #[test]
+    fn test_agy_idle_refreshes_are_not_activity_and_do_not_reflag() {
+        let config = Config::default();
+        let long_ago = Utc::now() - chrono::Duration::hours(3);
+        let mut info = agy_info(SessionState::Waiting);
+        info.set_state_at(SessionState::Waiting, long_ago);
+        info.last_activity = long_ago;
+        let idle = agy_fixture("idle");
+
+        // agy re-sends idle on every quota or token update. A session the
+        // user has already looked at must not be flagged again, and must
+        // still age towards the idle badge and suspension.
+        for _ in 0..3 {
+            assert!(!apply_agy(&mut info, idle.clone(), &config));
+        }
+        assert_eq!(info.attention, None);
+        assert_eq!(info.last_activity, long_ago);
+        // ...while its figures still land
+        assert!(info.usage.primary.is_some());
+    }
+
+    #[test]
+    fn test_agy_error_rings_once() {
+        let config = Config::default();
+        let mut info = agy_info(SessionState::Thinking);
+        let error = serde_json::json!({"product": "antigravity", "agent_state": "error"});
+
+        assert!(apply_agy(&mut info, error.clone(), &config));
+        assert_eq!(info.state, SessionState::Waiting);
+        assert!(matches!(
+            info.attention,
+            Some(AttentionReason::TurnFailed { .. })
+        ));
+        assert!(
+            !apply_agy(&mut info, error, &config),
+            "a repeat is not news"
+        );
+    }
+
+    #[test]
+    fn test_agy_payload_never_revives_a_session_without_a_process() {
+        let config = Config::default();
+        let working = agy_fixture("working");
+        for state in [SessionState::Suspended, SessionState::Exited] {
+            let mut info = agy_info(state);
+            apply_agy(&mut info, working.clone(), &config);
+            assert_eq!(info.state, state);
+            // Figures are still welcome
+            assert_eq!(info.usage.context_window, Some(1_048_576));
+        }
     }
 }

@@ -464,6 +464,10 @@ exactly what it prints. Your status line looks the same as without Panoptes.
 - Like the hooks, the setting stays after the session ends. Outside Panoptes it
   just runs your own command.
 
+Antigravity sessions always run the same wrapper, whatever this is set to: its
+status line is the only way `agy` reports its state (see
+[Antigravity](#antigravity) below).
+
 Set it to `false` to opt out: the next Claude session spawned in a directory
 puts back whatever Panoptes wrapped there (or removes the compact line), and
 Claude sessions show model and context only, with the window inferred from the
@@ -683,3 +687,29 @@ alongside where each file lives.
 # Press q to quit Panoptes (confirm when prompted), then restart it
 ./target/release/panoptes
 ```
+
+---
+
+## Antigravity
+
+Antigravity CLI (`agy`, 1.5 or later) has no settings of its own in
+`config.toml`. A session runs as whoever `agy` is signed in as, in your usual
+`~/.gemini` home, so your conversations, trusted workspaces and settings all
+apply as they do outside Panoptes.
+
+- **Status line.** Panoptes hands each session one setting for that session
+  only, with `agy --settings`: a `statusLine` that forwards the figures to
+  Panoptes. Nothing is written to `~/.gemini/antigravity-cli/settings.json`.
+  If that file sets a `statusLine` command of your own, Panoptes' command wraps
+  it and prints exactly what yours prints; without one, it shows a compact line
+  such as `quota 12% (resets Nov 30 10:18)`: the weekly quota closest to running
+  out, and when it resets.
+- **No hooks.** Panoptes does not register `agy` hooks; the status line already
+  reports everything it tracks.
+- **Updates.** Sessions run with `AGY_CLI_DISABLE_AUTO_UPDATE=1`, so an update
+  never swaps the binary under a running session. Update with `agy update`.
+- **Version.** A session will not start on an `agy` older than 1.5; the error
+  says so.
+- **Approvals.** `agy` defaults to `auto` mode, which runs edits and safe
+  commands without asking. Panoptes flags a session for approval only when
+  `agy` asks; Shift+Tab inside the session cycles the mode.

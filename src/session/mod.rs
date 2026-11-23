@@ -42,6 +42,8 @@ pub enum SessionType {
     Shell,
     /// OpenAI Codex CLI session - uses notify hook for state tracking
     OpenAICodex,
+    /// Antigravity CLI (`agy`) session - uses its status line for state tracking
+    Antigravity,
 }
 
 impl SessionType {
@@ -51,6 +53,7 @@ impl SessionType {
             SessionType::ClaudeCode => "Claude Code",
             SessionType::Shell => "Shell",
             SessionType::OpenAICodex => "Codex",
+            SessionType::Antigravity => "Antigravity",
         }
     }
 
@@ -60,6 +63,7 @@ impl SessionType {
             SessionType::ClaudeCode => "[CC]",
             SessionType::Shell => "[SH]",
             SessionType::OpenAICodex => "[CX]",
+            SessionType::Antigravity => "[AG]",
         }
     }
 
@@ -70,12 +74,19 @@ impl SessionType {
             SessionType::ClaudeCode => "CC",
             SessionType::Shell => "SH",
             SessionType::OpenAICodex => "CX",
+            SessionType::Antigravity => "AG",
         }
     }
 
     /// Check if this session type uses hooks for state tracking
+    ///
+    /// Antigravity counts: its status line reaches Panoptes through the same
+    /// hook server, as a `StatusLine` envelope.
     pub fn uses_hooks(&self) -> bool {
-        matches!(self, SessionType::ClaudeCode | SessionType::OpenAICodex)
+        matches!(
+            self,
+            SessionType::ClaudeCode | SessionType::OpenAICodex | SessionType::Antigravity
+        )
     }
 
     /// Whether this agent tells Panoptes when the user submits a prompt
@@ -84,8 +95,10 @@ impl SessionType {
     /// observed. Codex has no equivalent - its `notify` hook cannot be extended
     /// without stalling its output pipeline - so a Codex session falls back to
     /// guessing from the Enter keystroke until its rollout confirms the turn.
+    /// Antigravity's status line turns `working` within a refresh of the
+    /// prompt, so its turns are observed too.
     pub fn reports_prompt_submission(&self) -> bool {
-        matches!(self, SessionType::ClaudeCode)
+        matches!(self, SessionType::ClaudeCode | SessionType::Antigravity)
     }
 
     /// Whether this agent reports individual tool starts and finishes
@@ -513,6 +526,13 @@ pub struct SessionInfo {
     /// Codex configuration name (cached for display)
     #[serde(default)]
     pub codex_config_name: Option<String>,
+    /// The account the agent itself says it is signed in as
+    ///
+    /// For an agent without Panoptes account profiles - Antigravity, whose
+    /// status line names its `email` - so the header can still say who the
+    /// session runs as. Runtime only: the live agent reports it again.
+    #[serde(skip)]
+    pub agent_account: Option<String>,
     /// Whether to automatically close this session after its command finishes
     #[serde(default)]
     pub auto_close_after_command: bool,
@@ -571,6 +591,7 @@ impl SessionInfo {
         self.claude_config_name
             .as_deref()
             .or(self.codex_config_name.as_deref())
+            .or(self.agent_account.as_deref())
     }
 
     /// Whether this session is worth writing to the durable index
@@ -653,6 +674,11 @@ impl SessionInfo {
                     .unwrap_or_else(crate::transcript::default_codex_home);
                 crate::agent::codex::rollout_path(&codex_home, conversation_id).is_some()
             }
+            // Nowhere to look means nothing to block on
+            SessionType::Antigravity => match crate::agent::antigravity::data_dir() {
+                Some(dir) => crate::agent::antigravity::conversation_exists(&dir, conversation_id),
+                None => true,
+            },
         }
     }
 
@@ -878,6 +904,7 @@ impl SessionInfo {
             claude_config_name: None,
             codex_config_id: None,
             codex_config_name: None,
+            agent_account: None,
             auto_close_after_command: false,
             agent_session_id: None,
             agent_transcript_path: None,
@@ -899,6 +926,18 @@ impl SessionInfo {
         let mut info = Self::new(name, working_dir, project_id, branch_id);
         info.claude_config_id = claude_config_id;
         info.claude_config_name = claude_config_name;
+        info
+    }
+
+    /// Create new session info for an Antigravity session
+    pub fn antigravity(
+        name: String,
+        working_dir: std::path::PathBuf,
+        project_id: ProjectId,
+        branch_id: BranchId,
+    ) -> Self {
+        let mut info = Self::new(name, working_dir, project_id, branch_id);
+        info.session_type = SessionType::Antigravity;
         info
     }
 

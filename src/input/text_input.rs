@@ -15,7 +15,32 @@ use crate::app::{
 };
 use crate::input::agent_configs::AgentKind;
 use crate::session::NewSessionSpec;
-use crate::tui::views::WIZARD_AGENTS;
+use crate::tui::views::{ANTIGRAVITY_ROW, WIZARD_AGENTS};
+
+/// Handle key on the Antigravity name step
+///
+/// The wizard's last step, as for Claude and Codex, but with no config step
+/// before it: `Esc` goes straight back to the agent step.
+pub fn handle_creating_antigravity_session_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Esc => {
+            app.state.agent_type_selector_index = ANTIGRAVITY_ROW;
+            app.state.input_mode = InputMode::SelectingAgentType;
+        }
+        KeyCode::Enter => create_session(app, AgentType::Antigravity)?,
+        KeyCode::Backspace => {
+            app.state.session_draft.name.pop();
+        }
+        KeyCode::Char(c) if app.state.session_draft.name.len() < MAX_SESSION_NAME_LEN => {
+            app.state.session_draft.name.push(c);
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
 /// Handle key while creating a new shell session
 pub fn handle_creating_shell_session_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -61,6 +86,7 @@ pub(crate) fn create_session(app: &mut App, agent: AgentType) -> Result<()> {
         let prefix = match agent {
             AgentType::ClaudeCode => "Session",
             AgentType::OpenAICodex => "Codex",
+            AgentType::Antigravity => "Antigravity",
             AgentType::Shell => "Shell",
         };
         format!("{} {}", prefix, app.sessions.len() + 1)
@@ -648,7 +674,7 @@ fn apply_path_completion(app: &mut App) {
 // Agent Type Selection Handler
 // ========================================================================
 
-/// Handle key on the new-session wizard's first step (Claude Code vs Codex)
+/// Handle key on the new-session wizard's first step: which agent
 ///
 /// The only step `Esc` cancels from: every later step backs up into this one.
 pub fn handle_selecting_agent_type_key(app: &mut App, key: KeyEvent) -> Result<()> {
@@ -671,11 +697,18 @@ pub fn handle_selecting_agent_type_key(app: &mut App, key: KeyEvent) -> Result<(
                 cycle_prev(app.state.agent_type_selector_index, WIZARD_AGENTS.len());
         }
         KeyCode::Enter => {
-            let kind = agent_kind_at(app.state.agent_type_selector_index);
+            let row = app.state.agent_type_selector_index;
             app.state.agent_type_selector_index = 0;
-            // On to the config step, which shows itself only when the agent
-            // has more than one account to choose between
-            crate::input::agent_configs::start_session_config_step(app, kind);
+            match agent_kind_at(row) {
+                // On to the config step, which shows itself only when the
+                // agent has more than one account to choose between
+                Some(kind) => crate::input::agent_configs::start_session_config_step(app, kind),
+                // Single account: straight to the name
+                None => {
+                    app.state.session_draft.account = None;
+                    app.state.input_mode = InputMode::CreatingAntigravitySession;
+                }
+            }
         }
         _ => {}
     }
@@ -685,11 +718,13 @@ pub fn handle_selecting_agent_type_key(app: &mut App, key: KeyEvent) -> Result<(
 /// The agent the selector's row `index` stands for
 ///
 /// Row order is the view's ([`WIZARD_AGENTS`]), so the two cannot drift.
-pub(crate) fn agent_kind_at(index: usize) -> AgentKind {
-    if index == 0 {
-        AgentKind::Claude
-    } else {
-        AgentKind::Codex
+/// `None` is Antigravity ([`ANTIGRAVITY_ROW`]), which has no account profiles
+/// and so no [`AgentKind`].
+pub(crate) fn agent_kind_at(index: usize) -> Option<AgentKind> {
+    match index {
+        0 => Some(AgentKind::Claude),
+        ANTIGRAVITY_ROW => None,
+        _ => Some(AgentKind::Codex),
     }
 }
 
@@ -700,11 +735,19 @@ mod tests {
     /// Every row of step 1 names an agent, and the first one is Claude
     #[test]
     fn test_each_agent_row_maps_to_its_kind() {
-        assert_eq!(WIZARD_AGENTS.len(), 2);
-        assert_eq!(agent_kind_at(0), AgentKind::Claude);
-        assert_eq!(agent_kind_at(1), AgentKind::Codex);
-        assert_eq!(agent_kind_at(0).agent_type(), AgentType::ClaudeCode);
-        assert_eq!(agent_kind_at(1).agent_type(), AgentType::OpenAICodex);
+        assert_eq!(WIZARD_AGENTS.len(), 3);
+        assert_eq!(agent_kind_at(0), Some(AgentKind::Claude));
+        assert_eq!(agent_kind_at(1), Some(AgentKind::Codex));
+        assert_eq!(
+            agent_kind_at(0).unwrap().agent_type(),
+            AgentType::ClaudeCode
+        );
+        assert_eq!(
+            agent_kind_at(1).unwrap().agent_type(),
+            AgentType::OpenAICodex
+        );
+        assert_eq!(WIZARD_AGENTS[ANTIGRAVITY_ROW], "Antigravity");
+        assert_eq!(agent_kind_at(ANTIGRAVITY_ROW), None);
     }
 
     /// Stepping back reopens step 1 on the row that was chosen, so the two
@@ -712,7 +755,9 @@ mod tests {
     #[test]
     fn test_a_row_and_its_agent_round_trip() {
         for row in 0..WIZARD_AGENTS.len() {
-            assert_eq!(agent_kind_at(row).selector_row(), row);
+            if let Some(kind) = agent_kind_at(row) {
+                assert_eq!(kind.selector_row(), row);
+            }
         }
     }
 }

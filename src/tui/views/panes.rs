@@ -283,7 +283,9 @@ fn prompt_footer(state: &AppState) -> Option<&'static str> {
         InputMode::RenamingProject | InputMode::RenamingFolder => "Enter: save | Esc: cancel",
         InputMode::MovingToFolder => "Tab: complete | Enter: move | Esc: cancel",
         InputMode::SelectingAgentType => "↑↓: navigate | Enter: select | Esc: cancel",
-        InputMode::CreatingSession | InputMode::CreatingCodexSession => "Enter: create | Esc: back",
+        InputMode::CreatingSession
+        | InputMode::CreatingCodexSession
+        | InputMode::CreatingAntigravitySession => "Enter: create | Esc: back",
         // A shell session's flow is one step, so there is nothing behind it
         InputMode::CreatingShellSession => "Enter: create | Esc: cancel",
         InputMode::ConfirmingBranchDelete => {
@@ -659,6 +661,7 @@ mod tests {
             InputMode::SelectingCodexConfig,
             InputMode::CreatingSession,
             InputMode::CreatingCodexSession,
+            InputMode::CreatingAntigravitySession,
         ] {
             assert!(footer(mode).ends_with("Esc: back"), "{mode:?}");
         }

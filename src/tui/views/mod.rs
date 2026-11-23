@@ -50,7 +50,8 @@ pub use prompts::{
 };
 pub use session::render_session_view;
 pub use session_wizard::{
-    render_agent_type_selector, render_session_name_input, wizard_title, WIZARD_AGENTS,
+    render_agent_type_selector, render_session_name_input, wizard_title, ANTIGRAVITY_ROW,
+    WIZARD_AGENTS,
 };
 pub use worktree::{
     render_branch_delete_confirmation, render_default_base_selector,

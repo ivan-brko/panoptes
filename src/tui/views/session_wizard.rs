@@ -17,7 +17,13 @@ use crate::tui::widgets::dialog::{render_dialog, DialogSize, DialogSpec};
 use crate::tui::widgets::selection::{selection_name_style, selection_prefix};
 
 /// The agents offered by step 1, in list order
-pub const WIZARD_AGENTS: [&str; 2] = ["Claude Code", "Codex"];
+pub const WIZARD_AGENTS: [&str; 3] = ["Claude Code", "Codex", "Antigravity"];
+
+/// Antigravity's row in step 1
+///
+/// It runs as whoever `agy` is signed in as, so it has no config step and
+/// goes straight to the name.
+pub const ANTIGRAVITY_ROW: usize = 2;
 
 /// Title for a wizard step, naming what has been chosen so far
 ///
@@ -65,7 +71,8 @@ pub fn render_agent_type_selector(frame: &mut Frame, area: Rect, selected_index:
             border_color: t.accent,
             alignment: Alignment::Left,
             width: DialogSize::Fixed(50),
-            height: DialogSize::Fixed(9),
+            // Four lines above the list, two below, and the border
+            height: DialogSize::Fixed(WIZARD_AGENTS.len() as u16 + 7),
         },
         lines,
     );
@@ -133,6 +140,7 @@ mod tests {
         assert!(contains_line(&lines, "Select agent type:"), "{:?}", lines);
         assert!(contains_line(&lines, "Claude Code"), "{:?}", lines);
         assert!(contains_line(&lines, "▶ Codex"), "{:?}", lines);
+        assert!(contains_line(&lines, "Antigravity"), "{:?}", lines);
     }
 
     /// The name step carries the choices already made, so the modal reads as

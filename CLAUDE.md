@@ -26,7 +26,7 @@ Common clippy patterns to be aware of:
 
 ## Architecture
 
-Panoptes is a terminal dashboard for managing multiple AI coding agent sessions (Claude Code and OpenAI Codex CLI). It spawns agents in PTYs and tracks their state via HTTP hooks.
+Panoptes is a terminal dashboard for managing multiple AI coding agent sessions (Claude Code, OpenAI Codex CLI and Antigravity CLI). It spawns agents in PTYs and tracks their state via HTTP hooks (for Antigravity, its status line).
 
 ### Data Flow
 
@@ -43,7 +43,8 @@ PTY Output → Session buffer → TUI render
   the screen and how far each one is drilled in
 - `app/background.rs` - Off-thread git jobs (fetch, worktree create/remove) with a cancellable loading overlay
 - `app/selection.rs` - Mouse text selection: normalization, click counting, word/line expansion, and the stream/block `Shape` (pure; routed from `app/mod.rs`, painted by `tui/views/session.rs`)
-- `agent/` - Agent adapters (Claude Code, Codex, Shell) with hook setup
+- `agent/` - Agent adapters (Claude Code, Codex, Antigravity, Shell) with hook setup
+- `hooks/antigravity_status_line.rs` - Antigravity's status-line payload: state, conversation ID, quota
 - `session/` - Session lifecycle, PTY management, terminal emulation
 - `session/state_machine.rs` - Pure agent-event state machine (hook event → state transition)
 - `session/pty_reader.rs` - Per-PTY reader thread draining output into a byte-bounded queue

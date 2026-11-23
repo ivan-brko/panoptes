@@ -2,7 +2,7 @@
 
 ## What is Panoptes?
 
-Panoptes is a terminal-based dashboard for managing multiple AI coding agent sessions simultaneously. It supports both Claude Code and OpenAI Codex CLI. Named after the many-eyed giant of Greek mythology, it gives developers a bird's-eye view of all their AI coding assistant sessions across different projects and branches.
+Panoptes is a terminal-based dashboard for managing multiple AI coding agent sessions simultaneously. It supports Claude Code, OpenAI Codex CLI and Antigravity CLI (`agy`). Named after the many-eyed giant of Greek mythology, it gives developers a bird's-eye view of all their AI coding assistant sessions across different projects and branches.
 
 ## The Problem
 
@@ -91,7 +91,7 @@ Shell sessions show simplified states:
 
 ### Multi-Session Management
 
-Run as many Claude Code and Codex sessions as you need. Each session is independent and maintains its own conversation history. Creating one is a single dialog with three steps - the agent (Claude Code or Codex), the account it runs under, then the name - where `Esc` steps back one at a time.
+Run as many Claude Code, Codex and Antigravity sessions as you need. Each session is independent and maintains its own conversation history. Creating one is a single dialog with three steps - the agent (Claude Code, Codex or Antigravity), the account it runs under, then the name - where `Esc` steps back one at a time. Antigravity runs as whoever `agy` is signed in as, so it skips the account step.
 
 ### Git-Aware Organization
 
@@ -99,7 +99,7 @@ Panoptes understands git. It organizes sessions by repository and branch, and us
 
 ### Real-Time State Tracking
 
-Through agent hook systems, Panoptes knows exactly what each session is doing at any moment. Claude Code and Codex (0.156.1 and later) both provide granular tool-use tracking (Thinking, Executing, Waiting) and tell Panoptes when they are waiting for your approval; older Codex versions are tracked from their session logs. No more guessing if a session is still working or waiting for you.
+Through agent hook systems, Panoptes knows exactly what each session is doing at any moment. Claude Code and Codex (0.156.1 and later) both provide granular tool-use tracking (Thinking, Executing, Waiting) and tell Panoptes when they are waiting for your approval; older Codex versions are tracked from their session logs. Antigravity (1.5 and later) is tracked from its status line: working, waiting for your approval, and idle, including the turn it starts by itself when a background command finishes. No more guessing if a session is still working or waiting for you.
 
 ### Attention System
 
@@ -192,6 +192,11 @@ Manage multiple accounts for both Claude Code and Codex CLI:
 - **Project Defaults** - Set a default configuration for each project (independent for Claude and Codex)
 - **Session Selection** - Choose which configuration to use when creating a new session, as the step right after the agent type (skipped when there is only one configuration)
 - **Visual Indicator** - See which configuration a session is using in the header
+
+**Antigravity** runs single-account: as whoever `agy` is signed in as. Its
+session header shows that account's email, the model, context use and the
+weekly quota closest to running out. Multiple Antigravity accounts are not
+supported: Antigravity's terms forbid running several accounts side by side.
 
 ### Claude Code Permissions Sync
 

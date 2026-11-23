@@ -23,7 +23,8 @@
 //!
 //! The same document also draws Panoptes' own compact status line, for users
 //! who have none of their own ([`compact_line`], run as the hidden
-//! `panoptes status-line` subcommand).
+//! `panoptes status-line` subcommand). The subcommand serves Antigravity's
+//! wrapper too, and hands its payloads to `antigravity_status_line`.
 
 use chrono::{DateTime, Local, TimeZone, Utc};
 use serde_json::Value;
@@ -134,7 +135,13 @@ pub fn run_subcommand() {
     let Ok(payload) = serde_json::from_str::<Value>(&input) else {
         return;
     };
-    if let Some(line) = compact_line(&payload, Local::now()) {
+    // The wrapper is shared with Antigravity, whose document is its own shape
+    let line = if super::antigravity_status_line::is_antigravity(&payload) {
+        super::antigravity_status_line::compact_line(&payload, Local::now())
+    } else {
+        compact_line(&payload, Local::now())
+    };
+    if let Some(line) = line {
         let _ = std::io::stdout().write_all(line.as_bytes());
     }
 }

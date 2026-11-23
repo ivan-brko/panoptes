@@ -186,6 +186,7 @@ pub fn render_session_delete_confirmation(
             SessionType::ClaudeCode => "This will kill the Claude Code process.",
             SessionType::OpenAICodex => "This will kill the Codex process.",
             SessionType::Shell => "This will kill the shell process.",
+            SessionType::Antigravity => "This will kill the Antigravity process.",
         })
         .unwrap_or("This will kill the process.")
         .to_string();
