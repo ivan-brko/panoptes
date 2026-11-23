@@ -471,6 +471,8 @@ pub struct AppState {
     /// What the last probe of each Codex account found: login, plan, quota
     pub codex_account_probes:
         std::collections::HashMap<uuid::Uuid, crate::codex_config::probe::CodexAccountProbe>,
+    /// Which account each Claude profile is signed into, as last read
+    pub claude_logins: crate::claude_config::account::ClaudeLogins,
     /// Agent type selector index (0 = Claude Code, 1 = Codex)
     pub agent_type_selector_index: usize,
 

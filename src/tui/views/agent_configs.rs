@@ -55,7 +55,8 @@ fn copy_for(kind: AgentKind) -> &'static AgentConfigCopy {
 /// A second row under each account, given its id and the columns available
 ///
 /// Codex accounts use it for their login and quota
-/// ([`super::codex_account::codex_account_line`]); Claude's have none yet.
+/// ([`super::codex_account::codex_account_line`]), Claude profiles for the
+/// account they are signed into ([`super::claude_account::claude_profile_line`]).
 pub type AccountDetail<'a> = &'a dyn Fn(Uuid, usize) -> Line<'static>;
 
 /// Render an agent's config list into a settings-pane rect

@@ -280,6 +280,24 @@ fn plan_label(value: &Value) -> Option<String> {
     Some(label.to_string())
 }
 
+/// What was last read of every profile's login
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeLogins {
+    /// Each profile's login, once read
+    pub auth: HashMap<uuid::Uuid, ClaudeAuth>,
+    /// [`shared_accounts`] of `auth`, kept current by [`Self::set`]
+    pub shared: HashMap<uuid::Uuid, Vec<uuid::Uuid>>,
+}
+
+impl ClaudeLogins {
+    /// Record profile `id`'s login, forgetting profiles no longer in `live`
+    pub fn set(&mut self, id: uuid::Uuid, auth: ClaudeAuth, live: &[uuid::Uuid]) {
+        self.auth.insert(id, auth);
+        self.auth.retain(|id, _| live.contains(id));
+        self.shared = shared_accounts(self.auth.iter().map(|(id, auth)| (*id, auth)));
+    }
+}
+
 /// For each profile signed into the same account as another, those others
 ///
 /// Two profiles on one login share one quota, which defeats the point of
@@ -346,9 +364,99 @@ fn shell_path(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
+/// How often the profiles' login files are looked at while on screen
+const LOGIN_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The files' modification times a profile's login was last read at
+pub type LoginFilesMtime = (Option<SystemTime>, Option<SystemTime>);
+
+/// When to read the profiles' logins again
+///
+/// Every profile is read when the profiles come on screen (Settings, or the
+/// wizard's account step) - so at the very least each time they are opened -
+/// and again whenever its `.claude.json` or `settings.json` changes while
+/// they stay up. Claude replaces `.claude.json` by renaming a finished temp
+/// file over it, so a change is safe to read at once, with no debounce.
+#[derive(Debug, Default)]
+pub struct LoginWatch {
+    visible: bool,
+    last_check: Option<std::time::Instant>,
+    seen: HashMap<uuid::Uuid, LoginFilesMtime>,
+}
+
+impl LoginWatch {
+    /// Record whether the profiles are on screen; true when they just appeared
+    pub fn set_visible(&mut self, visible: bool) -> bool {
+        let opened = visible && !self.visible;
+        self.visible = visible;
+        opened
+    }
+
+    /// Whether the profiles are on screen and their files are due a look
+    ///
+    /// Always due on the tick they come on screen.
+    pub fn due(&mut self, opened: bool, now: std::time::Instant) -> bool {
+        if !self.visible {
+            return false;
+        }
+        let due = opened
+            || self
+                .last_check
+                .map_or(true, |at| now.duration_since(at) >= LOGIN_POLL);
+        if due {
+            self.last_check = Some(now);
+        }
+        due
+    }
+
+    /// Whether to read profile `id` again, given its files' times now
+    ///
+    /// Records `mtime` as read when it answers yes.
+    pub fn should_read(&mut self, id: uuid::Uuid, mtime: LoginFilesMtime, opened: bool) -> bool {
+        let changed = self.seen.get(&id) != Some(&mtime);
+        if opened || changed {
+            self.seen.insert(id, mtime);
+        }
+        opened || changed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_login_watch_reads_on_open_and_on_change() {
+        let mut watch = LoginWatch::default();
+        let id = uuid::Uuid::new_v4();
+        let start = std::time::Instant::now();
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(1);
+
+        // Off screen, nothing is looked at
+        assert!(!watch.due(false, start));
+
+        let opened = watch.set_visible(true);
+        assert!(opened);
+        assert!(watch.due(opened, start));
+        assert!(watch.should_read(id, (Some(t0), None), opened));
+
+        // Still on screen: not due again until the poll interval passes
+        assert!(!watch.set_visible(true));
+        assert!(!watch.due(false, start + std::time::Duration::from_millis(10)));
+        let later = start + LOGIN_POLL;
+        assert!(watch.due(false, later));
+        assert!(!watch.should_read(id, (Some(t0), None), false));
+        // A login rewrites the file
+        assert!(watch.should_read(id, (Some(t1), None), false));
+        assert!(!watch.should_read(id, (Some(t1), None), false));
+
+        // Reopening reads again even when nothing changed
+        watch.set_visible(false);
+        let opened = watch.set_visible(true);
+        assert!(watch.due(opened, later));
+        assert!(watch.should_read(id, (Some(t1), None), opened));
+    }
 
     const MAX: &str = include_str!("fixtures/claude_json/max.json");
     const TEAM: &str = include_str!("fixtures/claude_json/team.json");

@@ -12,6 +12,7 @@ use crate::tui::theme::theme;
 
 mod account_row;
 mod agent_configs;
+pub(crate) mod claude_account;
 mod claude_settings;
 pub(crate) mod codex_account;
 mod confirm;
