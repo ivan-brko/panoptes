@@ -175,6 +175,10 @@ pub struct Theme {
     pub cancel_key: Color,
     /// Color for default-item markers (e.g. "★" / "(default)")
     pub default_marker: Color,
+
+    // === Scheduled Actions ===
+    /// A session armed to act on its own later (`resumes 20:11`)
+    pub resume_armed: Color,
 }
 
 /// The tokens a preset owns
@@ -388,6 +392,15 @@ impl Theme {
             confirm_key: Color::Green,
             cancel_key: Color::Red,
             default_marker: Color::Yellow,
+
+            // Scheduled actions: "this will act by itself" has to read apart
+            // from everything else on a session row - the state's green, the
+            // failure's red, the cache's green or grey, the update badge's
+            // light blue - and from every preset's accent. Light magenta is
+            // the one named colour none of them use; plain magenta is only
+            // ever chrome (a prompt, Hera's accent) or a resumable row, which
+            // cannot be armed.
+            resume_armed: Color::LightMagenta,
         }
     }
 
@@ -679,6 +692,7 @@ mod tests {
                 assert_eq!(tier.confirm_key, base.confirm_key, "{palette:?}");
                 assert_eq!(tier.cancel_key, base.cancel_key, "{palette:?}");
                 assert_eq!(tier.default_marker, base.default_marker, "{palette:?}");
+                assert_eq!(tier.resume_armed, base.resume_armed, "{palette:?}");
                 assert_eq!(tier.bg_base, base.bg_base, "{palette:?}");
                 // Suspended is deliberately absent: it is a structural grey,
                 // and the greys are exactly what the tiers refine. On the
@@ -768,6 +782,40 @@ mod tests {
                     assert_ne!(
                         ta.text_selection_bg, tb.text_selection_bg,
                         "{a:?} vs {b:?} at {support:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An armed resume must stand apart from everything else that can share
+    /// its row, and from the chrome, in every preset and tier
+    #[test]
+    fn test_the_armed_resume_colour_is_its_own() {
+        for support in TIERS {
+            for palette in Palette::ALL {
+                let t = Theme::new(palette, support);
+                let others = [
+                    t.accent,
+                    t.border_focus,
+                    t.input_prompt,
+                    t.default_marker,
+                    t.success,
+                    t.warning,
+                    t.danger,
+                    t.update_available,
+                    t.text,
+                    t.text_dim,
+                    t.attention_badge,
+                ];
+                for other in others {
+                    assert_ne!(t.resume_armed, other, "{palette:?} at {support:?}");
+                }
+                for state in STATES {
+                    assert_ne!(
+                        t.resume_armed,
+                        t.session_state_color(&state),
+                        "{palette:?} {state:?} at {support:?}"
                     );
                 }
             }

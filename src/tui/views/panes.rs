@@ -256,9 +256,7 @@ fn footer_text(ctx: &PaneContext) -> String {
 
     let base = match state.focus.tab() {
         Some(Tab::Projects) => projects_footer(state, ctx.project_store, ctx.config),
-        Some(Tab::Sessions) => {
-            "↑↓/1-9: select | Enter: open | u: restart | d: delete | Esc: projects".to_string()
-        }
+        Some(Tab::Sessions) => sessions_footer(state, ctx.sessions),
         Some(Tab::Settings) => settings_footer(state).to_string(),
         None => String::new(),
     };
@@ -268,6 +266,31 @@ fn footer_text(ctx: &PaneContext) -> String {
     // way any of them goes
     let global = "←/⇧Tab: prev pane | →/Tab: next pane | q: quit | ?: help";
     footer_with_attention(format!("{} | {}", base, global), ctx.sessions)
+}
+
+/// Pane 2's keys, offering the resume toggle only where it applies
+///
+/// `a` is offered while the selected session is armed, or sitting on a
+/// usage limit it could be armed against; anywhere else it would only be
+/// refused.
+fn sessions_footer(state: &AppState, sessions: &SessionManager) -> String {
+    let base = "↑↓/1-9: select | Enter: open | u: restart | d: delete";
+    let resume = sessions
+        .get_by_index(state.sessions_pane_index)
+        .and_then(|session| {
+            let info = &session.info;
+            if info.auto_resume.is_some() {
+                Some("a: cancel resume")
+            } else {
+                crate::session::auto_resume::armable(info)
+                    .is_ok()
+                    .then_some("a: resume at reset")
+            }
+        });
+    match resume {
+        Some(resume) => format!("{} | {} | Esc: projects", base, resume),
+        None => format!("{} | Esc: projects", base),
+    }
 }
 
 /// The footer a prompt owns while it is open, if any
@@ -775,6 +798,37 @@ mod tests {
         };
         let lines = render(160, &state, &f);
         assert!(contains_line(&lines, "↑↓/1-9: select"), "{lines:?}");
+    }
+
+    /// `a` is offered only where it would not just be refused
+    #[test]
+    fn test_the_sessions_footer_offers_resume_only_on_a_usage_limit() {
+        use crate::agent::events::{AgentEvent, UsageLimit};
+        let mut sessions = SessionManager::with_store(Config::default(), SessionStore::new());
+        let id = sessions
+            .insert_test_session("s", uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .unwrap();
+        sessions.get_mut(id).unwrap().info.session_type = crate::session::SessionType::ClaudeCode;
+        let state = AppState::default();
+        assert!(!sessions_footer(&state, &sessions).contains("a: "));
+
+        let fail = |reason: &str| AgentEvent::TurnFailed {
+            reason: Some(reason.to_string()),
+            limit: Some(UsageLimit {
+                window: "five_hour".to_string(),
+                resets_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                using_overage: false,
+            }),
+        };
+        sessions.apply_agent_event(id, fail("rate limited"));
+        assert!(!sessions_footer(&state, &sessions).contains("a: "));
+
+        sessions.apply_agent_event(id, AgentEvent::TurnStarted { title: None });
+        sessions.apply_agent_event(id, fail("usage limit"));
+        assert!(sessions_footer(&state, &sessions).contains("a: resume at reset"));
+
+        sessions.toggle_auto_resume(id, chrono::Utc::now()).unwrap();
+        assert!(sessions_footer(&state, &sessions).contains("a: cancel resume"));
     }
 
     #[test]

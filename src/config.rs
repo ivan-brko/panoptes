@@ -79,7 +79,7 @@ impl CustomShortcut {
 /// where custom shortcuts do not fire.
 ///
 /// `Space`, `Esc`, `Enter`, and `Tab` are not chars and cannot be bound at all.
-const RESERVED_KEYS: &[char] = &['q', 'n', 's', 'd', 'i', 'u'];
+const RESERVED_KEYS: &[char] = &['q', 'n', 's', 'd', 'i', 'u', 'a'];
 const RESERVED_DIGITS: bool = true;
 
 /// Check if a key is reserved and cannot be used for custom shortcuts
@@ -155,6 +155,17 @@ pub struct Config {
     /// wakes on the next interaction. Set to 0 to disable.
     #[serde(default = "default_suspend_after")]
     pub suspend_after_secs: u64,
+
+    /// Arm every session refused on a usage limit to resume at its reset
+    ///
+    /// Off by default, and each session can still be armed or disarmed by
+    /// hand with `a` in the Sessions pane. An armed session is sent "Continue
+    /// where you left off." a minute after the limit lifts, unless the user
+    /// has typed into it, it has moved on, it was restarted, or its screen is
+    /// not the agent's empty prompt. A reset more than six hours out is never
+    /// armed.
+    #[serde(default)]
+    pub auto_resume_at_reset: bool,
 
     /// Whether to log every raw agent transcript line to `~/.panoptes/logs/`
     ///
@@ -515,6 +526,7 @@ impl Default for Config {
             selection_word_characters: default_selection_word_characters(),
             multi_click_ms: default_multi_click_ms(),
             suspend_after_secs: default_suspend_after(),
+            auto_resume_at_reset: false,
             log_agent_events: false,
             attention_on_idle: false,
             claude_status_line: true,

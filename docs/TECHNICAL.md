@@ -1487,6 +1487,64 @@ Setting `log_agent_events = true` writes every raw transcript line to
 can be checked against its input. Best effort throughout: it must never disturb
 the session it describes.
 
+### Resuming at a Usage Limit's Reset
+
+`session/auto_resume.rs` is the pure half: every decision takes the clock, and
+the screen, as an argument, so each guard has a unit test. A session is
+*armable* only when it is a Claude or Codex session sitting (`Waiting`) on a
+failed turn labelled `usage limit` whose `UsageLimit` carries a `resets_at`
+later than the failure's own `failed_at` (stamped by `state_machine::apply`),
+and the user has sent it no input since the failed turn began
+(`turn_started_at`, stamped on `TurnStarted` and on Panoptes' own guess for a
+Codex without prompt hooks; the failure itself when no start was seen). Arming
+also refuses a reset already past, or more than six hours (`MAX_LEAD`) out.
+Codex's `rate limited` is a different label and never arms; nor does
+Antigravity, whose failures carry no reset.
+
+Arming records a `ResumeArm` on the `SessionInfo` (not persisted): the reset,
+the failure's time, the quiet-since time, the conversation ID and the agent's
+PID. It is set by `a` in pane 2 (`SessionManager::toggle_auto_resume`), or,
+with `auto_resume_at_reset`, by `apply_agent_event` on the edge where the
+session *becomes* armable - for Claude that is when the transcript fills in the
+reset the `StopFailure` hook lacked, and only on the edge, so a session
+disarmed by hand is not re-armed by the next event. A refused auto-arm leaves a
+notice for the header.
+
+`App::tick_auto_resume` calls `SessionManager::tick_auto_resume(now, mono)`
+every loop; `auto_resume::step` re-checks every guard each time and disarms
+without writing on any failure: a different PID (killed, woken, restarted), not
+`Waiting`, not the same failure (by `failed_at` and `resets_at`), a different
+conversation, user input since the quiet-since time, or more than 30 minutes
+past the firing time.
+
+Before each write the screen has to agree. `VirtualTerminal::live_snapshot`
+reads the live screen (whatever the view is scrolled to, restoring the scroll
+after), and `read_prompt` recognises the agent's prompt line narrowly, from how
+the agents draw it (Claude Code 2.1.330: `❯ ` between two rules; Codex 0.156.1:
+a bold `› `; both with the real cursor on that line at the end of the input and
+the placeholder drawn dim): the cursor must be visible, on a line that starts
+with the glyph, at the end of the non-dim text (or right after the glyph when
+there is none), and no line below may look like a menu - a selection marker or
+a numbered option, which is how Claude's rate-limit options and Codex's
+model-switch and update popups draw. Before typing the line must be empty;
+before `Enter` it must hold exactly `CONTINUE_PROMPT`. Anything not positively
+recognised disarms, with a notice; a mismatched line is left unsent.
+
+A minute after the reset it types `CONTINUE_PROMPT`, and a second later writes
+`\r`: both agents treat a burst of characters ending in `\r` as a paste, where
+the `\r` is a newline rather than a submission. Both writes go straight to the
+PTY, so they do not count as the user's input. Sessions due in the same tick
+are typed five seconds apart, in list order. Each tick compares the wall clock
+with `Instant`; when the wall clock ran more than 30 seconds ahead, the machine
+slept, and every arm is held for 60 seconds so the user who just came back is
+not typed over.
+
+Any user input - `Session::write`, `write_paste`, `send_key`, which carry keys,
+pastes and mouse reports alike - goes through `note_user_input`, which stamps
+`last_user_input` and drops the arm at once. An armed session is exempt from
+idle suspension (`may_suspend`), and a suspended one is never woken to be
+resumed: it is no longer `Waiting`, so the arm simply lapses.
+
 ### Suspending Inactive Sessions
 
 An idle Claude Code process measures around 565 MB - roughly 25x the whole

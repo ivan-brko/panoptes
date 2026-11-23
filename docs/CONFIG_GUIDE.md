@@ -54,6 +54,10 @@ exited_retention_secs = 300
 # (scrollback is kept; the session wakes when you type into it). 0 disables.
 suspend_after_secs = 7200
 
+# Arm every session refused on a usage limit to continue by itself a minute
+# after the limit resets (each one can still be toggled with `a`)
+auto_resume_at_reset = false
+
 # Notification method when sessions need attention
 # Options: "bell" (terminal bell), "title" (update terminal title), "none"
 notification_method = "bell"
@@ -267,6 +271,35 @@ monitors, or a scheduled prompt such as `/loop`, all of which the kill would end
 
 **When to change:** Lower it if you keep many sessions open and are short on
 memory; raise it, or set `0`, if you would rather never wait for a wake.
+
+---
+
+### auto_resume_at_reset
+
+| Property | Value |
+|----------|-------|
+| Default | `false` |
+| Type | Boolean |
+
+When a Claude or Codex turn is refused on a usage limit and the agent says when
+it resets, arm the session to continue by itself: a minute after the reset,
+Panoptes types "Continue where you left off." into it and presses Enter. The row
+shows `resumes 20:11` while it is armed.
+
+Off, each session can still be armed by hand with `a` in the Sessions pane; on,
+`a` cancels one. A reset more than six hours away - a weekly limit - is never
+armed, and the header says so. Either way nothing is written unless the session
+is still idle on that same failure, in the same conversation and process, you
+have not typed into it since that turn began, and the screen shows the agent's
+own prompt, empty, with no menu open. Enter is pressed only if the line then
+holds exactly the prompt typed; otherwise it is left unsent and the header says
+why. "Rate limited", auth and server failures never arm. Sessions due together
+go a few seconds apart, a resume waits a minute after the machine wakes from
+sleep, and one more than half an hour late gives up. An armed session is exempt
+from `suspend_after_secs`.
+
+**When to change:** Turn it on if you run long jobs overnight and would rather
+they pick up on their own than wait for you.
 
 ---
 
@@ -557,6 +590,7 @@ Defines custom keyboard shortcuts that spawn shell sessions with predefined comm
 - `n`, `s`, `d` - New / shell / delete, bound in panes 1 and 2
 - `i` - Import a conversation, bound at a branch in pane 1
 - `u` - Restart a session on its agent's updated binary, bound in panes 1 and 2
+- `a` - Resume a session at its usage limit's reset, bound in pane 2
 - `0-9` - Used for session number jumping
 
 `c`, `g`, `G`, `k` and `x` used to be reserved and are now free: the configs,

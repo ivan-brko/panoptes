@@ -43,6 +43,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.activate_session(session_id)?;
             }
         }
+        KeyCode::Char('a') => {
+            // Resume at the usage limit's reset; refused, with a reason, for
+            // anything but a usage-limit failure that says when it lifts
+            if let Some(session) = app.sessions.get_by_index(app.state.sessions_pane_index) {
+                let session_id = session.info.id;
+                app.toggle_auto_resume(session_id);
+            }
+        }
         KeyCode::Char(super::RESTART_SESSION_KEY) => {
             if let Some(session) = app.sessions.get_by_index(app.state.sessions_pane_index) {
                 let session_id = session.info.id;

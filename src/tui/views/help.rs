@@ -256,6 +256,7 @@ fn sessions_shortcuts() -> Vec<Line<'static>> {
                 "Restart an ↻ session on the updated agent, resuming it",
             ),
             shortcut_line("d", "Delete the selected session"),
+            shortcut_line("a", "Resume at the usage limit's reset (toggle)"),
             shortcut_line("Esc", "Back to the Projects pane"),
         ],
     )

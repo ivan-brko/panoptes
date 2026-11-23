@@ -716,6 +716,7 @@ impl App {
             dirty |= self.acknowledge_visible_session();
             dirty |= self.tick_shell_state_notifications();
             dirty |= self.tick_auto_close();
+            dirty |= self.tick_auto_resume();
             dirty |= self.tick_idle_suspension();
             dirty |= self.tick_binary_updates();
             dirty |= self.tick_exited_cleanup();
@@ -1090,6 +1091,36 @@ impl App {
             closed_any = true;
         }
         closed_any
+    }
+
+    /// Send armed sessions their continue prompt once their limit resets
+    ///
+    /// Before the suspend sweep, though an armed session is exempt from it
+    /// anyway. Says so in the header: a session that started working while
+    /// nobody touched it should not be a mystery.
+    fn tick_auto_resume(&mut self) -> bool {
+        let (notices, changed) = self
+            .sessions
+            .tick_auto_resume(chrono::Utc::now(), std::time::Instant::now());
+        for notice in notices {
+            self.state.header_notifications.push(notice);
+        }
+        changed
+    }
+
+    /// Arm or disarm the selected session's resume at its limit's reset
+    pub(crate) fn toggle_auto_resume(&mut self, session_id: SessionId) {
+        let now = chrono::Utc::now();
+        let told = match self.sessions.toggle_auto_resume(session_id, now) {
+            Ok(Some(fires_at)) => match crate::agent::events::format_reset(fires_at, now) {
+                Some(when) => format!("Will resume at {}", when),
+                None => "Will resume at the reset".to_string(),
+            },
+            Ok(None) => "Will not resume at the reset".to_string(),
+            Err(refusal) => refusal.describe(now),
+        };
+        self.state.header_notifications.push(told);
+        self.state.needs_render = true;
     }
 
     /// Suspend agent sessions left idle, reclaiming their memory.

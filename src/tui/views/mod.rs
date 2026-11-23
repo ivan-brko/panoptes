@@ -111,6 +111,20 @@ pub(crate) fn failed_turn_limit_display(info: &SessionInfo, now: DateTime<Utc>) 
     Some(format!(" \u{00b7} {}", limit.describe_at(now)))
 }
 
+/// `resumes 20:11` for a session armed to resume at its limit's reset
+///
+/// The time the prompt is due, a minute after the reset itself. Once that
+/// has passed the prompt is going in, so it reads `resuming`.
+pub(crate) fn auto_resume_display(info: &SessionInfo, now: DateTime<Utc>) -> Option<String> {
+    let arm = info.auto_resume.as_ref()?;
+    Some(
+        match crate::agent::events::format_reset(arm.fires_at(), now) {
+            Some(when) => format!("resumes {}", when),
+            None => "resuming".to_string(),
+        },
+    )
+}
+
 fn base_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
     match (info.session_type, info.state) {
         // A recovered session that cannot come back says why, rather than
