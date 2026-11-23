@@ -601,9 +601,11 @@ hooks own its state: the rollout contributes usage figures and the
 conversation title only (`state_machine::admits_transcript_event`), its
 recency-based subagent count
 is ignored, and a `notify` event left installed by an older Panoptes is
-dropped as a duplicate of `Stop`. One known gap: Codex fires no hook for a
-turn that fails on an API error, so with hooks live such a turn is not
-reported as over, and the session reads `Thinking` until the next prompt.
+dropped as a duplicate of `Stop`. A failed turn is the one rollout event that
+still gets through: Codex fires no hook for a turn that fails on an API error
+(`run_turn_stop_hooks` only runs after a successful model request), so the
+rollout's `task_complete` carrying the error is the only report of it - see
+**Codex failed turns** below.
 
 **Codex `notify` (Codex before 0.156.1):** Limited to `notify` config firing
 `agent-turn-complete` events. Codex spawns the `notify` argv directly, with no
@@ -1292,7 +1294,33 @@ on a tie - labelled by its length (`5h 12%`, `wk 40%`), or
 `limit hit · resets 20:10` (local time, with the date when the reset is not
 today, and none once it has passed) while `rate_limit_reached_type` is set.
 Each window merges independently, so an update naming only one never blanks
-the other.
+the other. `primary` and `secondary` are positions, not lengths: a window
+written without `window_minutes` is labelled by plan, as T3 Code does - the
+primary is a month (`mo`) on Free and Go and five hours on every other plan,
+the secondary always the week, and with no plan known it stays `limit`. A
+workspace member's own credit allowance, `individual_limit`
+(`{limit, used, remaining_percent, resets_at}`; app-server calls it
+`individualLimit`), is read as a third limit, `credits`, used to
+`100 - remaining_percent`.
+
+**Codex failed turns.** A turn that dies on an API error still ends with
+`task_complete`, which then carries `error: {message, codex_error_info}`
+(Codex's `Error` event itself is never persisted). That becomes
+`AgentEvent::TurnFailed`, labelled from `codex_error_info`
+(`usage_limit_exceeded`, `rate_limit_exceeded` and retries given up on a 429
+are `usage limit`; `other` says nothing). For a usage limit Codex first writes
+a `token_count` with the figures the refusal came with, and
+`transcript::codex::RolloutLimits`, held by the tailer, joins them to the
+failure: every exhausted limit must lift before a turn can run, so the one
+named is the exhausted window that resets *last* (an exhausted window with no
+known reset wins, and no time is promised). When no figures came with it - a
+proxy can strip them - the reset is read from Codex's text,
+"Try again at 3:37 PM." or "try again at Nov 11th, 2026 3:37 PM.", on the
+local clock, plus a minute for the seconds Codex drops, taking the later
+instant of a repeated fall-back hour. A turn that ends with no message after
+figures this turn showed the limit hit is a usage-limit failure too, for Codex
+versions that do not write the error. The row reads
+`Waiting ✗ usage limit · wk resets Nov 14 10:00`, as for Claude.
 
 **Claude rate limits.** The status line's `five_hour` and `seven_day` windows
 map onto the same `primary` / `secondary` windows (300 and 10080 minutes), so

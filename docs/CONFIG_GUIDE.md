@@ -401,7 +401,7 @@ failed = true
 `failed` covers a turn that died on an API error - a usage limit, an expired
 login, an overloaded API - rather than finishing. The agent is still running and
 back at its prompt, so it is kept apart from `crashed`: the fix is usually to
-wait or log in, not to restart anything. Claude Code only, for now.
+wait or log in, not to restart anything. Claude Code and Codex.
 
 **When to change:** Set `turn_complete = false` if you run many agents at once
 and only want to hear about the ones that are actually blocked on you.
