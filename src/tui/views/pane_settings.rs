@@ -243,7 +243,14 @@ pub fn render_settings_pane(
             ctx.claude_config_store,
             ctx.state.claude_configs_selected_index,
             focused,
-            None,
+            Some(&|id, width| {
+                super::claude_account::claude_profile_line(
+                    ctx.claude_config_store,
+                    &ctx.state.claude_logins,
+                    id,
+                    width,
+                )
+            }),
         ),
         SettingsNav::CodexConfigs => {
             let now = chrono::Utc::now();

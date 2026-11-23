@@ -705,6 +705,25 @@ impl SessionInfo {
         }
     }
 
+    /// What to do about the failed turn, when there is one thing that fixes it
+    ///
+    /// A Claude turn that failed on its login says how to sign that profile
+    /// back in, with the exact `CLAUDE_CONFIG_DIR` the process runs under:
+    /// Claude's own "Please run /login" scrolls away, and does not say which
+    /// account directory the login lands in.
+    pub fn failure_fix(&self) -> Option<String> {
+        let failure = self.failed_turn()?;
+        if self.session_type != SessionType::ClaudeCode
+            || failure.reason != crate::transcript::claude::AUTH_FAILED
+        {
+            return None;
+        }
+        Some(format!(
+            "run `{}`",
+            crate::claude_config::account::login_command(self.spawned_claude_config_dir.as_deref())
+        ))
+    }
+
     /// Whether anything still runs, or is scheduled to run, in this session's
     /// process beyond the turn itself
     ///

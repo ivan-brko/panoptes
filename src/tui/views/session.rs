@@ -217,9 +217,16 @@ fn header_suffix(info: &SessionInfo, scroll_offset: usize) -> String {
         // The error scrolls away with the next thing printed, and after
         // that a turn that died on a usage limit looks exactly like one that
         // finished. The badge that said otherwise is cleared on sight.
+        // A failed login also says how to sign this profile back in.
         SessionState::Waiting => info
             .failed_turn()
-            .map(|failure| format!(" - \u{2717} {}", failure.describe_at(Utc::now())))
+            .map(|failure| {
+                let fix = info
+                    .failure_fix()
+                    .map(|fix| format!(" \u{00b7} {}", fix))
+                    .unwrap_or_default();
+                format!(" - \u{2717} {}{}", failure.describe_at(Utc::now()), fix)
+            })
             .unwrap_or_default(),
         _ => String::new(),
     };
@@ -452,6 +459,34 @@ mod tests {
         // Only while it is sitting on that failure
         failed.state = SessionState::Thinking;
         assert_eq!(header_suffix(&failed, 0), "[CC]");
+    }
+
+    /// A failed login names the command that signs this profile back in,
+    /// under the config directory the session runs with
+    #[test]
+    fn test_a_failed_login_names_the_login_command() {
+        let mut failed = info(SessionType::ClaudeCode);
+        failed.state = SessionState::Waiting;
+        failed.spawned_claude_config_dir = Some(std::path::PathBuf::from("/opt/claude-work"));
+        failed.turn_failure = Some(crate::session::TurnFailure::new(
+            Some(crate::transcript::claude::AUTH_FAILED.to_string()),
+            None,
+        ));
+        assert_eq!(
+            header_suffix(&failed, 0),
+            "[CC] - \u{2717} auth failed \u{00b7} run \
+             `CLAUDE_CONFIG_DIR=/opt/claude-work claude auth login`"
+        );
+
+        // Other auth failures are not fixed by logging in again
+        failed.turn_failure = Some(crate::session::TurnFailure::new(
+            Some("cloud credentials".to_string()),
+            None,
+        ));
+        assert_eq!(
+            header_suffix(&failed, 0),
+            "[CC] - \u{2717} cloud credentials"
+        );
     }
 
     /// "Claude Code, signed in as dot-lambda" is one fact, so it gets one

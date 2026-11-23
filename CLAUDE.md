@@ -68,6 +68,9 @@ PTY Output → Session buffer → TUI render
 - `persistence.rs` - Shared atomic-save / load-with-backup for all state files
 - `agent_profiles.rs` - Generic agent profile store (`ProfileStore<C>`)
 - `claude_config/` - Claude Code multi-account configuration
+- `claude_config/account.rs` - Which account a profile is signed into (`.claude.json`'s
+  `oauthAccount`, or API key / cloud), duplicate logins, the login command; drawn by
+  `tui/views/claude_account.rs`
 - `codex_config/` - Codex CLI multi-account configuration (CODEX_HOME)
 - `codex_config/homes.rs` - The one resolver for Codex homes; per-account shadow homes for
   shared history (`codex_shared_history`), and `merge.rs` to copy old history in

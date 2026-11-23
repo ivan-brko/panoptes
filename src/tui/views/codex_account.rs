@@ -18,42 +18,10 @@ use crate::codex_config::probe::{
     CodexAccountProbe, CodexAccountStatus, CodexLogin, CodexQuota, CodexUsage,
 };
 use crate::tui::theme::{theme, Theme};
-
-/// Indent that puts the row under the account's name, past the selection prefix
-pub const DETAIL_INDENT: &str = "    ";
+use crate::tui::views::account_row::{fit, Field};
 
 /// Cells in a quota bar
 const BAR_CELLS: usize = 8;
-
-/// Separator between fields
-const SEP: &str = " · ";
-
-/// One piece of the row, and how long it holds on as the row narrows
-struct Field {
-    spans: Vec<Span<'static>>,
-    /// Higher holds on longer
-    keep: u8,
-    /// Joined to the field before it by a space rather than a separator
-    ///
-    /// A window's reset time is part of that window, not a field of its own.
-    /// It always gives way before its window does, so it is never left
-    /// joined to the wrong one.
-    joined: bool,
-}
-
-impl Field {
-    fn text(text: impl Into<String>, style: Style, keep: u8) -> Self {
-        Self {
-            spans: vec![Span::styled(text.into(), style)],
-            keep,
-            joined: false,
-        }
-    }
-
-    fn width(&self) -> usize {
-        self.spans.iter().map(|s| s.content.chars().count()).sum()
-    }
-}
 
 /// The status row for one account, fitted to `width` columns
 pub fn codex_account_line(
@@ -184,40 +152,6 @@ fn level_colour(used_percent: f64, t: &Theme) -> Color {
     } else {
         t.success
     }
-}
-
-/// Columns a row of `fields` takes, indent and joins included
-fn row_width(fields: &[Field]) -> usize {
-    let joins: usize = fields
-        .iter()
-        .skip(1)
-        .map(|f| if f.joined { 1 } else { SEP.chars().count() })
-        .sum();
-    DETAIL_INDENT.len() + fields.iter().map(Field::width).sum::<usize>() + joins
-}
-
-/// Drop fields, least useful first, until the row fits; then lay it out
-fn fit(mut fields: Vec<Field>, width: usize) -> Line<'static> {
-    while fields.len() > 1 && row_width(&fields) > width {
-        // The weakest field; the later one of equals, so the row keeps its start
-        let weakest = fields
-            .iter()
-            .enumerate()
-            .min_by_key(|(i, f)| (f.keep, std::cmp::Reverse(*i)))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        fields.remove(weakest);
-    }
-
-    let muted = theme().muted_style();
-    let mut spans = vec![Span::raw(DETAIL_INDENT)];
-    for (i, field) in fields.into_iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(if field.joined { " " } else { SEP }, muted));
-        }
-        spans.extend(field.spans);
-    }
-    crate::tui::views::pane_projects::clamp_line(Line::from(spans), width)
 }
 
 #[cfg(test)]

@@ -150,6 +150,8 @@ pub struct App {
     child_focus: Option<SessionId>,
     /// Login and quota probes of the Codex accounts, while they are on screen
     codex_probes: background::CodexProbes,
+    /// When to read the Claude profiles' logins again, while they are on screen
+    claude_logins: crate::claude_config::account::LoginWatch,
 }
 
 /// How often to reconcile transcript watching against the live session list
@@ -198,6 +200,16 @@ fn worn_palette(state: &AppState, saved: crate::config::Palette) -> crate::confi
 fn codex_accounts_visible(state: &AppState) -> bool {
     state.input_mode == InputMode::SelectingCodexConfig
         || (state.settings_nav == SettingsNav::CodexConfigs
+            && matches!(state.focus, Focus::Panes(_)))
+}
+
+/// Whether the Claude profiles are on screen, with their login rows
+///
+/// The Claude twin of [`codex_accounts_visible`]: pane 3 drilled into the
+/// Claude accounts, or the wizard's (and project default's) account step.
+fn claude_accounts_visible(state: &AppState) -> bool {
+    state.input_mode == InputMode::SelectingClaudeConfig
+        || (state.settings_nav == SettingsNav::ClaudeConfigs
             && matches!(state.focus, Focus::Panes(_)))
 }
 
@@ -528,6 +540,7 @@ impl App {
             terminal_focused: true,
             child_focus: None,
             codex_probes: background::CodexProbes::default(),
+            claude_logins: Default::default(),
         })
     }
 
@@ -666,6 +679,7 @@ impl App {
             dirty |= self.tick_settings_marquee();
             dirty |= self.tick_background_job();
             dirty |= self.tick_codex_probes();
+            dirty |= self.tick_claude_logins();
             dirty |= self.tick_resize_debounce()?;
             dirty |= self.process_hook_events();
             dirty |= self.tick_selection_autoscroll();
@@ -2820,6 +2834,45 @@ impl App {
         dirty
     }
 
+    /// Re-read the Claude profiles' logins that changed, while on screen
+    ///
+    /// Every profile is read when the profiles come on screen
+    /// ([`claude_accounts_visible`]), and again whenever its `.claude.json` or
+    /// `settings.json` changes - a `claude auth login` or `/login` while the
+    /// list is open shows up without reopening it. `.claude.json` runs to a
+    /// few hundred KB, but only three of its fields are deserialized, so a
+    /// read stays in the low milliseconds even in a debug build and happens
+    /// right here rather than on a thread. A read caught mid-write keeps the
+    /// last login up and is retried ([`account::LoginWatch::accept`]).
+    /// Returns whether a row changed.
+    fn tick_claude_logins(&mut self) -> bool {
+        use crate::claude_config::account;
+        let opened = self
+            .claude_logins
+            .set_visible(claude_accounts_visible(&self.state));
+        if !self.claude_logins.due(opened, Instant::now()) {
+            return false;
+        }
+        let profiles: Vec<(uuid::Uuid, Option<PathBuf>)> = self
+            .claude_config_store
+            .configs()
+            .map(|c| (c.id, c.config_dir.clone()))
+            .collect();
+        let live: Vec<uuid::Uuid> = profiles.iter().map(|(id, _)| *id).collect();
+        let mut dirty = false;
+        for (id, dir) in profiles {
+            let mtime = account::login_files_mtime(dir.as_deref());
+            if self.claude_logins.should_read(id, mtime, opened) {
+                let auth = account::read_auth(dir.as_deref());
+                if self.claude_logins.accept(id, mtime, &auth) {
+                    self.state.claude_logins.set(id, auth, &live);
+                    dirty = true;
+                }
+            }
+        }
+        dirty
+    }
+
     /// Collect finished Codex account probes and start the ones now due
     ///
     /// Probes run only while the accounts are on screen ([`codex_accounts_visible`]):
@@ -3142,7 +3195,14 @@ impl App {
                         state.config_selector_index,
                         claude_config_store.get_default_id(),
                         config_selector_flow(state),
-                        None,
+                        Some(&|id, width| {
+                            crate::tui::views::claude_account::claude_profile_line(
+                                claude_config_store,
+                                &state.claude_logins,
+                                id,
+                                width,
+                            )
+                        }),
                     );
                 }
                 InputMode::ConfirmingClaudeSettingsCopy => {
@@ -3823,6 +3883,39 @@ mod tests {
             Focus::Panes(Tab::Settings),
             SettingsNav::ClaudeConfigs,
             InputMode::SelectingClaudeConfig
+        )));
+    }
+
+    /// Claude profiles are read while pane 3 shows them or the wizard's
+    /// account step does - and not while a session fills the screen
+    #[test]
+    fn test_claude_accounts_visible() {
+        let at = |focus, nav, mode| AppState {
+            focus,
+            settings_nav: nav,
+            input_mode: mode,
+            ..Default::default()
+        };
+
+        assert!(claude_accounts_visible(&at(
+            Focus::Panes(Tab::Settings),
+            SettingsNav::ClaudeConfigs,
+            InputMode::Normal
+        )));
+        assert!(claude_accounts_visible(&at(
+            Focus::Panes(Tab::Projects),
+            SettingsNav::Sections,
+            InputMode::SelectingClaudeConfig
+        )));
+        assert!(!claude_accounts_visible(&at(
+            Focus::Session,
+            SettingsNav::ClaudeConfigs,
+            InputMode::Normal
+        )));
+        assert!(!claude_accounts_visible(&at(
+            Focus::Panes(Tab::Settings),
+            SettingsNav::CodexConfigs,
+            InputMode::SelectingCodexConfig
         )));
     }
 

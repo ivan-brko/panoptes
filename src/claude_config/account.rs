@@ -1,0 +1,776 @@
+//! Which account a Claude profile is signed into
+//!
+//! Claude Code keeps its login in `.claude.json` - `$CLAUDE_CONFIG_DIR/.claude.json`
+//! for a profile, `~/.claude.json` (beside `~/.claude`, not inside it) for one
+//! without a `CLAUDE_CONFIG_DIR`. Its `oauthAccount` object names the account:
+//! email, organisation and plan. The token itself lives elsewhere (the
+//! keychain or `.credentials.json`) and is never read here.
+//!
+//! A profile can also not be using a subscription at all. Bedrock, Vertex and
+//! Foundry are switched on by environment variables, from Panoptes' own
+//! environment (which sessions inherit) or the profile's `settings.json`
+//! `env`; an API key comes from `ANTHROPIC_API_KEY` (only once Claude has
+//! been told to use it), `ANTHROPIC_AUTH_TOKEN`, an `apiKeyHelper`, or a key
+//! stored by `/login` as `primaryApiKey`. Those are shown as what they are.
+//!
+//! `.claude.json` is not small - a few hundred KB, mostly per-project
+//! history - and Claude rewrites it often while it runs. So it is
+//! deserialized into [`ClaudeJson`], which names only the three fields used
+//! here and lets serde skip the rest without building it, and it is read
+//! only while the profiles are on screen, when a file changes.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use serde::Deserialize;
+use serde_json::Value;
+
+/// How a profile's sessions will authenticate
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeAuth {
+    /// A claude.ai subscription login
+    Subscription(ClaudeAccount),
+    /// Not through Anthropic's login at all: "API key", "Bedrock", ...
+    Other(&'static str),
+    /// Nothing to sign in with
+    SignedOut,
+    /// `.claude.json` is there but could not be read
+    Unreadable(String),
+}
+
+/// The account behind a subscription login
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClaudeAccount {
+    pub email: Option<String>,
+    /// Plan as the user knows it: "Pro", "Max 20x", "Team"
+    pub plan: Option<String>,
+    pub organization: Option<String>,
+    pub account_uuid: Option<String>,
+    pub organization_uuid: Option<String>,
+}
+
+impl ClaudeAccount {
+    /// What makes two logins the same: the account, in the same organisation
+    ///
+    /// One person in two organisations is two seats with two quotas, so that
+    /// is not a duplicate. `None` when the file names neither id nor email.
+    pub fn identity(&self) -> Option<(String, Option<String>)> {
+        let who = self
+            .account_uuid
+            .clone()
+            .or_else(|| self.email.as_ref().map(|e| e.to_lowercase()))?;
+        Some((who, self.organization_uuid.clone()))
+    }
+}
+
+/// The `.claude.json` a profile's sessions read their login from
+///
+/// `config_dir` is the profile's `CLAUDE_CONFIG_DIR`. Without one a session
+/// inherits Panoptes' own, and only without that too is it `~/.claude.json`.
+pub fn claude_json_path(config_dir: Option<&Path>) -> Option<PathBuf> {
+    Some(effective_dir(config_dir)?.join(".claude.json"))
+}
+
+/// The directory `.claude.json` lives in, or `None` with no home directory
+fn effective_dir(config_dir: Option<&Path>) -> Option<PathBuf> {
+    match config_dir {
+        Some(dir) => Some(dir.to_path_buf()),
+        None => crate::transcript::inherited_claude_config_dir().or_else(dirs::home_dir),
+    }
+}
+
+/// The profile's user-level `settings.json`, whose `env` its sessions get
+fn settings_path(config_dir: Option<&Path>) -> PathBuf {
+    config_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(crate::transcript::default_claude_config_dir)
+        .join("settings.json")
+}
+
+/// Modification times of the files a profile's login is read from
+///
+/// Compared between looks to tell when to read again. A missing file is
+/// `None`, so creating or deleting one is a change too.
+pub fn login_files_mtime(config_dir: Option<&Path>) -> LoginFilesMtime {
+    let mtime = |path: Option<PathBuf>| {
+        path.and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok())
+    };
+    (
+        mtime(claude_json_path(config_dir)),
+        mtime(Some(settings_path(config_dir))),
+    )
+}
+
+/// The parts of `.claude.json` read here; serde skips everything else
+///
+/// Each is kept as a raw [`Value`] so that a field of an unexpected type
+/// costs that field, not the whole read. All three are small.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeJson {
+    #[serde(default)]
+    oauth_account: Option<Value>,
+    #[serde(default)]
+    primary_api_key: Option<Value>,
+    #[serde(default)]
+    custom_api_key_responses: Option<Value>,
+}
+
+/// Claude's `isEnvTruthy`: `1`, `true`, `yes` or `on`, in any case
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Read how a profile is signed in, from disk and Panoptes' environment
+pub fn read_auth(config_dir: Option<&Path>) -> ClaudeAuth {
+    read_auth_with(config_dir, &|name| std::env::var(name).ok())
+}
+
+/// [`read_auth`] with the environment lookup supplied
+pub fn read_auth_with(
+    config_dir: Option<&Path>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> ClaudeAuth {
+    let read = |path: Option<PathBuf>| -> std::io::Result<Option<String>> {
+        let Some(path) = path else { return Ok(None) };
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    };
+    let claude_json = match read(claude_json_path(config_dir)) {
+        Ok(text) => text,
+        Err(e) => return ClaudeAuth::Unreadable(e.to_string()),
+    };
+    // A settings file that cannot be read only loses its `env`
+    let settings = read(Some(settings_path(config_dir))).ok().flatten();
+    parse_auth(claude_json.as_deref(), settings.as_deref(), env)
+}
+
+/// [`read_auth`] on file contents already read, with the environment supplied
+///
+/// `claude_json` and `settings` are `None` for a missing file. `env` looks up
+/// Panoptes' own environment; the settings file's `env` overrides it, as it
+/// does for the session.
+pub fn parse_auth(
+    claude_json: Option<&str>,
+    settings: Option<&str>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> ClaudeAuth {
+    let settings: Option<Value> = settings.and_then(|s| serde_json::from_str(s).ok());
+    let settings_env = settings.as_ref().and_then(|s| s.get("env"));
+    let var = |name: &str| -> Option<String> {
+        settings_env
+            .and_then(|e| e.get(name))
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Bool(b) => Some(b.to_string()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .or_else(|| env(name))
+            .filter(|v| !v.is_empty())
+    };
+    let truthy = |name: &str| var(name).is_some_and(|v| is_truthy(&v));
+
+    // A cloud provider replaces Anthropic's login outright
+    if truthy("CLAUDE_CODE_USE_BEDROCK") {
+        return ClaudeAuth::Other("Bedrock");
+    }
+    if truthy("CLAUDE_CODE_USE_VERTEX") {
+        return ClaudeAuth::Other("Vertex AI");
+    }
+    if truthy("CLAUDE_CODE_USE_FOUNDRY") {
+        return ClaudeAuth::Other("Foundry");
+    }
+
+    // Neither needs `.claude.json`, so neither waits on it parsing
+    if var("ANTHROPIC_AUTH_TOKEN").is_some() {
+        return ClaudeAuth::Other("auth token");
+    }
+    if settings
+        .as_ref()
+        .and_then(|s| s.get("apiKeyHelper"))
+        .and_then(Value::as_str)
+        .is_some_and(|h| !h.trim().is_empty())
+    {
+        return ClaudeAuth::Other("API key helper");
+    }
+
+    let config: Option<ClaudeJson> = match claude_json {
+        None => None,
+        Some(text) if text.trim().is_empty() => None,
+        Some(text) => match serde_json::from_str(text) {
+            Ok(config) => Some(config),
+            Err(e) => return ClaudeAuth::Unreadable(format!("not valid JSON: {}", e)),
+        },
+    };
+
+    // Claude only uses an environment key the user has said yes to, and
+    // remembers the answer by the key's last 20 characters
+    if let Some(key) = var("ANTHROPIC_API_KEY") {
+        let tail: String = {
+            let chars: Vec<char> = key.chars().collect();
+            chars[chars.len().saturating_sub(20)..].iter().collect()
+        };
+        let approved = config
+            .as_ref()
+            .and_then(|c| c.custom_api_key_responses.as_ref())
+            .and_then(|r| r.get("approved"))
+            .and_then(Value::as_array)
+            .is_some_and(|keys| keys.iter().any(|k| k.as_str() == Some(tail.as_str())));
+        if approved {
+            return ClaudeAuth::Other("API key");
+        }
+    }
+
+    let Some(config) = config else {
+        return ClaudeAuth::SignedOut;
+    };
+    if let Some(account) = config.oauth_account.as_ref().and_then(parse_account) {
+        return ClaudeAuth::Subscription(account);
+    }
+    if config
+        .primary_api_key
+        .as_ref()
+        .and_then(Value::as_str)
+        .is_some_and(|k| !k.is_empty())
+    {
+        return ClaudeAuth::Other("API key");
+    }
+    ClaudeAuth::SignedOut
+}
+
+/// The account in an `oauthAccount` object, or `None` for an empty one
+fn parse_account(value: &Value) -> Option<ClaudeAccount> {
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let account = ClaudeAccount {
+        email: field("emailAddress"),
+        plan: plan_label(value),
+        organization: field("organizationName"),
+        account_uuid: field("accountUuid"),
+        organization_uuid: field("organizationUuid"),
+    };
+    (account.email.is_some() || account.account_uuid.is_some()).then_some(account)
+}
+
+/// The plan as the user knows it
+///
+/// Claude's own display name when it recorded one; otherwise from the
+/// organisation type, with Max's usage multiple read off its rate-limit tier
+/// (`default_claude_max_20x`).
+fn plan_label(value: &Value) -> Option<String> {
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+    };
+    if let Some(name) = field("planDisplayName") {
+        return Some(name.trim().to_string());
+    }
+    let label = match field("organizationType")? {
+        "claude_pro" => "Pro",
+        "claude_max" => {
+            let tier = [
+                field("userRateLimitTier"),
+                field("organizationRateLimitTier"),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(|tier| {
+                ["20x", "5x"]
+                    .into_iter()
+                    .find(|m| tier.ends_with(&format!("_{}", m)))
+            });
+            return Some(match tier {
+                Some(multiple) => format!("Max {}", multiple),
+                None => "Max".to_string(),
+            });
+        }
+        "claude_team" => "Team",
+        "claude_enterprise" => "Enterprise",
+        _ => return None,
+    };
+    Some(label.to_string())
+}
+
+/// What was last read of every profile's login
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeLogins {
+    /// Each profile's login, once read
+    pub auth: HashMap<uuid::Uuid, ClaudeAuth>,
+    /// [`shared_accounts`] of `auth`, kept current by [`Self::set`]
+    pub shared: HashMap<uuid::Uuid, Vec<uuid::Uuid>>,
+}
+
+impl ClaudeLogins {
+    /// Record profile `id`'s login, forgetting profiles no longer in `live`
+    pub fn set(&mut self, id: uuid::Uuid, auth: ClaudeAuth, live: &[uuid::Uuid]) {
+        self.auth.insert(id, auth);
+        self.auth.retain(|id, _| live.contains(id));
+        self.shared = shared_accounts(self.auth.iter().map(|(id, auth)| (*id, auth)));
+    }
+}
+
+/// For each profile signed into the same account as another, those others
+///
+/// Two profiles on one login share one quota, which defeats the point of
+/// having two; Settings warns about it. Profiles not signed into a
+/// subscription, or whose account cannot be identified, share with nobody.
+pub fn shared_accounts<'a>(
+    profiles: impl IntoIterator<Item = (uuid::Uuid, &'a ClaudeAuth)>,
+) -> HashMap<uuid::Uuid, Vec<uuid::Uuid>> {
+    let mut by_identity: HashMap<(String, Option<String>), Vec<uuid::Uuid>> = HashMap::new();
+    for (id, auth) in profiles {
+        if let ClaudeAuth::Subscription(account) = auth {
+            if let Some(identity) = account.identity() {
+                by_identity.entry(identity).or_default().push(id);
+            }
+        }
+    }
+    let mut shared = HashMap::new();
+    for ids in by_identity.into_values().filter(|ids| ids.len() > 1) {
+        for &id in &ids {
+            shared.insert(id, ids.iter().copied().filter(|&o| o != id).collect());
+        }
+    }
+    shared
+}
+
+/// The command that signs a profile in, ready to paste into a shell
+///
+/// `config_dir` is the profile's `CLAUDE_CONFIG_DIR`, or `None` for the
+/// default profile - which needs none unless Panoptes itself was started with
+/// one, since its sessions inherit that.
+pub fn login_command(config_dir: Option<&Path>) -> String {
+    let dir = config_dir
+        .map(Path::to_path_buf)
+        .or_else(crate::transcript::inherited_claude_config_dir);
+    match dir {
+        Some(dir) => format!(
+            "CLAUDE_CONFIG_DIR={} claude auth login",
+            shell_path(&dir, dirs::home_dir().as_deref())
+        ),
+        None => "claude auth login".to_string(),
+    }
+}
+
+/// A path as a shell word: `~/...` when it is under home and needs no
+/// quoting, else single-quoted when it has anything a shell would mangle
+fn shell_path(path: &Path, home: Option<&Path>) -> String {
+    let plain = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+,@:%".contains(c))
+    };
+    let full = path.to_string_lossy();
+    if let Some(rest) = home.and_then(|h| path.strip_prefix(h).ok()) {
+        let rest = rest.to_string_lossy();
+        if !rest.is_empty() && plain(&rest) {
+            return format!("~/{}", rest);
+        }
+    }
+    if plain(&full) {
+        full.into_owned()
+    } else {
+        format!("'{}'", full.replace('\'', r"'\''"))
+    }
+}
+
+/// How often the profiles' login files are looked at while on screen
+const LOGIN_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The files' modification times a profile's login was last read at
+pub type LoginFilesMtime = (Option<SystemTime>, Option<SystemTime>);
+
+/// When to read the profiles' logins again
+///
+/// Every profile is read when the profiles come on screen (Settings, or the
+/// wizard's account step) - so at the very least each time they are opened -
+/// and again whenever its `.claude.json` or `settings.json` changes while
+/// they stay up.
+///
+/// Claude normally replaces `.claude.json` by renaming a finished temp file
+/// over it, but a read can still catch a file mid-write. So a read that
+/// comes back [`ClaudeAuth::Unreadable`] is not believed at once: the last
+/// good login stays up, the files' times are not recorded, and the next look
+/// reads again. Only a file still unreadable at the same times on that
+/// second read is shown as such.
+#[derive(Debug, Default)]
+pub struct LoginWatch {
+    visible: bool,
+    last_check: Option<std::time::Instant>,
+    /// The files' times each profile's shown login was read at
+    seen: HashMap<uuid::Uuid, LoginFilesMtime>,
+    /// The files' times a profile was found unreadable at, not yet shown
+    unreadable_at: HashMap<uuid::Uuid, LoginFilesMtime>,
+}
+
+impl LoginWatch {
+    /// Record whether the profiles are on screen; true when they just appeared
+    pub fn set_visible(&mut self, visible: bool) -> bool {
+        let opened = visible && !self.visible;
+        self.visible = visible;
+        opened
+    }
+
+    /// Whether the profiles are on screen and their files are due a look
+    ///
+    /// Always due on the tick they come on screen.
+    pub fn due(&mut self, opened: bool, now: std::time::Instant) -> bool {
+        if !self.visible {
+            return false;
+        }
+        let due = opened
+            || self
+                .last_check
+                .map_or(true, |at| now.duration_since(at) >= LOGIN_POLL);
+        if due {
+            self.last_check = Some(now);
+        }
+        due
+    }
+
+    /// Whether to read profile `id` again, given its files' times now
+    pub fn should_read(&self, id: uuid::Uuid, mtime: LoginFilesMtime, opened: bool) -> bool {
+        opened || self.seen.get(&id) != Some(&mtime)
+    }
+
+    /// Take in what a read of profile `id` at `mtime` found
+    ///
+    /// Returns whether to show `auth`; when not, the last login shown stays.
+    pub fn accept(&mut self, id: uuid::Uuid, mtime: LoginFilesMtime, auth: &ClaudeAuth) -> bool {
+        if matches!(auth, ClaudeAuth::Unreadable(_)) && self.unreadable_at.get(&id) != Some(&mtime)
+        {
+            // Perhaps caught mid-write: look again before believing it
+            self.unreadable_at.insert(id, mtime);
+            return false;
+        }
+        self.unreadable_at.remove(&id);
+        self.seen.insert(id, mtime);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_login_watch_reads_on_open_and_on_change() {
+        let mut watch = LoginWatch::default();
+        let id = uuid::Uuid::new_v4();
+        let start = std::time::Instant::now();
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        let good = ClaudeAuth::SignedOut;
+
+        // Off screen, nothing is looked at
+        assert!(!watch.due(false, start));
+
+        let opened = watch.set_visible(true);
+        assert!(opened);
+        assert!(watch.due(opened, start));
+        assert!(watch.should_read(id, (Some(t0), None), opened));
+        assert!(watch.accept(id, (Some(t0), None), &good));
+
+        // Still on screen: not due again until the poll interval passes
+        assert!(!watch.set_visible(true));
+        assert!(!watch.due(false, start + std::time::Duration::from_millis(10)));
+        let later = start + LOGIN_POLL;
+        assert!(watch.due(false, later));
+        assert!(!watch.should_read(id, (Some(t0), None), false));
+        // A login rewrites the file
+        assert!(watch.should_read(id, (Some(t1), None), false));
+        assert!(watch.accept(id, (Some(t1), None), &good));
+        assert!(!watch.should_read(id, (Some(t1), None), false));
+
+        // Reopening reads again even when nothing changed
+        watch.set_visible(false);
+        let opened = watch.set_visible(true);
+        assert!(watch.due(opened, later));
+        assert!(watch.should_read(id, (Some(t1), None), opened));
+    }
+
+    /// A read caught mid-write is retried, not stuck until the next write
+    #[test]
+    fn test_login_watch_retries_an_unreadable_read() {
+        let mut watch = LoginWatch::default();
+        let id = uuid::Uuid::new_v4();
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        let torn = ClaudeAuth::Unreadable("not valid JSON".to_string());
+        watch.set_visible(true);
+        assert!(watch.accept(id, (Some(t0), None), &ClaudeAuth::SignedOut));
+
+        // The write lands while it is being read: the last login stays up,
+        // and the same times are read again on the next look
+        assert!(watch.should_read(id, (Some(t1), None), false));
+        assert!(!watch.accept(id, (Some(t1), None), &torn));
+        assert!(watch.should_read(id, (Some(t1), None), false));
+        // ...which finds the finished file
+        assert!(watch.accept(id, (Some(t1), None), &ClaudeAuth::SignedOut));
+        assert!(!watch.should_read(id, (Some(t1), None), false));
+
+        // A file still broken on the second read is shown as broken, and
+        // then left alone until it changes
+        let t2 = t1 + std::time::Duration::from_secs(1);
+        assert!(!watch.accept(id, (Some(t2), None), &torn));
+        assert!(watch.accept(id, (Some(t2), None), &torn));
+        assert!(!watch.should_read(id, (Some(t2), None), false));
+    }
+
+    /// Only Claude's truthy spellings switch a provider on
+    #[test]
+    fn test_truthy_matches_claude() {
+        for yes in ["1", "true", "TRUE", "yes", "On", " on "] {
+            assert!(is_truthy(yes), "{yes}");
+        }
+        for no in ["0", "false", "no", "off", "2", "enabled", ""] {
+            assert!(!is_truthy(no), "{no}");
+        }
+    }
+
+    /// An auth token or key helper is known even when `.claude.json` is torn
+    #[test]
+    fn test_token_and_helper_survive_a_garbled_file() {
+        let garbled = Some(r#"{"oauthAccount": {"emailAdd"#);
+        let token = |name: &str| (name == "ANTHROPIC_AUTH_TOKEN").then(|| "t".to_string());
+        assert_eq!(
+            parse_auth(garbled, None, &token),
+            ClaudeAuth::Other("auth token")
+        );
+        assert_eq!(
+            parse_auth(garbled, Some(r#"{"apiKeyHelper":"k.sh"}"#), &no_env),
+            ClaudeAuth::Other("API key helper")
+        );
+    }
+
+    const MAX: &str = include_str!("fixtures/claude_json/max.json");
+    const TEAM: &str = include_str!("fixtures/claude_json/team.json");
+    const SIGNED_OUT: &str = include_str!("fixtures/claude_json/signed_out.json");
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    fn account(auth: ClaudeAuth) -> ClaudeAccount {
+        match auth {
+            ClaudeAuth::Subscription(account) => account,
+            other => panic!("expected a subscription, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parses_a_max_login() {
+        let account = account(parse_auth(Some(MAX), None, &no_env));
+        assert_eq!(account.email.as_deref(), Some("user@example.com"));
+        assert_eq!(account.plan.as_deref(), Some("Max 20x"));
+        assert_eq!(account.organization.as_deref(), Some("Example Org"));
+        assert_eq!(
+            account.account_uuid.as_deref(),
+            Some("00000000-0000-4000-8000-000000000001")
+        );
+    }
+
+    #[test]
+    fn test_parses_a_team_login() {
+        let account = account(parse_auth(Some(TEAM), None, &no_env));
+        assert_eq!(account.email.as_deref(), Some("dev@example.com"));
+        assert_eq!(account.plan.as_deref(), Some("Team"));
+    }
+
+    #[test]
+    fn test_prefers_claudes_own_plan_name() {
+        let json = r#"{"oauthAccount":{"emailAddress":"a@example.com","organizationType":"claude_max","planDisplayName":"Max (20x)"}}"#;
+        assert_eq!(
+            account(parse_auth(Some(json), None, &no_env))
+                .plan
+                .as_deref(),
+            Some("Max (20x)")
+        );
+        let pro =
+            r#"{"oauthAccount":{"emailAddress":"a@example.com","organizationType":"claude_pro"}}"#;
+        assert_eq!(
+            account(parse_auth(Some(pro), None, &no_env))
+                .plan
+                .as_deref(),
+            Some("Pro")
+        );
+        let unknown = r#"{"oauthAccount":{"emailAddress":"a@example.com","organizationType":"something_new"}}"#;
+        assert_eq!(account(parse_auth(Some(unknown), None, &no_env)).plan, None);
+    }
+
+    #[test]
+    fn test_missing_file_or_account_is_signed_out() {
+        assert_eq!(parse_auth(None, None, &no_env), ClaudeAuth::SignedOut);
+        assert_eq!(parse_auth(Some(""), None, &no_env), ClaudeAuth::SignedOut);
+        assert_eq!(
+            parse_auth(Some(SIGNED_OUT), None, &no_env),
+            ClaudeAuth::SignedOut
+        );
+        // An account object with nothing in it is no login either
+        assert_eq!(
+            parse_auth(Some(r#"{"oauthAccount":{}}"#), None, &no_env),
+            ClaudeAuth::SignedOut
+        );
+    }
+
+    #[test]
+    fn test_garbled_file_is_unreadable() {
+        assert!(matches!(
+            parse_auth(Some(r#"{"oauthAccount": {"emailAdd"#), None, &no_env),
+            ClaudeAuth::Unreadable(_)
+        ));
+    }
+
+    #[test]
+    fn test_api_key_and_cloud_setups_name_their_auth() {
+        let stored_key = r#"{"primaryApiKey":"sk-ant-synthetic"}"#;
+        assert_eq!(
+            parse_auth(Some(stored_key), None, &no_env),
+            ClaudeAuth::Other("API key")
+        );
+
+        // A cloud provider in the profile's settings wins over the login
+        let bedrock = r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#;
+        assert_eq!(
+            parse_auth(Some(MAX), Some(bedrock), &no_env),
+            ClaudeAuth::Other("Bedrock")
+        );
+        // ...and in Panoptes' own environment
+        let vertex = |name: &str| (name == "CLAUDE_CODE_USE_VERTEX").then(|| "true".to_string());
+        assert_eq!(
+            parse_auth(Some(MAX), None, &vertex),
+            ClaudeAuth::Other("Vertex AI")
+        );
+        // Switched off is off
+        let off = r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"0"}}"#;
+        assert!(matches!(
+            parse_auth(Some(MAX), Some(off), &no_env),
+            ClaudeAuth::Subscription(_)
+        ));
+
+        let helper = r#"{"apiKeyHelper":"~/bin/key.sh"}"#;
+        assert_eq!(
+            parse_auth(Some(MAX), Some(helper), &no_env),
+            ClaudeAuth::Other("API key helper")
+        );
+    }
+
+    /// An `ANTHROPIC_API_KEY` in the environment is only used once approved
+    #[test]
+    fn test_env_api_key_counts_only_when_approved() {
+        let key = |name: &str| {
+            (name == "ANTHROPIC_API_KEY")
+                .then(|| "sk-ant-api03-abcdefghijklmnopqrstuvwxyz".to_string())
+        };
+        assert!(matches!(
+            parse_auth(Some(MAX), None, &key),
+            ClaudeAuth::Subscription(_)
+        ));
+        let approved =
+            r#"{"customApiKeyResponses":{"approved":["ghijklmnopqrstuvwxyz"],"rejected":[]}}"#;
+        assert_eq!(
+            parse_auth(Some(approved), None, &key),
+            ClaudeAuth::Other("API key")
+        );
+    }
+
+    #[test]
+    fn test_identity_is_the_account_in_its_organisation() {
+        let a = account(parse_auth(Some(MAX), None, &no_env));
+        let mut same = a.clone();
+        same.email = Some("USER@example.com".to_string());
+        assert_eq!(a.identity(), same.identity());
+
+        let mut other_org = a.clone();
+        other_org.organization_uuid = Some("00000000-0000-4000-8000-0000000000ff".to_string());
+        assert_ne!(a.identity(), other_org.identity());
+
+        // Without an account id, the email stands in, case-blind
+        let by_email = |email: &str| ClaudeAccount {
+            email: Some(email.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            by_email("A@example.com").identity(),
+            by_email("a@example.com").identity()
+        );
+        assert_eq!(ClaudeAccount::default().identity(), None);
+    }
+
+    #[test]
+    fn test_reads_a_profiles_own_claude_json() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            read_auth_with(Some(dir.path()), &no_env),
+            ClaudeAuth::SignedOut
+        );
+        assert_eq!(login_files_mtime(Some(dir.path())), (None, None));
+
+        std::fs::write(dir.path().join(".claude.json"), MAX).unwrap();
+        assert!(matches!(
+            read_auth_with(Some(dir.path()), &no_env),
+            ClaudeAuth::Subscription(_)
+        ));
+        assert!(login_files_mtime(Some(dir.path())).0.is_some());
+    }
+
+    #[test]
+    fn test_shared_accounts_finds_duplicate_logins() {
+        let max = parse_auth(Some(MAX), None, &no_env);
+        let team = parse_auth(Some(TEAM), None, &no_env);
+        let [a, b, c, d, e] = [(); 5].map(|_| uuid::Uuid::new_v4());
+        let profiles = [
+            (a, &max),
+            (b, &team),
+            (c, &max),
+            (d, &ClaudeAuth::SignedOut),
+            (e, &ClaudeAuth::SignedOut),
+        ];
+
+        let shared = shared_accounts(profiles);
+        assert_eq!(shared.get(&a), Some(&vec![c]));
+        assert_eq!(shared.get(&c), Some(&vec![a]));
+        // A distinct login, and two signed-out profiles, share nothing
+        assert!(!shared.contains_key(&b));
+        assert!(!shared.contains_key(&d));
+        assert!(!shared.contains_key(&e));
+    }
+
+    #[test]
+    fn test_login_command_names_the_profiles_dir() {
+        let home = Path::new("/Users/someone");
+        assert_eq!(
+            shell_path(Path::new("/Users/someone/.claude-work"), Some(home)),
+            "~/.claude-work"
+        );
+        assert_eq!(
+            shell_path(Path::new("/opt/claude"), Some(home)),
+            "/opt/claude"
+        );
+        assert_eq!(
+            shell_path(Path::new("/Users/someone/My Claude"), Some(home)),
+            "'/Users/someone/My Claude'"
+        );
+        assert_eq!(shell_path(Path::new("/tmp/it's"), None), r"'/tmp/it'\''s'");
+        assert_eq!(
+            login_command(Some(Path::new("/opt/claude"))),
+            "CLAUDE_CONFIG_DIR=/opt/claude claude auth login"
+        );
+    }
+}

@@ -557,8 +557,8 @@ fi
     fn user_settings_path(claude_config_dir: Option<&Path>) -> Option<PathBuf> {
         let dir = match claude_config_dir {
             Some(dir) => dir.to_path_buf(),
-            None => match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
-                Some(dir) => PathBuf::from(dir),
+            None => match crate::transcript::inherited_claude_config_dir() {
+                Some(dir) => dir,
                 None => dirs::home_dir()?.join(".claude"),
             },
         };
