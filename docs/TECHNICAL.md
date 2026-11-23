@@ -702,12 +702,28 @@ nothing Codex writes goes private by accident. Everything else stays private.
 across processes. The SQLite files are shared through `CODEX_SQLITE_HOME`, not
 links, because some are created lazily.
 
+The lock guarding the credentials follows them. From Codex 0.166 every
+credential read-modify-write (refresh commit, login, logout, the agent
+identity record) holds an `flock` on `$CODEX_HOME/auth.lock`, derived from
+`CODEX_HOME` *without* resolving the `auth.json` link. So while the shadow's
+`auth.json` is the link to the account's own file, the shadow's `auth.lock`
+is a link to the account's own `auth.lock`, and a Panoptes session and a
+direct `codex` run lock one file. The target is not pre-created, since that
+would write the account's own home. Codex opens the lock with `O_CREAT`, which
+creates the file through the dangling link. Its sibling `auth.json.lock`
+(0.167+) needs no link, because Codex derives it from the *resolved*
+`auth.json`. Codex 0.156.1 takes neither lock: it serialises refresh
+in-process and re-reads `auth.json` (through the link) before refreshing.
+For that version the lock link does nothing. A private `auth.lock` already
+in a shadow is replaced by the link only if a non-blocking `flock` on it
+succeeds. A held one is logged and left for the next heal.
+
 Invariants, from Codex 0.156.1:
 
 - **Shadows are never deleted or moved**, and the shared home never changes
   under them: Codex's state DB stores `threads.rollout_path` *through the
   shadow*, and resume trusts it. Deleting an account removes only its shadow's
-  `auth.json` link (`forget_account`).
+  `auth.json` and `auth.lock` links (`forget_account`).
 - **Healing never clobbers**: a missing or wrong link is replaced; a real
   directory in a link's place is logged and left. The exception is
   `session_index.jsonl`, which `codex delete` rewrites by rename - its new
