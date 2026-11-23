@@ -554,7 +554,8 @@ fn link_auth(shadow: &Path, original: &Path, report: &mut ShadowReport) -> Resul
 ///
 /// Only while `auth.json` itself is the link to the account's own file: a
 /// shadow with a login of its own, or with no credentials to share, guards
-/// nothing shared and keeps whatever lock it has.
+/// nothing shared. It keeps whatever private lock it has, and loses a lock
+/// link left over from when it did share.
 ///
 /// The target is not pre-created - that would write the account's own home -
 /// and need not be: Codex opens the lock with `O_CREAT`, which creates the
@@ -565,12 +566,23 @@ fn link_auth_lock(shadow: &Path, original: &Path, report: &mut ShadowReport) -> 
     let auth_link = shadow.join(AUTH_FILE);
     let auth_is_linked =
         std::fs::read_link(&auth_link).is_ok_and(|t| t == original.join(AUTH_FILE));
+    let link = shadow.join(AUTH_LOCK_FILE);
+    let target = original.join(AUTH_LOCK_FILE);
     if !auth_is_linked {
+        // A lock link left from when the credentials were shared - say the
+        // user logged out and then logged in under the shadow itself - would
+        // tie the shadow's own login to the account's lock. Only that exact
+        // link goes; anything else here is the shadow's own.
+        if std::fs::read_link(&link).is_ok_and(|t| t == target) {
+            std::fs::remove_file(&link).with_context(|| format!("removing {}", link.display()))?;
+            report.repaired.push(format!(
+                "{} (removed: the shadow no longer shares the account's auth.json)",
+                AUTH_LOCK_FILE
+            ));
+        }
         return Ok(());
     }
 
-    let link = shadow.join(AUTH_LOCK_FILE);
-    let target = original.join(AUTH_LOCK_FILE);
     let meta = match std::fs::symlink_metadata(&link) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -585,6 +597,9 @@ fn link_auth_lock(shadow: &Path, original: &Path, report: &mut ShadowReport) -> 
         let current =
             std::fs::read_link(&link).with_context(|| format!("reading {}", link.display()))?;
         if current != target {
+            // The same small window as the private-lock swap below: a Codex
+            // that opened the lock through the old link and is still waiting
+            // on it ends up locking the old target, not the account's own.
             std::fs::remove_file(&link).with_context(|| format!("removing {}", link.display()))?;
             make_symlink(&target, &link)?;
             report.repaired.push(format!(
@@ -1139,6 +1154,34 @@ mod tests {
             &shadow.join(AUTH_LOCK_FILE),
             &l.account_a.join(AUTH_LOCK_FILE)
         ));
+    }
+
+    #[test]
+    fn test_a_stale_auth_lock_link_goes_when_the_shadow_logs_in_itself() {
+        let l = layout();
+        let shadow = l.shadows.join("a");
+        ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+        // Logout removed the auth.json link; a login under the shadow wrote
+        // a real one. The lock link from before is still there.
+        std::fs::remove_file(shadow.join(AUTH_FILE)).unwrap();
+        std::fs::write(shadow.join(AUTH_FILE), "shadow login").unwrap();
+
+        let report = ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+
+        assert!(std::fs::symlink_metadata(shadow.join(AUTH_LOCK_FILE)).is_err());
+        assert_eq!(report.repaired.len(), 1, "{:?}", report.repaired);
+        assert_eq!(
+            std::fs::read_to_string(shadow.join(AUTH_FILE)).unwrap(),
+            "shadow login"
+        );
+
+        // The shadow's own private lock, once Codex makes one, is kept
+        std::fs::write(shadow.join(AUTH_LOCK_FILE), "").unwrap();
+        assert_eq!(
+            ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap(),
+            ShadowReport::default()
+        );
+        assert!(shadow.join(AUTH_LOCK_FILE).is_file());
     }
 
     #[test]
