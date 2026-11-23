@@ -308,6 +308,7 @@ at startup and before every Codex launch:
 | In the shadow home | What it is |
 |--------------------|------------|
 | `auth.json` | A symlink to the account's **own** `auth.json` - never a copy, so a token refresh is seen by both |
+| `auth.lock` | A symlink to the account's **own** `auth.lock`, so both homes take one lock to write credentials (Codex 0.166+) |
 | `sessions/`, `archived_sessions/`, `thread-writer-locks/`, `session_index.jsonl`, `history.jsonl`, `skills/`, `plugins/`, `rules/`, `worktrees/`, `cache/`, `mcp-oauth-locks/`, `.tmp/`, `config.toml` | Symlinks into the shared home |
 | Everything else (`models_cache.json`, `log/`, `tmp/`, `memories/`, anything a newer Codex adds, ...) | Private to the account |
 
