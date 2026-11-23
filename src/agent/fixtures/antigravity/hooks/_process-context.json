@@ -1,0 +1,16 @@
+{
+  "note": "What a hook/status-line process saw: env keys starting PANOPTES_/AGY_ (others dropped), and its cwd",
+  "hook_env": {
+    "AGY_CLI_DISABLE_AUTO_UPDATE": "1",
+    "PANOPTES_SESSION_ID": "00000000-0000-4000-8000-0000000000aa",
+    "PANOPTES_SPIKE_GUARD": "1"
+  },
+  "hook_cwd_user_hooks_json": "/home/user/.gemini/config",
+  "hook_cwd_workspace_hooks_json": "/home/user/projects/demo/.agents",
+  "status_line_env": {
+    "AGY_CLI_DISABLE_AUTO_UPDATE": "1",
+    "PANOPTES_SESSION_ID": "00000000-0000-4000-8000-0000000000aa",
+    "PANOPTES_SPIKE_GUARD": "1"
+  },
+  "status_line_cwd": "/home/user/projects/demo"
+}
