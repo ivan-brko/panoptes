@@ -8,6 +8,7 @@
 
 pub mod homes;
 pub mod merge;
+pub mod probe;
 pub mod store;
 
 pub use homes::CodexHomes;

@@ -1,0 +1,4 @@
+{"id":1,"result":{"userAgent":"panoptes/0.156.1 (Mac OS 26.6.2; arm64) xterm-256color (panoptes; 0.0.0)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}
+{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"example-host.local","installationId":"00000000-0000-4000-8000-000000000001","environmentId":null},"emittedAtMs":1795429963862}
+{"id":2,"result":{"account":null,"requiresOpenaiAuth":true,"workspaceRouting":null}}
+{"error":{"code":-32600,"message":"codex account authentication required to read rate limits"},"id":3}
