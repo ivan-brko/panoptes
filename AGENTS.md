@@ -53,6 +53,7 @@ PTY Output → Session buffer → TUI render
 - `app/background.rs` - Off-thread git jobs (fetch, worktree create/remove) with a cancellable loading overlay
 - `app/selection.rs` - Mouse text selection: normalization, click counting, word/line expansion, and the stream/block `Shape` (pure; routed from `app/mod.rs`, painted by `tui/views/session.rs`)
 - `agent/` - Agent adapters (Claude Code, Codex, Antigravity, Shell) with hook setup
+- `agent/binary.rs` - Fingerprint of the agent executable a session launched from, for the "restart to update" badge
 - `hooks/antigravity_status_line.rs` - Antigravity's status-line payload: state, conversation ID, quota
 - `session/` - Session lifecycle, PTY management, terminal emulation
 - `session/state_machine.rs` - Pure agent-event state machine (hook event → state transition)

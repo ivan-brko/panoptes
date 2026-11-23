@@ -87,6 +87,8 @@ Shell sessions show simplified states:
 - **Running** - A command is executing in the foreground
 - **Ready** - Shell is idle and waiting for input
 
+A session whose agent (Claude Code, Codex or Antigravity) has updated itself since the session started wears a `↻ restart to update` badge on its row and in its header. Press `u` on it in either session list to restart it on the new build; its conversation is resumed, and it asks first if that would interrupt a turn in progress.
+
 ## Key Features
 
 ### Multi-Session Management
