@@ -122,6 +122,8 @@ pub struct App {
     settings_marquee: Marquee,
     /// The row that scroll belongs to; a different one starts it over
     settings_marquee_row: Option<DescriptionRow>,
+    /// When a session row's `cache 42m` next reads differently
+    cache_redraw: crate::agent::prompt_cache::WarmthRedraw,
     /// Whether the hook server is still accepting agent callbacks
     pub(crate) hook_server_healthy: bool,
     /// Whether verbose mouse diagnostics are enabled
@@ -541,6 +543,7 @@ impl App {
             panes,
             settings_marquee: Marquee::default(),
             settings_marquee_row: None,
+            cache_redraw: Default::default(),
             hook_server_healthy: true,
             mouse_debug_enabled,
             last_codex_id_scan: None,
@@ -718,6 +721,8 @@ impl App {
             dirty |= self.tick_exited_cleanup();
             dirty |= self.tick_dropped_events();
             dirty |= self.tick_server_health();
+            // Last, so it knows whether anything above changed a session
+            dirty |= self.tick_cache_warmth(dirty || self.state.needs_render);
             if dirty {
                 self.state.needs_render = true;
             }
@@ -732,6 +737,25 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Redraw when a session row's cache countdown would read differently
+    ///
+    /// The countdown is the one thing on an idle screen that changes by the
+    /// clock alone, so nothing else would redraw it. The sessions are only
+    /// looked at when something else changed this pass (`changed`), which may
+    /// have moved a cache, or when the earliest label change comes due - once a
+    /// minute at most while anything is counting down, never once all is cold.
+    fn tick_cache_warmth(&mut self, changed: bool) -> bool {
+        let now = chrono::Utc::now();
+        let sessions = &self.sessions;
+        self.cache_redraw.tick(now, changed, || {
+            sessions
+                .sessions_in_order()
+                .into_iter()
+                .filter_map(|session| session.info.cache_warmth(now))
+                .collect::<Vec<_>>()
+        })
     }
 
     /// Advance the accordion transition
