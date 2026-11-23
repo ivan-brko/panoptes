@@ -718,6 +718,45 @@ Via the `CLAUDE_CONFIG_DIR` environment variable:
 2. **Set project defaults** - Each project can have a default Claude configuration
 3. **Session selection** - When creating a Claude session with multiple configs available, a selector appears
 4. **Environment injection** - `CLAUDE_CONFIG_DIR` is set when spawning with a non-default configuration
+5. **Signed-in account** - see below
+
+#### Signed-in account (`claude_config::account`)
+
+Claude Code keeps its login's account in `.claude.json`: `$CLAUDE_CONFIG_DIR/.claude.json`
+for a profile, and for the default profile `~/.claude.json` - beside
+`~/.claude`, not inside it - unless Panoptes was itself started with a
+`CLAUDE_CONFIG_DIR`, which default-profile sessions inherit. Its
+`oauthAccount` gives `emailAddress`, `organizationName`, `accountUuid`,
+`organizationUuid` and the plan: `planDisplayName` when Claude recorded one,
+else `organizationType` (`claude_pro` → Pro, `claude_max` → Max with `5x`/`20x`
+from the rate-limit tier, `claude_team` → Team, `claude_enterprise` →
+Enterprise). The token itself (keychain or `.credentials.json`) is never read.
+
+`read_auth` decides, in Claude's own order of precedence, how a profile's
+sessions authenticate. Variables come from the profile's `settings.json` `env`
+over Panoptes' environment (which sessions inherit):
+
+1. `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` → Bedrock / Vertex AI / Foundry
+2. `ANTHROPIC_AUTH_TOKEN` → auth token; an `apiKeyHelper` in `settings.json` → API key helper
+3. `ANTHROPIC_API_KEY`, only if its last 20 characters are in
+   `customApiKeyResponses.approved` - Claude ignores a key it was not told to use
+4. `oauthAccount` → the subscription login
+5. `primaryApiKey` (a key stored by `/login`) → API key
+6. otherwise signed out; a `.claude.json` that is not valid JSON is "can't read"
+
+`shared_accounts` flags profiles whose logins are the same account in the same
+organisation (`accountUuid`, else the email case-blind, plus `organizationUuid`);
+one person in two organisations is two seats, not a duplicate.
+
+`App::tick_claude_logins` reads every profile when the profiles come on screen
+(pane 3's Claude section or `SelectingClaudeConfig`, `claude_accounts_visible`)
+and re-reads one whenever its `.claude.json` or `settings.json` mtime changes,
+looked at every 250 ms while on screen (`LoginWatch`). The read is synchronous:
+one small file, and Claude replaces it by renaming a finished temp file, so it
+is never caught half-written. Results land in `AppState::claude_logins`;
+`tui/views/claude_account.rs` draws them as the second row under each profile,
+through the same field-dropping row as the Codex accounts
+(`tui/views/account_row.rs`).
 
 ### Codex Accounts
 
@@ -1190,6 +1229,15 @@ with the date added when it is not today (`Aug 29 00:10`). Window labels:
 `five_hour` → `5h`, `seven_day` → `wk`, `seven_day_opus` → `wk opus`,
 `seven_day_sonnet` → `wk sonnet`, `seven_day_overage_included` → `wk overage`,
 `overage` → `overage`; any other name is shown raw.
+
+Of the account failures, only `authentication_failed` is labelled `auth failed`
+(`transcript::claude::AUTH_FAILED`); `oauth_org_not_allowed`,
+`verification_required` and `cloud_credential_error` get labels of their own.
+`auth failed` is the one a fresh login fixes, so `SessionInfo::failure_fix`
+adds the command for the session's own `CLAUDE_CONFIG_DIR` to the header:
+``✗ auth failed · run `CLAUDE_CONFIG_DIR=~/.claude-work claude auth login` ``
+(`~/` when the directory is under home and needs no quoting, else
+single-quoted).
 
 The Claude tailer skips records that are not the live conversation's own:
 subagent turns (`isSidechain`), injected records (`isMeta`), compaction

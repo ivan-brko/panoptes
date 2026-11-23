@@ -109,7 +109,7 @@ Panoptes actively helps you manage your attention across sessions:
 - **Visual Badges** - Sessions that need attention display a coloured dot saying why:
   - Green dot (`●`) - The turn finished; the agent is waiting for your next prompt
   - Yellow dot (`●`) - Blocked on a permission dialog, or a tool that stopped reporting
-  - Red cross (`✗`) - The agent process died, or a turn died on an API error (usage limit, expired login, overload); for a failed turn the row and header name the reason until the next prompt, and for a usage limit which one and when it resets (`usage limit · 5h resets 20:10`)
+  - Red cross (`✗`) - The agent process died, or a turn died on an API error (usage limit, expired login, overload); for a failed turn the row and header name the reason until the next prompt, and for a usage limit which one and when it resets (`usage limit · 5h resets 20:10`); for a Claude turn that failed on its login the header also gives the exact command to sign that account back in (``auth failed · run `CLAUDE_CONFIG_DIR=~/.claude-work claude auth login` ``)
 - **Needs Attention Section** - Pinned to the top of the Sessions pane, with a blinking count in the header that is visible from every pane
 - **Auto-Acknowledge** - Opening a session clears its attention flag, and nothing re-raises it until something new happens
 
@@ -182,6 +182,7 @@ Manage multiple accounts for both Claude Code and Codex CLI:
 **Claude Code Accounts:**
 - Define named configurations pointing to different Claude config directories (`CLAUDE_CONFIG_DIR`)
 - Use the `c` key from the projects overview to manage configurations
+- **Which account at a glance** - Under each account, in Settings and in the new-session wizard's account step: the email it is signed in as, its plan (Pro, Max, Team, ...) and organisation. A profile that is signed out shows the `claude auth login` command for its directory; one set up for an API key, Bedrock, Vertex AI or Foundry says so instead. Two profiles signed into the same account are flagged (`same account as Work`) - they would share one quota. Read from the profile's `.claude.json` whenever the list opens, and again as soon as it changes, so a login with the list open shows up at once
 
 **Codex Accounts:**
 - Define named configurations pointing to different Codex home directories (`CODEX_HOME`)
