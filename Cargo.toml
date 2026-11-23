@@ -60,6 +60,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 shellexpand = "3.1.1"
 # Codex hook trust hashes (see agent/codex.rs)
 sha2 = "0.10"
+# Compressed Codex rollouts (`.jsonl.zst`): a pure-Rust zstd decoder (see
+# transcript/rollout_file.rs)
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 
 # Unix PTY support
 [target.'cfg(unix)'.dependencies]

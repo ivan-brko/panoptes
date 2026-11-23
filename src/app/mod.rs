@@ -358,6 +358,13 @@ fn watch_target_for(
             // Codex names its rollouts by timestamp as well as ID, so unlike
             // Claude the path has to be found rather than derived
             let path = crate::agent::codex::rollout_path(codex_home, conversation_id)?;
+            // A compressed rollout is a finished one: nothing will be appended
+            // to it, and the tailer reads raw bytes. Should Codex carry the
+            // conversation on, its plain file wins `rollout_path` and the next
+            // sync watches that.
+            if crate::transcript::rollout_file::is_compressed(&path) {
+                return None;
+            }
 
             Some(WatchTarget {
                 session_id: info.id,
@@ -3536,6 +3543,40 @@ mod tests {
                 "source": source,
             }),
         }
+    }
+
+    #[test]
+    fn test_watch_target_never_tails_a_compressed_rollout() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let claude_dir = temp_dir.path().join("claude");
+        let codex_home = temp_dir.path().join("codex");
+        let (mut sessions, session_id) = resumed_claude_session(&temp_dir);
+        let info = &mut sessions.get_mut(session_id).unwrap().info;
+        info.session_type = SessionType::OpenAICodex;
+        info.agent_session_id = Some("019aa0c9-0000-7000-8000-00000000c0de".to_string());
+
+        let day = codex_home.join("sessions/2025/11/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let plain =
+            day.join("rollout-2025-11-20T09-00-00-019aa0c9-0000-7000-8000-00000000c0de.jsonl");
+        let header = r#"{"type":"session_meta","payload":{"id":"019aa0c9-0000-7000-8000-00000000c0de","cwd":"/tmp","source":"cli"}}"#.to_string() + "\n";
+        let compressed = PathBuf::from(format!("{}.zst", plain.display()));
+        std::fs::write(
+            &compressed,
+            crate::transcript::rollout_file::tests::compress(&header),
+        )
+        .unwrap();
+
+        // Finished and compressed: nothing to follow
+        let info = &sessions.get(session_id).unwrap().info;
+        assert!(watch_target_for(info, &claude_dir, &codex_home).is_none());
+
+        // Carried on in a plain file: that one is followed
+        std::fs::write(&plain, &header).unwrap();
+        let target = watch_target_for(info, &claude_dir, &codex_home).unwrap();
+        assert_eq!(target.path, plain);
+
+        sessions.shutdown_all();
     }
 
     #[test]

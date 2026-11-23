@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use super::rollout_file;
 use crate::agent::events::{AgentEvent, RateLimitWindow, UsageSnapshot, WindowSource};
 
 /// The `session_meta` header of a Codex rollout file
@@ -120,6 +121,9 @@ pub const COPIED_HISTORY_MAX_GAP: chrono::TimeDelta = chrono::TimeDelta::seconds
 /// levels rather than recursing over an unbounded tree. A missing or
 /// unreadable directory yields an empty list, which is the normal state before
 /// Codex has written anything.
+///
+/// Compressed rollouts (`.jsonl.zst`) are listed too, except where the same
+/// conversation's plain file sits beside one (see [`rollout_file`]).
 pub fn rollout_files(sessions_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for year in subdirs(sessions_dir) {
@@ -128,12 +132,12 @@ pub fn rollout_files(sessions_dir: &Path) -> Vec<PathBuf> {
                 let Ok(entries) = std::fs::read_dir(&day) else {
                     continue;
                 };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                        out.push(path);
-                    }
-                }
+                let listed: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| rollout_file::is_rollout_path(path))
+                    .collect();
+                out.extend(rollout_file::prefer_plain(listed));
             }
         }
     }
@@ -157,13 +161,23 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
 /// Only the first line is read: the rest of a rollout is the conversation,
 /// which can be large and is of no interest here. Returns `None` for anything
 /// that is not a rollout with a parseable `session_meta` header - including a
-/// file observed before Codex finished writing its first line.
+/// file observed before Codex finished writing its first line, and a
+/// compressed rollout that does not decode.
+///
+/// Called on every rollout by each discovery poll, so a corrupt compressed
+/// file is only noted at debug; the conversation scanner warns about it.
 pub fn read_session_meta(path: &Path) -> Option<RolloutMeta> {
     use std::io::BufRead;
 
-    let file = std::fs::File::open(path).ok()?;
+    let reader = match rollout_file::open(path) {
+        Ok(reader) => reader,
+        Err(e) => {
+            tracing::debug!(path = %path.display(), error = %e, "Cannot open rollout");
+            return None;
+        }
+    };
     let mut first_line = String::new();
-    std::io::BufReader::new(file)
+    std::io::BufReader::new(reader)
         .read_line(&mut first_line)
         .ok()?;
 
@@ -838,6 +852,74 @@ mod tests {
 
         // A sessions dir that does not exist yet is the normal starting state
         assert!(rollout_files(&dir.path().join("nope")).is_empty());
+    }
+
+    /// The fixture as Codex compresses it (`zstd -19` of the `.jsonl` beside it)
+    const COMPRESSED_FIXTURE: &[u8] = include_bytes!("fixtures/compressed_rollout.jsonl.zst");
+
+    #[test]
+    fn test_compressed_fixture_decodes_to_its_source() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("rollout-c.jsonl.zst");
+        std::fs::write(&path, COMPRESSED_FIXTURE).unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut rollout_file::open(&path).unwrap(), &mut text).unwrap();
+        assert_eq!(text, include_str!("fixtures/compressed_rollout.jsonl"));
+    }
+
+    #[test]
+    fn test_rollout_files_lists_compressed_rollouts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plain = write_rollout_file(dir.path(), "rollout-a.jsonl", "{}");
+        let compressed = plain.with_file_name("rollout-b.jsonl.zst");
+        std::fs::write(&compressed, COMPRESSED_FIXTURE).unwrap();
+
+        let mut found = rollout_files(dir.path());
+        found.sort();
+        assert_eq!(found, vec![plain, compressed]);
+    }
+
+    #[test]
+    fn test_rollout_files_prefers_the_plain_file_of_a_pair() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plain = write_rollout_file(dir.path(), "rollout-t-id.jsonl", "{}");
+        std::fs::write(
+            plain.with_file_name("rollout-t-id.jsonl.zst"),
+            COMPRESSED_FIXTURE,
+        )
+        .unwrap();
+
+        assert_eq!(rollout_files(dir.path()), vec![plain]);
+    }
+
+    #[test]
+    fn test_read_session_meta_of_a_compressed_rollout() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("rollout-c.jsonl.zst");
+        std::fs::write(&path, COMPRESSED_FIXTURE).unwrap();
+
+        let meta = read_session_meta(&path).expect("decoded session_meta");
+        assert_eq!(meta.id, "00000000-0000-7000-8000-00000000c0de");
+        assert_eq!(meta.cwd, Some(PathBuf::from("/Users/redacted/work")));
+        assert_eq!(meta.kind, RolloutKind::Session);
+        assert!(meta.created_at.is_some());
+    }
+
+    #[test]
+    fn test_read_session_meta_of_a_corrupt_compressed_rollout_is_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let garbage = dir.path().join("rollout-bad.jsonl.zst");
+        std::fs::write(&garbage, b"not zstd at all\n").unwrap();
+        assert!(read_session_meta(&garbage).is_none());
+
+        // A real frame cut short: the header decodes, the rest does not
+        let truncated = dir.path().join("rollout-cut.jsonl.zst");
+        std::fs::write(
+            &truncated,
+            &COMPRESSED_FIXTURE[..COMPRESSED_FIXTURE.len() / 2],
+        )
+        .unwrap();
+        assert!(read_session_meta(&truncated).is_none());
     }
 
     #[test]
