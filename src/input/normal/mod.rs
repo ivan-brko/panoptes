@@ -19,6 +19,14 @@ use crate::config::CustomShortcut;
 use crate::project::{BranchId, ProjectId};
 use crate::session::{NewSessionSpec, SessionId};
 
+/// Restarts the selected session on its agent's current binary, resuming its
+/// conversation - what the "restart to update" badge asks for
+///
+/// Bound in both session lists: pane 2, and pane 1's branch level. Reserved
+/// (`config::RESERVED_KEYS`) because the branch level is where custom
+/// shortcuts fire, and the built-in arm would silently shadow one bound here.
+pub const RESTART_SESSION_KEY: char = 'u';
+
 /// Launch a shell session running a custom shortcut's command
 ///
 /// The body of the custom-shortcut key at pane 1's branch level: sizes the

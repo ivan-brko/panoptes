@@ -130,10 +130,7 @@ fn session_body(mode: SideMode, room: usize, row: &SessionRow) -> String {
     if mode != SideMode::Full {
         return compact;
     }
-    let full = format!(
-        "{}{} / {} / {} [{}]",
-        row.prefix, row.project, row.branch, row.name, row.state
-    );
+    let full = full_body(row);
     if full.chars().count() <= room {
         return full;
     }
@@ -177,6 +174,66 @@ fn session_body(mode: SideMode, room: usize, row: &SessionRow) -> String {
         row.name,
         row.state
     )
+}
+
+/// Every field of a session row, nothing dropped or elided
+fn full_body(row: &SessionRow) -> String {
+    format!(
+        "{}{} / {} / {} [{}]",
+        row.prefix, row.project, row.branch, row.name, row.state
+    )
+}
+
+/// The badge a session running a superseded agent binary wears, whole
+pub(crate) const UPDATE_BADGE: &str = " \u{21bb} restart to update";
+/// The same badge with its words dropped - the glyph is kept at every width
+pub(crate) const UPDATE_GLYPH: &str = " \u{21bb}";
+
+/// Clamp a row to `width`, keeping the update badge whole at its end
+///
+/// The badge's columns are reserved before the row is cut, so a compact row
+/// too long for its pane loses its tail rather than the badge. An empty
+/// badge is a plain clamp.
+pub(crate) fn clamp_with_update_badge(
+    line: Line<'static>,
+    badge: &'static str,
+    width: usize,
+) -> Line<'static> {
+    if badge.is_empty() {
+        return clamp_line(line, width);
+    }
+    let mut line = clamp_line(line, width.saturating_sub(badge.chars().count()));
+    line.spans.push(Span::styled(
+        badge,
+        Style::default().fg(theme().update_available),
+    ));
+    line
+}
+
+/// The row body and the update badge trailing it, together in `room` columns
+///
+/// The badge's words are a field like any other and go whole: they stay only
+/// while the complete row fits beside them, so a medium pane trades them for
+/// the glyph rather than eliding the project and branch to keep them. The
+/// glyph itself never goes - it is the only sign the session is stale, and two
+/// columns are cheap.
+fn body_with_update_badge(
+    mode: SideMode,
+    room: usize,
+    row: &SessionRow,
+    updated: bool,
+) -> (String, &'static str) {
+    if !updated {
+        return (session_body(mode, room, row), "");
+    }
+    if mode == SideMode::Full {
+        let body = session_body(mode, room.saturating_sub(UPDATE_BADGE.chars().count()), row);
+        if body == full_body(row) {
+            return (body, UPDATE_BADGE);
+        }
+    }
+    let body = session_body(mode, room.saturating_sub(UPDATE_GLYPH.chars().count()), row);
+    (body, UPDATE_GLYPH)
 }
 
 /// Share `budget` columns between two fields, charging the longer one first
@@ -300,7 +357,7 @@ fn render_attention_section(
             // ("[CC] "). An elided body fills its room exactly, so an
             // undercount here is not slack - it is two columns for
             // clamp_line to cut off the row's tail
-            let body = session_body(
+            let (body, update) = body_with_update_badge(
                 mode,
                 width.saturating_sub(7),
                 &SessionRow {
@@ -311,6 +368,7 @@ fn render_attention_section(
                     state: &state_text,
                     limit: limit.as_deref(),
                 },
+                info.shows_update_badge(),
             );
 
             let line = Line::from(vec![
@@ -321,7 +379,7 @@ fn render_attention_section(
                 ),
                 Span::raw(body),
             ]);
-            ListItem::new(clamp_line(line, width))
+            ListItem::new(clamp_with_update_badge(line, update, width))
         })
         .collect();
 
@@ -372,7 +430,7 @@ fn render_session_list(
             // badge (2), agent tag "[CC] " (5). An elided body fills its
             // room exactly, so an undercount here is not slack - it is
             // columns for clamp_line to cut off the row's tail
-            let body = session_body(
+            let (body, update) = body_with_update_badge(
                 mode,
                 width.saturating_sub(9),
                 &SessionRow {
@@ -383,6 +441,7 @@ fn render_session_list(
                     state: &state_display,
                     limit: limit.as_deref(),
                 },
+                info.shows_update_badge(),
             );
 
             let line = Line::from(vec![
@@ -395,7 +454,7 @@ fn render_session_list(
                 Span::raw(body),
             ]);
 
-            ListItem::new(clamp_line(line, width))
+            ListItem::new(clamp_with_update_badge(line, update, width))
                 .style(selection_style(selected, info.state.color()))
         })
         .collect();
@@ -592,6 +651,52 @@ mod tests {
             session_body(SideMode::Full, 30, &row),
             "2: feature [Waiting]"
         );
+    }
+
+    /// The badge's words are a field dropped whole: they stay only beside the
+    /// complete row, and the glyph survives every width
+    #[test]
+    fn test_the_update_badge_drops_its_words_whole_and_keeps_its_glyph() {
+        let row = SessionRow {
+            prefix: "2: ",
+            project: "panoptes",
+            branch: "main",
+            name: "feature",
+            state: "Waiting",
+            limit: None,
+        };
+        let full = "2: panoptes / main / feature [Waiting]";
+        let wide = full.chars().count() + UPDATE_BADGE.chars().count();
+
+        assert_eq!(
+            body_with_update_badge(SideMode::Full, wide, &row, true),
+            (full.to_string(), UPDATE_BADGE)
+        );
+        // One column short: the words go, the row stays whole
+        assert_eq!(
+            body_with_update_badge(SideMode::Full, wide - 1, &row, true),
+            (full.to_string(), UPDATE_GLYPH)
+        );
+        // Compact rows keep the glyph too
+        assert_eq!(
+            body_with_update_badge(SideMode::Compact, 200, &row, true),
+            ("2: feature [Waiting]".to_string(), UPDATE_GLYPH)
+        );
+        // And a current session wears nothing
+        assert_eq!(
+            body_with_update_badge(SideMode::Full, wide, &row, false),
+            (full.to_string(), "")
+        );
+    }
+
+    /// A compact row too long for its pane loses its tail, never the glyph
+    #[test]
+    fn test_the_update_glyph_keeps_its_columns_when_the_row_is_cut() {
+        let line = Line::from(format!("1: {} [Waiting]", "n".repeat(60)));
+        let clamped = clamp_with_update_badge(line, UPDATE_GLYPH, 20);
+        let text: String = clamped.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.chars().count(), 20, "{text:?}");
+        assert!(text.ends_with(UPDATE_GLYPH), "{text:?}");
     }
 
     #[test]

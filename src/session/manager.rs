@@ -108,6 +108,10 @@ pub struct SessionManager {
     /// process for one that exists on any machine and leaves the record alone.
     #[cfg(test)]
     spawn_as_shell: bool,
+    /// The configuration of the most recent spawn, so tests can see what a
+    /// relaunch would have handed the agent
+    #[cfg(test)]
+    last_spawn: Option<SpawnConfig>,
 }
 
 /// A session as it appears in a list
@@ -183,6 +187,8 @@ impl SessionManager {
             output_backlogged: false,
             #[cfg(test)]
             spawn_as_shell: false,
+            #[cfg(test)]
+            last_spawn: None,
         }
     }
 
@@ -828,6 +834,17 @@ impl SessionManager {
         }
         info.spawned_claude_config_dir = spawn.claude_config_dir.clone();
         info.spawned_codex_home = spawned_codex_home;
+        // What this process runs, so an update to it can be noticed later. A
+        // relaunch starts on whatever is installed now, so the badge an old
+        // process earned does not carry over.
+        info.launched_binary = (agent != AgentType::Shell)
+            .then(|| crate::agent::binary::BinaryFingerprint::locate(adapter.command()))
+            .flatten();
+        info.binary_updated = false;
+        #[cfg(test)]
+        {
+            self.last_spawn = Some(spawn.clone());
+        }
 
         let session_id = info.id;
         let session = Session::with_scrollback(
@@ -1480,6 +1497,113 @@ impl SessionManager {
         tracing::info!(session_id = %session_id, "Woke suspended session");
 
         Ok(())
+    }
+
+    /// Look again at the executables live sessions were launched from
+    ///
+    /// Flags every session whose binary has since been replaced - a symlink
+    /// repointed at a new version, or the file overwritten in place - so the
+    /// row can offer a restart. One `canonicalize` and `stat` per distinct
+    /// binary, however many sessions share it, which is what keeps this cheap
+    /// enough for the UI thread; the caller throttles it. `only` narrows the
+    /// look to one session, for when the user focuses it.
+    ///
+    /// Returns whether any session was newly flagged.
+    pub fn check_binary_updates(&mut self, only: Option<SessionId>) -> bool {
+        use crate::agent::binary::BinaryFingerprint;
+
+        let mut current: HashMap<PathBuf, Option<BinaryFingerprint>> = HashMap::new();
+        let mut flagged = false;
+        for session in self.sessions.values_mut() {
+            let info = &mut session.info;
+            if only.is_some_and(|id| id != info.id) || info.binary_updated {
+                continue;
+            }
+            // No process, nothing running an old build: the next spawn picks
+            // up whatever is installed
+            if matches!(
+                info.state,
+                SessionState::Suspended | SessionState::Exited | SessionState::Resumable
+            ) {
+                continue;
+            }
+            let Some(launched) = info.launched_binary.as_ref() else {
+                continue;
+            };
+            let now = current
+                .entry(launched.resolved.clone())
+                .or_insert_with(|| launched.refresh());
+            // A binary that cannot be read right now is mid-update or gone;
+            // either way the next look decides
+            if now
+                .as_ref()
+                .is_some_and(|now| launched.is_superseded_by(now))
+            {
+                tracing::info!(
+                    session_id = %info.id,
+                    binary = %launched.resolved.display(),
+                    "Agent binary was updated; session runs the old build until restarted"
+                );
+                info.binary_updated = true;
+                flagged = true;
+            }
+        }
+        flagged
+    }
+
+    /// Restart a session's agent on its current binary, resuming its conversation
+    ///
+    /// The kill-then-wake a suspension and a later open would do, in one step:
+    /// the relaunch goes through [`Self::wake_session`], so it reattaches with
+    /// `--resume <id>` (Claude), `resume <id>` (Codex) or
+    /// `--conversation=<id>` (Antigravity) under the same Panoptes session ID.
+    ///
+    /// Everything that could make the relaunch fail is checked before the
+    /// process is killed, so a refusal leaves the session running. Should the
+    /// spawn itself fail, the session is left suspended - opening it retries.
+    ///
+    /// Deliberately does not ask whether the session is busy; that is the
+    /// caller's question to put to the user (see [`SessionInfo::is_busy`]).
+    pub fn restart_session(
+        &mut self,
+        session_id: SessionId,
+        rows: usize,
+        cols: usize,
+        claude_config_dir: Option<PathBuf>,
+        codex_home: Option<PathBuf>,
+    ) -> Result<()> {
+        let codex_data_home = self.codex_homes.data_home_for(codex_home.as_deref());
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow!("No session with ID {}", session_id))?;
+        let info = &mut session.info;
+        if info.session_type == SessionType::Shell {
+            return Err(anyhow!(
+                "Cannot restart '{}': a shell has no conversation to resume",
+                info.name
+            ));
+        }
+        // The look `wake_session` makes, made first and fresh: once the
+        // process is gone a missing transcript would leave nothing to come
+        // back to, and a cached answer may be stale either way
+        info.transcript_missing = !info.conversation_transcript_exists(
+            claude_config_dir.as_deref(),
+            codex_data_home.as_deref(),
+        );
+        if let Some(reason) = info.resume_blocker() {
+            return Err(anyhow!("Cannot restart '{}': {}", info.name, reason));
+        }
+
+        if session.is_alive() {
+            session
+                .kill()
+                .with_context(|| format!("stopping '{}' to restart it", session.info.name))?;
+        }
+        session.set_state(SessionState::Suspended);
+        tracing::info!(session_id = %session_id, "Restarting session on its current binary");
+
+        self.wake_session(session_id, rows, cols, claude_config_dir, codex_home)
     }
 
     /// Clean up exited sessions that have been exited longer than retention_secs
@@ -2839,6 +2963,146 @@ mod tests {
             manager.get(session_id).unwrap().info.state,
             SessionState::Waiting
         );
+    }
+
+    // Restart on an updated binary
+
+    /// A live Claude session on its second conversation (as after `/clear`),
+    /// whose transcript is on disk
+    fn restartable_session(manager: &mut SessionManager, dir: &TempDir) -> (SessionId, String) {
+        let session_id = insert_suspendable_session(manager, dir);
+        // Distinct from the Panoptes ID on purpose: the restart must follow
+        // the conversation, not the session
+        let conversation_id = Uuid::new_v4().to_string();
+        let session = manager.get_mut(session_id).unwrap();
+        write_claude_transcript(
+            &claude_home(dir),
+            &session.info.working_dir,
+            &conversation_id,
+        );
+        session.info.agent_session_id = Some(conversation_id.clone());
+        session.info.binary_updated = true;
+        manager.spawn_as_shell = true;
+        (session_id, conversation_id)
+    }
+
+    #[test]
+    fn test_restart_args_reuse_the_same_conversation_id() {
+        use crate::agent::AgentAdapter;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (session_id, conversation_id) = restartable_session(&mut manager, &temp_dir);
+
+        manager
+            .restart_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
+            .unwrap();
+
+        let spawn = manager.last_spawn.clone().expect("the restart spawned");
+        assert_eq!(spawn.session_id, session_id, "same Panoptes session");
+        assert_eq!(spawn.resume.as_deref(), Some(conversation_id.as_str()));
+
+        // And each agent turns that into its own resume of that conversation
+        let claude = crate::agent::ClaudeCodeAdapter::new().build_args(&spawn);
+        let at = claude.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(claude[at + 1], conversation_id, "{claude:?}");
+        assert!(!claude.iter().any(|a| a == "--session-id"), "{claude:?}");
+
+        let codex = crate::agent::CodexAdapter::new().build_args(&spawn);
+        assert_eq!(
+            codex.first().map(String::as_str),
+            Some("resume"),
+            "{codex:?}"
+        );
+        assert!(codex.contains(&conversation_id), "{codex:?}");
+
+        let session = manager.get_mut(session_id).unwrap();
+        assert!(session.is_alive(), "the relaunched process runs");
+        assert_ne!(session.info.state, SessionState::Suspended);
+        assert!(!session.info.binary_updated, "the new process is current");
+        assert_eq!(manager.len(), 1, "restarted in place, not duplicated");
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_restart_refuses_before_killing_when_it_could_not_come_back() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (session_id, _) = restartable_session(&mut manager, &temp_dir);
+        // A conversation never written to disk cannot be resumed
+        manager.get_mut(session_id).unwrap().info.agent_session_id =
+            Some(Uuid::new_v4().to_string());
+
+        let err = manager
+            .restart_session(session_id, 24, 80, Some(claude_home(&temp_dir)), None)
+            .expect_err("nothing to resume");
+        assert!(err.to_string().contains("transcript"), "got: {err}");
+
+        let session = manager.get_mut(session_id).unwrap();
+        assert!(session.is_alive(), "a refused restart leaves it running");
+        assert_eq!(session.info.state, SessionState::Waiting);
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_a_shell_cannot_be_restarted() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_shell(&mut manager, "sh");
+
+        let err = manager
+            .restart_session(session_id, 24, 80, None, None)
+            .expect_err("a shell has nothing to resume");
+        assert!(err.to_string().contains("shell"), "got: {err}");
+        manager.shutdown_all();
+    }
+
+    /// The native installer's update: the stable symlink repointed at a new
+    /// versioned build, picked up by the re-check and only by live sessions
+    #[cfg(unix)]
+    #[test]
+    fn test_a_swapped_binary_flags_the_sessions_running_it() {
+        use crate::agent::binary::BinaryFingerprint;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let versions = temp_dir.path().join("versions");
+        std::fs::create_dir_all(&versions).unwrap();
+        std::fs::write(versions.join("1.0.0"), "old").unwrap();
+        std::fs::write(versions.join("1.0.1"), "new").unwrap();
+        let link = temp_dir.path().join("claude");
+        std::os::unix::fs::symlink(versions.join("1.0.0"), &link).unwrap();
+
+        let launched = BinaryFingerprint::of(&link).unwrap();
+        let live = insert_test_session(&mut manager);
+        let other = insert_test_session(&mut manager);
+        let suspended = insert_test_session(&mut manager);
+        for id in [live, other, suspended] {
+            manager.get_mut(id).unwrap().info.launched_binary = Some(launched.clone());
+        }
+        manager
+            .get_mut(suspended)
+            .unwrap()
+            .set_state(SessionState::Suspended);
+
+        assert!(!manager.check_binary_updates(None), "nothing changed yet");
+
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(versions.join("1.0.1"), &link).unwrap();
+
+        // Focusing one session looks at that one alone
+        assert!(manager.check_binary_updates(Some(live)));
+        assert!(manager.get(live).unwrap().info.binary_updated);
+        assert!(!manager.get(other).unwrap().info.binary_updated);
+
+        assert!(manager.check_binary_updates(None));
+        assert!(manager.get(other).unwrap().info.binary_updated);
+        // Its next process is spawned from whatever is installed then
+        assert!(!manager.get(suspended).unwrap().info.binary_updated);
+        assert!(!manager.check_binary_updates(None), "flagged once");
+
+        manager.shutdown_all();
     }
 
     #[test]

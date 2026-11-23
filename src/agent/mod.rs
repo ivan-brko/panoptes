@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod antigravity;
+pub mod binary;
 pub mod claude;
 pub mod codex;
 pub mod events;

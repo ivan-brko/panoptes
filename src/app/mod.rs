@@ -128,6 +128,11 @@ pub struct App {
     mouse_debug_enabled: bool,
     /// When the Codex rollout directory was last scanned for conversation IDs
     last_codex_id_scan: Option<Instant>,
+    /// When the agent binaries of live sessions were last re-checked
+    last_binary_check: Option<Instant>,
+    /// The session last opened full-screen when its binary was checked, so
+    /// focusing a session checks it once rather than every tick
+    binary_checked_session: Option<SessionId>,
     /// Background reader of agent transcripts
     transcripts: TranscriptWatcher,
     /// Which transcript each session is currently being followed at
@@ -165,6 +170,12 @@ const TRANSCRIPT_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 /// Codex writes its rollout within a moment of starting, so this resolves on the
 /// first or second scan and then stops costing anything.
 const CODEX_ID_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How often live sessions' agent binaries are looked at again for an update
+///
+/// Agents update a few times a week at most, and the look is a `stat` per
+/// distinct binary, so minutes is both cheap and soon enough.
+const BINARY_CHECK_INTERVAL: Duration = Duration::from_secs(180);
 
 /// How long a new rollout is left for a Codex `SessionStart` hook to claim
 /// before it is matched to a session by guesswork
@@ -533,6 +544,8 @@ impl App {
             hook_server_healthy: true,
             mouse_debug_enabled,
             last_codex_id_scan: None,
+            last_binary_check: None,
+            binary_checked_session: None,
             transcripts,
             watched_transcripts: HashMap::new(),
             last_transcript_sync: None,
@@ -701,6 +714,7 @@ impl App {
             dirty |= self.tick_shell_state_notifications();
             dirty |= self.tick_auto_close();
             dirty |= self.tick_idle_suspension();
+            dirty |= self.tick_binary_updates();
             dirty |= self.tick_exited_cleanup();
             dirty |= self.tick_dropped_events();
             dirty |= self.tick_server_health();
@@ -1071,6 +1085,102 @@ impl App {
             self.state.clear_selection();
         }
         !suspended.is_empty()
+    }
+
+    /// Notice agent binaries updated under live sessions
+    ///
+    /// Every live session on a throttle, and the session the user has just
+    /// opened full-screen straight away, since that is when a stale build is
+    /// about to matter. Either way only a `stat` per distinct binary.
+    fn tick_binary_updates(&mut self) -> bool {
+        let mut flagged = false;
+
+        let focused = (self.state.focus == Focus::Session)
+            .then_some(self.state.active_session)
+            .flatten();
+        if focused != self.binary_checked_session {
+            self.binary_checked_session = focused;
+            if let Some(session_id) = focused {
+                flagged |= self.sessions.check_binary_updates(Some(session_id));
+            }
+        }
+
+        if !self
+            .last_binary_check
+            .is_some_and(|last| last.elapsed() < BINARY_CHECK_INTERVAL)
+        {
+            self.last_binary_check = Some(Instant::now());
+            flagged |= self.sessions.check_binary_updates(None);
+        }
+        flagged
+    }
+
+    /// Restart a session on its agent's current binary, resuming its conversation
+    ///
+    /// Asks first when the restart would interrupt something - a turn, a
+    /// dialog, background work - unless `confirmed`, which is the answer to
+    /// that question. A refusal or failure is said in the header; it never
+    /// leaves the session without a way back.
+    pub(crate) fn restart_session(&mut self, session_id: SessionId, confirmed: bool) {
+        let Some(session) = self.sessions.get(session_id) else {
+            return;
+        };
+        let info = &session.info;
+        let name = crate::tui::views::truncate_string(&info.name, 40);
+        match info.restart_readiness(chrono::Utc::now()) {
+            crate::session::RestartReadiness::Refused(reason) => {
+                self.state
+                    .header_notifications
+                    .push(format!("Not restarting '{}': {}", name, reason));
+                self.state.needs_render = true;
+                return;
+            }
+            crate::session::RestartReadiness::Busy if !confirmed => {
+                self.state.pending_restart_session = Some(session_id);
+                self.state.input_mode = InputMode::ConfirmingSessionRestart;
+                return;
+            }
+            _ => {}
+        }
+
+        let (claude_config_dir, codex_home) =
+            self.resolve_agent_config_dirs(session_id, info.claude_config_id, info.codex_config_id);
+        let (rows, cols) = self.session_pty_size();
+
+        match self
+            .sessions
+            .restart_session(session_id, rows, cols, claude_config_dir, codex_home)
+        {
+            Ok(()) => {
+                // The old process's selection described a screen that is gone
+                if self
+                    .state
+                    .selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.session_id == session_id)
+                {
+                    self.state.clear_selection();
+                }
+                self.state
+                    .header_notifications
+                    .push(format!("Restarted '{}'", name));
+            }
+            Err(e) => {
+                tracing::warn!(session_id = %session_id, error = %e, "Failed to restart session");
+                // Refused before the kill, it is still running; failed after
+                // it, it is suspended and opening it tries the resume again
+                let notice = if self.sessions.is_suspended(session_id) {
+                    format!(
+                        "Could not restart '{}': {} - left suspended, Enter resumes it",
+                        name, e
+                    )
+                } else {
+                    format!("Could not restart: {}", e)
+                };
+                self.state.header_notifications.push(notice);
+            }
+        }
+        self.state.needs_render = true;
     }
 
     /// Clean up old exited sessions to prevent memory growth, repairing a
@@ -3313,6 +3423,11 @@ impl App {
                 }
                 InputMode::ConfirmingSessionDelete => {
                     render_session_delete_confirmation(frame, area, state, sessions);
+                }
+                InputMode::ConfirmingSessionRestart => {
+                    crate::tui::views::render_session_restart_confirmation(
+                        frame, area, state, sessions,
+                    );
                 }
                 InputMode::ConfirmingBranchDelete => {
                     render_branch_delete_confirmation(frame, area, state, project_store, sessions);

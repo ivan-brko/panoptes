@@ -95,6 +95,30 @@ pub(crate) fn confirming_session_delete_key(
     Ok(())
 }
 
+/// Handle the "restart a busy session?" confirmation
+///
+/// Only reached when the restart would interrupt something; a session at
+/// rest restarts without asking (see [`App::restart_session`]).
+pub fn handle_confirming_restart_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.state.input_mode = InputMode::Normal;
+            if let Some(session_id) = app.state.pending_restart_session.take() {
+                app.restart_session(session_id, true);
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.state.pending_restart_session = None;
+            app.state.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Clamp a list selection into a list that just shrank
 fn clamp(index: &mut usize, count: usize) {
     if count == 0 {

@@ -613,6 +613,34 @@ fn current_branch_name(project: &Project) -> Option<String> {
     }
 }
 
+/// A branch-level session row wearing the "restart to update" badge
+///
+/// The badge's words stay only when they fit whole after the row's own
+/// fields, and then the trailer after them is what gets clipped. Otherwise the
+/// words and the trailer go, and the glyph keeps its columns at the end.
+fn branch_row_with_update_badge(
+    mut spans: Vec<Span<'static>>,
+    trailer: Option<Span<'static>>,
+    width: usize,
+) -> Line<'static> {
+    use super::pane_sessions::{clamp_with_update_badge, UPDATE_BADGE, UPDATE_GLYPH};
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if trailer.is_some() && used + UPDATE_BADGE.chars().count() <= width {
+        spans.push(Span::styled(
+            UPDATE_BADGE,
+            Style::default().fg(theme().update_available),
+        ));
+        spans.extend(trailer);
+        return clamp_line(Line::from(spans), width);
+    }
+    let badge = if used + UPDATE_BADGE.chars().count() <= width {
+        UPDATE_BADGE
+    } else {
+        UPDATE_GLYPH
+    };
+    clamp_with_update_badge(Line::from(spans), badge, width)
+}
+
 /// The sessions of one branch
 fn render_branch_sessions(
     frame: &mut Frame,
@@ -681,19 +709,30 @@ fn render_branch_sessions(
                 None => info.last_message.clone(),
             };
             spans.push(Span::raw(format!("{} [{}]", info.name, state_display)));
-            if let Some(trailer) = trailer {
-                spans.push(Span::styled(format!(" — {}", trailer), t.muted_style()));
-            }
+            let trailer =
+                trailer.map(|trailer| Span::styled(format!(" — {}", trailer), t.muted_style()));
+            let line = if info.shows_update_badge() {
+                branch_row_with_update_badge(spans, trailer, width)
+            } else {
+                spans.extend(trailer);
+                clamp_line(Line::from(spans), width)
+            };
+            ListItem::new(line).style(selection_style(selected, info.state.color()))
         } else {
             spans.push(Span::raw(format!(
                 "{} [{}]",
                 info.name,
                 compact_state(&state_display)
             )));
+            let badge = if info.shows_update_badge() {
+                super::pane_sessions::UPDATE_GLYPH
+            } else {
+                ""
+            };
+            let line =
+                super::pane_sessions::clamp_with_update_badge(Line::from(spans), badge, width);
+            ListItem::new(line).style(selection_style(selected, info.state.color()))
         }
-
-        ListItem::new(clamp_line(Line::from(spans), width))
-            .style(selection_style(selected, info.state.color()))
     }));
 
     let items = window_rows(items, selected_index, area.height);

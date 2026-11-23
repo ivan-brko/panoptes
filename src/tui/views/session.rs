@@ -61,7 +61,8 @@ pub fn render_session_view(
         .with_suffix(suffix)
         .with_notifications(Some(header_notifications))
         .with_attention_count(attention_count)
-        .with_custom_style(custom_style);
+        .with_custom_style(custom_style)
+        .with_flag(update_flag(session.map(|s| &s.info)));
 
     // Pre-calculate layout using FrameLayout. The header height must come
     // from the same answer `FrameConfig::for_terminal` gives the off-screen
@@ -261,6 +262,24 @@ fn header_suffix(info: &SessionInfo, scroll_offset: usize) -> String {
         "{}{}{}{}{}",
         scroll_display, agent_display, state_display, subagent_display, usage_display
     )
+}
+
+/// The header's "restart to update" badge, for a session whose agent binary
+/// was updated under it
+///
+/// The terminal below cannot say this - the old build looks exactly like the
+/// new one until it is restarted - so it is one of the few things the header
+/// carries. Its own colour, because it is neither the session's state nor an
+/// attention reason.
+fn update_flag(info: Option<&SessionInfo>) -> Option<Span<'static>> {
+    info.filter(|info| info.shows_update_badge()).map(|_| {
+        Span::styled(
+            crate::tui::views::pane_sessions::UPDATE_BADGE,
+            Style::default()
+                .fg(theme().update_available)
+                .add_modifier(Modifier::BOLD),
+        )
+    })
 }
 
 /// Build breadcrumb and suffix for the session header

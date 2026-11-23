@@ -968,7 +968,7 @@ command = "code . &"
 - Creates shell session using `SessionManager::create_shell_session_with_command()`
 
 **Key validation:**
-- Reserved keys are rejected (q, n, s, d, i, 0-9)
+- Reserved keys are rejected (q, n, s, d, i, u, 0-9)
 - Duplicate keys are rejected
 - Validation occurs in `config::is_reserved_key()` and `Config::add_shortcut()`
 
@@ -1504,6 +1504,44 @@ Linux, which `poll_output` turns into `Exited`), `check_alive` (reaping our own 
 crash), and `cleanup_exited_sessions` (which calls `forget_session` and deletes
 the record from `sessions.json`, making the session permanently unrecoverable).
 `SessionState::has_process()` is the single predicate they all use.
+
+### Agent Updates Under a Live Session
+
+Claude Code, Codex and Antigravity update themselves, and a long-lived session
+keeps running the build it was launched from. At every spawn,
+`spawn_and_register` resolves the adapter's command on `PATH` and records a
+`BinaryFingerprint` (`agent/binary.rs`) on the session: the resolved path, its
+canonical target, and that file's inode, mtime and size. That covers both ways
+an agent is installed:
+
+- **Symlink swap** - the native Claude installer repoints
+  `~/.local/bin/claude` at `~/.local/share/claude/versions/<version>`; the
+  canonical path changes.
+- **In-place overwrite** - npm and Homebrew (`codex`, an npm `claude`) and
+  Antigravity's updater replace the file at the same path; the inode, mtime or
+  size changes.
+
+`SessionManager::check_binary_updates` re-checks with one `canonicalize` and
+`stat` per distinct resolved path, and only for sessions with a process. The
+app runs it every three minutes (`BINARY_CHECK_INTERVAL`) and for a session the
+moment it is opened full-screen. A binary that cannot be read - mid-update -
+is not a change; the next look decides. A changed one sets `binary_updated`,
+which the session rows and the session header show as `↻ restart to update`
+in the `update_available` theme token. The badge's words drop whole when the
+row would otherwise have to elide; the `↻` glyph stays at every width.
+
+`u` in either session list acts only on a session wearing the badge
+(`SessionInfo::restart_readiness`; the badge itself shows only while the
+session has a process) - anything else is a stray key, and killing a session
+for one would lose an unsent prompt. A session that `is_busy` - `Starting`,
+mid-turn, on a dialog, with background work, or with output in the last
+`RECENT_OUTPUT_SECS`, since hooks can lag - asks first. `restart_session` then
+checks every reason the relaunch could fail (a shell, a freshly re-checked
+transcript, any other `resume_blocker`) *before* killing anything, then kills the process, marks it `Suspended` and
+wakes it through `wake_session` - so the relaunch is the ordinary resume
+(`--resume <id>`, `codex resume <id>`, `--conversation=<id>`) under the same
+Panoptes session ID, and the new process gets a fresh fingerprint. A spawn that
+fails after the kill leaves the session suspended; `Enter` resumes it.
 
 ## Testing
 

@@ -75,6 +75,9 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Result<()> {
         InputMode::ConfirmingSessionDelete => {
             super::dialogs::handle_confirming_delete_key(app, key)
         }
+        InputMode::ConfirmingSessionRestart => {
+            super::dialogs::handle_confirming_restart_key(app, key)
+        }
         InputMode::ConfirmingBranchDelete => {
             super::dialogs::handle_confirming_branch_delete_key(app, key)
         }
@@ -322,8 +325,9 @@ fn validate_mode_focus_consistency(state: &mut AppState) {
         // - the session view has no delete key, because every key there is
         // the agent's - and stays allowed so that a session destroyed while
         // it is on screen can still put its pane back (`was_full_screen` in
-        // `dialogs::confirming_session_delete_key`).
-        InputMode::ConfirmingSessionDelete => {
+        // `dialogs::confirming_session_delete_key`). A restart is offered from
+        // the same two lists.
+        InputMode::ConfirmingSessionDelete | InputMode::ConfirmingSessionRestart => {
             state.focus == Focus::Session
                 || on(Tab::Sessions)
                 || (on(Tab::Projects) && matches!(state.projects_nav, ProjectsNav::Branch(_, _)))
@@ -646,6 +650,7 @@ mod tests {
         for mode in [
             InputMode::ConfirmingQuit,
             InputMode::ConfirmingSessionDelete,
+            InputMode::ConfirmingSessionRestart,
             InputMode::ConfirmingProjectDelete,
             InputMode::ConfirmingBranchDelete,
             InputMode::ConfirmingFolderRemove,

@@ -556,6 +556,7 @@ Defines custom keyboard shortcuts that spawn shell sessions with predefined comm
 - `q` - Quit, handled globally in normal mode
 - `n`, `s`, `d` - New / shell / delete, bound in panes 1 and 2
 - `i` - Import a conversation, bound at a branch in pane 1
+- `u` - Restart a session on its agent's updated binary, bound in panes 1 and 2
 - `0-9` - Used for session number jumping
 
 `c`, `g`, `G`, `k` and `x` used to be reserved and are now free: the configs,

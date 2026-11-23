@@ -373,6 +373,8 @@ pub struct AppState {
     pub fetch_error: Option<String>,
     /// Session pending deletion (for confirmation dialog)
     pub pending_delete_session: Option<SessionId>,
+    /// Session pending a restart that would interrupt it (for confirmation)
+    pub pending_restart_session: Option<SessionId>,
     /// Project pending deletion (for confirmation dialog)
     pub pending_delete_project: Option<ProjectId>,
     /// Branch pending deletion (for confirmation dialog)
@@ -631,6 +633,13 @@ impl AppState {
         if restored == Focus::Panes(Tab::Projects) {
             if let Some(session) = self.active_session.and_then(|id| sessions.get(id)) {
                 self.navigate_to_branch(session.info.project_id, session.info.branch_id);
+            }
+        }
+        // Pane 2's selection lands on the session just left, so a key acting
+        // on "the selected session" - `u`, `d` - means the one you were in
+        if restored == Focus::Panes(Tab::Sessions) {
+            if let Some(index) = self.active_session.and_then(|id| sessions.index_of(id)) {
+                self.sessions_pane_index = index;
             }
         }
 
@@ -1004,6 +1013,49 @@ mod tests {
             state.projects_nav,
             ProjectsNav::Branch(project_id, branch_id)
         );
+    }
+
+    /// Opened from pane 2 by a jump (attention, a digit elsewhere), `Esc`
+    /// must leave pane 2's selection on the session just left - otherwise a
+    /// following `u` or `d` acts on whatever row happened to be selected
+    #[test]
+    fn test_return_to_pane_two_selects_the_session_just_left() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = crate::config::Config {
+            worktrees_dir: temp_dir.path().join("worktrees"),
+            hooks_dir: temp_dir.path().join("hooks"),
+            ..crate::config::Config::default()
+        };
+        let mut sessions = SessionManager::with_store(
+            config,
+            crate::session::SessionStore::with_path(temp_dir.path().join("sessions.json")),
+        );
+        let ids: Vec<_> = ["first", "second", "third"]
+            .iter()
+            .map(|name| {
+                sessions
+                    .insert_test_session(name, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+                    .unwrap()
+            })
+            .collect();
+
+        let mut state = AppState {
+            focus: Focus::Panes(Tab::Sessions),
+            sessions_pane_index: 0,
+            ..Default::default()
+        };
+        state.navigate_to_session(ids[2]);
+        state.return_from_session(&sessions);
+
+        assert_eq!(state.focus, Focus::Panes(Tab::Sessions));
+        assert_eq!(state.sessions_pane_index, 2);
+        assert_eq!(
+            sessions
+                .get_by_index(state.sessions_pane_index)
+                .map(|s| s.info.id),
+            Some(ids[2])
+        );
+        sessions.shutdown_all();
     }
 
     #[test]

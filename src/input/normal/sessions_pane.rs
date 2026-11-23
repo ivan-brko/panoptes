@@ -43,6 +43,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.activate_session(session_id)?;
             }
         }
+        KeyCode::Char(super::RESTART_SESSION_KEY) => {
+            if let Some(session) = app.sessions.get_by_index(app.state.sessions_pane_index) {
+                let session_id = session.info.id;
+                app.restart_session(session_id, false);
+            }
+        }
         KeyCode::Char('d') => {
             // Ask first, like every other delete in the app
             if let Some(session) = app.sessions.get_by_index(app.state.sessions_pane_index) {
