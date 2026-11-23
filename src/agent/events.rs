@@ -13,6 +13,7 @@
 use chrono::{DateTime, Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::prompt_cache::PromptCache;
 use crate::hooks::NotificationKind;
 
 /// Something an agent did, expressed in terms the session model understands
@@ -263,6 +264,11 @@ pub struct UsageSnapshot {
     /// Only its presence is shown; the wording is Codex's and may change.
     #[serde(default)]
     pub limit_reached: Option<String>,
+
+    /// The last request that used the prompt cache, and when it expires
+    /// (Claude only, from the transcript's `usage.cache_creation` split)
+    #[serde(default)]
+    pub prompt_cache: Option<PromptCache>,
 }
 
 /// One rate-limit window as the agent reported it
@@ -399,6 +405,11 @@ impl UsageSnapshot {
         }
         if newer.credits_available.is_some() {
             self.credits_available = newer.credits_available;
+        }
+        match (self.prompt_cache.as_mut(), newer.prompt_cache) {
+            (Some(known), Some(newer)) => known.merge(newer),
+            (None, Some(newer)) => self.prompt_cache = Some(newer),
+            (_, None) => {}
         }
     }
 
