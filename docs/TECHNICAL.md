@@ -1487,6 +1487,40 @@ Setting `log_agent_events = true` writes every raw transcript line to
 can be checked against its input. Best effort throughout: it must never disturb
 the session it describes.
 
+### Resuming at a Usage Limit's Reset
+
+`session/auto_resume.rs` is the pure half: every decision takes the clock as an
+argument, so each guard has a unit test. A session is *armable* only when it is
+a Claude or Codex session sitting (`Waiting`) on a failed turn labelled
+`usage limit` whose `UsageLimit` carries a `resets_at` later than the failure's
+own `failed_at` (stamped by `state_machine::apply`), and the user has sent it no
+input since that failure. Codex's `rate limited` is a different label and never
+arms; nor does Antigravity, whose failures carry no reset.
+
+Arming records a `ResumeArm` on the `SessionInfo` (not persisted): the reset,
+the failure's time, the conversation ID and the agent's PID. It is set by `a` in
+pane 2 (`SessionManager::toggle_auto_resume`), or, with
+`auto_resume_at_reset`, by `apply_agent_event` on the edge where the session
+*becomes* armable - for Claude that is when the transcript fills in the reset
+the `StopFailure` hook lacked, and only on the edge, so a session disarmed by
+hand is not re-armed by the next event.
+
+`App::tick_auto_resume` calls `SessionManager::tick_auto_resume(now)` every
+loop; `auto_resume::step` re-checks every guard each time and disarms without
+writing on any failure: a different PID (killed, woken, restarted), not
+`Waiting`, not the same failure (by `failed_at` and `resets_at`), a different
+conversation, user input since the failure, or more than 24 hours past the
+firing time. A minute after the reset it types `CONTINUE_PROMPT`, and a second
+later writes `\r`: both agents treat a burst of characters ending in `\r` as a
+paste, where the `\r` is a newline rather than a submission. Both writes go
+straight to the PTY, so they do not count as the user's input.
+
+Any user input - `Session::write`, `write_paste`, `send_key`, which carry keys,
+pastes and mouse reports alike - goes through `note_user_input`, which stamps
+`last_user_input` and drops the arm at once. An armed session is exempt from
+idle suspension (`may_suspend`), and a suspended one is never woken to be
+resumed: it is no longer `Waiting`, so the arm simply lapses.
+
 ### Suspending Inactive Sessions
 
 An idle Claude Code process measures around 565 MB - roughly 25x the whole

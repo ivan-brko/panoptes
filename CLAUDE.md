@@ -48,6 +48,7 @@ PTY Output → Session buffer → TUI render
 - `hooks/antigravity_status_line.rs` - Antigravity's status-line payload: state, conversation ID, quota
 - `session/` - Session lifecycle, PTY management, terminal emulation
 - `session/state_machine.rs` - Pure agent-event state machine (hook event → state transition)
+- `session/auto_resume.rs` - Pure guards for resuming a session at its usage limit's reset
 - `session/pty_reader.rs` - Per-PTY reader thread draining output into a byte-bounded queue
 - `hooks/` - HTTP server for agent callbacks
 - `transcript/` - Reads agent transcripts on disk (Codex state, usage for both, Claude failed turns)

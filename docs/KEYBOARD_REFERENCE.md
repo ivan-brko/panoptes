@@ -135,6 +135,7 @@ Every session, flat and sorted, with a pinned "Needs Attention" section on top.
 | `Enter` | Open the selected session full-screen |
 | `u` | Restart a session wearing `↻ restart to update` on the new agent build, resuming its conversation. Asks first if it would interrupt a turn, a dialog, a start-up, background work, or output still arriving; does nothing on a session without the badge |
 | `d` | Delete the selected session (prompts for confirmation) |
+| `a` | Resume the selected session at its usage limit's reset, or cancel that (offered in the footer only for a usage limit with a known reset) |
 | `Esc` | Back out to the Projects pane |
 
 ## Pane 3 — Settings
