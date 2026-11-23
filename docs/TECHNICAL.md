@@ -690,9 +690,10 @@ line, no `jsonrpc` member):
    notification
 2. `account/read` → logged out (`account: null`), `apiKey`, or `chatgpt` with
    email and plan
-3. `account/rateLimits/read`, only for a ChatGPT login whose top-level
-   `config.toml` routes to OpenAI (no `model_provider` other than `openai`, no
-   `openai_base_url` off `api.openai.com`/`chatgpt.com`). The `codex` bucket
+3. `account/rateLimits/read`, only for a ChatGPT login whose `config.toml`
+   routes to OpenAI (no `model_provider` other than `openai`, no
+   `openai_base_url` off `api.openai.com`/`chatgpt.com`; each read from the
+   active `profile` when it sets one, else the top level). The `codex` bucket
    of `rateLimitsByLimitId` is read, else `rateLimits`; `primary`/`secondary`
    become the five-hour (monthly on Free/Go) and weekly windows,
    `individualLimit` a "credit" window. Its `planType` overrides
@@ -709,18 +710,22 @@ the shadow, healed first) and `CODEX_SQLITE_HOME` from `sqlite_home_for`.
 - **Usage is optional.** The handshake and `account/read` have 20 s; a usage
   read that fails or takes over 10 s leaves the login shown and the quota as
   "usage unavailable".
-- **`CODEX_INTERNAL_ORIGINATOR_OVERRIDE` is removed, not set.** app-server
-  refreshes `models_cache.json` before `initialize`, under the default
-  (plain-CLI) originator, which is what Panoptes sessions are; verified on
-  0.156.1 that the cache it writes carries the CLI's `client_version` and the
-  account's identity hash, so the CLI reuses it. Setting the override (as
-  T3 Code does for its own app-server sessions) would file another client's
-  model list in the sessions' home.
+- **The originator is pinned to the CLI's.** On `initialize`, app-server
+  adopts `clientInfo.name` as its process-wide originator
+  (`set_default_originator`), and every later backend call - including the
+  periodic `models_cache.json` refresh - goes out under it. The cache is not
+  keyed by originator, so a probe running as `panoptes` could refile the
+  model list the sessions (the plain CLI) read. The probe therefore sets
+  `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codex_cli_rs` (Codex's
+  `DEFAULT_ORIGINATOR`), which Codex prefers over any client name. T3 Code
+  sets the override too, to its own name, because its sessions are its
+  app-server; Panoptes' are the CLI.
 
 Scheduling is `app::background::CodexProbes`, polled by
 `App::tick_codex_probes`. Not a `BackgroundJob`: no overlay, one thread per
 account, nothing waits on it. An account is probed when the list opens unless
-it was probed in the last 60 s, and when its own `auth.json`'s mtime changes -
+it was probed in the last 60 s, as soon as it is seen if it was never probed
+(an account added while the list is open), and when its own `auth.json`'s mtime changes -
 at once if noticed on open, else after it has been still for 250 ms
 (`codex login` writes it more than once). The mtime is checked every 100 ms,
 only while the list is on screen. Results land in

@@ -274,6 +274,8 @@ struct ProbeHistory {
 /// When to probe is decided here, purely, so it can be tested on a clock:
 /// - when the accounts become visible (the Settings list or the wizard's
 ///   account step), unless the account was probed within [`PROBE_THROTTLE`];
+/// - an account never probed at all, as soon as it is seen - one added while
+///   the list is open would otherwise wait for the list to be reopened;
 /// - when an account's `auth.json` changed since its last probe - at once if
 ///   that is noticed as the list opens, else once it has been still for
 ///   [`AUTH_DEBOUNCE`].
@@ -331,8 +333,10 @@ impl CodexProbes {
         if self.is_running(id) {
             return false;
         }
+        // Only ever asked while the accounts are on screen, so an account
+        // with no history is one the user is looking at unprobed
         let Some(history) = self.history.get_mut(&id) else {
-            return opened;
+            return true;
         };
         if history.auth == auth {
             history.pending_auth = None;
@@ -503,10 +507,6 @@ mod tests {
         let id = Uuid::new_v4();
         let t0 = Instant::now();
 
-        assert!(
-            !probes.should_probe(id, mtime(1), false, t0),
-            "not yet visible"
-        );
         assert!(probes.should_probe(id, mtime(1), true, t0));
         probes.record_start(id, mtime(1), t0);
 
@@ -514,6 +514,25 @@ mod tests {
         assert!(!probes.should_probe(id, mtime(1), true, soon), "throttled");
         let later = t0 + PROBE_THROTTLE;
         assert!(probes.should_probe(id, mtime(1), true, later));
+    }
+
+    /// An account added while the list is open is probed right away, not on
+    /// the next time the list opens
+    #[test]
+    fn an_account_added_while_open_is_probed_at_once() {
+        let mut probes = CodexProbes::default();
+        let t0 = Instant::now();
+        assert!(probes.set_visible(true));
+        let existing = Uuid::new_v4();
+        assert!(probes.should_probe(existing, mtime(1), true, t0));
+        probes.record_start(existing, mtime(1), t0);
+
+        // Later, still open: a new account appears
+        let added = Uuid::new_v4();
+        let t1 = t0 + Duration::from_secs(3);
+        assert!(!probes.set_visible(true), "no new opening edge");
+        assert!(probes.should_probe(added, None, false, t1));
+        assert!(!probes.should_probe(existing, mtime(1), false, t1));
     }
 
     #[test]

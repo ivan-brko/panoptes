@@ -19,11 +19,16 @@
 //!   custom `model_provider` spends someone else's.
 //! - **Usage is optional.** A failed or slow `account/rateLimits/read` costs
 //!   the usage figures, never the login status.
-//! - **`CODEX_INTERNAL_ORIGINATOR_OVERRIDE` is left unset.** app-server
-//!   refreshes `models_cache.json` before `initialize`, under the default
-//!   originator - the plain CLI's, which is what Panoptes sessions run. With
-//!   the override set, that refresh would file another client's model list in
-//!   the home the sessions read.
+//! - **The probe speaks to OpenAI as the plain CLI.** `initialize` makes
+//!   app-server adopt the client's name as its process-wide originator
+//!   (`set_default_originator(clientInfo.name)`), and from then on every
+//!   backend call - including its periodic `models_cache.json` refresh - goes
+//!   out under that name. The cache is not keyed by originator, so a refresh
+//!   as anything but the CLI would file another client's model list in the
+//!   home Panoptes sessions (the plain CLI) read. The probe therefore spawns
+//!   with `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` set to the CLI's own
+//!   originator ([`CLI_ORIGINATOR`]), which Codex prefers over any name a
+//!   client offers.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -49,6 +54,13 @@ pub const EXIT_GRACE: Duration = Duration::from_secs(60);
 
 /// The client name Codex sees, and stamps on its user agent
 const CLIENT_NAME: &str = "panoptes";
+
+/// Codex's override for its process-wide originator
+const ORIGINATOR_OVERRIDE_VAR: &str = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
+
+/// The plain CLI's originator (`DEFAULT_ORIGINATOR` in Codex's
+/// `login/src/auth/default_client.rs`), which Panoptes sessions run as
+pub const CLI_ORIGINATOR: &str = "codex_cli_rs";
 
 /// The five-hour window's length, for a reading that omits it
 const SESSION_MINS: u64 = 5 * 60;
@@ -435,10 +447,12 @@ pub fn plan_label(plan_type: &str) -> Option<String> {
 
 /// Whether a Codex home's model traffic goes to OpenAI itself
 ///
-/// Only then does the account's plan quota pay for it. Reads the top level of
-/// `config.toml`: a `model_provider` other than `openai`, or an
-/// `openai_base_url` pointing anywhere but OpenAI, routes elsewhere. A file
-/// that cannot be read is no file - Codex's default is OpenAI.
+/// Only then does the account's plan quota pay for it. A `model_provider`
+/// other than `openai`, or an `openai_base_url` pointing anywhere but OpenAI,
+/// routes elsewhere. Each is read from the active profile (the top-level
+/// `profile = "x"` selects `[profiles.x]`) when it sets one, else from the
+/// top level, as Codex resolves them. A file that cannot be read is no file -
+/// Codex's default is OpenAI.
 pub fn routes_to_native_openai(config_toml: Option<&str>) -> bool {
     let Some(text) = config_toml else {
         return true;
@@ -446,14 +460,20 @@ pub fn routes_to_native_openai(config_toml: Option<&str>) -> bool {
     let Ok(config) = text.parse::<toml::Table>() else {
         return true;
     };
-    let provider = config
-        .get("model_provider")
+    let profile = config
+        .get("profile")
         .and_then(toml::Value::as_str)
-        .unwrap_or("openai");
-    if provider != "openai" {
+        .and_then(|name| config.get("profiles")?.get(name)?.as_table());
+    let setting = |key: &str| {
+        profile
+            .and_then(|p| p.get(key))
+            .or_else(|| config.get(key))
+            .and_then(toml::Value::as_str)
+    };
+    if setting("model_provider").unwrap_or("openai") != "openai" {
         return false;
     }
-    match config.get("openai_base_url").and_then(toml::Value::as_str) {
+    match setting("openai_base_url") {
         None | Some("") => true,
         Some(url) => is_openai_url(url),
     }
@@ -498,19 +518,7 @@ pub fn probe_account(request: &ProbeRequest, budget: ProbeBudget) -> ProbeResult
     let config_toml = std::fs::read_to_string(request.codex_home.join("config.toml")).ok();
     let native_quota = routes_to_native_openai(config_toml.as_deref());
 
-    let mut command = Command::new(&request.binary);
-    command
-        .arg("app-server")
-        .env("CODEX_HOME", &request.codex_home)
-        .env_remove("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
-        .current_dir(dirs::home_dir().unwrap_or_else(std::env::temp_dir))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    if let Some(sqlite_home) = &request.sqlite_home {
-        command.env("CODEX_SQLITE_HOME", sqlite_home);
-    }
-    let mut child = command
+    let mut child = probe_command(request)
         .spawn()
         .map_err(|e| format!("could not start `{} app-server`: {}", request.binary, e))?;
 
@@ -519,16 +527,7 @@ pub fn probe_account(request: &ProbeRequest, budget: ProbeBudget) -> ProbeResult
         return Err("codex app-server has no stdio".to_string());
     };
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if tx.send(line).is_err() {
-                // Nobody is listening any more; keep draining so Codex
-                // never blocks on a full pipe while it winds down
-                continue;
-            }
-        }
-    });
+    std::thread::spawn(move || forward_lines(BufReader::new(stdout), &tx));
 
     let mut client = RpcClient::new(stdin, rx);
     let result = run_probe(&mut client, native_quota, budget);
@@ -536,6 +535,45 @@ pub fn probe_account(request: &ProbeRequest, budget: ProbeBudget) -> ProbeResult
     drop(client);
     reap(child);
     result
+}
+
+/// The `codex app-server` command for a probe, environment and all
+///
+/// `CODEX_HOME` and `CODEX_SQLITE_HOME` as a session gets them, and the
+/// originator pinned to the CLI's (see the module docs).
+fn probe_command(request: &ProbeRequest) -> Command {
+    let mut command = Command::new(&request.binary);
+    command
+        .arg("app-server")
+        .env("CODEX_HOME", &request.codex_home)
+        .env(ORIGINATOR_OVERRIDE_VAR, CLI_ORIGINATOR)
+        .current_dir(dirs::home_dir().unwrap_or_else(std::env::temp_dir))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(sqlite_home) = &request.sqlite_home {
+        command.env("CODEX_SQLITE_HOME", sqlite_home);
+    }
+    command
+}
+
+/// Send each line Codex writes to `tx`, until it closes its stdout
+///
+/// A line that is not UTF-8 is decoded lossily rather than ending the read,
+/// and lines keep being drained after nobody listens, so Codex never blocks
+/// on a full pipe while it winds down.
+fn forward_lines(mut reader: impl BufRead, tx: &mpsc::Sender<String>) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buf);
+                let _ = tx.send(line.trim_end_matches(['\n', '\r']).to_string());
+            }
+        }
+    }
 }
 
 /// Wait out a probe's exit on a thread of its own, killing it only if it hangs
@@ -909,12 +947,80 @@ mod tests {
         assert!(!routes_to_native_openai(Some(
             "openai_base_url = \"http://localhost:8317/v1\"\n"
         )));
-        // A provider set only inside a profile is not the top-level route
+        // A profile that is defined but not active does not route anything
         assert!(routes_to_native_openai(Some(
             "[profiles.local]\nmodel_provider = \"ollama\"\n"
         )));
         // An unreadable file is no file
         assert!(routes_to_native_openai(Some("this is = = not toml")));
+    }
+
+    #[test]
+    fn the_active_profile_decides_the_route() {
+        // The active profile picks a custom provider
+        assert!(!routes_to_native_openai(Some(
+            "profile = \"local\"\n[profiles.local]\nmodel_provider = \"ollama\"\n"
+        )));
+        // ...or a custom endpoint for the OpenAI provider
+        assert!(!routes_to_native_openai(Some(
+            "profile = \"proxy\"\n[profiles.proxy]\nopenai_base_url = \"http://localhost:8317/v1\"\n"
+        )));
+        // A profile back to OpenAI wins over a custom top level
+        assert!(routes_to_native_openai(Some(
+            "profile = \"cloud\"\nmodel_provider = \"ollama\"\n[profiles.cloud]\nmodel_provider = \"openai\"\n"
+        )));
+        // A profile that leaves the provider alone inherits the top level
+        assert!(!routes_to_native_openai(Some(
+            "profile = \"fast\"\nmodel_provider = \"ollama\"\n[profiles.fast]\nmodel = \"x\"\n"
+        )));
+        // Naming a profile that does not exist falls back to the top level
+        assert!(routes_to_native_openai(Some("profile = \"missing\"\n")));
+    }
+
+    #[test]
+    fn probe_pins_the_originator_to_the_cli() {
+        let request = ProbeRequest {
+            codex_home: PathBuf::from("/tmp/panoptes-test-home"),
+            sqlite_home: Some(PathBuf::from("/tmp/panoptes-test-shared")),
+            binary: "codex".to_string(),
+        };
+
+        let command = probe_command(&request);
+        let env: std::collections::HashMap<_, _> = command
+            .get_envs()
+            .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+            .collect();
+
+        assert_eq!(CLI_ORIGINATOR, "codex_cli_rs");
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")),
+            Some(&Some(CLI_ORIGINATOR.into()))
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("CODEX_HOME")),
+            Some(&Some("/tmp/panoptes-test-home".into()))
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("CODEX_SQLITE_HOME")),
+            Some(&Some("/tmp/panoptes-test-shared".into()))
+        );
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["app-server"]);
+    }
+
+    #[test]
+    fn reader_survives_a_line_that_is_not_utf8() {
+        let (tx, rx) = mpsc::channel();
+        let input: &[u8] = b"{\"a\":1}\n\xff\xfe broken\r\n{\"b\":2}\n";
+
+        forward_lines(input, &tx);
+        drop(tx);
+
+        let lines: Vec<String> = rx.iter().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "{\"a\":1}");
+        assert!(lines[1].ends_with(" broken"), "{:?}", lines[1]);
+        assert_eq!(lines[2], "{\"b\":2}");
     }
 
     #[test]
