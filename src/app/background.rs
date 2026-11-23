@@ -300,7 +300,7 @@ impl CodexProbes {
     pub(crate) fn check_due(&mut self, now: Instant) -> bool {
         let due = self
             .last_check
-            .is_none_or(|at| now.duration_since(at) >= AUTH_POLL);
+            .map_or(true, |at| now.duration_since(at) >= AUTH_POLL);
         if due {
             self.last_check = Some(now);
         }

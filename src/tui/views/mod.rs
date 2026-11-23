@@ -12,6 +12,7 @@ use crate::tui::theme::theme;
 
 mod agent_configs;
 mod claude_settings;
+pub(crate) mod codex_account;
 mod confirm;
 mod custom_shortcuts;
 mod help;

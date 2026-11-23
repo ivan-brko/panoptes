@@ -3138,6 +3138,7 @@ impl App {
                         state.config_selector_index,
                         claude_config_store.get_default_id(),
                         config_selector_flow(state),
+                        None,
                     );
                 }
                 InputMode::ConfirmingClaudeSettingsCopy => {
@@ -3193,6 +3194,14 @@ impl App {
                     }
                 }
                 InputMode::SelectingCodexConfig => {
+                    let now = chrono::Utc::now();
+                    let detail = |id, width| {
+                        crate::tui::views::codex_account::codex_account_line(
+                            state.codex_account_probes.get(&id),
+                            width,
+                            now,
+                        )
+                    };
                     render_agent_config_selector(
                         frame,
                         area,
@@ -3201,6 +3210,7 @@ impl App {
                         state.config_selector_index,
                         codex_config_store.get_default_id(),
                         config_selector_flow(state),
+                        Some(&detail),
                     );
                 }
                 InputMode::AddingCustomShortcutKey
