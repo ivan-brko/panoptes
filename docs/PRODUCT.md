@@ -186,6 +186,7 @@ Manage multiple accounts for both Claude Code and Codex CLI:
 **Codex Accounts:**
 - Define named configurations pointing to different Codex home directories (`CODEX_HOME`)
 - Use the `x` key from the projects overview to manage configurations
+- **Login and quota at a glance** - Under each account, in Settings and in the new-session wizard's account step: the email it is logged in as, its plan, and a bar for each quota window (five-hour, weekly, and a workspace credit limit if one is set) with when it resets. An account that is not logged in, uses an API key, or routes to a custom provider says so instead of showing quota. Panoptes asks Codex itself (`codex app-server`) whenever the list opens - at most once a minute per account - and again as soon as you `codex login` or `codex logout` with the list open, so you can pick the account with headroom before you start a session
 
 **Shared features:**
 - **Project Defaults** - Set a default configuration for each project (independent for Claude and Codex)

@@ -52,16 +52,24 @@ fn copy_for(kind: AgentKind) -> &'static AgentConfigCopy {
     }
 }
 
+/// A second row under each account, given its id and the columns available
+///
+/// Codex accounts use it for their login and quota
+/// ([`super::codex_account::codex_account_line`]); Claude's have none yet.
+pub type AccountDetail<'a> = &'a dyn Fn(Uuid, usize) -> Line<'static>;
+
 /// Render an agent's config list into a settings-pane rect
 ///
 /// The pane owns the border and title, so this draws rows only, truncated
-/// against the pane's current width.
+/// against the pane's current width. With `detail`, every account takes two
+/// rows: its name, then the detail under it.
 pub fn render_agent_config_list<C: AgentProfile>(
     frame: &mut Frame,
     area: Rect,
     config_store: &ProfileStore<C>,
     selected_index: usize,
     focused: bool,
+    detail: Option<AccountDetail>,
 ) {
     let t = theme();
     let configs = config_store.configs_sorted();
@@ -76,34 +84,39 @@ pub fn render_agent_config_list<C: AgentProfile>(
     let default_id = config_store.get_default_id();
     let width = area.width as usize;
 
-    let items: Vec<ListItem> = configs
-        .iter()
-        .enumerate()
-        .map(|(i, config)| {
-            let is_selected = i == selected_index && focused;
-            let is_default = default_id == Some(config.id());
+    let mut items: Vec<ListItem> = Vec::new();
+    for (i, config) in configs.iter().enumerate() {
+        let is_selected = i == selected_index && focused;
+        let is_default = default_id == Some(config.id());
 
-            let line = Line::from(vec![
-                Span::raw(selection_prefix(is_selected)),
-                Span::styled(
-                    config.name().to_string(),
-                    selection_name_style(is_selected, t),
-                ),
-                Span::styled(
-                    if is_default { " ★" } else { "" },
-                    Style::default().fg(t.default_marker),
-                ),
-                Span::styled(
-                    format!("  {}", config.home_dir_display()),
-                    Style::default().fg(t.text_dim),
-                ),
-            ]);
+        let line = Line::from(vec![
+            Span::raw(selection_prefix(is_selected)),
+            Span::styled(
+                config.name().to_string(),
+                selection_name_style(is_selected, t),
+            ),
+            Span::styled(
+                if is_default { " ★" } else { "" },
+                Style::default().fg(t.default_marker),
+            ),
+            Span::styled(
+                format!("  {}", config.home_dir_display()),
+                Style::default().fg(t.text_dim),
+            ),
+        ]);
 
-            ListItem::new(crate::tui::views::pane_projects::clamp_line(line, width))
-        })
-        .collect();
+        items.push(ListItem::new(crate::tui::views::pane_projects::clamp_line(
+            line, width,
+        )));
+        if let Some(detail) = detail {
+            items.push(ListItem::new(detail(config.id(), width)));
+        }
+    }
 
-    let items = crate::tui::views::window_rows(items, selected_index, area.height);
+    // Keep the selected account's last row on screen, so its detail is too
+    let rows_per_account = if detail.is_some() { 2 } else { 1 };
+    let selected_row = selected_index * rows_per_account + rows_per_account - 1;
+    let items = crate::tui::views::window_rows(items, selected_row, area.height);
     frame.render_widget(List::new(items), area);
 }
 
@@ -301,11 +314,18 @@ pub enum ConfigSelectorFlow {
 /// Rows of config the selector overlay will show at once
 const SELECTOR_MAX_ROWS: usize = 8;
 
+/// The selector's width, and its width with a detail row under each account
+const SELECTOR_WIDTH: u16 = 50;
+const SELECTOR_DETAIL_WIDTH: u16 = 72;
+
 /// Render the config selector overlay
 ///
 /// The overlay is capped at [`SELECTOR_MAX_ROWS`] rows, so anyone with more
 /// configs than that gets a window around the selection rather than a list
-/// whose tail is drawn past the dialog's bottom border.
+/// whose tail is drawn past the dialog's bottom border. With `detail` each
+/// account takes two of those rows, and the dialog widens to give the
+/// detail room - it is what the user is choosing between.
+#[allow(clippy::too_many_arguments)]
 pub fn render_agent_config_selector<C: AgentProfile>(
     frame: &mut Frame,
     area: Rect,
@@ -314,12 +334,26 @@ pub fn render_agent_config_selector<C: AgentProfile>(
     selected_index: usize,
     default_id: Option<Uuid>,
     flow: ConfigSelectorFlow,
+    detail: Option<AccountDetail>,
 ) {
     let t = theme();
 
-    let (start, end) =
-        crate::tui::views::visible_window(configs.len(), selected_index, SELECTOR_MAX_ROWS);
-    let list_height = (end - start) as u16;
+    let rows_per_account = if detail.is_some() { 2 } else { 1 };
+    let (start, end) = crate::tui::views::visible_window(
+        configs.len(),
+        selected_index,
+        SELECTOR_MAX_ROWS / rows_per_account,
+    );
+    let list_height = ((end - start) * rows_per_account) as u16;
+    let dialog_width = if detail.is_some() {
+        SELECTOR_DETAIL_WIDTH
+    } else {
+        SELECTOR_WIDTH
+    };
+    // Inside the borders, of the dialog as it will be clamped to the terminal
+    let detail_width = dialog_width
+        .min(area.width.saturating_sub(4))
+        .saturating_sub(2) as usize;
 
     let mut lines = vec![
         Line::from(""),
@@ -343,6 +377,9 @@ pub fn render_agent_config_selector<C: AgentProfile>(
             ),
             Span::styled(default_marker, Style::default().fg(t.default_marker)),
         ]));
+        if let Some(detail) = detail {
+            lines.push(detail(config.id(), detail_width));
+        }
     }
 
     lines.push(Line::from(""));
@@ -365,7 +402,7 @@ pub fn render_agent_config_selector<C: AgentProfile>(
             },
             border_color: t.accent,
             alignment: Alignment::Left,
-            width: DialogSize::Fixed(50),
+            width: DialogSize::Fixed(dialog_width),
             // Two borders, a leading blank, the prompt, a blank, the list,
             // a blank, and the key hint - the hint is a step's own keys now,
             // so a height that clipped it is a step that cannot be read
@@ -385,7 +422,7 @@ mod tests {
 
     fn render_list<C: AgentProfile>(store: &ProfileStore<C>, selected: usize) -> Vec<String> {
         render_to_lines(60, 12, |frame| {
-            render_agent_config_list(frame, frame.size(), store, selected, true)
+            render_agent_config_list(frame, frame.size(), store, selected, true, None)
         })
     }
 
@@ -403,7 +440,7 @@ mod tests {
         assert!(contains_line(&focused, "▶ "), "{focused:?}");
 
         let unfocused = render_to_lines(60, 12, |frame| {
-            render_agent_config_list(frame, frame.size(), &store, 0, false)
+            render_agent_config_list(frame, frame.size(), &store, 0, false, None)
         });
         assert!(!contains_line(&unfocused, "▶ "), "{unfocused:?}");
     }
@@ -546,6 +583,7 @@ mod tests {
                 1,
                 Some(default_id),
                 flow,
+                None,
             )
         })
     }
@@ -594,6 +632,7 @@ mod tests {
                     selected,
                     None,
                     ConfigSelectorFlow::SessionWizard,
+                    None,
                 )
             })
         };
@@ -606,5 +645,76 @@ mod tests {
         let lines = render(0);
         assert!(contains_line(&lines, "▶ config-00"), "{:?}", lines);
         assert!(!contains_line(&lines, "config-19"), "{:?}", lines);
+    }
+
+    /// A detail row names its account, so a test can tell whose it is
+    fn detail_naming(id: Uuid, _width: usize) -> Line<'static> {
+        Line::from(format!("    detail-{}", &id.to_string()[..8]))
+    }
+
+    /// Each Codex account carries its login and quota row right under it
+    #[test]
+    fn test_list_detail_sits_under_its_account() {
+        let mut store = CodexConfigStore::new();
+        let work = CodexConfig::new("Work".to_string(), Some(PathBuf::from("/tmp/w")));
+        let tag = format!("detail-{}", &work.id.to_string()[..8]);
+        store.add(work);
+
+        let lines = render_to_lines(60, 12, |frame| {
+            render_agent_config_list(frame, frame.size(), &store, 0, true, Some(&detail_naming))
+        });
+
+        let name_row = lines.iter().position(|l| l.contains("Work ★")).unwrap();
+        assert!(lines[name_row + 1].contains(&tag), "{lines:?}");
+    }
+
+    /// In a list taller than the pane, the selected account's detail row is
+    /// kept on screen along with its name
+    #[test]
+    fn test_list_window_keeps_the_selected_detail() {
+        let mut store = CodexConfigStore::new();
+        let configs: Vec<CodexConfig> = (0..10)
+            .map(|i| CodexConfig::new(format!("acct-{i}"), None))
+            .collect();
+        let last = configs[9].clone();
+        for config in configs {
+            store.add(config);
+        }
+
+        let lines = render_to_lines(60, 6, |frame| {
+            render_agent_config_list(frame, frame.size(), &store, 9, true, Some(&detail_naming))
+        });
+
+        assert!(contains_line(&lines, "▶ acct-9"), "{lines:?}");
+        let tag = format!("detail-{}", &last.id.to_string()[..8]);
+        assert!(contains_line(&lines, &tag), "{lines:?}");
+    }
+
+    /// The wizard's account step shows each account's row under its name,
+    /// and the overlay still fits its key hint
+    #[test]
+    fn test_selector_detail_rows_and_height() {
+        let configs: Vec<CodexConfig> = (0..3)
+            .map(|i| CodexConfig::new(format!("acct-{i}"), None))
+            .collect();
+        let lines = render_to_lines(100, 30, |frame| {
+            render_agent_config_selector(
+                frame,
+                frame.size(),
+                AgentKind::Codex,
+                &configs,
+                0,
+                None,
+                ConfigSelectorFlow::SessionWizard,
+                Some(&detail_naming),
+            )
+        });
+
+        for config in &configs {
+            let name_row = lines.iter().position(|l| l.contains(&config.name)).unwrap();
+            let tag = format!("detail-{}", &config.id.to_string()[..8]);
+            assert!(lines[name_row + 1].contains(&tag), "{lines:?}");
+        }
+        assert!(contains_line(&lines, "[Esc] Back"), "{lines:?}");
     }
 }

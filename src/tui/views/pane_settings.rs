@@ -243,14 +243,26 @@ pub fn render_settings_pane(
             ctx.claude_config_store,
             ctx.state.claude_configs_selected_index,
             focused,
+            None,
         ),
-        SettingsNav::CodexConfigs => super::render_agent_config_list(
-            frame,
-            area,
-            ctx.codex_config_store,
-            ctx.state.codex_configs_selected_index,
-            focused,
-        ),
+        SettingsNav::CodexConfigs => {
+            let now = chrono::Utc::now();
+            let detail = |id, width| {
+                super::codex_account::codex_account_line(
+                    ctx.state.codex_account_probes.get(&id),
+                    width,
+                    now,
+                )
+            };
+            super::render_agent_config_list(
+                frame,
+                area,
+                ctx.codex_config_store,
+                ctx.state.codex_configs_selected_index,
+                focused,
+                Some(&detail),
+            )
+        }
         SettingsNav::Shortcuts => super::render_shortcuts_list(
             frame,
             area,

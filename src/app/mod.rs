@@ -148,6 +148,8 @@ pub struct App {
     /// and the terminal itself is focused. This tracks the last state told to
     /// the children so transitions send exactly one `CSI I`/`CSI O` pair.
     child_focus: Option<SessionId>,
+    /// Login and quota probes of the Codex accounts, while they are on screen
+    codex_probes: background::CodexProbes,
 }
 
 /// How often to reconcile transcript watching against the live session list
@@ -186,6 +188,17 @@ fn worn_palette(state: &AppState, saved: crate::config::Palette) -> crate::confi
     } else {
         saved
     }
+}
+
+/// Whether the Codex accounts are on screen, with their login and quota rows
+///
+/// Two places show them: pane 3 drilled into the Codex accounts, and the
+/// account step of the new-session wizard (which is also where a project's
+/// default account is picked). A full-screen session hides pane 3.
+fn codex_accounts_visible(state: &AppState) -> bool {
+    state.input_mode == InputMode::SelectingCodexConfig
+        || (state.settings_nav == SettingsNav::CodexConfigs
+            && matches!(state.focus, Focus::Panes(_)))
 }
 
 /// The session the user is actually watching, if any
@@ -511,6 +524,7 @@ impl App {
             background_job: None,
             terminal_focused: true,
             child_focus: None,
+            codex_probes: background::CodexProbes::default(),
         })
     }
 
@@ -648,6 +662,7 @@ impl App {
             dirty |= self.tick_pane_transition();
             dirty |= self.tick_settings_marquee();
             dirty |= self.tick_background_job();
+            dirty |= self.tick_codex_probes();
             dirty |= self.tick_resize_debounce()?;
             dirty |= self.process_hook_events();
             dirty |= self.tick_selection_autoscroll();
@@ -2801,6 +2816,71 @@ impl App {
         dirty
     }
 
+    /// Collect finished Codex account probes and start the ones now due
+    ///
+    /// Probes run only while the accounts are on screen ([`codex_accounts_visible`]):
+    /// opening them probes every account not probed within the throttle, and a
+    /// `codex login`/`logout` while they are open is picked up off `auth.json`.
+    /// Returns whether a row changed.
+    fn tick_codex_probes(&mut self) -> bool {
+        let mut dirty = false;
+        for (id, result) in self.codex_probes.poll() {
+            let entry = self.state.codex_account_probes.entry(id).or_default();
+            entry.result = Some(result);
+            entry.checking = false;
+            dirty = true;
+        }
+
+        let opened = self
+            .codex_probes
+            .set_visible(codex_accounts_visible(&self.state));
+        let now = Instant::now();
+        if !self.codex_probes.visible() || !(opened || self.codex_probes.check_due(now)) {
+            return dirty;
+        }
+
+        let default_home = crate::transcript::default_codex_home();
+        let accounts: Vec<(uuid::Uuid, Option<PathBuf>)> = self
+            .codex_config_store
+            .configs()
+            .map(|c| (c.id, c.codex_home.clone()))
+            .collect();
+        for (id, home) in accounts {
+            let own_home = home.clone().unwrap_or_else(|| default_home.clone());
+            let auth = crate::codex_config::probe::auth_mtime(&own_home);
+            if !self.codex_probes.should_probe(id, auth, opened, now) {
+                continue;
+            }
+            dirty = true;
+            let homes = self.sessions.codex_homes();
+            // The home this account's sessions spawn with, healed first just
+            // as a spawn heals it, so the probe sees what a session would
+            let codex_home = match homes.prepare_spawn(Some(id), home.as_deref()) {
+                Ok(spawn_home) => spawn_home.unwrap_or(own_home),
+                Err(e) => {
+                    tracing::warn!(account = %id, error = %e, "Cannot probe Codex account");
+                    self.codex_probes.record_start(id, auth, now);
+                    let entry = self.state.codex_account_probes.entry(id).or_default();
+                    entry.result = Some(Err(format!("{:#}", e)));
+                    entry.checking = false;
+                    continue;
+                }
+            };
+            let request = crate::codex_config::probe::ProbeRequest {
+                sqlite_home: homes.sqlite_home_for(&codex_home),
+                codex_home,
+                binary: "codex".to_string(),
+            };
+            self.codex_probes.start(id, auth, request, now);
+            self.state
+                .codex_account_probes
+                .entry(id)
+                .or_default()
+                .checking = true;
+        }
+        dirty
+    }
+
     /// Apply a finished job's output to the app state
     fn apply_job_result(&mut self, result: background::JobResult) {
         use background::{JobFollowUp, JobOutput};
@@ -3058,6 +3138,7 @@ impl App {
                         state.config_selector_index,
                         claude_config_store.get_default_id(),
                         config_selector_flow(state),
+                        None,
                     );
                 }
                 InputMode::ConfirmingClaudeSettingsCopy => {
@@ -3113,6 +3194,14 @@ impl App {
                     }
                 }
                 InputMode::SelectingCodexConfig => {
+                    let now = chrono::Utc::now();
+                    let detail = |id, width| {
+                        crate::tui::views::codex_account::codex_account_line(
+                            state.codex_account_probes.get(&id),
+                            width,
+                            now,
+                        )
+                    };
                     render_agent_config_selector(
                         frame,
                         area,
@@ -3121,6 +3210,7 @@ impl App {
                         state.config_selector_index,
                         codex_config_store.get_default_id(),
                         config_selector_flow(state),
+                        Some(&detail),
                     );
                 }
                 InputMode::AddingCustomShortcutKey
@@ -3689,6 +3779,45 @@ mod tests {
         // Session focus with no session is a state that should not exist,
         // but must still acknowledge nothing rather than panic
         assert_eq!(acknowledgeable_session(true, Focus::Session, None), None);
+    }
+
+    /// Codex accounts are probed while pane 3 shows them or the wizard's
+    /// account step does - and not while a session fills the screen
+    #[test]
+    fn test_codex_accounts_visible() {
+        let at = |focus, nav, mode| AppState {
+            focus,
+            settings_nav: nav,
+            input_mode: mode,
+            ..Default::default()
+        };
+
+        assert!(codex_accounts_visible(&at(
+            Focus::Panes(Tab::Settings),
+            SettingsNav::CodexConfigs,
+            InputMode::Normal
+        )));
+        // Pane 3 stays drawn while another pane has focus
+        assert!(codex_accounts_visible(&at(
+            Focus::Panes(Tab::Projects),
+            SettingsNav::CodexConfigs,
+            InputMode::Normal
+        )));
+        assert!(codex_accounts_visible(&at(
+            Focus::Panes(Tab::Projects),
+            SettingsNav::Sections,
+            InputMode::SelectingCodexConfig
+        )));
+        assert!(!codex_accounts_visible(&at(
+            Focus::Session,
+            SettingsNav::CodexConfigs,
+            InputMode::Normal
+        )));
+        assert!(!codex_accounts_visible(&at(
+            Focus::Panes(Tab::Settings),
+            SettingsNav::ClaudeConfigs,
+            InputMode::SelectingClaudeConfig
+        )));
     }
 
     /// The preview is worn only inside the picker, and only while the picker
