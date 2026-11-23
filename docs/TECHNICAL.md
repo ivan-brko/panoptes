@@ -1319,8 +1319,10 @@ failure carries its `turn_id` and is dropped when it is no longer news
 (`state_machine::admits_transcript_event`): when a root-thread hook has
 already named a later turn (Codex starts queued input the moment a turn
 fails), or when `Stop` / `Interrupt` already ended that same turn (an
-`after_agent` hook that aborts writes its error after `Stop`). The turns the
-hooks named are kept in `SessionInfo::codex_turns`. Once admitted it is a
+`after_agent` hook that aborts writes its error after `Stop`). One task keeps
+one `turn_id` across its model loops - queued input, or a `Stop` hook that
+blocks, runs again under the same id - so any later root hook for the turn
+reopens it. The turns the hooks named are kept in `SessionInfo::codex_turns`. Once admitted it is a
 plain `TurnFailed`. For a usage limit Codex first writes
 a `token_count` with the figures the refusal came with, and
 `transcript::codex::RolloutLimits`, held by the tailer, joins them to the

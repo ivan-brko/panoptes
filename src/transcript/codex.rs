@@ -502,7 +502,9 @@ fn parse_token_count(payload: &Value) -> UsageSnapshot {
         .get("individual_limit")
         .and_then(parse_individual_limit);
     // Plus and Pro accounts carry on past 100% on purchased credits
-    snapshot.credits_available = limits.get("credits").filter(|c| c.is_object()).map(|c| {
+    // A `credits` of null is a statement too - none to fall back on - and must
+    // replace an earlier `true`, so any record naming the key decides it
+    snapshot.credits_available = limits.get("credits").map(|c| {
         let flag = |key| c.get(key).and_then(Value::as_bool).unwrap_or(false);
         flag("has_credits") || flag("unlimited")
     });
@@ -1549,6 +1551,31 @@ mod tests {
             observed(&[TASK_STARTED, &limited, TASK_STARTED, &lifted, bare_end]).last(),
             Some(AgentEvent::TurnCompleted { .. })
         ));
+    }
+
+    #[test]
+    fn test_null_credits_replace_earlier_credits() {
+        let with = token_count(
+            r#"{"limit_id":"codex","primary":{"used_percent":100.0},
+              "credits":{"has_credits":true,"unlimited":false,"balance":"5"}}"#,
+        );
+        let without =
+            token_count(r#"{"limit_id":"codex","primary":{"used_percent":100.0},"credits":null}"#);
+        let usage = |line: &str| match parse_line(line) {
+            Some(AgentEvent::Usage(usage)) => usage,
+            other => panic!("expected usage, got {other:?}"),
+        };
+        let mut merged = usage(&with);
+        assert!(!merged.is_limited());
+        merged.merge(usage(&without));
+        assert_eq!(merged.credits_available, Some(false));
+        assert!(merged.is_limited(), "nothing left to carry on with");
+
+        // A record that does not name credits at all leaves them alone
+        let silent = token_count(r#"{"limit_id":"codex","primary":{"used_percent":100.0}}"#);
+        let mut merged = usage(&with);
+        merged.merge(usage(&silent));
+        assert_eq!(merged.credits_available, Some(true));
     }
 
     #[test]

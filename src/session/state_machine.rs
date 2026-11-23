@@ -328,12 +328,16 @@ pub fn note_codex_turn(info: &mut SessionInfo, event: &HookEvent) {
     };
     let turns = &mut info.codex_turns;
     turns.current = Some(turn.to_string());
-    if matches!(
+    // Any other root hook means the turn is running again. One Codex task
+    // keeps one `turn_id` across every model loop it runs: queued input
+    // starts another under the same id (`UserPromptSubmit` again), and so
+    // does a `Stop` hook that blocks and continues. A failure of that
+    // continuation is news, though its id has already been seen to stop.
+    turns.ended = matches!(
         event.event_type(),
         HookEventType::Stop | HookEventType::Interrupt
-    ) {
-        turns.ended = Some(turn.to_string());
-    }
+    )
+    .then(|| turn.to_string());
 }
 
 /// Apply a canonical agent event to a session
@@ -2537,6 +2541,58 @@ mod tests {
         info.hooks_live = true;
         note_turn(&mut info, "UserPromptSubmit", "t1");
         note_turn(&mut info, "Interrupt", "t1");
+        assert!(!admits_transcript_event(
+            &info,
+            &rollout_failure(Some("t1"), false)
+        ));
+    }
+
+    #[test]
+    fn test_queued_input_after_stop_reopens_the_same_turn() {
+        // One Codex task keeps one turn id across its model loops: queued
+        // input runs as a second loop of t1, which then hits the limit
+        let config = Config::default();
+        let mut info = test_info();
+        info.session_type = crate::session::SessionType::OpenAICodex;
+        info.hooks_live = true;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "Stop", "t1");
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+
+        let failure = rollout_failure(Some("t1"), false);
+        assert!(admits_transcript_event(&info, &failure));
+        apply(&mut info, failure, Utc::now(), &config);
+        assert_eq!(info.state, SessionState::Waiting, "not left in Thinking");
+    }
+
+    #[test]
+    fn test_blocked_stop_continuation_failure_is_admitted() {
+        // A `Stop` hook that blocks feeds the model a continuation in the
+        // same turn; its tools fire, and then the continuation fails
+        let mut info = test_info();
+        info.hooks_live = true;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "Stop", "t1");
+        note_turn(&mut info, "PreToolUse", "t1");
+        note_turn(&mut info, "PostToolUse", "t1");
+        assert!(admits_transcript_event(
+            &info,
+            &rollout_failure(Some("t1"), false)
+        ));
+
+        // With no hook between `Stop` and the failure there is nothing to tell
+        // a continuation's first request failing from an `after_agent` abort,
+        // and the abort is the one that has already rung - so it is dropped
+        let mut info = test_info();
+        info.hooks_live = true;
+        note_turn(&mut info, "UserPromptSubmit", "t1");
+        note_turn(&mut info, "Stop", "t1");
         assert!(!admits_transcript_event(
             &info,
             &rollout_failure(Some("t1"), false)
