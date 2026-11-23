@@ -5,6 +5,7 @@
 //! the middle - the header and footer each draw their own rule, and the rows
 //! and columns a box would have cost belong to the agent.
 
+use chrono::Utc;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -218,7 +219,7 @@ fn header_suffix(info: &SessionInfo, scroll_offset: usize) -> String {
         // finished. The badge that said otherwise is cleared on sight.
         SessionState::Waiting => info
             .failed_turn()
-            .map(|reason| format!(" - \u{2717} {}", reason))
+            .map(|failure| format!(" - \u{2717} {}", failure.describe_at(Utc::now())))
             .unwrap_or_default(),
         _ => String::new(),
     };
@@ -423,8 +424,30 @@ mod tests {
     fn test_a_failed_turn_names_its_reason() {
         let mut failed = info(SessionType::ClaudeCode);
         failed.state = SessionState::Waiting;
-        failed.turn_failure = Some("usage limit".to_string());
+        failed.turn_failure = Some(crate::session::TurnFailure::new(
+            Some("usage limit".to_string()),
+            None,
+        ));
         assert_eq!(header_suffix(&failed, 0), "[CC] - \u{2717} usage limit");
+
+        // A usage limit also says which window and when it lifts
+        let resets_at = Utc::now() + chrono::Duration::minutes(130);
+        failed.turn_failure = Some(crate::session::TurnFailure::new(
+            Some("usage limit".to_string()),
+            Some(crate::agent::events::UsageLimit {
+                window: "seven_day_sonnet".to_string(),
+                resets_at: Some(resets_at),
+                using_overage: false,
+            }),
+        ));
+        assert_eq!(
+            header_suffix(&failed, 0),
+            format!(
+                "[CC] - \u{2717} usage limit \u{00b7} wk sonnet resets {}",
+                crate::agent::events::format_reset(resets_at, Utc::now()).unwrap()
+            )
+        );
+        failed.turn_failure = None;
 
         // Only while it is sitting on that failure
         failed.state = SessionState::Thinking;

@@ -444,11 +444,13 @@ layer, so Panoptes wraps rather than replaces it:
   and exits 0 on input it cannot read, and a missing binary only costs the
   line. It is drawn by `hooks::status_line::compact_line` from the same
   `usage_from_payload` the header uses, so the binding window is picked by the
-  same rule - e.g. `5h 12% · wk 40% (resets Thu 18:00) · $2.14`. The reset is
-  local wall-clock time (`18:00` today, `Thu 18:00` on another day), not a
-  countdown: Claude redraws its status line on events, not on a clock, so a
-  countdown would go stale. A reset already past, or any missing field, is
-  left out.
+  same rule - e.g. `5h 12% · wk 40% (resets Sep 29 18:00) · $2.14`. The reset
+  goes through `agent::events::format_reset_in`, the same formatter as the
+  header's `limit hit` and a failed turn's `5h resets 20:10`: local wall-clock
+  time (`18:00` today, `Sep 29 18:00` on another day), not a countdown, since
+  Claude redraws its status line on events, not on a clock, so a countdown
+  would go stale. A reset already past is left out everywhere, as is any
+  missing field.
 
 The envelope is built by splicing Claude's document in whole, not with `jq`:
 the document is already JSON and nothing is picked out of it, and the status
@@ -1050,6 +1052,19 @@ to `Waiting` with a `TurnFailed` attention reason (a red `✗`, gated by
 still sitting on the first, so the hook and the transcript cannot double-fire
 once both report it.
 
+The one thing a repeat may still add is *which* limit. A usage-limit record
+carries `quotaLimits` (`rateLimitType`, `resetsAt` in epoch seconds,
+`isUsingOverage`); `StopFailure` does not (Claude Code 2.1.330 sends only
+`error`, `error_details` and `last_assistant_message`). So the transcript's
+repeat quietly fills the window and reset into the failure, and into a badge
+still up, without ringing. The row and header then read
+`Waiting ✗ usage limit · 5h resets 20:10`: the reset goes through the same
+`agent::events::format_reset` as the header's `limit hit`, on the local clock,
+with the date added when it is not today (`Aug 29 00:10`). Window labels:
+`five_hour` → `5h`, `seven_day` → `wk`, `seven_day_opus` → `wk opus`,
+`seven_day_sonnet` → `wk sonnet`, `seven_day_overage_included` → `wk overage`,
+`overage` → `overage`; any other name is shown raw.
+
 The Claude tailer skips records that are not the live conversation's own:
 subagent turns (`isSidechain`), injected records (`isMeta`), compaction
 summaries (`isCompactSummary`), and placeholders Claude wrote locally
@@ -1090,9 +1105,10 @@ overwrite the account's figures with an unrelated pool's (in real rollouts,
 about one `token_count` in fifteen). The session header shows whichever window
 is closer to stopping the user - higher `used_percent` first, the longer window
 on a tie - labelled by its length (`5h 12%`, `wk 40%`), or
-`limit hit · resets in 3h 20m` while `rate_limit_reached_type` is set. Each
-window merges independently, so an update naming only one never blanks the
-other.
+`limit hit · resets 20:10` (local time, with the date when the reset is not
+today, and none once it has passed) while `rate_limit_reached_type` is set.
+Each window merges independently, so an update naming only one never blanks
+the other.
 
 **Claude rate limits.** The status line's `five_hour` and `seven_day` windows
 map onto the same `primary` / `secondary` windows (300 and 10080 minutes), so

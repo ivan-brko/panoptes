@@ -448,12 +448,12 @@ exactly what it prints. Your status line looks the same as without Panoptes.
   of its own, for example:
 
   ```
-  5h 12% · wk 40% (resets Thu 18:00) · $2.14
+  5h 12% · wk 40% (resets Sep 29 18:00) · $2.14
   ```
 
   That is how much of Claude's five-hour and weekly allowances you have used,
   when the one closer to running out resets (local time: `18:00` for later
-  today, `Thu 18:00` for another day), and what the session has cost so far.
+  today, `Sep 29 18:00` for another day), and what the session has cost so far.
   Anything Claude has not reported yet is left out - before the first reply of
   a session there are no rate limits, so it shows just the cost.
 - Configure a status line of your own and it replaces the compact line

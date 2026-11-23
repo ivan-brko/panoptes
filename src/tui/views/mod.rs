@@ -63,6 +63,9 @@ pub use worktree::{
 ///
 /// Agent vocabulary is translated for shell sessions, which have no notion of
 /// thinking: they are `Running` or `Ready`.
+///
+/// A failed turn's usage limit is part of it; [`failed_turn_limit_display`]
+/// is that part exactly, for a row that has to give it up to fit.
 pub fn session_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
     let base = base_state_display(info, now);
 
@@ -94,6 +97,14 @@ pub fn session_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
         }
     }
     display
+}
+
+/// The ` · 5h resets 20:10` a failed turn adds to [`session_state_display`]
+///
+/// The text exactly as it appears there, so a row can drop it whole.
+pub(crate) fn failed_turn_limit_display(info: &SessionInfo, now: DateTime<Utc>) -> Option<String> {
+    let limit = info.failed_turn()?.limit.as_ref()?;
+    Some(format!(" \u{00b7} {}", limit.describe_at(now)))
 }
 
 fn base_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
@@ -135,8 +146,10 @@ fn base_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
             // state, same idle prompt - so the reason rides along until the
             // next turn starts. It outlives the attention badge on purpose:
             // glancing at the session does not make the usage limit go away.
+            // A usage limit also says which one and when it lifts, rendered
+            // against `now` so a reset tomorrow never reads as today's.
             match info.failed_turn() {
-                Some(reason) => format!("{} ✗ {}", waiting, reason),
+                Some(failure) => format!("{} ✗ {}", waiting, failure.describe_at(now)),
                 None => waiting,
             }
         }
@@ -385,6 +398,8 @@ pub(crate) fn elide_middle(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::events::{format_reset, UsageLimit};
+    use crate::session::TurnFailure;
 
     /// The badge's glyph carries the reason on its own, so state survives a
     /// bad theme, a colourblind user, and a monochrome screenshot
@@ -415,7 +430,10 @@ mod tests {
         });
         assert_eq!(attention_badge(&info, true).0, "✗ ");
 
-        info.attention = Some(AttentionReason::TurnFailed { reason: None });
+        info.attention = Some(AttentionReason::TurnFailed {
+            reason: None,
+            limit: None,
+        });
         assert_eq!(attention_badge(&info, true).0, "✗ ");
     }
 
@@ -432,7 +450,7 @@ mod tests {
         info.last_activity = now;
         assert_eq!(session_state_display(&info, now), "Waiting");
 
-        info.turn_failure = Some("usage limit".to_string());
+        info.turn_failure = Some(TurnFailure::new(Some("usage limit".to_string()), None));
         assert_eq!(session_state_display(&info, now), "Waiting ✗ usage limit");
 
         // Survives the badge being acknowledged
@@ -441,6 +459,50 @@ mod tests {
         assert_eq!(
             session_state_display(&info, later),
             "Waiting - 3m ✗ usage limit"
+        );
+    }
+
+    #[test]
+    fn test_waiting_state_names_the_usage_limit_and_its_reset() {
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            std::path::PathBuf::from("/tmp"),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let now = Utc::now();
+        info.set_state_at(SessionState::Waiting, now);
+        info.last_activity = now;
+        let resets_at = now + chrono::Duration::minutes(130);
+        info.turn_failure = Some(TurnFailure::new(
+            Some("usage limit".to_string()),
+            Some(UsageLimit {
+                window: "five_hour".to_string(),
+                resets_at: Some(resets_at),
+                using_overage: false,
+            }),
+        ));
+        // The clock time is the user's own, so it comes from the shared
+        // formatter rather than being spelled out here
+        assert_eq!(
+            session_state_display(&info, now),
+            format!(
+                "Waiting ✗ usage limit · 5h resets {}",
+                format_reset(resets_at, now).unwrap()
+            )
+        );
+
+        // The droppable part is exactly what the state carries
+        let limit = failed_turn_limit_display(&info, now).unwrap();
+        assert_eq!(
+            session_state_display(&info, now).replacen(&limit, "", 1),
+            "Waiting ✗ usage limit"
+        );
+
+        // The compact row keeps the state alone: the limit is dropped whole
+        assert_eq!(
+            pane_projects::compact_state(&session_state_display(&info, now)),
+            "Waiting"
         );
     }
 

@@ -12,7 +12,7 @@ use crate::agent::events::AgentEvent;
 use crate::config::Config;
 use crate::hooks::{HookEvent, HookEventType, NotificationKind};
 
-use super::{AttentionReason, SessionInfo, SessionState};
+use super::{AttentionReason, SessionInfo, SessionState, TurnFailure};
 
 /// What applying an event did, beyond mutating the session
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +78,8 @@ pub fn translate_hook(event: &HookEvent) -> AgentEvent {
         // code is the same enum the transcript's failed-turn record carries,
         // and the message text is what the transcript's own reading uses, so
         // both reports of one failure agree on its label.
+        // The hook does not say which limit was hit (Claude Code 2.1.330
+        // sends no `quotaLimits` here); the transcript's record fills it in.
         HookEventType::StopFailure => AgentEvent::TurnFailed {
             reason: crate::transcript::claude::failure_reason(
                 event.failure_code(),
@@ -85,6 +87,7 @@ pub fn translate_hook(event: &HookEvent) -> AgentEvent {
                     .last_assistant_message()
                     .or_else(|| event.error_details()),
             ),
+            limit: None,
         },
         // Denied without a dialog - auto mode's classifier said no. The turn
         // carries on, told why, so it resolves an approval rather than
@@ -220,11 +223,26 @@ pub fn apply(
     // it, because attention is cleared the moment the session is viewed and
     // the duplicate can land after that. Only a new turn clears it, so a
     // genuinely new failure is never mistaken for a repeat.
-    if matches!(event, AgentEvent::TurnFailed { .. })
-        && info.state == SessionState::Waiting
-        && info.turn_failure.is_some()
-    {
-        return Applied { rang: false };
+    //
+    // The repeat is not always redundant, though. Only the transcript's record
+    // says *which* usage limit was hit and when it lifts - `StopFailure` does
+    // not carry it - and the hook usually lands first. So a repeat may still
+    // fill in a limit the first report lacked, quietly, on both the record and
+    // a badge that is still up - but only when it reports the same failure.
+    // A late record of an earlier turn's usage limit must not pin a window
+    // onto the "auth failed" the session is now sitting on.
+    if let AgentEvent::TurnFailed { reason, limit } = &event {
+        if let (SessionState::Waiting, Some(failure)) = (info.state, info.turn_failure.as_mut()) {
+            let same_failure = TurnFailure::new(reason.clone(), None).reason == failure.reason;
+            if same_failure && failure.limit.is_none() && limit.is_some() {
+                failure.limit = limit.clone();
+                if let Some(AttentionReason::TurnFailed { limit: badge, .. }) = &mut info.attention
+                {
+                    *badge = limit.clone();
+                }
+            }
+            return Applied { rang: false };
+        }
     }
 
     // These events must not count as activity, or they would hold
@@ -358,7 +376,7 @@ pub fn apply(
             Move::Authoritative(SessionState::Waiting)
         }
 
-        AgentEvent::TurnFailed { reason } => {
+        AgentEvent::TurnFailed { reason, limit } => {
             // A turn that dies on an API error fires `StopFailure` instead of
             // `Stop`, and Claude also records it in its transcript, which
             // otherwise never drives state (see `transcript::claude`). Without
@@ -367,8 +385,8 @@ pub fn apply(
             // running any more and the agent is back at its prompt - but
             // unlike an interrupt, nobody chose this, so it is flagged.
             info.in_flight.clear();
-            info.turn_failure = Some(reason.clone().unwrap_or_else(|| "turn failed".to_string()));
-            attention = Some(AttentionReason::TurnFailed { reason });
+            info.turn_failure = Some(TurnFailure::new(reason.clone(), limit.clone()));
+            attention = Some(AttentionReason::TurnFailed { reason, limit });
             Move::Authoritative(SessionState::Waiting)
         }
 
@@ -1011,6 +1029,7 @@ mod tests {
         // tool's PostToolUse never arrives.
         let failed = AgentEvent::TurnFailed {
             reason: Some("usage limit".to_string()),
+            limit: Some(five_hour_limit()),
         };
         assert!(
             apply(&mut info, failed, now, &config).rang,
@@ -1022,14 +1041,16 @@ mod tests {
         assert_eq!(
             info.attention,
             Some(AttentionReason::TurnFailed {
-                reason: Some("usage limit".to_string())
+                reason: Some("usage limit".to_string()),
+                limit: Some(five_hour_limit()),
             })
         );
-        assert_eq!(info.turn_failure.as_deref(), Some("usage limit"));
+        let failure = TurnFailure::new(Some("usage limit".to_string()), Some(five_hour_limit()));
+        assert_eq!(info.turn_failure.as_ref(), Some(&failure));
 
         // Looking at it clears the flag, not the record of what happened
         info.attention = None;
-        assert_eq!(info.turn_failure.as_deref(), Some("usage limit"));
+        assert_eq!(info.turn_failure.as_ref(), Some(&failure));
 
         // The next prompt is a new turn, and the failure is history
         apply_hook(
@@ -1047,7 +1068,10 @@ mod tests {
         assert!(
             !apply(
                 &mut info,
-                AgentEvent::TurnFailed { reason: None },
+                AgentEvent::TurnFailed {
+                    reason: None,
+                    limit: None
+                },
                 now,
                 &quiet
             )
@@ -1055,10 +1079,143 @@ mod tests {
         );
         assert_eq!(
             info.attention,
-            Some(AttentionReason::TurnFailed { reason: None }),
+            Some(AttentionReason::TurnFailed {
+                reason: None,
+                limit: None
+            }),
             "muting the bell still leaves the badge"
         );
-        assert_eq!(info.turn_failure.as_deref(), Some("turn failed"));
+        assert_eq!(
+            info.turn_failure.as_ref().map(|f| f.reason.as_str()),
+            Some("turn failed")
+        );
+    }
+
+    /// The limit in the real `RATE_LIMIT_RECORD` fixture
+    fn five_hour_limit() -> crate::agent::events::UsageLimit {
+        crate::agent::events::UsageLimit {
+            window: "five_hour".to_string(),
+            resets_at: DateTime::<Utc>::from_timestamp(1_787_940_600, 0),
+            using_overage: false,
+        }
+    }
+
+    #[test]
+    fn test_transcript_repeat_fills_in_the_limit_stop_failure_lacked() {
+        let config = Config::default();
+        let mut info = test_info();
+        let now = Utc::now();
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+
+        // `StopFailure` lands first and knows only that it was a usage limit
+        let hook = serde_json::json!({"error": "rate_limit"});
+        assert!(apply_hook(&mut info, "StopFailure", hook, &config));
+        assert_eq!(
+            info.failed_turn().and_then(|f| f.limit.as_ref()),
+            None,
+            "the hook does not say which limit"
+        );
+        let entered = info.state_entered_at;
+
+        // The transcript's record follows and names the window
+        let transcript = AgentEvent::TurnFailed {
+            reason: Some("usage limit".to_string()),
+            limit: Some(five_hour_limit()),
+        };
+        let later = now + chrono::Duration::seconds(1);
+        assert!(
+            !apply(&mut info, transcript.clone(), later, &config).rang,
+            "still a repeat: it must not ring twice"
+        );
+        assert_eq!(info.state_entered_at, entered);
+        assert_eq!(
+            info.failed_turn().and_then(|f| f.limit.as_ref()),
+            Some(&five_hour_limit())
+        );
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::TurnFailed {
+                reason: Some("usage limit".to_string()),
+                limit: Some(five_hour_limit()),
+            }),
+            "the badge still up learns the limit too"
+        );
+
+        // Once the user has looked, filling in the record does not raise the
+        // badge again
+        let mut info = test_info();
+        apply_hook(
+            &mut info,
+            "StopFailure",
+            serde_json::json!({"error": "rate_limit"}),
+            &config,
+        );
+        info.attention = None;
+        assert!(!apply(&mut info, transcript, later, &config).rang);
+        assert!(info.attention.is_none());
+        assert_eq!(
+            info.failed_turn().and_then(|f| f.limit.as_ref()),
+            Some(&five_hour_limit())
+        );
+    }
+
+    #[test]
+    fn test_late_limit_from_an_earlier_turn_is_not_pinned_on_a_new_failure() {
+        let config = Config::default();
+        let mut info = test_info();
+        let now = Utc::now();
+
+        // Turn 1 fails on a usage limit; only the hook gets through in time
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        apply_hook(
+            &mut info,
+            "StopFailure",
+            serde_json::json!({"error": "rate_limit"}),
+            &config,
+        );
+
+        // Turn 2 fails differently, again reported by the hook
+        apply_hook(
+            &mut info,
+            "UserPromptSubmit",
+            serde_json::json!({}),
+            &config,
+        );
+        apply_hook(
+            &mut info,
+            "StopFailure",
+            serde_json::json!({"error": "authentication_failed"}),
+            &config,
+        );
+
+        // Turn 1's transcript record lands only now
+        let late = AgentEvent::TurnFailed {
+            reason: Some("usage limit".to_string()),
+            limit: Some(five_hour_limit()),
+        };
+        assert!(!apply(&mut info, late, now, &config).rang);
+        assert_eq!(
+            info.failed_turn(),
+            Some(&TurnFailure::new(Some("auth failed".to_string()), None)),
+            "an auth failure has no usage window to show"
+        );
+        assert_eq!(
+            info.attention,
+            Some(AttentionReason::TurnFailed {
+                reason: Some("auth failed".to_string()),
+                limit: None,
+            })
+        );
     }
 
     #[test]
@@ -1077,6 +1234,7 @@ mod tests {
         // and reports the failure in the same vocabulary
         let failed = || AgentEvent::TurnFailed {
             reason: Some("server error".to_string()),
+            limit: None,
         };
         assert!(apply(&mut info, failed(), now, &config).rang);
         let entered = info.state_entered_at;
@@ -1132,10 +1290,12 @@ mod tests {
         assert_eq!(
             info.attention,
             Some(AttentionReason::TurnFailed {
-                reason: Some("usage limit".to_string())
+                reason: Some("usage limit".to_string()),
+                limit: None,
             })
         );
-        assert_eq!(info.failed_turn(), Some("usage limit"));
+        let reason = |info: &SessionInfo| info.failed_turn().map(|f| f.reason.clone());
+        assert_eq!(reason(&info).as_deref(), Some("usage limit"));
 
         // The transcript reports the same failure moments later
         assert!(!apply_hook(&mut info, "StopFailure", failure, &config));
@@ -1149,7 +1309,7 @@ mod tests {
             "last_assistant_message": "Prompt is too long"
         });
         apply_hook(&mut info, "StopFailure", too_long, &config);
-        assert_eq!(info.failed_turn(), Some("prompt too long"));
+        assert_eq!(reason(&info).as_deref(), Some("prompt too long"));
 
         // The no-jq path still ends the turn, just without a reason
         let mut info = test_info();
@@ -1161,7 +1321,7 @@ mod tests {
         );
         apply_hook(&mut info, "StopFailure", serde_json::Value::Null, &config);
         assert_eq!(info.state, SessionState::Waiting);
-        assert_eq!(info.failed_turn(), Some("turn failed"));
+        assert_eq!(reason(&info).as_deref(), Some("turn failed"));
     }
 
     #[test]

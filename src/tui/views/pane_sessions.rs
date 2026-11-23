@@ -96,12 +96,18 @@ const ELIDE_MIN: usize = 12;
 /// `prefix` is the selection index (`"4: "`) in the numbered list and empty
 /// in the attention section. It is part of the row's identity: the digit is
 /// how the session is selected, so no degradation may drop it.
+///
+/// `limit` is the part of `state` that may go first: a failed turn's
+/// ` · 5h resets 20:10`. The state stays the row's identity, but which window
+/// and when is detail, and not worth the project and branch.
+#[derive(Clone, Copy)]
 struct SessionRow<'a> {
     prefix: &'a str,
     project: &'a str,
     branch: &'a str,
     name: &'a str,
     state: &'a str,
+    limit: Option<&'a str>,
 }
 
 /// Build the densest session row that fits in `room` columns
@@ -115,6 +121,10 @@ struct SessionRow<'a> {
 /// fields readable instead of discarding them all to protect one. Below
 /// [`ELIDE_MIN`] an elided field is noise, so the row falls back to the
 /// compact form whole - which keeps its index too.
+///
+/// Before any of that, a failed turn's usage limit (`row.limit`) is dropped
+/// whole from the state: the full row without it beats an elided or compact
+/// one with it.
 fn session_body(mode: SideMode, room: usize, row: &SessionRow) -> String {
     let compact = format!("{}{} [{}]", row.prefix, row.name, compact_state(row.state));
     if mode != SideMode::Full {
@@ -126,6 +136,18 @@ fn session_body(mode: SideMode, room: usize, row: &SessionRow) -> String {
     );
     if full.chars().count() <= room {
         return full;
+    }
+    if let Some(limit) = row.limit {
+        let lean = row.state.replacen(limit, "", 1);
+        return session_body(
+            mode,
+            room,
+            &SessionRow {
+                state: &lean,
+                limit: None,
+                ..*row
+            },
+        );
     }
 
     // Everything but project and branch is kept whole; the 9 is the two
@@ -272,6 +294,7 @@ fn render_attention_section(
             let info = &session.info;
             let (badge, badge_color) = super::attention_badge(info, true);
             let state_text = super::session_state_display(info, now);
+            let limit = super::failed_turn_limit_display(info, now);
 
             // Two leading spans, seven columns: "● " plus the agent tag
             // ("[CC] "). An elided body fills its room exactly, so an
@@ -286,6 +309,7 @@ fn render_attention_section(
                     branch: branch_name_of(project_store, info),
                     name: &info.name,
                     state: &state_text,
+                    limit: limit.as_deref(),
                 },
             );
 
@@ -342,6 +366,7 @@ fn render_session_list(
             let selected = i == selected_index && focused;
             let (badge, badge_color) = super::attention_badge(info, info.needs_attention());
             let state_display = super::session_state_display(info, now);
+            let limit = super::failed_turn_limit_display(info, now);
 
             // Three leading spans, nine columns: selection marker (2),
             // badge (2), agent tag "[CC] " (5). An elided body fills its
@@ -356,6 +381,7 @@ fn render_session_list(
                     branch: branch_name_of(project_store, info),
                     name: &info.name,
                     state: &state_display,
+                    limit: limit.as_deref(),
                 },
             );
 
@@ -529,7 +555,43 @@ mod tests {
             branch: "pan-10-esc-backs-out-to-the-projects-pane-once-a-pane-has-nothing-left-to-pop",
             name: "feature",
             state: "Thinking",
+            limit: None,
         }
+    }
+
+    /// A usage limit's window and reset go before anything else does: a
+    /// medium pane keeps project, branch and "usage limit", and only loses
+    /// which limit
+    #[test]
+    fn test_a_usage_limit_is_dropped_whole_before_the_full_row() {
+        let row = SessionRow {
+            prefix: "2: ",
+            project: "panoptes",
+            branch: "main",
+            name: "feature",
+            state: "Waiting ✗ usage limit · wk sonnet resets Aug 29 00:10 · 1 in background",
+            limit: Some(" · wk sonnet resets Aug 29 00:10"),
+        };
+
+        // Room for all of it: all of it
+        assert_eq!(
+            session_body(SideMode::Full, 200, &row),
+            "2: panoptes / main / feature [Waiting ✗ usage limit · wk sonnet resets Aug 29 00:10 · 1 in background]"
+        );
+
+        // Not quite: the limit goes, and only the limit
+        let lean = "2: panoptes / main / feature [Waiting ✗ usage limit · 1 in background]";
+        assert_eq!(session_body(SideMode::Full, 80, &row), lean);
+        assert_eq!(
+            session_body(SideMode::Full, lean.chars().count(), &row),
+            lean
+        );
+
+        // Narrower still, the usual degradation carries on from the lean row
+        assert_eq!(
+            session_body(SideMode::Full, 30, &row),
+            "2: feature [Waiting]"
+        );
     }
 
     #[test]
