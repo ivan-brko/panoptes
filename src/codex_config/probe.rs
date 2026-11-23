@@ -467,6 +467,18 @@ fn is_openai_url(url: &str) -> bool {
     host == "api.openai.com" || host == "chatgpt.com"
 }
 
+/// What the views know of one account's probe
+///
+/// The last result stays up while a newer probe runs, so a refresh does not
+/// blank a row that was already filled in.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CodexAccountProbe {
+    /// The latest finished probe, if any has finished
+    pub result: Option<ProbeResult>,
+    /// Whether a probe is running now
+    pub checking: bool,
+}
+
 /// What one probe needs to know about its account
 #[derive(Debug, Clone)]
 pub struct ProbeRequest {

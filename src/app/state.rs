@@ -468,6 +468,9 @@ pub struct AppState {
     pub codex_configs_selected_index: usize,
     /// Available Codex configs for selection during session creation
     pub available_codex_configs: Vec<crate::codex_config::CodexConfig>,
+    /// What the last probe of each Codex account found: login, plan, quota
+    pub codex_account_probes:
+        std::collections::HashMap<uuid::Uuid, crate::codex_config::probe::CodexAccountProbe>,
     /// Agent type selector index (0 = Claude Code, 1 = Codex)
     pub agent_type_selector_index: usize,
 
