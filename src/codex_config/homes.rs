@@ -10,6 +10,8 @@
 //! - `auth.json` is a symlink to the account's *own* `auth.json`. Never a copy:
 //!   a copy forks the ChatGPT refresh token, and whichever copy refreshes first
 //!   logs the other out.
+//! - `auth.lock` follows it, a symlink to the account's own `auth.lock`, so a
+//!   shadow and its own home serialise credential writes under one lock.
 //! - a fixed allow-list of entries ([`SHARED_ENTRIES`]) are symlinks into the
 //!   shared home. A list rather than "whatever the shared home holds", so an
 //!   entry a newer Codex adds is private until someone decides otherwise.
@@ -25,7 +27,7 @@
 //! - **Shadows are never deleted or moved.** Codex records each thread's
 //!   rollout path *through the shadow* in the shared state database, and
 //!   resuming trusts that path. Removing an account drops only its
-//!   `auth.json` link ([`CodexHomes::forget_account`]).
+//!   `auth.json` and `auth.lock` links ([`CodexHomes::forget_account`]).
 //! - **Real data is never clobbered.** Healing replaces a missing or wrong
 //!   link; a real directory where a link belongs is logged and left alone. The
 //!   one real file that is folded back is `session_index.jsonl`, which
@@ -85,6 +87,17 @@ pub const SHARED_ENTRIES: &[(&str, EntryKind)] = &[
 
 /// The account's credentials, linked to its own home
 const AUTH_FILE: &str = "auth.json";
+/// The lock guarding writes to the credentials, linked beside them
+///
+/// From Codex 0.166 every credential read-modify-write - the refresh commit,
+/// login, logout, the agent identity record - holds an `flock` on
+/// `$CODEX_HOME/auth.lock`, derived from `CODEX_HOME` *without* resolving the
+/// `auth.json` link. Left private, a shadow and the account's own home would
+/// write one `auth.json` under two locks. Its sibling `auth.json.lock`
+/// (Codex 0.167+) needs no link: Codex derives it from the *resolved*
+/// `auth.json`, so it already sits in the account's own home. Codex 0.156.1
+/// takes neither lock, so for it the link is inert.
+const AUTH_LOCK_FILE: &str = "auth.lock";
 /// Shared settings, compared against each account's own
 const CONFIG_FILE: &str = "config.toml";
 /// The one shared file Codex can turn into a private copy
@@ -330,29 +343,35 @@ impl CodexHomes {
 
     /// Drop a removed account's credentials from its shadow
     ///
-    /// Only the `auth.json` *link* goes, and only if it is a link. The rest of
-    /// the shadow stays: the shared state database refers to rollouts through
-    /// it, and deleting it would make those conversations unresumable from
-    /// every other account. Runs whether or not sharing is enabled now - a
-    /// shadow left from an earlier enabled spell must not keep a login alive.
+    /// Only the `auth.json` and `auth.lock` *links* go, and only if they are
+    /// links. The rest of the shadow stays: the shared state database refers
+    /// to rollouts through it, and deleting it would make those conversations
+    /// unresumable from every other account. Runs whether or not sharing is
+    /// enabled now - a shadow left from an earlier enabled spell must not keep
+    /// a login alive.
     pub fn forget_account(&self, account_id: Uuid) {
-        let link = self.shadow_home(Some(account_id)).join(AUTH_FILE);
-        let is_link = std::fs::symlink_metadata(&link)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-        if !is_link {
-            return;
-        }
-        match std::fs::remove_file(&link) {
-            Ok(()) => tracing::info!(
-                account = %account_id,
-                "Removed the deleted Codex account's credentials link from its shadow home"
-            ),
-            Err(e) => tracing::warn!(
-                account = %account_id,
-                error = %e,
-                "Failed to remove the deleted Codex account's credentials link"
-            ),
+        let shadow = self.shadow_home(Some(account_id));
+        for name in [AUTH_FILE, AUTH_LOCK_FILE] {
+            let link = shadow.join(name);
+            let is_link = std::fs::symlink_metadata(&link)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if !is_link {
+                continue;
+            }
+            match std::fs::remove_file(&link) {
+                Ok(()) => tracing::info!(
+                    account = %account_id,
+                    entry = name,
+                    "Removed the deleted Codex account's credentials link from its shadow home"
+                ),
+                Err(e) => tracing::warn!(
+                    account = %account_id,
+                    entry = name,
+                    error = %e,
+                    "Failed to remove the deleted Codex account's credentials link"
+                ),
+            }
         }
     }
 }
@@ -379,6 +398,7 @@ pub fn ensure_shadow(shadow: &Path, shared: &Path, original: &Path) -> Result<Sh
     }
 
     link_auth(shadow, original, &mut report)?;
+    link_auth_lock(shadow, original, &mut report)?;
 
     let differing = config_divergence(&original.join(CONFIG_FILE), &shared.join(CONFIG_FILE));
     if !differing.is_empty() {
@@ -528,6 +548,112 @@ fn link_auth(shadow: &Path, original: &Path, report: &mut ShadowReport) -> Resul
         ));
     }
     Ok(())
+}
+
+/// Link the shadow's `auth.lock` to the account's own, beside `auth.json`
+///
+/// Only while `auth.json` itself is the link to the account's own file: a
+/// shadow with a login of its own, or with no credentials to share, guards
+/// nothing shared and keeps whatever lock it has.
+///
+/// The target is not pre-created - that would write the account's own home -
+/// and need not be: Codex opens the lock with `O_CREAT`, which creates the
+/// file through a dangling link. A private lock already in the shadow (Codex
+/// 0.166+ run there before this link existed) is replaced only while no
+/// process holds it; a held one is left for the next spawn to heal.
+fn link_auth_lock(shadow: &Path, original: &Path, report: &mut ShadowReport) -> Result<()> {
+    let auth_link = shadow.join(AUTH_FILE);
+    let auth_is_linked =
+        std::fs::read_link(&auth_link).is_ok_and(|t| t == original.join(AUTH_FILE));
+    if !auth_is_linked {
+        return Ok(());
+    }
+
+    let link = shadow.join(AUTH_LOCK_FILE);
+    let target = original.join(AUTH_LOCK_FILE);
+    let meta = match std::fs::symlink_metadata(&link) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            make_symlink(&target, &link)?;
+            report.created.push(AUTH_LOCK_FILE.to_string());
+            return Ok(());
+        }
+        Err(e) => return Err(e).with_context(|| format!("inspecting {}", link.display())),
+    };
+
+    if meta.file_type().is_symlink() {
+        let current =
+            std::fs::read_link(&link).with_context(|| format!("reading {}", link.display()))?;
+        if current != target {
+            std::fs::remove_file(&link).with_context(|| format!("removing {}", link.display()))?;
+            make_symlink(&target, &link)?;
+            report.repaired.push(format!(
+                "{} (pointed at {})",
+                AUTH_LOCK_FILE,
+                current.display()
+            ));
+        }
+        return Ok(());
+    }
+
+    if !meta.is_file() {
+        report.warnings.push(format!(
+            "{} is not a file or a link; left alone, so this shadow and the account's own home \
+             lock its credentials separately",
+            link.display()
+        ));
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(&link).with_context(|| format!("opening {}", link.display()))?;
+    match try_lock_exclusive(&file) {
+        Ok(true) => {
+            // Swapped while holding the private lock, so no Codex is mid-write
+            // under it. One that opened it a moment ago and is still waiting
+            // would get the orphaned file once this lock drops - a window of
+            // the two calls below, and only while a shadow is being healed.
+            std::fs::remove_file(&link).with_context(|| format!("removing {}", link.display()))?;
+            make_symlink(&target, &link)?;
+            report
+                .repaired
+                .push(format!("{} (was a private lock file)", AUTH_LOCK_FILE));
+        }
+        Ok(false) => report.warnings.push(format!(
+            "{} is a private lock held by a running Codex; left alone until the next launch, so \
+             until then this shadow and the account's own home lock its credentials separately",
+            link.display()
+        )),
+        Err(e) => report.warnings.push(format!(
+            "{} is a private lock that could not be checked ({}); left alone",
+            link.display(),
+            e
+        )),
+    }
+    Ok(())
+}
+
+/// Take an exclusive `flock` without waiting: `Ok(false)` if another holds it
+///
+/// `flock` because that is what Codex locks with (`std::fs::File::lock` on
+/// Unix). The lock is released when `file` is dropped.
+#[cfg(unix)]
+fn try_lock_exclusive(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: the descriptor is owned by `file`, which outlives the call
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(false)
+    } else {
+        Err(err)
+    }
+}
+
+#[cfg(not(unix))]
+fn try_lock_exclusive(_file: &std::fs::File) -> std::io::Result<bool> {
+    Err(std::io::Error::other("file locks are only checked on Unix"))
 }
 
 fn make_symlink(target: &Path, link: &Path) -> Result<()> {
@@ -766,7 +892,12 @@ mod tests {
             std::fs::read_to_string(shadow.join(AUTH_FILE)).unwrap(),
             r#"{"OPENAI_API_KEY":"sk-fake-a"}"#
         );
-        assert_eq!(report.created.len(), SHARED_ENTRIES.len() + 1);
+        assert!(is_link_to(
+            &shadow.join(AUTH_LOCK_FILE),
+            &l.account_a.join(AUTH_LOCK_FILE)
+        ));
+        // auth.json, then auth.lock beside it
+        assert_eq!(report.created.len(), SHARED_ENTRIES.len() + 2);
         assert!(report.repaired.is_empty());
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
@@ -917,6 +1048,118 @@ mod tests {
             std::fs::read_to_string(shadow.join(AUTH_FILE)).unwrap(),
             "shadow login"
         );
+        // Its own login, its own lock: nothing is shared to guard
+        assert!(std::fs::symlink_metadata(shadow.join(AUTH_LOCK_FILE)).is_err());
+    }
+
+    #[test]
+    fn test_the_auth_lock_link_creates_its_target_on_first_lock() {
+        // Nothing is pre-created in the account's own home; Codex opens the
+        // lock with O_CREAT, which makes the file through the dangling link
+        let l = layout();
+        let shadow = l.shadows.join("a");
+        ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+        assert!(!l.account_a.join(AUTH_LOCK_FILE).exists());
+
+        // What Codex 0.166+ does in `lock_for_write`
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(shadow.join(AUTH_LOCK_FILE))
+            .unwrap();
+        assert!(try_lock_exclusive(&file).unwrap());
+
+        assert!(l.account_a.join(AUTH_LOCK_FILE).is_file());
+        assert!(is_link_to(
+            &shadow.join(AUTH_LOCK_FILE),
+            &l.account_a.join(AUTH_LOCK_FILE)
+        ));
+        // The account's own home and the shadow now contend for one lock
+        let own = std::fs::File::open(l.account_a.join(AUTH_LOCK_FILE)).unwrap();
+        assert!(!try_lock_exclusive(&own).unwrap());
+    }
+
+    #[test]
+    fn test_a_private_auth_lock_is_healed_into_the_link() {
+        let l = layout();
+        let shadow = l.shadows.join("a");
+        ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+        // A Codex 0.166+ run under the shadow before the link existed
+        std::fs::remove_file(shadow.join(AUTH_LOCK_FILE)).unwrap();
+        std::fs::write(shadow.join(AUTH_LOCK_FILE), "").unwrap();
+
+        let report = ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+
+        assert!(is_link_to(
+            &shadow.join(AUTH_LOCK_FILE),
+            &l.account_a.join(AUTH_LOCK_FILE)
+        ));
+        assert_eq!(
+            report.repaired,
+            vec![format!("{AUTH_LOCK_FILE} (was a private lock file)")]
+        );
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        // And a second heal changes nothing
+        let before = snapshot(&l.root);
+        assert_eq!(
+            ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap(),
+            ShadowReport::default()
+        );
+        assert_eq!(snapshot(&l.root), before);
+    }
+
+    #[test]
+    fn test_a_held_private_auth_lock_is_left_alone_with_a_warning() {
+        let l = layout();
+        let shadow = l.shadows.join("a");
+        ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+        std::fs::remove_file(shadow.join(AUTH_LOCK_FILE)).unwrap();
+        std::fs::write(shadow.join(AUTH_LOCK_FILE), "").unwrap();
+        // A running Codex mid-write under the private lock
+        let holder = std::fs::File::open(shadow.join(AUTH_LOCK_FILE)).unwrap();
+        assert!(try_lock_exclusive(&holder).unwrap());
+
+        let report = ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+
+        let meta = std::fs::symlink_metadata(shadow.join(AUTH_LOCK_FILE)).unwrap();
+        assert!(meta.is_file() && !meta.file_type().is_symlink());
+        assert!(report.repaired.is_empty(), "{:?}", report.repaired);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("held by a running Codex")));
+
+        // Released, the next heal links it
+        drop(holder);
+        ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+        assert!(is_link_to(
+            &shadow.join(AUTH_LOCK_FILE),
+            &l.account_a.join(AUTH_LOCK_FILE)
+        ));
+    }
+
+    #[test]
+    fn test_a_wrong_auth_lock_link_is_repaired() {
+        let l = layout();
+        let shadow = l.shadows.join("a");
+        ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+        std::fs::remove_file(shadow.join(AUTH_LOCK_FILE)).unwrap();
+        make_symlink(
+            &l.account_b.join(AUTH_LOCK_FILE),
+            &shadow.join(AUTH_LOCK_FILE),
+        )
+        .unwrap();
+
+        let report = ensure_shadow(&shadow, &l.shared, &l.account_a).unwrap();
+
+        assert!(is_link_to(
+            &shadow.join(AUTH_LOCK_FILE),
+            &l.account_a.join(AUTH_LOCK_FILE)
+        ));
+        assert_eq!(report.repaired.len(), 1, "{:?}", report.repaired);
     }
 
     #[test]
@@ -928,6 +1171,7 @@ mod tests {
         let report = ensure_shadow(&shadow, &l.shared, &l.account_b).unwrap();
 
         assert!(std::fs::symlink_metadata(shadow.join(AUTH_FILE)).is_err());
+        assert!(std::fs::symlink_metadata(shadow.join(AUTH_LOCK_FILE)).is_err());
         assert!(report.warnings.iter().any(|w| w.contains("codex login")));
     }
 
@@ -1077,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn test_forgetting_an_account_drops_only_its_auth_link() {
+    fn test_forgetting_an_account_drops_only_its_credential_links() {
         let l = layout();
         let homes = homes(&l, true);
         let id = Uuid::new_v4();
@@ -1086,9 +1330,15 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        assert!(is_link_to(
+            &shadow.join(AUTH_LOCK_FILE),
+            &l.account_a.join(AUTH_LOCK_FILE)
+        ));
+
         homes.forget_account(id);
 
         assert!(std::fs::symlink_metadata(shadow.join(AUTH_FILE)).is_err());
+        assert!(std::fs::symlink_metadata(shadow.join(AUTH_LOCK_FILE)).is_err());
         assert!(l.account_a.join(AUTH_FILE).exists());
         assert!(is_link_to(
             &shadow.join("sessions"),
