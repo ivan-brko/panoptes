@@ -236,6 +236,64 @@ fn body_with_update_badge(
     (body, UPDATE_GLYPH)
 }
 
+/// [`body_with_update_badge`], with the prompt cache's warmth when it has room
+///
+/// `cache` is `cache 42m` or `cold`: a field of its own, dropped whole, and
+/// returned apart from the body so the row can colour it. It is the first
+/// field to go. It stays only beside the complete row - limit, project and
+/// branch all whole - so keeping it never costs the row anything else. The
+/// update badge's words go before it, the glyph never does.
+fn row_fields<'c>(
+    mode: SideMode,
+    room: usize,
+    row: &SessionRow,
+    cache: Option<&'c str>,
+    updated: bool,
+) -> (String, Option<&'c str>, &'static str) {
+    if let Some(cache) = cache.filter(|_| mode == SideMode::Full) {
+        let full = full_body(row);
+        let used = full.chars().count() + 1 + cache.chars().count();
+        let badges: &[&'static str] = if updated {
+            &[UPDATE_BADGE, UPDATE_GLYPH]
+        } else {
+            &[""]
+        };
+        if let Some(badge) = badges
+            .iter()
+            .find(|badge| used + badge.chars().count() <= room)
+        {
+            return (full, Some(cache), badge);
+        }
+    }
+    let (body, badge) = body_with_update_badge(mode, room, row, updated);
+    (body, None, badge)
+}
+
+/// The session row's cache field: its text and colour, when it has one
+fn cache_field(
+    info: &crate::session::SessionInfo,
+    now: chrono::DateTime<Utc>,
+) -> Option<(String, Color)> {
+    let warmth = info.cache_warmth(now)?;
+    Some((warmth.label(), theme().cache_warmth_color(&warmth)))
+}
+
+/// Append the cache field, in its own colour, when the row kept it
+///
+/// Before [`clamp_with_update_badge`], so the update badge stays last.
+fn push_cache_span(
+    spans: &mut Vec<Span<'static>>,
+    kept: Option<&str>,
+    field: Option<&(String, Color)>,
+) {
+    if let (Some(text), Some((_, color))) = (kept, field) {
+        spans.push(Span::styled(
+            format!(" {}", text),
+            Style::default().fg(*color),
+        ));
+    }
+}
+
 /// Share `budget` columns between two fields, charging the longer one first
 ///
 /// A field that fits in half the budget keeps its full length and the other
@@ -352,12 +410,13 @@ fn render_attention_section(
             let (badge, badge_color) = super::attention_badge(info, true);
             let state_text = super::session_state_display(info, now);
             let limit = super::failed_turn_limit_display(info, now);
+            let cache = cache_field(info, now);
 
             // Two leading spans, seven columns: "● " plus the agent tag
             // ("[CC] "). An elided body fills its room exactly, so an
             // undercount here is not slack - it is two columns for
             // clamp_line to cut off the row's tail
-            let (body, update) = body_with_update_badge(
+            let (body, cache_text, update) = row_fields(
                 mode,
                 width.saturating_sub(7),
                 &SessionRow {
@@ -368,17 +427,20 @@ fn render_attention_section(
                     state: &state_text,
                     limit: limit.as_deref(),
                 },
+                cache.as_ref().map(|(text, _)| text.as_str()),
                 info.shows_update_badge(),
             );
 
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(badge, Style::default().fg(badge_color)),
                 Span::styled(
                     format!("{} ", info.session_type.short_tag()),
                     t.muted_style(),
                 ),
                 Span::raw(body),
-            ]);
+            ];
+            push_cache_span(&mut spans, cache_text, cache.as_ref());
+            let line = Line::from(spans);
             ListItem::new(clamp_with_update_badge(line, update, width))
         })
         .collect();
@@ -425,12 +487,13 @@ fn render_session_list(
             let (badge, badge_color) = super::attention_badge(info, info.needs_attention());
             let state_display = super::session_state_display(info, now);
             let limit = super::failed_turn_limit_display(info, now);
+            let cache = cache_field(info, now);
 
             // Three leading spans, nine columns: selection marker (2),
             // badge (2), agent tag "[CC] " (5). An elided body fills its
             // room exactly, so an undercount here is not slack - it is
             // columns for clamp_line to cut off the row's tail
-            let (body, update) = body_with_update_badge(
+            let (body, cache_text, update) = row_fields(
                 mode,
                 width.saturating_sub(9),
                 &SessionRow {
@@ -441,10 +504,11 @@ fn render_session_list(
                     state: &state_display,
                     limit: limit.as_deref(),
                 },
+                cache.as_ref().map(|(text, _)| text.as_str()),
                 info.shows_update_badge(),
             );
 
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::raw(selection_prefix(selected)),
                 Span::styled(badge, Style::default().fg(badge_color)),
                 Span::styled(
@@ -452,7 +516,9 @@ fn render_session_list(
                     t.muted_style(),
                 ),
                 Span::raw(body),
-            ]);
+            ];
+            push_cache_span(&mut spans, cache_text, cache.as_ref());
+            let line = Line::from(spans);
 
             ListItem::new(clamp_with_update_badge(line, update, width))
                 .style(selection_style(selected, info.state.color()))
@@ -697,6 +763,170 @@ mod tests {
         let text: String = clamped.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.chars().count(), 20, "{text:?}");
         assert!(text.ends_with(UPDATE_GLYPH), "{text:?}");
+    }
+
+    /// The cache field is the first to go: it stays only beside the complete
+    /// row, never at the cost of the limit, project or branch
+    #[test]
+    fn test_the_cache_field_stays_only_beside_the_complete_row() {
+        let row = SessionRow {
+            prefix: "2: ",
+            project: "panoptes",
+            branch: "main",
+            name: "feature",
+            state: "Waiting ✗ usage limit · 5h resets 20:10",
+            limit: Some(" · 5h resets 20:10"),
+        };
+        let cache = Some("cache 42m");
+        let full = "2: panoptes / main / feature [Waiting ✗ usage limit · 5h resets 20:10]";
+        let lean = "2: panoptes / main / feature [Waiting ✗ usage limit]";
+        let with_cache = full.chars().count() + " cache 42m".chars().count();
+
+        // Room for all of it: all of it
+        assert_eq!(
+            row_fields(SideMode::Full, with_cache, &row, cache, false),
+            (full.to_string(), cache, "")
+        );
+
+        // A column short: the cache goes, and the limit stays
+        assert_eq!(
+            row_fields(SideMode::Full, with_cache - 1, &row, cache, false),
+            (full.to_string(), None, "")
+        );
+
+        // Narrower: the usual degradation, the cache long gone
+        assert_eq!(
+            row_fields(SideMode::Full, lean.chars().count(), &row, cache, false),
+            (lean.to_string(), None, "")
+        );
+        assert_eq!(
+            row_fields(SideMode::Compact, 200, &row, cache, false),
+            ("2: feature [Waiting]".to_string(), None, "")
+        );
+
+        // And no cache figure is no field
+        assert_eq!(
+            row_fields(SideMode::Full, 200, &row, None, false),
+            (full.to_string(), None, "")
+        );
+    }
+
+    /// Limit, cache and update badge together: the badge's words go first,
+    /// then the cache, then the limit - and the glyph never
+    #[test]
+    fn test_limit_cache_and_update_badge_give_way_in_order() {
+        let row = SessionRow {
+            prefix: "2: ",
+            project: "panoptes",
+            branch: "main",
+            name: "feature",
+            state: "Waiting ✗ usage limit · 5h resets 20:10",
+            limit: Some(" · 5h resets 20:10"),
+        };
+        let cache = Some("cache 42m");
+        let full = "2: panoptes / main / feature [Waiting ✗ usage limit · 5h resets 20:10]";
+        let lean = "2: panoptes / main / feature [Waiting ✗ usage limit]";
+        let len = |s: &str| s.chars().count();
+        let with_cache = len(full) + len(" cache 42m");
+
+        assert_eq!(
+            row_fields(
+                SideMode::Full,
+                with_cache + len(UPDATE_BADGE),
+                &row,
+                cache,
+                true
+            ),
+            (full.to_string(), cache, UPDATE_BADGE)
+        );
+        assert_eq!(
+            row_fields(
+                SideMode::Full,
+                with_cache + len(UPDATE_BADGE) - 1,
+                &row,
+                cache,
+                true
+            ),
+            (full.to_string(), cache, UPDATE_GLYPH)
+        );
+        assert_eq!(
+            row_fields(
+                SideMode::Full,
+                with_cache + len(UPDATE_GLYPH) - 1,
+                &row,
+                cache,
+                true
+            ),
+            (full.to_string(), None, UPDATE_GLYPH)
+        );
+        assert_eq!(
+            row_fields(
+                SideMode::Full,
+                len(lean) + len(UPDATE_GLYPH),
+                &row,
+                cache,
+                true
+            ),
+            (lean.to_string(), None, UPDATE_GLYPH)
+        );
+
+        // Rendered, the cache sits before the badge, which stays last
+        let line = Line::from(vec![Span::raw(full), Span::raw(" cache 42m")]);
+        let clamped = clamp_with_update_badge(line, UPDATE_GLYPH, with_cache + 2);
+        let text: String = clamped.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, format!("{full} cache 42m{UPDATE_GLYPH}"));
+    }
+
+    /// An idle Claude session says how long its cache has left; a working one
+    /// does not, and neither does one whose cache tier is unknown
+    #[test]
+    fn test_an_idle_session_row_shows_its_cache_warmth() {
+        use crate::agent::prompt_cache::{CacheTtl, PromptCache};
+        use crate::session::SessionState;
+
+        let temp = TempDir::new().unwrap();
+        let mut sessions = sessions_with(&temp, &[]);
+        let id = sessions
+            .insert_test_session("review", uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .unwrap();
+        let set = |sessions: &mut SessionManager, state, cache| {
+            let info = &mut sessions.get_mut(id).unwrap().info;
+            info.state = state;
+            info.usage.prompt_cache = cache;
+        };
+        let warm = |minutes: i64| {
+            Some(PromptCache::new(
+                Some(CacheTtl::OneHour),
+                Utc::now() - chrono::Duration::minutes(60 - minutes),
+                None,
+            ))
+        };
+
+        set(&mut sessions, SessionState::Waiting, warm(42));
+        let lines = render(60, &sessions);
+        // 42 minutes left, give or take the second the render took
+        assert!(
+            contains_line(&lines, "[Waiting] cache 42m")
+                || contains_line(&lines, "[Waiting] cache 41m"),
+            "{lines:?}"
+        );
+
+        set(&mut sessions, SessionState::Suspended, warm(-1));
+        assert!(contains_line(&render(60, &sessions), "] cold"));
+
+        // Working: the cache is in use, so nothing to say about it
+        set(&mut sessions, SessionState::Thinking, warm(42));
+        assert!(!contains_line(&render(60, &sessions), "cache"));
+
+        // Pure cache reads, never a write: no tier, so nothing either
+        set(
+            &mut sessions,
+            SessionState::Waiting,
+            Some(PromptCache::new(None, Utc::now(), None)),
+        );
+        let lines = render(60, &sessions);
+        assert!(!contains_line(&lines, "cache"), "{lines:?}");
+        assert!(!contains_line(&lines, "cold"), "{lines:?}");
     }
 
     #[test]

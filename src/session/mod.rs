@@ -755,6 +755,24 @@ impl SessionInfo {
         }
     }
 
+    /// Whether the agent's prompt cache is still warm, for a session at rest
+    ///
+    /// Only a session that is not working has a cache worth asking about: one
+    /// that is thinking or running a tool is using its cache as it goes.
+    /// `None` too while the cache's tier is unknown (no request has written
+    /// to it yet) and for agents that do not report it - only Claude does.
+    pub fn cache_warmth(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Option<crate::agent::prompt_cache::CacheWarmth> {
+        match self.state {
+            SessionState::Waiting | SessionState::AwaitingApproval | SessionState::Suspended => {
+                self.usage.prompt_cache.as_ref()?.warmth_at(now)
+            }
+            _ => None,
+        }
+    }
+
     /// What to do about the failed turn, when there is one thing that fixes it
     ///
     /// A Claude turn that failed on its login says how to sign that profile
