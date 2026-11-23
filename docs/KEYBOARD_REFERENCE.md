@@ -106,7 +106,7 @@ shortcut that opened this list before it became a row of the branch list.
 | `n` | Create new AI session (Claude Code or Codex) |
 | `s` | Create new shell session |
 | `i` | Import a Claude or Codex conversation started in this branch's directory outside Panoptes |
-| `u` | Restart the selected session, resuming its conversation - picks up an agent update (`↻`). Asks first if it would interrupt a turn, a dialog or background work |
+| `u` | Restart a session wearing `↻ restart to update` on the new agent build, resuming its conversation. Asks first if it would interrupt a turn, a dialog, a start-up, background work, or output still arriving; does nothing on a session without the badge |
 | `d` | Delete selected session (prompts for confirmation) |
 | `Esc` | Back to the branch list |
 | any other key | Run a matching custom shortcut, if one is bound |
@@ -133,7 +133,7 @@ Every session, flat and sorted, with a pinned "Needs Attention" section on top.
 |-----|--------|
 | `Up` / `Down` / `1-9` | Select a session (`0` = 10) |
 | `Enter` | Open the selected session full-screen |
-| `u` | Restart the selected session, resuming its conversation - picks up an agent update (`↻`). Asks first if it would interrupt a turn, a dialog or background work |
+| `u` | Restart a session wearing `↻ restart to update` on the new agent build, resuming its conversation. Asks first if it would interrupt a turn, a dialog, a start-up, background work, or output still arriving; does nothing on a session without the badge |
 | `d` | Delete the selected session (prompts for confirmation) |
 | `Esc` | Back out to the Projects pane |
 

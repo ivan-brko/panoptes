@@ -272,7 +272,7 @@ fn header_suffix(info: &SessionInfo, scroll_offset: usize) -> String {
 /// carries. Its own colour, because it is neither the session's state nor an
 /// attention reason.
 fn update_flag(info: Option<&SessionInfo>) -> Option<Span<'static>> {
-    info.filter(|info| info.binary_updated).map(|_| {
+    info.filter(|info| info.shows_update_badge()).map(|_| {
         Span::styled(
             crate::tui::views::pane_sessions::UPDATE_BADGE,
             Style::default()

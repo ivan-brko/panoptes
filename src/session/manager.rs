@@ -1572,37 +1572,29 @@ impl SessionManager {
         claude_config_dir: Option<PathBuf>,
         codex_home: Option<PathBuf>,
     ) -> Result<()> {
+        let codex_data_home = self.codex_homes.data_home_for(codex_home.as_deref());
         let session = self
             .sessions
-            .get(&session_id)
+            .get_mut(&session_id)
             .ok_or_else(|| anyhow!("No session with ID {}", session_id))?;
-        let info = &session.info;
+        let info = &mut session.info;
         if info.session_type == SessionType::Shell {
             return Err(anyhow!(
                 "Cannot restart '{}': a shell has no conversation to resume",
                 info.name
             ));
         }
+        // The look `wake_session` makes, made first and fresh: once the
+        // process is gone a missing transcript would leave nothing to come
+        // back to, and a cached answer may be stale either way
+        info.transcript_missing = !info.conversation_transcript_exists(
+            claude_config_dir.as_deref(),
+            codex_data_home.as_deref(),
+        );
         if let Some(reason) = info.resume_blocker() {
             return Err(anyhow!("Cannot restart '{}': {}", info.name, reason));
         }
-        // The look `wake_session` makes, made first: once the process is gone
-        // a missing transcript would leave nothing to come back to
-        let codex_data_home = self.codex_homes.data_home_for(codex_home.as_deref());
-        if !info.conversation_transcript_exists(
-            claude_config_dir.as_deref(),
-            codex_data_home.as_deref(),
-        ) {
-            return Err(anyhow!(
-                "Cannot restart '{}': its conversation transcript is not on disk yet",
-                info.name
-            ));
-        }
 
-        let session = self
-            .sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| anyhow!("No session with ID {}", session_id))?;
         if session.is_alive() {
             session
                 .kill()

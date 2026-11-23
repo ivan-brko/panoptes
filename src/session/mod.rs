@@ -389,6 +389,25 @@ pub struct CodexTurns {
     pub ended: Option<String>,
 }
 
+/// Output this recent means the agent is still working, whatever its hooks say
+///
+/// Hooks are delivered in the background and can lag or be missing - an older
+/// Codex reports nothing between the start of a turn and its end - so a
+/// session that looks `Waiting` while it is still streaming is not at rest.
+/// The suspend sweep guards against the same thing with its silence check.
+pub const RECENT_OUTPUT_SECS: i64 = 5;
+
+/// Whether the restart key may restart a session, and how
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartReadiness {
+    /// At rest and on a superseded binary: restart straight away
+    Ready,
+    /// On a superseded binary, but a restart would interrupt it: ask first
+    Busy,
+    /// Not something to restart, and why
+    Refused(&'static str),
+}
+
 /// Metadata for a session (without PTY details)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -757,13 +776,45 @@ impl SessionInfo {
 
     /// Whether restarting this session now would interrupt something
     ///
-    /// A turn in progress, a dialog held open, or background work that dies
-    /// with the process. A restart asks first when this is true.
-    pub fn is_busy(&self) -> bool {
+    /// A turn in progress, a dialog held open, a process still starting, or
+    /// background work that dies with the process - and, because hook state
+    /// can lag, any output in the last [`RECENT_OUTPUT_SECS`]. A restart asks
+    /// first when this is true.
+    pub fn is_busy(&self, now: DateTime<Utc>) -> bool {
         matches!(
             self.state,
-            SessionState::Thinking | SessionState::Executing | SessionState::AwaitingApproval
+            SessionState::Starting
+                | SessionState::Thinking
+                | SessionState::Executing
+                | SessionState::AwaitingApproval
         ) || self.has_background_work()
+            || now.signed_duration_since(self.last_activity).num_seconds() < RECENT_OUTPUT_SECS
+    }
+
+    /// Whether the "restart to update" badge applies right now
+    ///
+    /// Only a running process can be on an old build: a suspended or exited
+    /// session's next process is spawned from whatever is installed then.
+    pub fn shows_update_badge(&self) -> bool {
+        self.binary_updated && self.state.has_process()
+    }
+
+    /// Whether the restart key should restart this session
+    ///
+    /// Only a session wearing the update badge is restarted: anything else is
+    /// a stray key, and killing a session for one would throw away a typed but
+    /// unsent prompt - or, held down, restart the process just relaunched.
+    pub fn restart_readiness(&self, now: DateTime<Utc>) -> RestartReadiness {
+        if self.session_type == SessionType::Shell {
+            return RestartReadiness::Refused("a shell has no conversation to restart into");
+        }
+        if !self.shows_update_badge() {
+            return RestartReadiness::Refused("its agent has not been updated since it started");
+        }
+        if self.is_busy(now) {
+            return RestartReadiness::Busy;
+        }
+        RestartReadiness::Ready
     }
 
     /// Whether anything still runs, or is scheduled to run, in this session's
@@ -1808,6 +1859,93 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Claude session on a superseded binary, at rest and long silent
+    fn updated_at_rest(now: DateTime<Utc>) -> SessionInfo {
+        let mut info = SessionInfo::new(
+            "s".to_string(),
+            "/tmp".into(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        info.session_type = SessionType::ClaudeCode;
+        info.state = SessionState::Waiting;
+        info.binary_updated = true;
+        info.last_activity = now - chrono::Duration::seconds(60);
+        info
+    }
+
+    #[test]
+    fn test_only_a_badged_session_at_rest_restarts_without_asking() {
+        let now = Utc::now();
+        assert_eq!(
+            updated_at_rest(now).restart_readiness(now),
+            RestartReadiness::Ready
+        );
+
+        // No badge: a stray key, refused - which is also what keeps a held
+        // key from restarting the process it just relaunched
+        let mut current = updated_at_rest(now);
+        current.binary_updated = false;
+        assert!(matches!(
+            current.restart_readiness(now),
+            RestartReadiness::Refused(_)
+        ));
+
+        // A badge left on a process that is gone does not count
+        let mut suspended = updated_at_rest(now);
+        suspended.state = SessionState::Suspended;
+        assert!(!suspended.shows_update_badge());
+        assert!(matches!(
+            suspended.restart_readiness(now),
+            RestartReadiness::Refused(_)
+        ));
+
+        let mut shell = updated_at_rest(now);
+        shell.session_type = SessionType::Shell;
+        assert!(matches!(
+            shell.restart_readiness(now),
+            RestartReadiness::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn test_a_restart_asks_first_whenever_it_would_interrupt() {
+        let now = Utc::now();
+        for state in [
+            SessionState::Starting,
+            SessionState::Thinking,
+            SessionState::Executing,
+            SessionState::AwaitingApproval,
+        ] {
+            let mut info = updated_at_rest(now);
+            info.state = state;
+            assert_eq!(
+                info.restart_readiness(now),
+                RestartReadiness::Busy,
+                "{state:?}"
+            );
+        }
+
+        let mut background = updated_at_rest(now);
+        background.background_tasks = 1;
+        assert_eq!(background.restart_readiness(now), RestartReadiness::Busy);
+    }
+
+    /// Hooks can lag or be missing, so `Waiting` while output is still
+    /// arriving is not at rest
+    #[test]
+    fn test_recent_output_counts_as_busy_whatever_the_hooks_say() {
+        let now = Utc::now();
+        let mut streaming = updated_at_rest(now);
+        streaming.last_activity = now - chrono::Duration::seconds(1);
+        assert!(streaming.is_busy(now));
+        assert_eq!(streaming.restart_readiness(now), RestartReadiness::Busy);
+
+        let mut settled = updated_at_rest(now);
+        settled.last_activity = now - chrono::Duration::seconds(RECENT_OUTPUT_SECS);
+        assert!(!settled.is_busy(now));
+    }
 
     #[test]
     fn test_session_state_display() {

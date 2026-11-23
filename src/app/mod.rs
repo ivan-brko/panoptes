@@ -1127,16 +1127,20 @@ impl App {
         };
         let info = &session.info;
         let name = crate::tui::views::truncate_string(&info.name, 40);
-        if info.session_type == crate::session::SessionType::Shell {
-            self.state
-                .header_notifications
-                .push("A shell has no conversation to restart into".to_string());
-            return;
-        }
-        if !confirmed && info.is_busy() {
-            self.state.pending_restart_session = Some(session_id);
-            self.state.input_mode = InputMode::ConfirmingSessionRestart;
-            return;
+        match info.restart_readiness(chrono::Utc::now()) {
+            crate::session::RestartReadiness::Refused(reason) => {
+                self.state
+                    .header_notifications
+                    .push(format!("Not restarting '{}': {}", name, reason));
+                self.state.needs_render = true;
+                return;
+            }
+            crate::session::RestartReadiness::Busy if !confirmed => {
+                self.state.pending_restart_session = Some(session_id);
+                self.state.input_mode = InputMode::ConfirmingSessionRestart;
+                return;
+            }
+            _ => {}
         }
 
         let (claude_config_dir, codex_home) =
@@ -1163,9 +1167,17 @@ impl App {
             }
             Err(e) => {
                 tracing::warn!(session_id = %session_id, error = %e, "Failed to restart session");
-                self.state
-                    .header_notifications
-                    .push(format!("Could not restart: {}", e));
+                // Refused before the kill, it is still running; failed after
+                // it, it is suspended and opening it tries the resume again
+                let notice = if self.sessions.is_suspended(session_id) {
+                    format!(
+                        "Could not restart '{}': {} - left suspended, Enter resumes it",
+                        name, e
+                    )
+                } else {
+                    format!("Could not restart: {}", e)
+                };
+                self.state.header_notifications.push(notice);
             }
         }
         self.state.needs_render = true;

@@ -224,7 +224,10 @@ fn branch_shortcuts() -> Vec<Line<'static>> {
             shortcut_line("n", "New AI session (Claude/Codex)"),
             shortcut_line("s", "New shell session"),
             shortcut_line("i", "Import a conversation started outside Panoptes"),
-            shortcut_line("u", "Restart session, resuming it (picks up an ↻ update)"),
+            shortcut_line(
+                "u",
+                "Restart an ↻ session on the updated agent, resuming it",
+            ),
             shortcut_line("d", "Delete session (or discard a resumable one)"),
             shortcut_line("<key>", "Run a custom shortcut"),
         ],
@@ -248,7 +251,10 @@ fn sessions_shortcuts() -> Vec<Line<'static>> {
         vec![
             shortcut_line("↑ / ↓ / 1-9", "Select a session (0 = 10)"),
             shortcut_line("Enter", "Open the session full-screen"),
-            shortcut_line("u", "Restart session, resuming it (picks up an ↻ update)"),
+            shortcut_line(
+                "u",
+                "Restart an ↻ session on the updated agent, resuming it",
+            ),
             shortcut_line("d", "Delete the selected session"),
             shortcut_line("Esc", "Back to the Projects pane"),
         ],

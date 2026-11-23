@@ -189,6 +189,27 @@ pub(crate) const UPDATE_BADGE: &str = " \u{21bb} restart to update";
 /// The same badge with its words dropped - the glyph is kept at every width
 pub(crate) const UPDATE_GLYPH: &str = " \u{21bb}";
 
+/// Clamp a row to `width`, keeping the update badge whole at its end
+///
+/// The badge's columns are reserved before the row is cut, so a compact row
+/// too long for its pane loses its tail rather than the badge. An empty
+/// badge is a plain clamp.
+pub(crate) fn clamp_with_update_badge(
+    line: Line<'static>,
+    badge: &'static str,
+    width: usize,
+) -> Line<'static> {
+    if badge.is_empty() {
+        return clamp_line(line, width);
+    }
+    let mut line = clamp_line(line, width.saturating_sub(badge.chars().count()));
+    line.spans.push(Span::styled(
+        badge,
+        Style::default().fg(theme().update_available),
+    ));
+    line
+}
+
 /// The row body and the update badge trailing it, together in `room` columns
 ///
 /// The badge's words are a field like any other and go whole: they stay only
@@ -347,7 +368,7 @@ fn render_attention_section(
                     state: &state_text,
                     limit: limit.as_deref(),
                 },
-                info.binary_updated,
+                info.shows_update_badge(),
             );
 
             let line = Line::from(vec![
@@ -357,9 +378,8 @@ fn render_attention_section(
                     t.muted_style(),
                 ),
                 Span::raw(body),
-                Span::styled(update, Style::default().fg(t.update_available)),
             ]);
-            ListItem::new(clamp_line(line, width))
+            ListItem::new(clamp_with_update_badge(line, update, width))
         })
         .collect();
 
@@ -421,7 +441,7 @@ fn render_session_list(
                     state: &state_display,
                     limit: limit.as_deref(),
                 },
-                info.binary_updated,
+                info.shows_update_badge(),
             );
 
             let line = Line::from(vec![
@@ -432,10 +452,9 @@ fn render_session_list(
                     t.muted_style(),
                 ),
                 Span::raw(body),
-                Span::styled(update, Style::default().fg(t.update_available)),
             ]);
 
-            ListItem::new(clamp_line(line, width))
+            ListItem::new(clamp_with_update_badge(line, update, width))
                 .style(selection_style(selected, info.state.color()))
         })
         .collect();
@@ -668,6 +687,16 @@ mod tests {
             body_with_update_badge(SideMode::Full, wide, &row, false),
             (full.to_string(), "")
         );
+    }
+
+    /// A compact row too long for its pane loses its tail, never the glyph
+    #[test]
+    fn test_the_update_glyph_keeps_its_columns_when_the_row_is_cut() {
+        let line = Line::from(format!("1: {} [Waiting]", "n".repeat(60)));
+        let clamped = clamp_with_update_badge(line, UPDATE_GLYPH, 20);
+        let text: String = clamped.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.chars().count(), 20, "{text:?}");
+        assert!(text.ends_with(UPDATE_GLYPH), "{text:?}");
     }
 
     #[test]

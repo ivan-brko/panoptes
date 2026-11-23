@@ -1530,13 +1530,18 @@ which the session rows and the session header show as `↻ restart to update`
 in the `update_available` theme token. The badge's words drop whole when the
 row would otherwise have to elide; the `↻` glyph stays at every width.
 
-`u` in either session list calls `restart_session`: it checks every reason the
-relaunch could fail (a shell, a `resume_blocker`, a transcript not on disk)
-*before* killing anything, then kills the process, marks it `Suspended` and
+`u` in either session list acts only on a session wearing the badge
+(`SessionInfo::restart_readiness`; the badge itself shows only while the
+session has a process) - anything else is a stray key, and killing a session
+for one would lose an unsent prompt. A session that `is_busy` - `Starting`,
+mid-turn, on a dialog, with background work, or with output in the last
+`RECENT_OUTPUT_SECS`, since hooks can lag - asks first. `restart_session` then
+checks every reason the relaunch could fail (a shell, a freshly re-checked
+transcript, any other `resume_blocker`) *before* killing anything, then kills the process, marks it `Suspended` and
 wakes it through `wake_session` - so the relaunch is the ordinary resume
 (`--resume <id>`, `codex resume <id>`, `--conversation=<id>`) under the same
-Panoptes session ID, and the new process gets a fresh fingerprint. A session
-that `is_busy` (mid-turn, on a dialog, or with background work) asks first.
+Panoptes session ID, and the new process gets a fresh fingerprint. A spawn that
+fails after the kill leaves the session suspended; `Enter` resumes it.
 
 ## Testing
 
