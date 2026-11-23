@@ -175,6 +175,10 @@ pub struct Theme {
     pub cancel_key: Color,
     /// Color for default-item markers (e.g. "★" / "(default)")
     pub default_marker: Color,
+
+    // === Scheduled Actions ===
+    /// A session armed to act on its own later (`resumes 20:11`)
+    pub resume_armed: Color,
 }
 
 /// The tokens a preset owns
@@ -388,6 +392,10 @@ impl Theme {
             confirm_key: Color::Green,
             cancel_key: Color::Red,
             default_marker: Color::Yellow,
+
+            // Scheduled actions: a calm colour no state uses, so "this will
+            // act by itself" reads apart from what the session is doing now
+            resume_armed: Color::LightCyan,
         }
     }
 
@@ -679,6 +687,7 @@ mod tests {
                 assert_eq!(tier.confirm_key, base.confirm_key, "{palette:?}");
                 assert_eq!(tier.cancel_key, base.cancel_key, "{palette:?}");
                 assert_eq!(tier.default_marker, base.default_marker, "{palette:?}");
+                assert_eq!(tier.resume_armed, base.resume_armed, "{palette:?}");
                 assert_eq!(tier.bg_base, base.bg_base, "{palette:?}");
                 // Suspended is deliberately absent: it is a structural grey,
                 // and the greys are exactly what the tiers refine. On the

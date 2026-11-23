@@ -3,6 +3,7 @@
 //! This module handles Claude Code session lifecycle, PTY management,
 //! and session state tracking.
 
+pub mod auto_resume;
 pub mod manager;
 pub mod proxy;
 pub mod pty;
@@ -20,6 +21,7 @@ pub use vterm::{VirtualTerminal, DEFAULT_SCROLLBACK_ROWS};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -360,6 +362,12 @@ pub struct TurnFailure {
     pub reason: String,
     /// Which usage limit, and when it lifts, when the agent said
     pub limit: Option<UsageLimit>,
+    /// When Panoptes recorded the failure
+    ///
+    /// What a resume at the reset is checked against: a reset that is not
+    /// after the failure is a stale reading, and never arms one (see
+    /// [`auto_resume`]). `None` only for a failure built without a clock.
+    pub failed_at: Option<DateTime<Utc>>,
 }
 
 impl TurnFailure {
@@ -368,6 +376,15 @@ impl TurnFailure {
         Self {
             reason: reason.unwrap_or_else(|| "turn failed".to_string()),
             limit,
+            failed_at: None,
+        }
+    }
+
+    /// The same failure, stamped with when it was recorded
+    pub fn at(self, failed_at: DateTime<Utc>) -> Self {
+        Self {
+            failed_at: Some(failed_at),
+            ..self
         }
     }
 
@@ -465,6 +482,19 @@ pub struct SessionInfo {
     /// Not persisted, like everything else describing a live turn.
     #[serde(skip)]
     pub turn_failure: Option<TurnFailure>,
+    /// Armed to send a continue prompt once the usage limit resets
+    ///
+    /// Not persisted: it is bound to the process it was armed in, and a
+    /// restart disarms it anyway (see [`auto_resume`]).
+    #[serde(skip)]
+    pub auto_resume: Option<auto_resume::ResumeArm>,
+    /// When the user last sent this session input - keys, a paste, the mouse
+    ///
+    /// Not persisted. Unlike `last_engagement`, which the agent moves too,
+    /// this is the user alone, which is what an auto-resume must not talk
+    /// over.
+    #[serde(skip)]
+    pub last_user_input: Option<DateTime<Utc>>,
     /// Token and rate-limit figures read from the agent's own transcript
     ///
     /// Not persisted: it describes a live conversation, and stale numbers shown
@@ -1022,6 +1052,8 @@ impl SessionInfo {
             in_flight: HashMap::new(),
             last_message: None,
             turn_failure: None,
+            auto_resume: None,
+            last_user_input: None,
             usage: crate::agent::events::UsageSnapshot::default(),
             subagents: 0,
             subagent_ids: HashSet::new(),
@@ -1761,10 +1793,45 @@ impl Session {
     /// Keeps a session the user is typing into out of the suspend sweep -
     /// killing a process with half a prompt typed into it would lose real work,
     /// and the agent produces no events at all while that happens.
+    ///
+    /// Also disarms an auto-resume: whatever the user is typing, a prompt
+    /// written over it at the reset would mangle it.
     pub fn note_user_input(&mut self) {
         let now = Utc::now();
         self.info.last_activity = now;
         self.info.last_engagement = now;
+        self.info.last_user_input = Some(now);
+        if self.info.auto_resume.take().is_some() {
+            tracing::info!(
+                session_id = %self.info.id,
+                "User input disarmed the resume at reset"
+            );
+        }
+    }
+
+    /// The agent process's ID, which tells a restarted session from the one
+    /// an auto-resume was armed in
+    pub fn process_id(&self) -> Option<u32> {
+        self.pty.process_id()
+    }
+
+    /// Type the auto-resume's continue prompt, without submitting it
+    ///
+    /// Straight to the PTY rather than through [`Session::write`]: this is
+    /// Panoptes talking, not the user, and must not count as their input.
+    pub fn type_resume_prompt(&mut self) -> anyhow::Result<()> {
+        self.pty
+            .write(auto_resume::CONTINUE_PROMPT.as_bytes())
+            .context("Failed to type the continue prompt")
+    }
+
+    /// Submit the prompt [`Session::type_resume_prompt`] typed
+    pub fn submit_resume_prompt(&mut self) -> anyhow::Result<()> {
+        self.pty
+            .write(b"\r")
+            .context("Failed to submit the continue prompt")?;
+        self.guess_turn_started();
+        Ok(())
     }
 
     /// Strip ANSI escape/control sequences from PTY bytes while preserving

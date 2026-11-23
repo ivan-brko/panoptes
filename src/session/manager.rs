@@ -21,8 +21,8 @@ use crate::project::{BranchId, ProjectId};
 
 use super::pty_reader::{QUEUE_CAP, READ_CHUNK};
 use super::{
-    state_machine, AttentionReason, PollOutcome, Session, SessionId, SessionInfo, SessionState,
-    SessionStore, SessionType,
+    auto_resume, state_machine, AttentionReason, PollOutcome, Session, SessionId, SessionInfo,
+    SessionState, SessionStore, SessionType,
 };
 
 /// How long a session's PTY has to have been silent before an overdue tool is
@@ -1327,6 +1327,14 @@ impl SessionManager {
             return false;
         }
 
+        // Armed to resume at its limit's reset: killing it would only mean
+        // waking it to do so, and a resume never wakes a session implicitly
+        // (see `auto_resume`). The arm lasts at most the length of a limit
+        // window plus a day, so it cannot hold a session awake for good.
+        if info.auto_resume.is_some() {
+            return false;
+        }
+
         // Both clocks must agree, and they answer different questions.
         //
         // `last_engagement` is the honest one: it moves when the agent changes
@@ -1416,6 +1424,85 @@ impl SessionManager {
         suspended
     }
 
+    /// Arm a session to resume at its usage limit's reset, or disarm it
+    ///
+    /// Returns when it will fire once armed, `None` once disarmed, and why
+    /// not when the session cannot be armed.
+    pub fn toggle_auto_resume(
+        &mut self,
+        session_id: SessionId,
+        now: DateTime<Utc>,
+    ) -> std::result::Result<Option<DateTime<Utc>>, auto_resume::Refusal> {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Err(auto_resume::Refusal::NotFailed);
+        };
+        if session.info.auto_resume.take().is_some() {
+            tracing::info!(session_id = %session_id, "Disarmed the resume at reset");
+            return Ok(None);
+        }
+        let arm = auto_resume::arm(&session.info, session.process_id(), now)?;
+        let fires_at = arm.fires_at();
+        tracing::info!(session_id = %session_id, fires_at = %fires_at, "Armed to resume at reset");
+        session.info.auto_resume = Some(arm);
+        Ok(Some(fires_at))
+    }
+
+    /// Move every armed session one step towards its resume
+    ///
+    /// The clock is a parameter so the guards are testable. Each guard is
+    /// re-checked here on every tick (see [`auto_resume::step`]); a session
+    /// that fails one is disarmed without anything being written. Returns
+    /// the names of the sessions whose continue prompt was submitted, and
+    /// whether any row changed.
+    pub fn tick_auto_resume(&mut self, now: DateTime<Utc>) -> (Vec<String>, bool) {
+        let mut resumed = Vec::new();
+        let mut changed = false;
+        for session in self.sessions.values_mut() {
+            let Some(arm) = session.info.auto_resume.clone() else {
+                continue;
+            };
+            let step = auto_resume::step(&arm, &session.info, session.process_id(), now);
+            let outcome = match step {
+                auto_resume::Step::Wait => continue,
+                auto_resume::Step::Disarm(why) => {
+                    tracing::info!(
+                        session_id = %session.info.id,
+                        reason = ?why,
+                        "Gave up on resuming at reset"
+                    );
+                    session.info.auto_resume = None;
+                    changed = true;
+                    continue;
+                }
+                auto_resume::Step::Type => session.type_resume_prompt().map(|()| {
+                    session.info.auto_resume = Some(auto_resume::ResumeArm {
+                        typed_at: Some(now),
+                        ..arm
+                    });
+                }),
+                auto_resume::Step::Submit => session.submit_resume_prompt().map(|()| {
+                    session.info.auto_resume = None;
+                    changed = true;
+                    resumed.push(session.info.name.clone());
+                    tracing::info!(
+                        session_id = %session.info.id,
+                        "Resumed the session at its usage limit's reset"
+                    );
+                }),
+            };
+            if let Err(e) = outcome {
+                tracing::warn!(
+                    session_id = %session.info.id,
+                    error = %e,
+                    "Could not resume at reset; disarming"
+                );
+                session.info.auto_resume = None;
+                changed = true;
+            }
+        }
+        (resumed, changed)
+    }
+
     /// Whether a session is suspended and can be brought back
     pub fn is_suspended(&self, session_id: SessionId) -> bool {
         self.sessions
@@ -1487,6 +1574,9 @@ impl SessionManager {
         info.last_engagement = Utc::now();
         info.in_flight.clear();
         info.resumed_conversation = true;
+        // A new process is a different session as far as an auto-resume is
+        // concerned; its own guard would disarm it, but say so here too
+        info.auto_resume = None;
 
         // Spawning happens before the existing entry is touched, so a failure
         // leaves the suspended session exactly as it was. On success the new
@@ -1937,8 +2027,26 @@ impl SessionManager {
                 | AgentEvent::SessionReset { title: Some(_) }
         );
         let name_before = may_rename.then(|| session.info.name.clone());
+        let armable_before = auto_resume::armable(&session.info).is_ok();
 
-        let applied = state_machine::apply(&mut session.info, event, Utc::now(), &self.config);
+        let now = Utc::now();
+        let applied = state_machine::apply(&mut session.info, event, now, &self.config);
+
+        // With the default on, a usage-limit failure arms itself the moment it
+        // becomes armable - which for Claude is when the transcript fills in
+        // the reset the hook did not carry. Only on that edge, so a session
+        // the user disarmed by hand is not re-armed by the next event.
+        if self.config.auto_resume_at_reset && !armable_before && session.info.auto_resume.is_none()
+        {
+            if let Ok(arm) = auto_resume::arm(&session.info, session.process_id(), now) {
+                tracing::info!(
+                    session_id = %session_id,
+                    fires_at = %arm.fires_at(),
+                    "Armed to resume at the usage limit's reset"
+                );
+                session.info.auto_resume = Some(arm);
+            }
+        }
         let renamed = name_before.is_some_and(|before| before != session.info.name);
         if renamed {
             self.persist_session(session_id);
@@ -5510,5 +5618,181 @@ mod tests {
         let info = manager.get_recovered(session_id).unwrap();
         assert_eq!(info.name, "Imported conversation");
         assert_eq!(info.account_name(), None, "found under the default account");
+    }
+
+    /// A live Claude session that just failed on a usage limit resetting in 2h
+    ///
+    /// Returns the reset. The process is the test `sleep`, which takes PTY
+    /// writes without complaint.
+    fn usage_limited_session(manager: &mut SessionManager) -> (SessionId, DateTime<Utc>) {
+        let session_id = insert_test_session(manager);
+        let resets_at = Utc::now() + chrono::Duration::hours(2);
+        {
+            let info = &mut manager.get_mut(session_id).unwrap().info;
+            info.session_type = SessionType::ClaudeCode;
+            info.agent_session_id = Some("conv-1".to_string());
+        }
+        manager.apply_agent_event(
+            session_id,
+            AgentEvent::TurnFailed {
+                reason: Some("usage limit".to_string()),
+                limit: Some(crate::agent::events::UsageLimit {
+                    window: "five_hour".to_string(),
+                    resets_at: Some(resets_at),
+                    using_overage: false,
+                }),
+            },
+        );
+        (session_id, resets_at)
+    }
+
+    fn armed_at(manager: &SessionManager, id: SessionId) -> Option<&auto_resume::ResumeArm> {
+        manager.get(id).unwrap().info.auto_resume.as_ref()
+    }
+
+    #[test]
+    fn test_an_armed_session_types_then_submits_after_the_reset() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (id, resets_at) = usage_limited_session(&mut manager);
+        assert!(armed_at(&manager, id).is_none(), "off by default");
+
+        let fires_at = manager.toggle_auto_resume(id, Utc::now()).unwrap();
+        assert_eq!(fires_at, Some(resets_at + chrono::Duration::minutes(1)));
+        let fires_at = fires_at.unwrap();
+
+        // Before the reset plus its minute, nothing
+        assert_eq!(manager.tick_auto_resume(resets_at), (Vec::new(), false));
+        assert!(armed_at(&manager, id).unwrap().typed_at.is_none());
+
+        // Typed, not yet submitted
+        let (resumed, _) = manager.tick_auto_resume(fires_at);
+        assert!(resumed.is_empty());
+        assert_eq!(armed_at(&manager, id).unwrap().typed_at, Some(fires_at));
+
+        // And `Enter` a beat later
+        let (resumed, changed) = manager.tick_auto_resume(fires_at + auto_resume::SUBMIT_DELAY);
+        assert_eq!(resumed, vec!["test-session".to_string()]);
+        assert!(changed);
+        assert!(armed_at(&manager, id).is_none());
+    }
+
+    #[test]
+    fn test_toggling_again_disarms() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (id, _) = usage_limited_session(&mut manager);
+        manager.toggle_auto_resume(id, Utc::now()).unwrap();
+        assert_eq!(manager.toggle_auto_resume(id, Utc::now()), Ok(None));
+        assert!(armed_at(&manager, id).is_none());
+    }
+
+    #[test]
+    fn test_a_rate_limited_session_cannot_be_armed() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let id = insert_test_session(&mut manager);
+        manager.get_mut(id).unwrap().info.session_type = SessionType::OpenAICodex;
+        manager.apply_agent_event(
+            id,
+            AgentEvent::TurnFailed {
+                reason: Some("rate limited".to_string()),
+                limit: None,
+            },
+        );
+        assert_eq!(
+            manager.toggle_auto_resume(id, Utc::now()),
+            Err(auto_resume::Refusal::NotUsageLimit)
+        );
+    }
+
+    #[test]
+    fn test_any_user_input_disarms() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (id, resets_at) = usage_limited_session(&mut manager);
+        manager.toggle_auto_resume(id, Utc::now()).unwrap();
+
+        manager.get_mut(id).unwrap().write(b"h").unwrap();
+        assert!(armed_at(&manager, id).is_none());
+        assert_eq!(
+            manager.tick_auto_resume(resets_at + chrono::Duration::hours(1)),
+            (Vec::new(), false),
+            "nothing left to fire"
+        );
+    }
+
+    #[test]
+    fn test_a_killed_session_is_disarmed_without_a_write() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (id, resets_at) = usage_limited_session(&mut manager);
+        manager.toggle_auto_resume(id, Utc::now()).unwrap();
+
+        // As if relaunched under a different process
+        manager
+            .get_mut(id)
+            .unwrap()
+            .info
+            .auto_resume
+            .as_mut()
+            .unwrap()
+            .pid = Some(1);
+        let (resumed, changed) = manager.tick_auto_resume(resets_at + chrono::Duration::hours(1));
+        assert!(resumed.is_empty());
+        assert!(changed);
+        assert!(armed_at(&manager, id).is_none());
+    }
+
+    #[test]
+    fn test_a_new_turn_disarms() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (id, resets_at) = usage_limited_session(&mut manager);
+        manager.toggle_auto_resume(id, Utc::now()).unwrap();
+
+        manager.apply_agent_event(id, AgentEvent::TurnStarted { title: None });
+        let (resumed, _) = manager.tick_auto_resume(resets_at + chrono::Duration::hours(1));
+        assert!(resumed.is_empty());
+        assert!(armed_at(&manager, id).is_none());
+    }
+
+    #[test]
+    fn test_the_config_default_arms_on_the_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config {
+            auto_resume_at_reset: true,
+            ..test_config(&temp_dir)
+        };
+        let mut manager = test_manager(&temp_dir, config);
+        let (id, resets_at) = usage_limited_session(&mut manager);
+        assert_eq!(
+            armed_at(&manager, id).map(|arm| arm.resets_at),
+            Some(resets_at)
+        );
+
+        // Disarmed by hand, a repeat of the same failure does not re-arm it
+        manager.toggle_auto_resume(id, Utc::now()).unwrap();
+        manager.apply_agent_event(
+            id,
+            AgentEvent::TurnFailed {
+                reason: Some("usage limit".to_string()),
+                limit: None,
+            },
+        );
+        assert!(armed_at(&manager, id).is_none());
+    }
+
+    #[test]
+    fn test_an_armed_session_is_not_suspended() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let (id, _) = usage_limited_session(&mut manager);
+        manager.toggle_auto_resume(id, Utc::now()).unwrap();
+        let later = Utc::now() + chrono::Duration::hours(3);
+        let mut info = manager.get(id).unwrap().info.clone();
+        assert!(!SessionManager::may_suspend(&info, None, later, 60));
+        info.auto_resume = None;
+        assert!(SessionManager::may_suspend(&info, None, later, 60));
     }
 }

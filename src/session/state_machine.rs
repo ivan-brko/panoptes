@@ -530,7 +530,7 @@ pub fn apply(
             // running any more and the agent is back at its prompt - but
             // unlike an interrupt, nobody chose this, so it is flagged.
             info.in_flight.clear();
-            info.turn_failure = Some(TurnFailure::new(reason.clone(), limit.clone()));
+            info.turn_failure = Some(TurnFailure::new(reason.clone(), limit.clone()).at(now));
             attention = Some(AttentionReason::TurnFailed { reason, limit });
             Move::Authoritative(SessionState::Waiting)
         }
@@ -1191,7 +1191,8 @@ mod tests {
                 limit: Some(five_hour_limit()),
             })
         );
-        let failure = TurnFailure::new(Some("usage limit".to_string()), Some(five_hour_limit()));
+        let failure =
+            TurnFailure::new(Some("usage limit".to_string()), Some(five_hour_limit())).at(now);
         assert_eq!(info.turn_failure.as_ref(), Some(&failure));
 
         // Looking at it clears the flag, not the record of what happened
@@ -1351,8 +1352,9 @@ mod tests {
         };
         assert!(!apply(&mut info, late, now, &config).rang);
         assert_eq!(
-            info.failed_turn(),
-            Some(&TurnFailure::new(Some("auth failed".to_string()), None)),
+            info.failed_turn()
+                .map(|f| (f.reason.as_str(), f.limit.as_ref())),
+            Some(("auth failed", None)),
             "an auth failure has no usage window to show"
         );
         assert_eq!(

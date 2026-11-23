@@ -243,6 +243,7 @@ fn body_with_update_badge(
 /// field to go. It stays only beside the complete row - limit, project and
 /// branch all whole - so keeping it never costs the row anything else. The
 /// update badge's words go before it, the glyph never does.
+#[cfg(test)]
 fn row_fields<'c>(
     mode: SideMode,
     room: usize,
@@ -250,23 +251,49 @@ fn row_fields<'c>(
     cache: Option<&'c str>,
     updated: bool,
 ) -> (String, Option<&'c str>, &'static str) {
-    if let Some(cache) = cache.filter(|_| mode == SideMode::Full) {
+    let (body, cache, _, badge) = row_fields_with_resume(mode, room, row, cache, None, updated);
+    (body, cache, badge)
+}
+
+/// [`row_fields`], with an armed resume's `resumes 20:11` too
+///
+/// The resume is a field like the cache - dropped whole, kept only beside
+/// the complete row, returned apart so the row can colour it - but it
+/// outranks the cache: it says the session will act by itself, where the
+/// cache is only a cost hint. The drop order is the update badge's words,
+/// then the cache, then the resume, then the limit and elision as
+/// [`session_body`] has them; the update glyph never goes.
+fn row_fields_with_resume<'c, 'r>(
+    mode: SideMode,
+    room: usize,
+    row: &SessionRow,
+    cache: Option<&'c str>,
+    resume: Option<&'r str>,
+    updated: bool,
+) -> (String, Option<&'c str>, Option<&'r str>, &'static str) {
+    if mode == SideMode::Full && (cache.is_some() || resume.is_some()) {
         let full = full_body(row);
-        let used = full.chars().count() + 1 + cache.chars().count();
+        let field = |f: Option<&str>| f.map_or(0, |f| 1 + f.chars().count());
         let badges: &[&'static str] = if updated {
             &[UPDATE_BADGE, UPDATE_GLYPH]
         } else {
             &[""]
         };
-        if let Some(badge) = badges
-            .iter()
-            .find(|badge| used + badge.chars().count() <= room)
-        {
-            return (full, Some(cache), badge);
+        // Richest first: the badge's words go, then the cache
+        let mut tries: Vec<(Option<&'c str>, &'static str)> =
+            badges.iter().map(|badge| (cache, *badge)).collect();
+        if cache.is_some() && resume.is_some() {
+            tries.push((None, badges[badges.len() - 1]));
+        }
+        for (cache, badge) in tries {
+            let used = full.chars().count() + field(cache) + field(resume) + badge.chars().count();
+            if used <= room {
+                return (full, cache, resume, badge);
+            }
         }
     }
     let (body, badge) = body_with_update_badge(mode, room, row, updated);
-    (body, None, badge)
+    (body, None, None, badge)
 }
 
 /// The session row's cache field: its text and colour, when it has one
@@ -290,6 +317,19 @@ fn push_cache_span(
         spans.push(Span::styled(
             format!(" {}", text),
             Style::default().fg(*color),
+        ));
+    }
+}
+
+/// Append the armed resume, in its own colour, when the row kept it
+///
+/// After the cache and before [`clamp_with_update_badge`], so the update
+/// badge stays last.
+fn push_resume_span(spans: &mut Vec<Span<'static>>, kept: Option<&str>) {
+    if let Some(resume) = kept {
+        spans.push(Span::styled(
+            format!(" {}", resume),
+            Style::default().fg(theme().resume_armed),
         ));
     }
 }
@@ -411,12 +451,13 @@ fn render_attention_section(
             let state_text = super::session_state_display(info, now);
             let limit = super::failed_turn_limit_display(info, now);
             let cache = cache_field(info, now);
+            let resume = super::auto_resume_display(info, now);
 
             // Two leading spans, seven columns: "● " plus the agent tag
             // ("[CC] "). An elided body fills its room exactly, so an
             // undercount here is not slack - it is two columns for
             // clamp_line to cut off the row's tail
-            let (body, cache_text, update) = row_fields(
+            let (body, cache_text, resume_text, update) = row_fields_with_resume(
                 mode,
                 width.saturating_sub(7),
                 &SessionRow {
@@ -428,6 +469,7 @@ fn render_attention_section(
                     limit: limit.as_deref(),
                 },
                 cache.as_ref().map(|(text, _)| text.as_str()),
+                resume.as_deref(),
                 info.shows_update_badge(),
             );
 
@@ -440,6 +482,7 @@ fn render_attention_section(
                 Span::raw(body),
             ];
             push_cache_span(&mut spans, cache_text, cache.as_ref());
+            push_resume_span(&mut spans, resume_text);
             let line = Line::from(spans);
             ListItem::new(clamp_with_update_badge(line, update, width))
         })
@@ -488,12 +531,13 @@ fn render_session_list(
             let state_display = super::session_state_display(info, now);
             let limit = super::failed_turn_limit_display(info, now);
             let cache = cache_field(info, now);
+            let resume = super::auto_resume_display(info, now);
 
             // Three leading spans, nine columns: selection marker (2),
             // badge (2), agent tag "[CC] " (5). An elided body fills its
             // room exactly, so an undercount here is not slack - it is
             // columns for clamp_line to cut off the row's tail
-            let (body, cache_text, update) = row_fields(
+            let (body, cache_text, resume_text, update) = row_fields_with_resume(
                 mode,
                 width.saturating_sub(9),
                 &SessionRow {
@@ -505,6 +549,7 @@ fn render_session_list(
                     limit: limit.as_deref(),
                 },
                 cache.as_ref().map(|(text, _)| text.as_str()),
+                resume.as_deref(),
                 info.shows_update_badge(),
             );
 
@@ -518,6 +563,7 @@ fn render_session_list(
                 Span::raw(body),
             ];
             push_cache_span(&mut spans, cache_text, cache.as_ref());
+            push_resume_span(&mut spans, resume_text);
             let line = Line::from(spans);
 
             ListItem::new(clamp_with_update_badge(line, update, width))
@@ -622,6 +668,103 @@ mod tests {
         assert!(row.contains("left-to-pop / feature ["), "{row:?}");
         assert!(row.ends_with(']'), "{row:?}");
         assert!(row.chars().count() <= 93, "{row:?}");
+    }
+
+    /// Armed to resume at 20:11 - the row says so, in its own token, and
+    /// drops it whole on a pane too narrow to hold it
+    #[test]
+    fn test_an_armed_session_row_says_when_it_resumes() {
+        let temp = TempDir::new().unwrap();
+        let mut sessions = sessions_with(&temp, &["review"]);
+        let id = sessions.session_ids()[0];
+        let fires_at = Utc::now() + chrono::Duration::hours(2);
+        let when = crate::agent::events::format_reset(fires_at, Utc::now()).unwrap();
+        sessions.get_mut(id).unwrap().info.auto_resume =
+            Some(crate::session::auto_resume::ResumeArm {
+                resets_at: fires_at - crate::session::auto_resume::grace(),
+                failed_at: Utc::now(),
+                conversation: None,
+                pid: None,
+                armed_at: Utc::now(),
+                typed_at: None,
+            });
+
+        let lines = render(60, &sessions);
+        let expected = format!("resumes {}", when);
+        assert!(contains_line(&lines, &expected), "{lines:?}");
+
+        let buf = crate::tui::views::test_util::render_to_buffer(60, 12, |frame| {
+            let state = AppState {
+                focus: crate::app::Focus::Panes(Tab::Sessions),
+                ..Default::default()
+            };
+            let mode = crate::tui::panes::side_mode(62);
+            render_sessions_pane(
+                frame,
+                frame.size(),
+                &state,
+                &ProjectStore::new(),
+                &sessions,
+                mode,
+            )
+        });
+        let colored = (0..buf.area.height).any(|y| {
+            (0..buf.area.width).any(|x| {
+                let cell = buf.get(x, y);
+                cell.symbol() == "r" && cell.fg == theme().resume_armed
+            })
+        });
+        assert!(colored, "the resume is drawn in its own token");
+
+        for line in render(30, &sessions) {
+            assert!(!line.contains("resumes"), "{line:?}");
+        }
+    }
+
+    /// Every field at once - limit, cache, resume, update badge - giving way
+    /// in order as the room shrinks: the badge's words, the cache, the
+    /// resume, then the limit; the glyph stays throughout
+    #[test]
+    fn test_every_field_gives_way_in_order() {
+        let row = SessionRow {
+            prefix: "2: ",
+            project: "panoptes",
+            branch: "main",
+            name: "feature",
+            state: "Waiting ✗ usage limit · 5h resets 20:10",
+            limit: Some(" · 5h resets 20:10"),
+        };
+        let (cache, resume) = (Some("cache 42m"), Some("resumes 20:11"));
+        let full = full_body(&row).chars().count();
+        let cols = |s: &str| s.chars().count();
+        let all = full + 1 + cols("cache 42m") + 1 + cols("resumes 20:11");
+
+        let fields = |room| row_fields_with_resume(SideMode::Full, room, &row, cache, resume, true);
+        assert_eq!(
+            fields(all + cols(UPDATE_BADGE)),
+            (full_body(&row), cache, resume, UPDATE_BADGE)
+        );
+        // The badge's words first
+        assert_eq!(
+            fields(all + cols(UPDATE_BADGE) - 1),
+            (full_body(&row), cache, resume, UPDATE_GLYPH)
+        );
+        // Then the cache
+        assert_eq!(
+            fields(all + cols(UPDATE_GLYPH) - 1),
+            (full_body(&row), None, resume, UPDATE_GLYPH)
+        );
+        // Then the resume
+        let resume_only = full + 1 + cols("resumes 20:11") + cols(UPDATE_GLYPH);
+        assert_eq!(
+            fields(resume_only - 1),
+            (full_body(&row), None, None, UPDATE_GLYPH)
+        );
+        // Then the limit
+        let (body, cache_kept, resume_kept, badge) = fields(full + cols(UPDATE_GLYPH) - 1);
+        assert_eq!((cache_kept, resume_kept, badge), (None, None, UPDATE_GLYPH));
+        assert!(!body.contains("5h resets"), "{body:?}");
+        assert!(body.contains("usage limit"), "{body:?}");
     }
 
     #[test]
