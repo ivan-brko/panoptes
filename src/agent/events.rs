@@ -375,7 +375,7 @@ impl UsageSnapshot {
         self.summary_at(Utc::now())
     }
 
-    /// [`Self::summary`] against a given clock, so the reset countdown is testable
+    /// [`Self::summary`] against a given clock, so the reset time is testable
     pub fn summary_at(&self, now: DateTime<Utc>) -> Option<String> {
         let mut parts = Vec::new();
 
@@ -391,8 +391,11 @@ impl UsageSnapshot {
         if self.limit_reached.is_some() {
             // Blocked outright - how full the window is no longer matters, only
             // when it lets the user back in
-            match binding.and_then(|w| w.resets_at) {
-                Some(at) => parts.push(format!("limit hit · resets {}", format_reset(at, now))),
+            match binding
+                .and_then(|w| w.resets_at)
+                .and_then(|at| format_reset(at, now))
+            {
+                Some(reset) => parts.push(format!("limit hit · resets {}", reset)),
                 None => parts.push("limit hit".to_string()),
             }
         } else if let Some(window) = binding {
@@ -428,13 +431,18 @@ fn merge_window(current: &mut Option<RateLimitWindow>, newer: Option<RateLimitWi
 }
 
 /// Render when a limit lifts, on the user's own clock: `20:10` today,
-/// `Aug 29 01:30` on any other day, `now` once it has passed
+/// `Aug 29 01:30` on any other day
 ///
-/// The one reset formatter, shared by the header's `limit hit` and a failed
-/// turn's `5h resets 20:10`, so the two never disagree about the same reset.
-/// A clock time rather than a countdown because it does not go stale: "resets
-/// in 2h" read an hour later is wrong, where "resets 20:10" is not.
-pub fn format_reset(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+/// The one reset formatter: the header's `limit hit`, a failed turn's
+/// `5h resets 20:10` and Panoptes' default status line all use it, so none of
+/// them disagree about the same reset. A clock time rather than a countdown
+/// because it does not go stale: "resets in 2h" read an hour later is wrong,
+/// where "resets 20:10" is not - and Claude redraws its status line on
+/// events, not on a clock.
+///
+/// `None` once the reset has passed. Every caller then leaves the reset out:
+/// a time that no longer means anything is not worth the room.
+pub fn format_reset(at: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
     format_reset_in(at, now, &Local)
 }
 
@@ -443,19 +451,19 @@ pub(crate) fn format_reset_in<Tz: TimeZone>(
     at: DateTime<Utc>,
     now: DateTime<Utc>,
     tz: &Tz,
-) -> String
+) -> Option<String>
 where
     Tz::Offset: std::fmt::Display,
 {
     if at <= now {
-        return "now".to_string();
+        return None;
     }
     let (at, now) = (at.with_timezone(tz), now.with_timezone(tz));
-    if at.date_naive() == now.date_naive() {
+    Some(if at.date_naive() == now.date_naive() {
         at.format("%H:%M").to_string()
     } else {
         at.format("%b %-d %H:%M").to_string()
-    }
+    })
 }
 
 /// A usage limit the agent refused a turn on: which window, and when it lifts
@@ -494,10 +502,10 @@ impl UsageLimit {
         }
     }
 
-    /// `5h resets 20:10`, or just `5h` when the reset time is unknown
+    /// `5h resets 20:10`, or just `5h` when the reset is unknown or past
     pub fn describe_at(&self, now: DateTime<Utc>) -> String {
-        match self.resets_at {
-            Some(at) => format!("{} resets {}", self.window_label(), format_reset(at, now)),
+        match self.resets_at.and_then(|at| format_reset(at, now)) {
+            Some(reset) => format!("{} resets {}", self.window_label(), reset),
             None => self.window_label().to_string(),
         }
     }
@@ -733,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn test_summary_limit_reached_shows_reset_countdown() {
+    fn test_summary_limit_reached_shows_reset_time() {
         let now = at(1_000_000);
         let usage = UsageSnapshot {
             model: Some("gpt-5.5".to_string()),
@@ -751,15 +759,27 @@ mod tests {
             ..Default::default()
         };
         // On the user's clock, through the same formatter a failed turn uses
-        let reset = format_reset(now + chrono::Duration::minutes(200), now);
+        let reset = format_reset(now + chrono::Duration::minutes(200), now).unwrap();
         assert_eq!(
             usage.summary_at(now),
             Some(format!("gpt-5.5 · limit hit · resets {reset}"))
         );
 
-        // Without a reset time the block is still shown, just without a countdown
+        // Without a reset time the block is still shown, just without one
         let usage = UsageSnapshot {
             primary: Some(window(100.0, Some(300), None)),
+            limit_reached: Some("x".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(usage.summary_at(now).as_deref(), Some("limit hit"));
+
+        // Likewise once the reset has passed: no time that means nothing
+        let usage = UsageSnapshot {
+            primary: Some(window(
+                100.0,
+                Some(300),
+                Some(now - chrono::Duration::minutes(1)),
+            )),
             limit_reached: Some("x".to_string()),
             ..Default::default()
         };
@@ -774,26 +794,38 @@ mod tests {
         let later = |secs| now + chrono::Duration::seconds(secs);
 
         // Today: just the clock time, in the zone's own hours
-        assert_eq!(format_reset_in(later(603), now, &zagreb), "20:10");
-        assert_eq!(format_reset_in(later(603), now, &Utc), "18:10");
-        assert_eq!(format_reset_in(later(30), now, &zagreb), "20:00");
+        assert_eq!(
+            format_reset_in(later(603), now, &zagreb),
+            Some("20:10".to_string())
+        );
+        assert_eq!(
+            format_reset_in(later(603), now, &Utc),
+            Some("18:10".to_string())
+        );
+        assert_eq!(
+            format_reset_in(later(30), now, &zagreb),
+            Some("20:00".to_string())
+        );
 
         // Past midnight it is another day, and says which
         assert_eq!(
             format_reset_in(later(4 * 3_600 + 603), now, &zagreb),
-            "Aug 29 00:10"
+            Some("Aug 29 00:10".to_string())
         );
         // ...but only where midnight has actually passed: the same instant is
         // still the 28th in UTC
-        assert_eq!(format_reset_in(later(4 * 3_600 + 603), now, &Utc), "22:10");
+        assert_eq!(
+            format_reset_in(later(4 * 3_600 + 603), now, &Utc),
+            Some("22:10".to_string())
+        );
         assert_eq!(
             format_reset_in(later(6 * 24 * 3_600), now, &zagreb),
-            "Sep 3 19:59"
+            Some("Sep 3 19:59".to_string())
         );
 
-        // A reset already past reads as such
-        assert_eq!(format_reset_in(later(0), now, &zagreb), "now");
-        assert_eq!(format_reset_in(later(-60), now, &zagreb), "now");
+        // A reset already past has nothing left to say
+        assert_eq!(format_reset_in(later(0), now, &zagreb), None);
+        assert_eq!(format_reset_in(later(-60), now, &zagreb), None);
     }
 
     #[test]
@@ -825,8 +857,13 @@ mod tests {
         };
         assert_eq!(
             with_reset.describe_at(now),
-            format!("5h resets {}", format_reset(at(1_787_940_600), now))
+            format!(
+                "5h resets {}",
+                format_reset(at(1_787_940_600), now).unwrap()
+            )
         );
+        // Past its reset the window still names itself, and only that
+        assert_eq!(with_reset.describe_at(at(1_787_940_600)), "5h");
     }
 
     #[test]

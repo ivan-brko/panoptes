@@ -63,6 +63,9 @@ pub use worktree::{
 ///
 /// Agent vocabulary is translated for shell sessions, which have no notion of
 /// thinking: they are `Running` or `Ready`.
+///
+/// A failed turn's usage limit is part of it; [`failed_turn_limit_display`]
+/// is that part exactly, for a row that has to give it up to fit.
 pub fn session_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
     let base = base_state_display(info, now);
 
@@ -94,6 +97,14 @@ pub fn session_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
         }
     }
     display
+}
+
+/// The ` · 5h resets 20:10` a failed turn adds to [`session_state_display`]
+///
+/// The text exactly as it appears there, so a row can drop it whole.
+pub(crate) fn failed_turn_limit_display(info: &SessionInfo, now: DateTime<Utc>) -> Option<String> {
+    let limit = info.failed_turn()?.limit.as_ref()?;
+    Some(format!(" \u{00b7} {}", limit.describe_at(now)))
 }
 
 fn base_state_display(info: &SessionInfo, now: DateTime<Utc>) -> String {
@@ -477,8 +488,15 @@ mod tests {
             session_state_display(&info, now),
             format!(
                 "Waiting ✗ usage limit · 5h resets {}",
-                format_reset(resets_at, now)
+                format_reset(resets_at, now).unwrap()
             )
+        );
+
+        // The droppable part is exactly what the state carries
+        let limit = failed_turn_limit_display(&info, now).unwrap();
+        assert_eq!(
+            session_state_display(&info, now).replacen(&limit, "", 1),
+            "Waiting ✗ usage limit"
         );
 
         // The compact row keeps the state alone: the limit is dropped whole

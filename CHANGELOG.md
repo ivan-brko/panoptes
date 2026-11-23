@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **A Claude usage limit says which limit and when it lifts.** A turn refused on a usage limit now reads `Waiting ✗ usage limit · 5h resets 20:10` in the session row and header (or `wk sonnet`, `wk opus`, ...), from the window and reset time Claude records with the failure. Reset times - here and in the header's `limit hit` - are now shown on your local clock, with the date when the reset is not today, instead of as a countdown.
+- **A Claude usage limit says which limit and when it lifts.** A turn refused on a usage limit now reads `Waiting ✗ usage limit · 5h resets 20:10` in the session row and header (or `wk sonnet`, `wk opus`, ...), from the window and reset time Claude records with the failure. Reset times - here, in the header's `limit hit` and in Panoptes' default status line - now share one format: your local clock, with the date when the reset is not today (`Aug 29 00:10`), and left out once passed. The header used to show a countdown, and the status line a weekday.
 
 ## [0.5.0] - 2026-09-23
 

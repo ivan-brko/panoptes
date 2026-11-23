@@ -444,11 +444,13 @@ layer, so Panoptes wraps rather than replaces it:
   and exits 0 on input it cannot read, and a missing binary only costs the
   line. It is drawn by `hooks::status_line::compact_line` from the same
   `usage_from_payload` the header uses, so the binding window is picked by the
-  same rule - e.g. `5h 12% · wk 40% (resets Thu 18:00) · $2.14`. The reset is
-  local wall-clock time (`18:00` today, `Thu 18:00` on another day), not a
-  countdown: Claude redraws its status line on events, not on a clock, so a
-  countdown would go stale. A reset already past, or any missing field, is
-  left out.
+  same rule - e.g. `5h 12% · wk 40% (resets Sep 29 18:00) · $2.14`. The reset
+  goes through `agent::events::format_reset_in`, the same formatter as the
+  header's `limit hit` and a failed turn's `5h resets 20:10`: local wall-clock
+  time (`18:00` today, `Sep 29 18:00` on another day), not a countdown, since
+  Claude redraws its status line on events, not on a clock, so a countdown
+  would go stale. A reset already past is left out everywhere, as is any
+  missing field.
 
 The envelope is built by splicing Claude's document in whole, not with `jq`:
 the document is already JSON and nothing is picked out of it, and the status
@@ -1104,8 +1106,9 @@ about one `token_count` in fifteen). The session header shows whichever window
 is closer to stopping the user - higher `used_percent` first, the longer window
 on a tie - labelled by its length (`5h 12%`, `wk 40%`), or
 `limit hit · resets 20:10` (local time, with the date when the reset is not
-today) while `rate_limit_reached_type` is set. Each window merges independently, so an update naming only one never blanks the
-other.
+today, and none once it has passed) while `rate_limit_reached_type` is set.
+Each window merges independently, so an update naming only one never blanks
+the other.
 
 **Claude rate limits.** The status line's `five_hour` and `seven_day` windows
 map onto the same `primary` / `secondary` windows (300 and 10080 minutes), so

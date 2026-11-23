@@ -444,7 +444,7 @@ mod tests {
             header_suffix(&failed, 0),
             format!(
                 "[CC] - \u{2717} usage limit \u{00b7} wk sonnet resets {}",
-                crate::agent::events::format_reset(resets_at, Utc::now())
+                crate::agent::events::format_reset(resets_at, Utc::now()).unwrap()
             )
         );
         failed.turn_failure = None;

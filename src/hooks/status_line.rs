@@ -28,7 +28,9 @@
 use chrono::{DateTime, Local, TimeZone, Utc};
 use serde_json::Value;
 
-use crate::agent::events::{base_model_id, RateLimitWindow, UsageSnapshot, WindowSource};
+use crate::agent::events::{
+    base_model_id, format_reset_in, RateLimitWindow, UsageSnapshot, WindowSource,
+};
 
 /// Length of the `five_hour` window, in minutes
 const FIVE_HOURS: u64 = 5 * 60;
@@ -137,18 +139,17 @@ pub fn run_subcommand() {
     }
 }
 
-/// Panoptes' default status line, e.g. `5h 12% · wk 40% (resets Thu 18:00) · $2.14`
+/// Panoptes' default status line, e.g. `5h 12% · wk 40% (resets Sep 29 18:00) · $2.14`
 ///
 /// Both rate-limit windows, the binding one - picked by the same rule as the
 /// session header - with its reset time, then the session's cost. Any part
 /// the payload lacks is left out; before the first turn there are no rate
 /// limits, so the line is just the cost.
 ///
-/// The reset is local wall-clock time: `18:00` when it falls today, `Thu 18:00`
-/// otherwise (the weekly window resets within seven days, so the weekday is
-/// never ambiguous). A countdown such as `in 3h 20m` would go stale, because
-/// Claude redraws its status line on events, not on a clock. A reset already
-/// past is left out rather than shown as a time that no longer means anything.
+/// The reset goes through [`format_reset_in`], the formatter the session header
+/// and a failed turn use, so all three agree: local wall-clock time, `18:00`
+/// when it falls today, `Sep 29 23:00` otherwise, and left out once it has
+/// passed.
 pub fn compact_line<Tz>(payload: &Value, now: DateTime<Tz>) -> Option<String>
 where
     Tz: TimeZone,
@@ -161,8 +162,11 @@ where
         for window in [&usage.primary, &usage.secondary].into_iter().flatten() {
             let mut part = format!("{} {:.0}%", window.label(), window.used_percent);
             if binding == Some(window) {
-                if let Some(at) = window.resets_at.filter(|at| *at > now.to_utc()) {
-                    part.push_str(&format!(" (resets {})", wall_clock(at, &now)));
+                if let Some(reset) = window
+                    .resets_at
+                    .and_then(|at| format_reset_in(at, now.to_utc(), &now.timezone()))
+                {
+                    part.push_str(&format!(" (resets {})", reset));
                 }
             }
             parts.push(part);
@@ -179,20 +183,6 @@ where
     }
 
     (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-/// `18:00` for a time later today, `Thu 18:00` for any other day
-fn wall_clock<Tz>(at: DateTime<Utc>, now: &DateTime<Tz>) -> String
-where
-    Tz: TimeZone,
-    Tz::Offset: std::fmt::Display,
-{
-    let at = at.with_timezone(&now.timezone());
-    if at.date_naive() == now.date_naive() {
-        at.format("%H:%M").to_string()
-    } else {
-        at.format("%a %H:%M").to_string()
-    }
 }
 
 #[cfg(test)]
@@ -308,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_line_week_binding_names_the_day() {
+    fn test_compact_line_week_binding_names_the_date() {
         let mut payload = fixture();
         payload["rate_limits"]["seven_day"]["used_percentage"] = serde_json::json!(40.4);
         payload["cost"]["total_cost_usd"] = serde_json::json!(2.137);
@@ -316,7 +306,7 @@ mod tests {
         // The week resets Tuesday 2026-09-29 at 23:00 UTC
         assert_eq!(
             compact_line(&payload, capture_time()).as_deref(),
-            Some("5h 21% · wk 40% (resets Tue 23:00) · $2.14")
+            Some("5h 21% · wk 40% (resets Sep 29 23:00) · $2.14")
         );
     }
 
