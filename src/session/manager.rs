@@ -1832,6 +1832,17 @@ impl SessionManager {
             }
             state_machine::translate_codex_hook(event)
         } else {
+            if let Some(info) = self.sessions.get(&session_id).map(|s| &s.info) {
+                if Self::is_foreign_claude_startup(info, event) {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        conversation_id = info.agent_session_id.as_deref().unwrap_or("none"),
+                        foreign_conversation_id = event.agent_conversation_id().unwrap_or("none"),
+                        "Ignoring a startup SessionStart from another Claude process"
+                    );
+                    return None;
+                }
+            }
             self.follow_agent_conversation(session_id, event);
             state_machine::translate_hook(event)
         };
@@ -1906,6 +1917,31 @@ impl SessionManager {
         );
     }
 
+    /// Whether a Claude `SessionStart` came from a process this session did not launch
+    ///
+    /// Panoptes dictates the conversation every process it launches starts on
+    /// (`--session-id`, or `--resume` for a recovered one), and that process
+    /// announces exactly that ID; Claude has no other path to `startup`
+    /// (`/clear`, `/resume` and `/branch` report their own sources). A
+    /// `startup` naming another one came from a second `claude` that
+    /// inherited `PANOPTES_SESSION_ID` - one the agent ran from its shell, or
+    /// a review or worktree agent it started. Following it would point the
+    /// session at a conversation it never had, whose transcript is usually
+    /// gone with the worktree; applying it would reset the session to
+    /// `Waiting` in the middle of the turn that launched it.
+    ///
+    /// Claude only: Codex mints its own ID, so its first `startup` is how the
+    /// session learns it.
+    fn is_foreign_claude_startup(info: &SessionInfo, event: &HookEvent) -> bool {
+        info.session_type == SessionType::ClaudeCode
+            && event.event_type() == HookEventType::SessionStart
+            && event.session_start_source() == Some(SessionStartSource::Startup)
+            && info.agent_session_id.is_some()
+            && event
+                .agent_conversation_id()
+                .is_some_and(|id| info.agent_session_id.as_deref() != Some(id))
+    }
+
     /// Follow a Claude session onto a new conversation, if the event says it moved
     ///
     /// Claude changes conversation inside a live process: `/clear` starts a
@@ -1921,7 +1957,9 @@ impl SessionManager {
     /// `compact` is excluded outright rather than trusted to carry the same ID:
     /// it happens mid-turn with nobody asking, and is never a conversation
     /// boundary. A `SessionStart` naming the conversation already recorded -
-    /// every process start - is a no-op, and in particular writes nothing.
+    /// every process start - is a no-op, and in particular writes nothing. A
+    /// `startup` naming any other is not this session's process at all (see
+    /// [`Self::is_foreign_claude_startup`]) and is ignored too.
     ///
     /// Returns whether the session moved.
     pub fn follow_agent_conversation(&mut self, session_id: SessionId, event: &HookEvent) -> bool {
@@ -1942,9 +1980,12 @@ impl SessionManager {
         {
             return false;
         }
+        if Self::is_foreign_claude_startup(info, event) {
+            return false;
+        }
+        let source = event.session_start_source();
 
         let old_id = info.agent_session_id.clone();
-        let source = event.session_start_source();
         info.agent_transcript_path = event.transcript_path().map(std::path::Path::to_path_buf);
         // Where the tailer starts. A cleared or forked conversation is this
         // session's own from its first line - and a fork's copied history only
@@ -4672,6 +4713,71 @@ mod tests {
     }
 
     #[test]
+    fn test_session_start_startup_from_a_nested_claude_keeps_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let store_path = temp_dir.path().join("sessions.json");
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = claude_on_conversation(&mut manager, "conversation");
+        // Mid-turn: the agent is running the tool that launched the nested one
+        manager
+            .get_mut(session_id)
+            .unwrap()
+            .set_state(SessionState::Executing);
+
+        // A `claude` the agent ran itself inherits `PANOPTES_SESSION_ID`, so
+        // its `startup` reaches this session naming its own conversation
+        let event = hook(
+            session_id,
+            "SessionStart",
+            session_start_payload("startup", "nested"),
+        );
+        assert!(!manager.follow_agent_conversation(session_id, &event));
+        manager.handle_hook_event(&event);
+
+        let info = &manager.get(session_id).unwrap().info;
+        assert_eq!(info.agent_session_id.as_deref(), Some("conversation"));
+        // Nor does it reset the parent to `Waiting` mid-turn
+        assert_eq!(info.state, SessionState::Executing);
+        assert_eq!(info.agent_transcript_path, None);
+        assert_eq!(
+            load_store(&store_path)
+                .get(session_id)
+                .unwrap()
+                .agent_session_id
+                .as_deref(),
+            Some("conversation")
+        );
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_session_start_startup_is_adopted_when_none_is_recorded() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_persistable(&mut manager, "claude");
+        manager.get_mut(session_id).unwrap().info.agent_session_id = None;
+
+        let event = hook(
+            session_id,
+            "SessionStart",
+            session_start_payload("startup", "first"),
+        );
+        assert!(manager.follow_agent_conversation(session_id, &event));
+        assert_eq!(
+            manager
+                .get(session_id)
+                .unwrap()
+                .info
+                .agent_session_id
+                .as_deref(),
+            Some("first")
+        );
+
+        manager.shutdown_all();
+    }
+
+    #[test]
     fn test_session_start_compact_keeps_id() {
         let temp_dir = TempDir::new().unwrap();
         let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
@@ -5135,6 +5241,35 @@ mod tests {
                 .agent_session_id
                 .as_deref(),
             Some("019a0ce7-0000-7000-8000-000000000002")
+        );
+
+        manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_codex_startup_replaces_a_recorded_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut manager = test_manager(&temp_dir, test_config(&temp_dir));
+        let session_id = create_codex(&mut manager);
+        // Codex mints its own ID, so one already recorded - a rollout-scan
+        // guess - can be wrong; its own `startup` is the authority. The
+        // nested-process guard Claude has must not reach Codex.
+        assert!(manager.set_agent_session_id(session_id, "guessed".to_string()));
+
+        manager.handle_hook_event(&codex_hook(
+            session_id,
+            "SessionStart",
+            serde_json::json!({"source": "startup"}),
+        ));
+
+        assert_eq!(
+            manager
+                .get(session_id)
+                .unwrap()
+                .info
+                .agent_session_id
+                .as_deref(),
+            Some("019a0ce7-0000-7000-8000-000000000001")
         );
 
         manager.shutdown_all();

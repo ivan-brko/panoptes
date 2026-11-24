@@ -232,7 +232,7 @@ fn render_pane(frame: &mut Frame, area: Rect, tab: Tab, ctx: &PaneContext) {
 ///
 /// The check is by colour value, which is why the richer tiers give the
 /// suspended state its own grey off the ramp. The 16-colour baseline cannot:
-/// there, suspended shares `text_dim`'s value and recesses with it.
+/// there, suspended shares `text_faint`'s value and recesses with it.
 fn dim_pane_body(buf: &mut Buffer, area: Rect, t: crate::tui::theme::Theme) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
@@ -964,8 +964,8 @@ mod tests {
 
     /// Suspended is the one state colour that is a grey. On the richer tiers
     /// it has its own grey, off the text ramp, so the dimmer never catches
-    /// it; only the 16-colour baseline - one grey for everything - has to
-    /// let a suspended row recess with the ramp.
+    /// it; only the 16-colour baseline - two named greys, both on the ramp -
+    /// has to let a suspended row recess with it.
     #[test]
     fn test_suspended_state_survives_dimming_on_richer_tiers() {
         use crate::tui::theme::Theme;

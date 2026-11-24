@@ -133,6 +133,11 @@ The TUI uses a centralized theme system (`tui/theme.rs`) for consistent styling:
   code are a bug, because they are invisible to a theme change
 - Tiered tokens where hierarchy matters: `text` / `text_dim` / `text_faint`,
   `border_focus` / `border` / `border_dim`, `bg_base` / `bg_surface`
+- `text_dim` is secondary text the user still reads (emails, hints, footers,
+  separators), so each tier pins a legible value - `Gray` on the baseline,
+  a fixed light grey on the richer tiers (≥ 4.5:1 on a dark background) -
+  rather than the terminal's "bright black", which many dark themes make
+  nearly invisible. `text_faint` is for chrome that may recede
 - State-specific colors for session states (thinking, executing, waiting,
   awaiting approval, suspended), plus `attention_color` for badge reasons
 - Three capability tiers - `truecolor()`, `ansi256()`, `ansi16()` - detected

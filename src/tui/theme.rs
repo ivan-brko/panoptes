@@ -100,6 +100,12 @@ pub struct Theme {
     /// Text color for normal content
     pub text: Color,
     /// Text one step down: secondary content, help lines, tags
+    ///
+    /// Still text the user is meant to read - account emails, footer hints,
+    /// separators between fields - so every tier keeps it comfortably legible
+    /// on a dark background (WCAG AA, 4.5:1, against the base and the
+    /// selected-row surface). Anything meant to recede further is
+    /// `text_faint`.
     pub text_dim: Color,
     /// Text two steps down: present but ignorable - inactive pane chrome
     pub text_faint: Color,
@@ -323,7 +329,9 @@ impl Theme {
     /// The 16-colour baseline tier - the classic dark theme
     ///
     /// Every token the other tiers refine holds its historical value here,
-    /// which is what makes this the worst case rather than a different look.
+    /// which is what makes this the worst case rather than a different look -
+    /// save `text_dim`, lifted from `DarkGray` to `Gray` so secondary text
+    /// stays readable (see the field).
     pub fn ansi16() -> Self {
         Self {
             // Session states
@@ -333,7 +341,7 @@ impl Theme {
             state_waiting: Color::Green,
             // Distinct from thinking's plain Yellow: this one is on you
             state_awaiting_approval: Color::LightYellow,
-            // Shares the tier's only grey with `text_dim`, which the
+            // Shares the tier's darker grey with `text_faint`, which the
             // unfocused-pane dimmer cannot tell apart - so in this tier alone
             // a suspended row recesses with the ramp. The richer tiers give
             // suspended its own grey precisely to avoid that.
@@ -346,8 +354,13 @@ impl Theme {
             // UI elements
             accent: Color::Cyan,
             text: Color::White,
-            text_dim: Color::DarkGray,
-            // One grey is all this tier has, so faint collapses into dim
+            // Gray, not DarkGray: "bright black" is whatever the terminal's
+            // palette says, and many dark themes make it a slate barely
+            // brighter than the background - unreadable for text that
+            // carries emails, hints and footers. Gray stays a step below
+            // `text`'s bright White in every common palette.
+            text_dim: Color::Gray,
+            // The darker of the tier's two greys: chrome that may recede
             text_faint: Color::DarkGray,
             text_inverted: Color::Black,
             selected: Color::White,
@@ -408,10 +421,12 @@ impl Theme {
     ///
     /// Chromatic tokens stay the named ANSI colours so the user's own terminal
     /// palette keeps deciding what "green" means; only the greys that carry
-    /// hierarchy - faint text, dim borders, the surface tint - use the indexed
+    /// hierarchy - dim and faint text, dim borders, the surface tint - use the indexed
     /// ramp the baseline cannot express.
     pub fn ansi256() -> Self {
         Self {
+            // #a8a8a8: ~5.5:1 on the 236 surface, well under `text`'s 255
+            text_dim: Color::Indexed(248),
             text_faint: Color::Indexed(238),
             border_dim: Color::Indexed(238),
             bg_surface: Color::Indexed(236),
@@ -433,6 +448,9 @@ impl Theme {
     /// background.
     pub fn truecolor() -> Self {
         Self {
+            // Cooled toward the surfaces: ~5.5:1 on the selected row,
+            // ~5.7:1 on a typical #2b2d3a dark background
+            text_dim: Color::Rgb(0xa3, 0xa8, 0xb0),
             text_faint: Color::Rgb(0x4e, 0x4e, 0x4e),
             border_dim: Color::Rgb(0x3a, 0x3f, 0x44),
             bg_surface: Color::Rgb(0x2c, 0x31, 0x36),
@@ -671,7 +689,6 @@ mod tests {
                 let tier = Theme::new(palette, support);
                 assert_eq!(tier.accent, base.accent, "{palette:?}");
                 assert_eq!(tier.text, base.text, "{palette:?}");
-                assert_eq!(tier.text_dim, base.text_dim, "{palette:?}");
                 assert_eq!(tier.selected, base.selected, "{palette:?}");
                 assert_eq!(tier.active, base.active, "{palette:?}");
                 assert_eq!(tier.input_prompt, base.input_prompt, "{palette:?}");
@@ -694,9 +711,13 @@ mod tests {
                 assert_eq!(tier.default_marker, base.default_marker, "{palette:?}");
                 assert_eq!(tier.resume_armed, base.resume_armed, "{palette:?}");
                 assert_eq!(tier.bg_base, base.bg_base, "{palette:?}");
+                // `text_dim` is absent for the same reason as suspended below:
+                // it is a structural grey, and each tier pins its own
+                // readable value rather than trusting the terminal's
+                // "bright black".
                 // Suspended is deliberately absent: it is a structural grey,
                 // and the greys are exactly what the tiers refine. On the
-                // baseline it has to share the one grey with `text_dim`; the
+                // baseline it has to share the darker grey with `text_faint`; the
                 // richer tiers give it its own so the unfocused-pane dimmer
                 // never catches it.
                 for state in STATES {
@@ -861,10 +882,19 @@ mod tests {
         assert_eq!(Theme::ansi256().bg_surface, Color::Indexed(236));
         assert!(matches!(Theme::truecolor().text_faint, Color::Rgb(..)));
         assert!(matches!(Theme::truecolor().border_dim, Color::Rgb(..)));
-        // The baseline cannot express the ramp: faint collapses into dim,
-        // and the surface stays the terminal's own background
-        assert_eq!(Theme::ansi16().text_faint, Theme::ansi16().text_dim);
+        // The baseline has only the two named greys: dim takes the lighter,
+        // faint the darker, and the surface stays the terminal's own
+        // background
+        assert_eq!(Theme::ansi16().text_dim, Color::Gray);
+        assert_eq!(Theme::ansi16().text_faint, Color::DarkGray);
         assert_eq!(Theme::ansi16().bg_surface, Color::Reset);
+
+        // The ramp keeps three distinct steps in every tier, the baseline
+        // included now that dim no longer collapses into faint
+        for tier in [Theme::ansi16(), Theme::ansi256(), Theme::truecolor()] {
+            assert_ne!(tier.text_dim, tier.text);
+            assert_ne!(tier.text_dim, tier.text_faint);
+        }
 
         // Suspended sits off the text ramp wherever the palette allows, so
         // the unfocused-pane dimmer - which recesses the ramp by value -
@@ -873,6 +903,64 @@ mod tests {
             assert_ne!(tier.state_suspended, tier.text);
             assert_ne!(tier.state_suspended, tier.text_dim);
             assert_ne!(tier.state_suspended, tier.text_faint);
+        }
+    }
+
+    /// WCAG relative luminance of an sRGB colour
+    fn luminance((r, g, b): (u8, u8, u8)) -> f64 {
+        let channel = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+
+    fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// The xterm value of a colour the richer tiers pin exactly
+    fn rgb_of(color: Color) -> (u8, u8, u8) {
+        match color {
+            Color::Rgb(r, g, b) => (r, g, b),
+            // The 256-colour grey ramp: 232 is #080808, each step +10
+            Color::Indexed(i @ 232..=255) => {
+                let v = 8 + 10 * (i - 232);
+                (v, v, v)
+            }
+            other => panic!("not a pinned grey: {other:?}"),
+        }
+    }
+
+    /// Dim text is still text: on every pinned surface it clears WCAG AA
+    /// (4.5:1), and it stays a visible step below full-strength text
+    #[test]
+    fn test_dim_text_stays_readable() {
+        for palette in Palette::ALL {
+            for support in [ColorSupport::Ansi256, ColorSupport::TrueColor] {
+                let t = Theme::new(palette, support);
+                let dim = rgb_of(t.text_dim);
+                let surface = rgb_of(t.bg_surface);
+                let ratio = contrast(dim, surface);
+                assert!(
+                    ratio >= 4.5,
+                    "{palette:?} at {support:?}: {ratio:.2}:1 on the surface"
+                );
+                // A typical dark terminal background, for the base itself
+                let ratio = contrast(dim, (0x2b, 0x2d, 0x3a));
+                assert!(ratio >= 4.5, "{palette:?} at {support:?}: {ratio:.2}:1");
+                // And still a step below `text` (White, at its brightest)
+                let ratio = contrast(dim, (0xff, 0xff, 0xff));
+                assert!(
+                    ratio >= 2.0,
+                    "{palette:?} at {support:?}: {ratio:.2}:1 vs text"
+                );
+            }
         }
     }
 
